@@ -6,12 +6,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import knexLibrary, { type Knex } from "knex";
-import { syntheticOptionQuotes, writeSyntheticSymbolFile } from "../backtest/engine/testSupport/syntheticBacktestData.js";
+import { syntheticOptionQuotes, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile } from "../backtest/engine/testSupport/syntheticBacktestData.js";
+import type { AnalysisFileFigures } from "../backtest/analysis/analysisFigures.js";
 import type { AnalysisRunView, TickerAnalysisView } from "../backtest/analysis/analysisStore.js";
 
 // The Analyse window's routes on the real backtest router against the test database: starting an analysis (Update
 // Analysis and Run with these values) stores its row and claims its job, the refusals, the window's view and history,
-// cancelling, and a ticker's lab save re-running its analysis. The job process itself is not started (spawn mocked).
+// the data file's figures before a first analysis, cancelling, and a ticker's lab save re-running its analysis. The job
+// process itself is not started (spawn mocked).
 const dataDirectory = mkdtempSync(path.join(os.tmpdir(), "backtest-analysis-route-test-"));
 process.env.BACKTEST_DATA_DIR = dataDirectory;
 
@@ -49,6 +51,7 @@ async function call<T>(method: string, route: string, body?: unknown): Promise<{
 beforeAll(async () => {
   const days = ["2026-03-02", "2026-03-03", "2026-03-04"].map((tradingDate) => ({ tradingDate, quotes: syntheticOptionQuotes(tradingDate, 50, ["2026-03-20"], 0.5, 0.04, 1, 3), endOfDayVolume: 100, openInterest: 500 }));
   writeSyntheticSymbolFile(path.join(dataDirectory, `${symbol}.sqlite`), symbol, days);
+  writeSyntheticIbkrBarsFromQuotes(path.join(dataDirectory, `${symbol}.sqlite`), days.map(({ tradingDate }) => ({ tradingDate, open: 50, high: 51, low: 49, close: 50, volume: 1_000, impliedVolatility: 0.5 })), 4);
   const [user] = await testDb("users").insert({ username: `analysis-routes-${suffix}`, display_name: "Analysis Routes Tester", password_hash: "not-a-real-hash" }).returning("id");
   userId = user.id;
   const app = express();
@@ -95,6 +98,22 @@ describe("analysis routes", () => {
     expect(view.body).toMatchObject({ symbol, stored: null, trial: null, active: [], latestProblem: null, fileLastDate: "2026-03-04" });
     expect(view.body.currentHash).toMatch(/^[0-9a-f]{32}$/);
     expect(view.body).toMatchObject({ profile: null, suitability: null });
+  });
+
+  it("gives the data file's figures before any analysis, without the chain scan's, storing nothing; refuses a ticker without a file", async () => {
+    const figures = await call<AnalysisFileFigures>("GET", `/analyses/${symbol}/file-figures`);
+    expect(figures.status).toBe(200);
+    expect(figures.body).toMatchObject({ symbol, optionLastDate: "2026-03-04", barsLastDate: "2026-03-04" });
+    expect(figures.body.bars.map(([date]) => date)).toEqual(["2026-03-02", "2026-03-03", "2026-03-04"]);
+    expect(figures.body.dataQuality).toMatchObject({ completeDays: 3, firstDate: "2026-03-02", lastDate: "2026-03-04" });
+    for (const scanField of ["chains", "fitDays", "largestPotWithoutModel"]) expect(figures.body).not.toHaveProperty(scanField);
+    for (const scanField of ["scannedDays", "daysWithoutPrice", "daysWithNothingPassing"]) expect(figures.body.dataQuality).not.toHaveProperty(scanField);
+    expect(await testDb("backtest_ticker_analyses").where({ symbol }).first()).toBeUndefined();
+    expect(await testDb("backtest_jobs").where({ symbol }).first()).toBeUndefined();
+
+    const missing = await call<{ error: string }>("GET", `/analyses/${symbolWithoutFile}/file-figures`);
+    expect(missing.status).toBe(404);
+    expect(missing.body.error).toMatch(/no data file/);
   });
 
   it("gives the header the ticker's stored TradingView profile and its suitability", async () => {

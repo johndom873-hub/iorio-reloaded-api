@@ -42,6 +42,7 @@ import { loadTreasuryBillRates } from "./treasuryBillRates.js";
 import { prepareModelTablesForSession } from "./walkForwardModelTables.js";
 import { runBaselineLook } from "./backtestBaselineLook.js";
 import { runSteadyStakeLook } from "./backtestSteadyStakeLook.js";
+import { describeVolFarmerCash, runVolFarmerLook, scanVolFarmerCrossing } from "./backtestVolFarmerLook.js";
 
 // The backtest engine's entry point (docs/backtesting/FORMULAS.md, FULL-FIDELITY-DESIGN.md, DATA-FILES.md). Called by the
 // job process (scripts/run-backtest-job.ts) for a backtest job. One session = one or several symbols from its start to
@@ -387,8 +388,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
   // Each ticker's own baseline values and weight (backtestLook.ts).
   const tickerSetupBySymbol: ReadonlyMap<string, BacktestTickerSetup> | undefined =
     session.bookMode === "pots" && session.symbolSettings ? new Map(Object.entries(session.symbolSettings).map(([symbol, ticker]) => [symbol, { baseline: { ...settings.baseline, ...ticker.baseline }, weight: ticker.weight }])) : undefined;
-  // The baseline wheel's hedge (backtestBaselineHedge.ts) reads long-dated Puts from the files of the tickers it is on for.
-  const hedgeOnFor = (symbol: string) => settings.decisionMaker === "baseline" && hedgeIsOn(tickerSetupBySymbol?.get(symbol)?.baseline ?? settings.baseline);
+  // The baseline wheel's hedge (backtestBaselineHedge.ts) reads long-dated Puts from the files of the tickers it is on for; the Vol Farmer's, from every file.
+  const hedgeOnFor = (symbol: string) => settings.decisionMaker === "vol_farmer" || (settings.decisionMaker === "baseline" && hedgeIsOn(tickerSetupBySymbol?.get(symbol)?.baseline ?? settings.baseline));
   const severalSymbols = symbolNames.length > 1;
   const startingValue = Number(session.startingValue);
   const dataDirectory = requireBacktestDataDirectory();
@@ -712,7 +713,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const contractLabel = describeOptionContract({ symbol: owner.symbol, strike: roundedStrike(leg.strikePrice! / tradedScale), right: "P", expiry: expiryDate, dte: null });
         if (!settlementClose) throw new Error(`Cannot settle the hedge's ${contractLabel}: the ${owner.symbol} data file has no IBKR daily or 30-minute bar for ${settlementDate}. Press Update on its row in Data files and run the session again.`);
         const outcome = settleHedgePut(ledger, { legId: leg.id, expiryClose: settlementClose.close });
-        notes.push(`hedge ${contractLabel} still held at its expiry (no quote to sell it at): ${outcome === "hedge_worthless" ? "expired worthless" : `sold at its intrinsic value, ${((leg.strikePrice! - settlementClose.close) / tradedScale).toFixed(2)}`} at the ${(settlementClose.close / tradedScale).toFixed(2)} close`);
+        notes.push(`hedge ${contractLabel} ${settings.decisionMaker === "vol_farmer" ? "held to its expiry" : "still held at its expiry (no quote to sell it at)"}: ${outcome === "hedge_worthless" ? "expired worthless" : `sold at its intrinsic value, ${((leg.strikePrice! - settlementClose.close) / tradedScale).toFixed(2)}`} at the ${(settlementClose.close / tradedScale).toFixed(2)} close`);
       }
 
       // b. Interest since the previous session day.
@@ -959,8 +960,20 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       /** LLM mode: the day's opening analysis has run; the instant of the day's previous look (cooldowns that ended since then queue rounds). */
       let openingAnalysisDone = false;
       let previousLookAtMs: number | null = null;
+      /** The Vol Farmer: unwinds a position whose Call's strike today's bars reached, by `throughEt`, before the look that reads it (none when its Calls are held to expiry). */
+      const scanVolFarmerCrossings = (throughEt: string) => {
+        if (settings.decisionMaker !== "vol_farmer" || settings.volFarmer.crossing === "hold_to_expiry") return;
+        for (const entry of symbols) {
+          const crossing = scanVolFarmerCrossing({ ledger, symbol: entry.symbol, todayIso, adjustedBars: entry.intradayPrices.barsOn(todayIso), splitFactorToday: splitFactorToday(entry), throughEt, riskFreeRate: (riskFreeRatePercentOn(todayIso) ?? 0) / 100, priceByLegId, nextActionId });
+          if (crossing === null) continue;
+          actions.push(...crossing.actions);
+          filledActionsToday += crossing.actions.length;
+          looksOfDay.push({ lookTimeEt: crossing.lookTimeEt, summary: crossing.summary, filledCount: crossing.actions.length, refusedCount: 0, opensStopped: [] });
+        }
+      };
       for (const lookTimeEt of lookTimes) {
         const isCaptureLook = lookTimeEt === captureLookTimeEt;
+        scanVolFarmerCrossings(lookTimeEt);
         const lookSymbols: BacktestLookSymbol[] = [];
         if (isCaptureLook) lookSymbols.push(...daySymbols.map((daySymbol) => daySymbol.lookSymbol));
         else {
@@ -979,10 +992,11 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         }
         if (lookSymbols.length === 0) continue;
 
-        // The baseline wheel and the Steady Stake have none of Pluto's checks; the Steady Stake decides at 10:00 only.
-        if (settings.decisionMaker === "baseline" || settings.decisionMaker === "steady_stake") {
-          if (settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" && !isCaptureLook : !isCaptureLook) continue;
-          const runLook = settings.decisionMaker === "baseline" ? runBaselineLook : runSteadyStakeLook;
+        // The baseline wheel, the Steady Stake and the Vol Farmer have none of Pluto's checks; the Steady Stake decides at
+        // 10:00 only, the Vol Farmer too but reads every look's quotes (the IVs a crossing is priced on).
+        if (settings.decisionMaker === "baseline" || settings.decisionMaker === "steady_stake" || settings.decisionMaker === "vol_farmer") {
+          if (settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" && !isCaptureLook : settings.decisionMaker === "steady_stake" && !isCaptureLook) continue;
+          const runLook = settings.decisionMaker === "baseline" ? runBaselineLook : settings.decisionMaker === "steady_stake" ? runSteadyStakeLook : runVolFarmerLook;
           const look = await runLook({ todayIso, lookTimeEt, symbols: lookSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
           actions.push(...look.actions);
           optionSales.push(...look.optionSales);
@@ -1063,6 +1077,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         looksOfDay.push({ lookTimeEt, summary: look.summaryOfActions, filledCount: filledAtLook, refusedCount: look.actions.length - filledAtLook, opensStopped: look.opensStopped });
         if (!isCaptureLook) lookedAfterCapture = true;
       }
+      scanVolFarmerCrossings(clockTime(closeMinutesByDay.get(todayIso) ?? regularCloseMinutesEt));
       if (marketStressLookTimes.length > 0) {
         checkNotes.push(`market stress barred new opens at ${marketStressLookTimes.join(", ")} (at -${pluto.spyStressBreakerPct}% or worse)`);
         runStatistics.marketStressLooks += marketStressLookTimes.length;
@@ -1141,6 +1156,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       runStatistics.hedge = summarizeHedge(ledger, actions, priceByLegId);
       sessionNotes.push(describeHedgeTotals(runStatistics.hedge));
     }
+    const volFarmerCashNote = settings.decisionMaker === "vol_farmer" ? describeVolFarmerCash(ledger, symbols.map((entry) => entry.symbol)) : null;
+    if (volFarmerCashNote !== null) sessionNotes.push(volFarmerCashNote);
     const bookRecords = buildBookRecords({ ledger, symbols, optionSales, actions, priceByLegId, lastSessionDateIso, calendar, noSaleRecords: { shortfalls, notes: noSaleNotes, noCandidates: noCandidateNotes } });
     // The book holds every share it sells (the ledger refuses anything else); the platform's cycle derivation reading it
     // must agree. A cycle whose shares do not reconcile is named in the notes, its figures not to be trusted.

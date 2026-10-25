@@ -14,6 +14,7 @@ import {
   defaultBacktestModelSettings,
   defaultBacktestPolicySettings,
   defaultBacktestSteadyStakeSettings,
+  defaultBacktestVolFarmerSettings,
   type BacktestBaselineSettings,
   type BacktestBookMode,
   type BacktestModelSettings,
@@ -24,6 +25,7 @@ import {
   type BacktestSettingsOverrides,
   type BacktestSettingsSource,
   type BacktestSteadyStakeSettings,
+  type BacktestVolFarmerSettings,
   type BacktestSymbolResolution,
   type BacktestSymbolSettingSource,
   type BacktestSymbolSettings,
@@ -132,7 +134,7 @@ export function validateBacktestSettingsOverrides(
 ): { ok: true; overrides: BacktestSettingsOverrides } | { ok: false; error: string } {
   if (raw === undefined || raw === null) return { ok: true, overrides: {} };
   if (!isPlainObject(raw)) return { ok: false, error: "overrides must be an object." };
-  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "kellyFraction" && key !== "policy" && key !== "decisionMaker" && key !== "baseline" && key !== "steadyStake" && key !== "model");
+  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "kellyFraction" && key !== "policy" && key !== "decisionMaker" && key !== "baseline" && key !== "steadyStake" && key !== "volFarmer" && key !== "model");
   if (unknownSection) return { ok: false, error: `overrides.${unknownSection} is not a setting a session can change.` };
 
   const overrides: BacktestSettingsOverrides = {};
@@ -192,6 +194,18 @@ export function validateBacktestSettingsOverrides(
     if (Object.keys(changed).length > 0) overrides.steadyStake = changed as Partial<BacktestSteadyStakeSettings>;
   }
 
+  // Every Vol Farmer value can change for a session.
+  if (raw.volFarmer !== undefined) {
+    if (!isPlainObject(raw.volFarmer)) return { ok: false, error: "overrides.volFarmer must be an object." };
+    const snapshotVolFarmer = { ...defaultBacktestVolFarmerSettings, ...snapshot.volFarmer };
+    const unknownField = Object.keys(raw.volFarmer).find((field) => !(field in defaultBacktestVolFarmerSettings));
+    if (unknownField) return { ok: false, error: `volFarmer.${unknownField} is not a Vol Farmer setting.` };
+    const problem = validateVolFarmerSettings({ ...snapshotVolFarmer, ...raw.volFarmer });
+    if (problem) return { ok: false, error: problem };
+    const changed = changedEntries(snapshotVolFarmer, raw.volFarmer);
+    if (Object.keys(changed).length > 0) overrides.volFarmer = changed as Partial<BacktestVolFarmerSettings>;
+  }
+
   // Two of the model's values can change for a session (Edge Margin audit 2026-10-22); the others stay live's.
   if (raw.model !== undefined) {
     if (!isPlainObject(raw.model)) return { ok: false, error: "overrides.model must be an object." };
@@ -210,7 +224,7 @@ export function validateBacktestSettingsOverrides(
   }
 
   if (raw.decisionMaker !== undefined) {
-    if (raw.decisionMaker !== "rules" && raw.decisionMaker !== "llm" && raw.decisionMaker !== "baseline" && raw.decisionMaker !== "steady_stake") return { ok: false, error: "decisionMaker must be rules, llm, baseline or steady_stake." };
+    if (raw.decisionMaker !== "rules" && raw.decisionMaker !== "llm" && raw.decisionMaker !== "baseline" && raw.decisionMaker !== "steady_stake" && raw.decisionMaker !== "vol_farmer") return { ok: false, error: "decisionMaker must be rules, llm, baseline, steady_stake or vol_farmer." };
     if (raw.decisionMaker === "llm" && !decisionMakers.claudeCliAvailable) return { ok: false, error: backtestClaudeCliPathMissingMessage };
     if (raw.decisionMaker !== (snapshot.decisionMaker ?? "rules")) overrides.decisionMaker = raw.decisionMaker;
   }
@@ -292,6 +306,27 @@ export function validateSteadyStakeSettings(values: Record<string, unknown>): st
   for (const field of ["callAbsDelta", "putAbsDelta"] as const) if (!isNumberIn(values[field], 0.01, 0.99)) return `steadyStake.${field} must be a number from 0.01 to 0.99.`;
   if (!isNumberIn(values.deltaTolerance, 0.005, 0.5)) return "steadyStake.deltaTolerance must be a number from 0.005 to 0.5.";
   if (!isNumberIn(values.maxSpreadPctOfMid, 1, 200)) return "steadyStake.maxSpreadPctOfMid must be a number from 1 to 200.";
+  return null;
+}
+
+/** The Vol Farmer's values (BacktestVolFarmerSettings): null when they are valid. */
+export function validateVolFarmerSettings(values: Record<string, unknown>): string | null {
+  const isNumberIn = (value: unknown, min: number, max: number) => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+  const isWholeNumberIn = (value: unknown, min: number, max: number) => isNumberIn(value, min, max) && Number.isInteger(value);
+  for (const field of ["callMinAbsDelta", "callMaxAbsDelta"] as const) if (!isNumberIn(values[field], 0.01, 0.99)) return `volFarmer.${field} must be a number from 0.01 to 0.99.`;
+  if ((values.callMinAbsDelta as number) > (values.callMaxAbsDelta as number)) return "volFarmer.callMinAbsDelta must not be above volFarmer.callMaxAbsDelta.";
+  for (const field of ["callMinDte", "callMaxDte"] as const) if (!isWholeNumberIn(values[field], 0, 45)) return `volFarmer.${field} must be a whole number from 0 to 45 (the Calls the engine reads).`;
+  if ((values.callMinDte as number) > (values.callMaxDte as number)) return "volFarmer.callMinDte must not be above volFarmer.callMaxDte.";
+  for (const field of ["putMinDte", "putMaxDte"] as const) if (!isWholeNumberIn(values[field], 0, 1000)) return `volFarmer.${field} must be a whole number from 0 to 1000.`;
+  if ((values.putMinDte as number) > (values.putMaxDte as number)) return "volFarmer.putMinDte must not be above volFarmer.putMaxDte.";
+  if (!isNumberIn(values.putMaxStrikeAbovePricePct, -20, 10)) return "volFarmer.putMaxStrikeAbovePricePct must be a number from −20 to 10.";
+  if (!isNumberIn(values.protectionFallPct, 1, 90)) return "volFarmer.protectionFallPct must be a number from 1 to 90.";
+  if (!isNumberIn(values.maxSpreadPctOfMid, 1, 200)) return "volFarmer.maxSpreadPctOfMid must be a number from 1 to 200.";
+  if (!isNumberIn(values.putCashReservePct, 0, 50)) return "volFarmer.putCashReservePct must be a number from 0 to 50.";
+  const choices: Record<string, readonly string[]> = { crossing: ["unwind", "hold_to_expiry"], putExpiry: ["in_range", "with_the_call"], hedgeRuleCallPremiums: ["excluded", "included"], hedgeWithoutCall: ["none", "put"], putRoll: ["none", "when_no_call"] };
+  for (const [field, allowed] of Object.entries(choices)) if (!allowed.includes(values[field] as string)) return `volFarmer.${field} must be one of ${allowed.join(", ")}.`;
+  if (!isNumberIn(values.minPutProtectionPct, 0, 100)) return "volFarmer.minPutProtectionPct must be a number from 0 to 100.";
+  if (!isNumberIn(values.maxPutCostPctOfCallPremium, 0, 500)) return "volFarmer.maxPutCostPctOfCallPremium must be a number from 0 to 500.";
   return null;
 }
 

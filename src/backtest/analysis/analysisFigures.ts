@@ -120,6 +120,9 @@ export interface AnalysisDataQuality {
   daysWithNothingPassing: string[];
 }
 
+/** The figures the data file gives on its own, without the chain scan: what the Analyse window shows before a ticker's first analysis. */
+export type AnalysisFileFigures = Omit<AnalysisFigures, "chains" | "fitDays" | "largestPotWithoutModel" | "dataQuality"> & { dataQuality: Omit<AnalysisDataQuality, "scannedDays" | "daysWithoutPrice" | "daysWithNothingPassing"> };
+
 export interface AnalysisFigureProgress {
   step: AnalysisStep;
   done: number;
@@ -198,14 +201,9 @@ async function loadCalendarEvents(symbol: string, connection: Knex): Promise<{ h
   };
 }
 
-/** Every figure but the analysis backtest's. Reads the files read-only; `onProgress` reports each step and the chain scan's days. */
-export async function computeAnalysisFigures(input: { symbol: string; values: AnalysisFigureValues; onProgress?: (progress: AnalysisFigureProgress) => void; connection?: Knex }): Promise<AnalysisFigures> {
-  const { symbol, values } = input;
-  const connection = input.connection ?? db;
-  const report = (step: AnalysisStep, done = 0, total = 0) => input.onProgress?.({ step, done, total });
+/** What every figure reads: the file's complete days, the daily bars, the split schedule, the T-bill rates, the 10:00 prices and the ticker's calendar. */
+async function loadAnalysisInputs(symbol: string, connection: Knex) {
   const dataDirectory = requireBacktestDataDirectory();
-
-  report("bars");
   const contents = readBacktestDataFileContents(symbol);
   if (!contents || !contents.firstDate || !contents.lastDate) throw new Error(`The ${symbol} data file has no complete days yet.`);
   const file = BacktestSymbolFile.open(symbol);
@@ -229,22 +227,15 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
     }
   })();
   if (!intradayPrices) throw new Error(`The ${symbol} data file has no IBKR 30-minute bars: the 10:00 prices cannot be read. Its download writes them.`);
-
   const calendar = await loadCalendarEvents(symbol, connection);
-  const skipsEarnings = values.baseline.earnings === "skip_spanning" && calendar.calendarChecksApply;
+  return { contents: { ...contents, firstDate: contents.firstDate, lastDate: contents.lastDate }, completeDays, dailyBars, barsSource, ohlcv, closes, schedule, rates, intradayPrices, calendar };
+}
 
-  report("chains", 0, completeDays.length);
-  const days = buildChainScanDayInputs({ completeDays, intradayPrices, schedule, rates, dailyBars, shockSettings: values.baseline, earnings: skipsEarnings ? calendar.earnings.map((event) => ({ dateIso: event.date, eventTime: event.eventTime })) : null });
-  const scanStarted = Date.now();
-  const { rows, chainMap } = await scanChainDaysInParallel({
-    filePath: backtestDataFilePath(symbol),
-    days,
-    settings: { ...values.baseline, spreadShareCharged: values.spreadShareCharged },
-    chainMapDate: completeDays.at(-1)!,
-    onChunkDone: (daysDone) => report("chains", daysDone, completeDays.length),
-  });
-  const scanSeconds = (Date.now() - scanStarted) / 1000;
-  const capByDate = new Map(rows.flatMap((row) => (row.cap === null ? [] : [[row.date, row.cap] as [string, number]])));
+type AnalysisInputs = Awaited<ReturnType<typeof loadAnalysisInputs>>;
+
+/** Every figure that needs no chain scan; `capByDate`, each scanned day's first-rung cap, gives the option activity's capped Puts (none without a scan). */
+async function fileFiguresOf(symbol: string, values: AnalysisFigureValues, inputs: AnalysisInputs, capByDate: ReadonlyMap<string, number>, connection: Knex): Promise<AnalysisFileFigures> {
+  const { contents, completeDays, barsSource, ohlcv, closes, schedule, intradayPrices, calendar } = inputs;
   const activityDatabase = openBacktestDataFileReadOnly(symbol);
   let optionActivity: AnalysisOptionActivity | null = null;
   try {
@@ -252,11 +243,7 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
   } finally {
     activityDatabase?.close();
   }
-  const summary = summarizeChainScan(rows);
-  const last = rows.at(-1) ?? null;
-  const passing = (row: ChainScanDayRow, view: "C" | "P" | "Pcap") => Object.values(row.cells[view]).reduce((sum, cell) => sum + (cell?.count ?? 0), 0);
 
-  report("earnings_correlation");
   const firstOptionDay = completeDays[0]!;
   const lastBarDate = closes.at(-1)?.tradingDate ?? null;
   const pastReports = calendar.earnings.filter((event) => event.date >= firstOptionDay && lastBarDate !== null && event.date <= lastBarDate);
@@ -325,14 +312,6 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
       shock: ladderShock(values.baseline, closes.map((bar) => ({ date: bar.tradingDate, close: bar.close })), shockStart),
       rule: values.baseline.ladderShock,
     },
-    chains: {
-      ...summary,
-      lastDay: last && { date: last.date, spot: last.spot, shock: last.shock, cap: last.cap, bestCappedPut: last.bestCappedPut, bestEntryCall: last.bestEntryCall, passingCalls: passing(last, "C"), passingPuts: passing(last, "P"), passingCappedPuts: passing(last, "Pcap") },
-      chainMap,
-      scanSeconds,
-    },
-    fitDays: rows.filter((row) => row.spot !== null).map((row): AnalysisFitDayRow => [row.date, row.spot!, row.shock, row.largestPotPut?.volumeCap ?? null, row.largestPotPut?.strike ?? null, row.largestPotCall?.volumeCap ?? null, row.largestPotPut?.previousVolume ?? null]),
-    largestPotWithoutModel: values.baseline.volatilityEdgeFilter !== "off" || values.baseline.ranking === "edge_yield",
     optionActivity,
     earnings: { ...earnings, exDividendDates: calendar.exDividendDates, hasTickerRow: calendar.hasTickerRow },
     correlation: { rows: correlationRows(closes, others), skipped, spySource },
@@ -357,9 +336,55 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
       splits: schedule?.segments ?? null,
       barChecks: barChecks(closes),
       sizeBytes: fileSizeBytes(symbol),
-      scannedDays: rows.length - summary.daysWithoutPrice,
-      daysWithoutPrice: summary.daysWithoutPrice,
-      daysWithNothingPassing: summary.daysWithNothingPassing,
     },
+  };
+}
+
+/** The figures the data file gives without an analysis (no chain scan, no backtest): the Analyse window before a ticker's first analysis. Reads the files read-only. */
+export async function computeAnalysisFileFigures(input: { symbol: string; values: AnalysisFigureValues; connection?: Knex }): Promise<AnalysisFileFigures> {
+  const connection = input.connection ?? db;
+  return fileFiguresOf(input.symbol, input.values, await loadAnalysisInputs(input.symbol, connection), new Map(), connection);
+}
+
+/** Every figure but the analysis backtest's. Reads the files read-only; `onProgress` reports each step and the chain scan's days. */
+export async function computeAnalysisFigures(input: { symbol: string; values: AnalysisFigureValues; onProgress?: (progress: AnalysisFigureProgress) => void; connection?: Knex }): Promise<AnalysisFigures> {
+  const { symbol, values } = input;
+  const connection = input.connection ?? db;
+  const report = (step: AnalysisStep, done = 0, total = 0) => input.onProgress?.({ step, done, total });
+
+  report("bars");
+  const inputs = await loadAnalysisInputs(symbol, connection);
+  const { completeDays, intradayPrices, schedule, rates, dailyBars, calendar } = inputs;
+  const skipsEarnings = values.baseline.earnings === "skip_spanning" && calendar.calendarChecksApply;
+
+  report("chains", 0, completeDays.length);
+  const days = buildChainScanDayInputs({ completeDays, intradayPrices, schedule, rates, dailyBars, shockSettings: values.baseline, earnings: skipsEarnings ? calendar.earnings.map((event) => ({ dateIso: event.date, eventTime: event.eventTime })) : null });
+  const scanStarted = Date.now();
+  const { rows, chainMap } = await scanChainDaysInParallel({
+    filePath: backtestDataFilePath(symbol),
+    days,
+    settings: { ...values.baseline, spreadShareCharged: values.spreadShareCharged },
+    chainMapDate: completeDays.at(-1)!,
+    onChunkDone: (daysDone) => report("chains", daysDone, completeDays.length),
+  });
+  const scanSeconds = (Date.now() - scanStarted) / 1000;
+  const capByDate = new Map(rows.flatMap((row) => (row.cap === null ? [] : [[row.date, row.cap] as [string, number]])));
+  const summary = summarizeChainScan(rows);
+  const last = rows.at(-1) ?? null;
+  const passing = (row: ChainScanDayRow, view: "C" | "P" | "Pcap") => Object.values(row.cells[view]).reduce((sum, cell) => sum + (cell?.count ?? 0), 0);
+
+  report("earnings_correlation");
+  const fileFigures = await fileFiguresOf(symbol, values, inputs, capByDate, connection);
+  return {
+    ...fileFigures,
+    chains: {
+      ...summary,
+      lastDay: last && { date: last.date, spot: last.spot, shock: last.shock, cap: last.cap, bestCappedPut: last.bestCappedPut, bestEntryCall: last.bestEntryCall, passingCalls: passing(last, "C"), passingPuts: passing(last, "P"), passingCappedPuts: passing(last, "Pcap") },
+      chainMap,
+      scanSeconds,
+    },
+    fitDays: rows.filter((row) => row.spot !== null).map((row): AnalysisFitDayRow => [row.date, row.spot!, row.shock, row.largestPotPut?.volumeCap ?? null, row.largestPotPut?.strike ?? null, row.largestPotCall?.volumeCap ?? null, row.largestPotPut?.previousVolume ?? null]),
+    largestPotWithoutModel: values.baseline.volatilityEdgeFilter !== "off" || values.baseline.ranking === "edge_yield",
+    dataQuality: { ...fileFigures.dataQuality, scannedDays: rows.length - summary.daysWithoutPrice, daysWithoutPrice: summary.daysWithoutPrice, daysWithNothingPassing: summary.daysWithNothingPassing },
   };
 }

@@ -83,19 +83,40 @@ export function describeFileStockBars(database: DatabaseSync): { dailyFirstDate:
 
 const minutesOfLookTime = (lookTimeEt: string): number => Number(lookTimeEt.slice(0, 2)) * 60 + Number(lookTimeEt.slice(3, 5));
 
+/** One 30-minute bar of a day, on IBKR's split-adjusted scale; open and high fall back to the close when the file lacks them. */
+export interface FileIntradayBarPrices {
+  startMinutesEt: number;
+  open: number;
+  high: number;
+  close: number;
+}
+
 /** The stock's price inside each day, from the file's 30-minute bars, on IBKR's split-adjusted scale. */
 export class FileIntradayPrices {
   /** Per Eastern date: [minutes ET at which the bar ends, its close], ascending. */
   private readonly closesByDate = new Map<string, [number, number][]>();
+  /** Per Eastern date: its bars, ascending. */
+  private readonly barsByDate = new Map<string, FileIntradayBarPrices[]>();
 
-  constructor(rows: readonly { tradingDate: string; startMinutesEt: number; close: number | null }[]) {
+  constructor(rows: readonly { tradingDate: string; startMinutesEt: number; close: number | null; open?: number | null; high?: number | null }[]) {
     for (const row of rows) {
       if (row.close === null || !(row.close > 0)) continue;
       let closes = this.closesByDate.get(row.tradingDate);
       if (!closes) this.closesByDate.set(row.tradingDate, (closes = []));
       closes.push([row.startMinutesEt + fileIntradayBarMinutes, row.close]);
+      let bars = this.barsByDate.get(row.tradingDate);
+      if (!bars) this.barsByDate.set(row.tradingDate, (bars = []));
+      const open = row.open !== undefined && row.open !== null && row.open > 0 ? row.open : row.close;
+      const high = row.high !== undefined && row.high !== null && row.high > 0 ? Math.max(row.high, open, row.close) : Math.max(open, row.close);
+      bars.push({ startMinutesEt: row.startMinutesEt, open, high, close: row.close });
     }
     for (const closes of this.closesByDate.values()) closes.sort((a, b) => a[0] - b[0]);
+    for (const bars of this.barsByDate.values()) bars.sort((a, b) => a.startMinutesEt - b.startMinutesEt);
+  }
+
+  /** A day's bars, ascending; none when the file has none that day. */
+  barsOn(dateIso: string): readonly FileIntradayBarPrices[] {
+    return this.barsByDate.get(dateIso) ?? [];
   }
 
   /** The last date with a bar; null with none. */
@@ -124,7 +145,7 @@ export function readFileIntradayPrices(database: DatabaseSync, fromDateIso: stri
   if (!hasTable(database, "ibkr_intraday_bars")) return null;
   if (database.prepare("SELECT 1 FROM ibkr_intraday_bars LIMIT 1").get() === undefined) return null;
   const rows = database
-    .prepare("SELECT trading_date AS tradingDate, start_minutes_et AS startMinutesEt, close FROM ibkr_intraday_bars WHERE trading_date BETWEEN ? AND ? ORDER BY trading_date, start_minutes_et")
-    .all(fromDateIso, toDateIso) as unknown as { tradingDate: string; startMinutesEt: number; close: number | null }[];
+    .prepare("SELECT trading_date AS tradingDate, start_minutes_et AS startMinutesEt, open, high, close FROM ibkr_intraday_bars WHERE trading_date BETWEEN ? AND ? ORDER BY trading_date, start_minutes_et")
+    .all(fromDateIso, toDateIso) as unknown as { tradingDate: string; startMinutesEt: number; open: number | null; high: number | null; close: number | null }[];
   return new FileIntradayPrices(rows);
 }

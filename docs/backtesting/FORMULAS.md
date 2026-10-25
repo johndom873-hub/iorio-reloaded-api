@@ -238,6 +238,31 @@ Example: break-even $100, shares' average cost $104, S 70% (F = $31.20), R0 $100
 - A human's hand: the breaker's reset is assumed, the market-stress override is never used.
 - Early assignment and dividends.
 
+## Vol Farmer (decision maker `vol_farmer`, approved by Marcelo 2026-10-23)
+
+Shares, one Covered Call on every lot and one long Put per lot. Prices as traded at the 10:00 look; S = the look's stock price (the close of IBKR's 30-minute bar ending at 10:00).
+
+- **Hedge rule** (a Call strike K and a Put qualify together): (K − share cost) + (Pₓ(K) − Put cost − sale commission) + the cycle's realized Put P&L ≥ 0, per share. Call premiums are left out.
+  - share cost = S plus the stock commission (a new cycle), or what the cycle's shares cost, commission included.
+  - Pₓ(x) = the Put's Black-Scholes value with the stock at x on the Call's expiry day: its own IV (from its mid, forward S·e^{rT}), time left = its expiry − the Call's, never below intrinsic.
+  - Example: S 100, $103 Call 7 days out, $100 Put 45 days out bought at 8.12, IV 60%, r 4%: Pₓ(103) = 6.22 (38 days left), so (103 − 100.005) + (6.22 − 8.1268 − 0.0068) = +1.08 ≥ 0: passes.
+- **Protection** = (Pₓ(S × (1 − f)) − Put cost − sale commission) ÷ (S × f), f = the fall setting (20%). Of the Puts that pass, the highest protection (a tie: the cheaper). Puts tried: expiries on or after the Call's, within the Puts' days-to-expiry range (0–360), strikes up to S × (1 + cap%) (cap 0: at or below S; −5: at least 5% below S), bid ≥ $0.05, spread within the limit.
+- **Call**: OTM, in the |delta| (0.05–0.30) and days-to-expiry (1–45) ranges, by premium yield; the first that passes the hedge rule (with the Put held, or with some Put) and whose volume limit (20% of the previous session's volume) covers every lot, else the one covering the most.
+- **Lots** at a cycle's start = floor(free cash × (1 − reserve%) ÷ (100 × S + stock commission + 100 × the Put's fill + one contract's commission)), reserve 10%: the later Puts are paid from it and the Calls' premiums.
+- **Crossing**: the first 30-minute bar after the Call's sale whose high reaches K. Shares sold at K (at the bar's open if it opened at or above K), the Call bought back and the Put sold at their Black-Scholes values at that price, on each one's IV from its last look, T from the bar's middle (its start on a gap); commissions, no spread. The next cycle starts at the next day's 10:00 look.
+- **Call expires below its strike**: the next Call at the next 10:00 look, with the Put held (the Call expiring on or before it), or with a new Put when it has expired. Puts are held to expiry (settled at intrinsic value), never rolled.
+- **Lots left without a Call and a Put** (the volume or the cash): their shares are sold at S only where S is above what they cost (commission included), with the Puts no Call covers; otherwise kept and tried again at the next 10:00 look.
+- Every 10:00 trade fills at the session's fill rule; $0.68 a contract, $0.005 a share.
+- **The hedge in Wheel cycles** (approved by Marcelo 2026-10-23; display only, the cycle's figures unchanged): at every hand-over of the shares (to N/S when a Call expires, back to CC when the next Call is sold) each Put held from before is marked at that day's close: its end-of-day mid, else its last trade, else its intrinsic value. Its row's net premium = (the mark − its last mark) × shares-equivalent, the first last mark being its cost with commission; its purchase row shows no net premium; its sale, settlement or open mark row shows what it brought less the last mark × shares-equivalent; a Put that expires worthless gets a row at its expiry of − the last mark × shares-equivalent. COIN #1 ($310 Put bought @ 51.40): +$9,088.64 at the 21 May close ($96.85), −$480 (24 May, $94.45), −$3,800 (2 Jul, $75.45), −$1,730 (7 Jul, $66.80), −$2,290 (20 Aug, $55.35), +$1,892 at the 17 Sep settlement (64.81): +$2,680.64, the Put's result as before.
+- **Research settings** (2026-10-24, not yet signed off; the defaults keep every rule above):
+  - `crossing` "hold_to_expiry": no crossing scan. A Call in the money at its expiry is assigned (its shares go at K), and the Put left without shares is sold at the next 10:00 look at the session's fill rule (or settles with the Call when it expires that day).
+  - `putExpiry` "with_the_call": Puts tried = only those expiring on the Call's own expiry; the days-to-expiry range is not read. Each Put settles at intrinsic value with its Call, and that P&L enters the hedge rule's realized Put P&L for the cycle's next Call.
+  - `hedgeRuleCallPremiums` "included": hedge rule = (K − share cost) + (Pₓ(K) − Put cost − sale commission) + the cycle's realized Put P&L + the cycle's realized Call P&L ≥ 0, per share; Call P&L = the option legs of the cycle's Covered Call positions (premiums kept, buybacks paid, commissions).
+  - `minPutProtectionPct` m > 0: a Put passes only when its protection ≥ m ÷ 100.
+  - `hedgeWithoutCall` "put": shares held with no Put and no Call sold at the look buy the Put at the highest strike up to S × (1 + cap%) of the nearest listed expiry 7 or more days out (bid ≥ $0.05, spread within the limit), on min(lots held, floor(free cash ÷ (100 × fill + one contract's commission))) contracts.
+  - `maxPutCostPctOfCallPremium` b > 0: a Put passes only when its fill ≤ the Call's fill × b ÷ 100 (b = 100: a zero-cost collar; the most protection within the budget, as before).
+  - `putRoll` "when_no_call": at a 10:00 look with Puts held and no Call that passes with them, banked = Σ (sale fill − entry) × 100 × contracts − commission over the Puts held; the usual choice of a Call with a new Put runs with realized P&L + banked in the hedge rule and free cash + the sale's proceeds; if it finds a Call, the Puts are sold, the Call sold and the new Put bought, otherwise nothing is traded.
+
 ## Baselines (comparison only)
 
 Two buy-and-hold series run beside every session, marked at 10:00 each session day and measured with the same formulas as the session (return, CAGR, Sortino, drawdown, worst month). They are for comparison only: nothing in the session depends on them. Neither counts dividends.

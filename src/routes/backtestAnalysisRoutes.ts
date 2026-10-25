@@ -6,6 +6,7 @@ import { BacktestRequestError } from "../backtest/jobs/backtestJobStore.js";
 import { listAnalysisSessions } from "../backtest/analysis/analysisSessions.js";
 import {
   cancelTickerAnalysis,
+  loadAnalysisFileFigures,
   loadAnalysisStatusBySymbol,
   loadTickerAnalysisRun,
   loadTickerAnalysisView,
@@ -14,8 +15,9 @@ import {
   validateAnalysisTrialValues,
 } from "../backtest/analysis/analysisStore.js";
 
-// The Analyse window's routes (under /backtest): the stored analysis, starting one (Update Analysis, or Run with these
-// values when the body has values), cancelling it, its history, the ticker's backtests, and fetching its earnings.
+// The Analyse window's routes (under /backtest): the stored analysis, the data file's figures before a first analysis,
+// starting one (Update Analysis, or Run with these values when the body has values), cancelling it, its history, the
+// ticker's backtests, and fetching its earnings.
 
 const symbolParameter = (raw: unknown): string => {
   try {
@@ -45,6 +47,11 @@ export function registerTickerAnalysisRoutes(router: Router): void {
 
   router.get("/analyses/:symbol", async (request, response) => {
     response.json(await loadTickerAnalysisView(symbolParameter(request.params.symbol)));
+  });
+
+  // The figures the data file gives on its own (no chain scan, nothing stored): the window before a ticker's first analysis.
+  router.get("/analyses/:symbol/file-figures", async (request, response) => {
+    response.json(await loadAnalysisFileFigures(symbolParameter(request.params.symbol)));
   });
 
   router.get("/analyses/:symbol/runs", async (request, response) => {

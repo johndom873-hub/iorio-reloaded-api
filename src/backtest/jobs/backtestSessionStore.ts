@@ -51,6 +51,8 @@ import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { cachedSplitsBetween, readSplitScheduleCache, splitFactorOn } from "../engine/splitFactors.js";
 import { withPositionCycle, type BacktestPositionRecord } from "../engine/backtestSessionRecords.js";
 import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment, sharesHeldAtInstant, sharesHeldAtMarks, type SplitFactorOfDay } from "../cycleCashBreakEven.js";
+import { withHedgeMarkedAtHandOvers, type HedgePutMarkOf } from "../cycleHedgeHandOvers.js";
+import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 
 const spyBaselineLabel = "Buy and hold · SPY";
 /** "HOOD #12": a symbol's cycle as the screens name it (backtestSessionRecords.ts describeCycle). */
@@ -540,6 +542,27 @@ async function loadSessionBookCounts(sessionId: string): Promise<BacktestSession
 const cycleSummaryColumns = ["symbol", "cycle_number", "status", "opened_at", "closed_at", "recovery_sessions", "age_sessions", "total_dollars", "net_premium_dollars", "shares_held", "break_even_per_share", "buckets", "data_flags"];
 
 /** Whether a session counts its hedge's realized P&L in its cycles' break-even (baseline hedgeInBreakEven "included"). */
+/** True for a session run by the Vol Farmer: its cycles mark the hedge at every hand-over of the shares (cycleHedgeHandOvers.ts). */
+async function isVolFarmerSession(sessionId: string): Promise<boolean> {
+  const row: { settings_snapshot: BacktestSettings; overrides: BacktestSettingsOverrides | null } | undefined = await db("backtest_sessions").where({ id: sessionId }).first("settings_snapshot", "overrides");
+  return row !== undefined && applyBacktestOverrides(row.settings_snapshot, row.overrides ?? {}).decisionMaker === "vol_farmer";
+}
+
+/** A symbol's Put prices from its data file's end-of-day quotes: the closing mid, else the last trade, else the intrinsic value at the stock's close. Close it when done. */
+function hedgePutMarksFromFile(symbol: string): { markOf: HedgePutMarkOf; close(): void } {
+  const file = openBacktestDataFileReadOnly(symbol);
+  const statement = file?.prepare("SELECT bid, ask, close FROM eod WHERE trading_date = ? AND expiry = ? AND option_right = 'P' AND abs(strike - ?) < 0.0005") ?? null;
+  return {
+    markOf: (tradingDate, expiry, strikeAsTraded, stockCloseAsTraded) => {
+      const quote = statement?.get(tradingDate, expiry, strikeAsTraded) as { bid: number | null; ask: number | null; close: number | null } | undefined;
+      if (quote && quote.bid !== null && quote.ask !== null && quote.bid > 0 && quote.ask >= quote.bid) return (quote.bid + quote.ask) / 2;
+      if (quote && quote.close !== null && quote.close > 0) return quote.close;
+      return stockCloseAsTraded === null ? null : Math.max(0, strikeAsTraded - stockCloseAsTraded);
+    },
+    close: () => file?.close(),
+  };
+}
+
 async function hedgeRealizedPnlInBreakEven(sessionId: string): Promise<boolean> {
   const row: { settings_snapshot: BacktestSettings; overrides: BacktestSettingsOverrides | null } | undefined = await db("backtest_sessions").where({ id: sessionId }).first("settings_snapshot", "overrides");
   return row !== undefined && applyBacktestOverrides(row.settings_snapshot, row.overrides ?? {}).baseline.hedgeInBreakEven === "included";
@@ -613,20 +636,35 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
   if (!row) throw new BacktestRequestError(`The session has no cycle ${symbol} #${cycleNumber}.`, 404);
   if (row.timeline === null) return null;
   const sales = await loadSaleRecords(sessionId, symbol, row.timeline);
+  const crossingInstants = await loadVolFarmerCrossingInstants(sessionId, symbol, row.timeline);
   const splitFactorOf = splitFactorOfDayFor(symbol);
   const breakEvens = cashBreakEvenBeforeEachRow(row.timeline, splitFactorOf, { hedgeRealizedPnlIncluded: await hedgeRealizedPnlInBreakEven(sessionId) });
   const sharesHeld = sharesHeldAfterEachMoment(row.timeline, splitFactorOf);
+  // A Vol Farmer cycle shows its hedge marked at every hand-over of the shares; what the cycle reads per moment (break-even,
+  // shares held) stays the stored timeline's, through each shown row's source row.
+  let shown: { rows: BacktestCycleDetail["timeline"]; sourceIndexes: number[] } = { rows: row.timeline, sourceIndexes: row.timeline.map((_, index) => index) };
+  if (await isVolFarmerSession(sessionId)) {
+    const marks = hedgePutMarksFromFile(symbol);
+    try {
+      shown = withHedgeMarkedAtHandOvers(row.timeline, marks.markOf, splitFactorOf);
+    } finally {
+      marks.close();
+    }
+  }
   const stretches = row.stock_only_stretches ?? [];
   const dates = [...row.timeline.map((entry) => entry.tradingDate), ...stretches.map((stretch) => stretch.firstIdleDay)].sort();
   const freeCash = dates.length > 0 ? await loadSessionFreeCash(sessionId, dates[0]!, dates.at(-1)!) : null;
   return {
-    timeline: row.timeline.map((entry, index) => {
+    timeline: shown.rows.map((entry, shownIndex) => {
+      const index = shown.sourceIndexes[shownIndex]!;
+      const isSourceRow = row.timeline![index] === entry;
       // A hedge's "Sold put" closes a long Put: not a sale held to the break-even, with no yield or delta recorded.
       const sold = entry.bucket === "hedge" ? null : /^Sold (put|call) @/.exec(entry.label);
       const freeCashShare = freeCash?.shareAfter(entry.tradingDate, entry.at) ?? null;
-      if (!sold || entry.instrument !== "option") return { ...entry, sharesHeld: sharesHeld[index]!, freeCashShare };
+      const crossing = entry.at !== null && crossingInstants.has(Date.parse(entry.at)) ? { crossing: true } : {};
+      if (!sold || entry.instrument !== "option" || !isSourceRow) return { ...entry, sharesHeld: sharesHeld[index]!, freeCashShare, ...crossing };
       const { premiumYield, delta, ladderRung } = sales.recordedOf(entry.tradingDate, sold[1] === "put" ? "P" : "C", entry.strike, entry.expiryDate, entry.at);
-      return { ...entry, premiumYield, delta, breakEvenAtSale: breakEvens[index]!, sharesHeld: sharesHeld[index]!, ...(sold[1] === "put" ? { ladderRung } : {}), freeCashShare };
+      return { ...entry, premiumYield, delta, breakEvenAtSale: breakEvens[index]!, sharesHeld: sharesHeld[index]!, ...(sold[1] === "put" ? { ladderRung } : {}), freeCashShare, ...crossing };
     }),
     // Stretches stored before their no-candidate detail was kept have none.
     // A stretch's shares from the cycle's own trades: stored before 2026-10-21 they came from the ledger's stock legs, which
@@ -686,6 +724,21 @@ function ladderRungOf(scores: Partial<Record<(typeof ladderScoreKeys)[number], n
 }
 
 /** The options sold in the cycle's days, as their sales recorded them, read by day, right, strike and expiry. */
+/**
+ * The instants of a symbol's Vol Farmer crossings over a cycle's days (backtestVolFarmerLook.ts): the automatic unwind
+ * actions, each stamped with the moment the stock reached the Call's strike, which is also when its rows were written.
+ */
+async function loadVolFarmerCrossingInstants(sessionId: string, symbol: string, timeline: readonly BacktestCycleTimelineRow[]): Promise<Set<number>> {
+  const dates = timeline.map((entry) => entry.tradingDate).sort();
+  if (dates.length === 0) return new Set();
+  const rows: { at: Date }[] = await db("backtest_actions")
+    .where({ session_id: sessionId, symbol, outcome: "filled", automatic: true })
+    .where("candidate_id", "like", `${symbol}:vol_farmer_unwind:%`)
+    .whereBetween("trading_date", [dates[0]!, dates.at(-1)!])
+    .distinct("at");
+  return new Set(rows.map((row) => new Date(row.at).getTime()));
+}
+
 async function loadSaleRecords(sessionId: string, symbol: string, timeline: readonly BacktestCycleTimelineRow[]): Promise<{ recordedOf: (date: string, right: "C" | "P", strike: number | null, expiry: string | null, at: string | null) => RecordedSale }> {
   const dates = timeline.map((entry) => entry.tradingDate).sort();
   if (dates.length === 0) return { recordedOf: () => ({ premiumYield: null, delta: null, ladderRung: null }) };

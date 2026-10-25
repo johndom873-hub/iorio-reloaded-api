@@ -3,7 +3,7 @@ import { db } from "../db/connection.js";
 import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { kellyFraction } from "../pluto/postModelGates.js";
 import { mapTradingSettingsRow } from "../lib/tradingSettingsStore.js";
-import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, type BacktestSettingApplicability, type BacktestSettingCondition, type BacktestSettingGroup, type BacktestSettingRow, type BacktestSettingSection, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
+import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, defaultBacktestVolFarmerSettings, type BacktestSettingApplicability, type BacktestSettingCondition, type BacktestSettingGroup, type BacktestSettingRow, type BacktestSettingSection, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
 import { earningsDateKnownCalendarDaysAhead } from "./engine/backtestTickerInputs.js";
 import { readBacktestClaudeCliPath } from "./backtestClaudeCli.js";
 
@@ -15,7 +15,7 @@ export async function loadCurrentBacktestSettings(connection: Knex = db): Promis
   const [pluto, tradingRow] = await Promise.all([loadPlutoSettings(connection), connection("trading_settings").first()]);
   if (!tradingRow) throw new Error("No trading_settings row found.");
   const trading = mapTradingSettingsRow(tradingRow);
-  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "rules", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings }, steadyStake: { ...defaultBacktestSteadyStakeSettings } };
+  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "rules", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings }, steadyStake: { ...defaultBacktestSteadyStakeSettings }, volFarmer: { ...defaultBacktestVolFarmerSettings } };
 }
 
 type RowDefinition = Omit<BacktestSettingRow, "now" | "group" | "section" | "appliesWhen"> & { fixedValue?: number | string };
@@ -73,12 +73,80 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Decision maker",
     unit: "choice",
     editable: true,
-    note: "who makes the choices the AI model makes live. The rules: each pass looks at closes, then rolls, then opens, and an open is Pluto's own top pick. The AI model: Claude through the subscription, asked as live Pluto asks it, with the symbols and dates masked; the rules below do not apply. The Steady Stake: only its own group's values, at the 10:00 look",
+    note: "who makes the choices the AI model makes live. The rules: each pass looks at closes, then rolls, then opens, and an open is Pluto's own top pick. The AI model: Claude through the subscription, asked as live Pluto asks it, with the symbols and dates masked; the rules below do not apply. The Steady Stake and the Vol Farmer: only their own group's values, at the 10:00 look",
     choices: [
       { value: "rules", label: "Rules (below)" },
       { value: "llm", label: "The AI model" },
       { value: "baseline", label: "Baseline wheel (no Pluto rules, no Signals)" },
       { value: "steady_stake", label: "Steady Stake (a steady share stake, Calls and Puts on expiry days)" },
+      { value: "vol_farmer", label: "Vol Farmer (shares, a Covered Call and a long Put hedge)" },
+    ],
+  },
+  { path: "volFarmer.callMinAbsDelta", label: "Calls' |delta| from", unit: "number", editable: true, note: "the Call sold is the one with the highest premium yield (annualized) inside the |delta| and days-to-expiry ranges whose strike passes the hedge rule; |delta| from each quote's own implied volatility" },
+  { path: "volFarmer.callMaxAbsDelta", label: "Calls' |delta| to", unit: "number", editable: true, note: null },
+  { path: "volFarmer.callMinDte", label: "Calls' days to expiry from", unit: "days", editable: true, note: "the data files' Calls are read up to 45 days out" },
+  { path: "volFarmer.callMaxDte", label: "Calls' days to expiry to", unit: "days", editable: true, note: null },
+  { path: "volFarmer.putMinDte", label: "Puts' days to expiry from", unit: "days", editable: true, note: "the Put also expires on or after the Call's expiry: 0 = from the Call's expiry" },
+  { path: "volFarmer.putMaxDte", label: "Puts' days to expiry to", unit: "days", editable: true, note: null },
+  { path: "volFarmer.putMaxStrikeAbovePricePct", label: "Puts' strike up to", unit: "percent", editable: true, note: "% above the stock price; 0 = at or below the price, −5 = at least 5% below it (−20 to 10)" },
+  { path: "volFarmer.protectionFallPct", label: "Protection measured on a fall of", unit: "percent", editable: true, note: "% of the stock price: of the Puts that pass the hedge rule, the one whose gain after its cost offsets the most of the shares' loss on this fall by the Call's expiry" },
+  { path: "volFarmer.maxSpreadPctOfMid", label: "Spread at most", unit: "percent", editable: true, note: "(ask − bid) ÷ mid; a bid of at least $0.05, and a Call within 20% of the contract's previous-session volume, as for the ladder" },
+  { path: "volFarmer.putCashReservePct", label: "Cash kept for later Puts", unit: "percent", editable: true, note: "% of the free cash a cycle's first purchase does not spend: the later Puts are paid from it and the Calls' premiums (0 to 50)" },
+  {
+    path: "volFarmer.crossing",
+    label: "When the stock reaches the Call's strike",
+    unit: "choice",
+    editable: true,
+    note: "unwind: the shares sold at the strike, the Call bought back and the Put sold at their Black-Scholes values, there and then. Hold to expiry: nothing is traded; a Call in the money at its expiry is assigned (its shares go at the strike) and the Put is sold at the next 10:00 look, or settles with the Call",
+    choices: [
+      { value: "unwind", label: "Unwind the position at the crossing" },
+      { value: "hold_to_expiry", label: "Hold to the Call's expiry (assignment)" },
+    ],
+  },
+  {
+    path: "volFarmer.putExpiry",
+    label: "Puts tried",
+    unit: "choice",
+    editable: true,
+    note: "in the days-to-expiry range: every expiry from the Puts' days to expiry from/to, on or after the Call's. With the Call: only Puts expiring with the Call, so each Put settles at the Call's expiry and its gain or loss counts in the hedge rule from then",
+    choices: [
+      { value: "in_range", label: "Every expiry in the days-to-expiry range" },
+      { value: "with_the_call", label: "Only the Call's expiry" },
+    ],
+  },
+  {
+    path: "volFarmer.hedgeRuleCallPremiums",
+    label: "Call P&L in the hedge rule",
+    unit: "choice",
+    editable: true,
+    note: "included: the cycle's realized Call P&L (premiums kept, buybacks paid) is added to the Puts' realized P&L in the hedge rule, so the Calls already sold pay for the Puts bought since",
+    choices: [
+      { value: "excluded", label: "Left out" },
+      { value: "included", label: "Included" },
+    ],
+  },
+  { path: "volFarmer.minPutProtectionPct", label: "Least protection of a new Put", unit: "percent", editable: true, note: "% of the fall the protection is measured on: a Call qualifies only with a Put that passes the hedge rule and offers at least this much; 0 = any (0 to 100)" },
+  {
+    path: "volFarmer.hedgeWithoutCall",
+    label: "Shares with no Call that qualifies",
+    unit: "choice",
+    editable: true,
+    note: "a Put: shares held with no Put buy the Put at the strike cap (the highest strike up to the Puts' strike limit) of the nearest expiry 7 or more days out, the Calls tried again at the next 10:00 look with it",
+    choices: [
+      { value: "none", label: "Left unhedged" },
+      { value: "put", label: "A Put" },
+    ],
+  },
+  { path: "volFarmer.maxPutCostPctOfCallPremium", label: "A new Put costs at most", unit: "percent", editable: true, note: "% of the Call's premium (its fill): of the Puts that pass, the most protection within this budget; 100 = a zero-cost collar, 0 = no limit (0 to 500)" },
+  {
+    path: "volFarmer.putRoll",
+    label: "Puts held and no Call passes",
+    unit: "choice",
+    editable: true,
+    note: "roll: the Puts held are sold when what they realize, counted in the hedge rule, lets a Call pass with a new Put; the Call and the new Put are then traded at the same look. Wait: no trade until a Call passes with the Puts held or they expire",
+    choices: [
+      { value: "none", label: "Wait" },
+      { value: "when_no_call", label: "Roll the Put when that lets a Call pass" },
     ],
   },
   { path: "steadyStake.stakePct", label: "Stake", unit: "percent", editable: true, note: "% of the pot: the share of each ticker's pot held in its shares. At the 10:00 look, whole shares are bought or sold back to it when their value drifts out of the band" },
@@ -656,6 +724,14 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
     })),
   },
   {
+    group: "Vol Farmer",
+    section: "vol_farmer",
+    rows: ["volFarmer.callMinAbsDelta", "volFarmer.callMaxAbsDelta", "volFarmer.callMinDte", "volFarmer.callMaxDte", "volFarmer.putMinDte", "volFarmer.putMaxDte", "volFarmer.putMaxStrikeAbovePricePct", "volFarmer.protectionFallPct", "volFarmer.maxSpreadPctOfMid", "volFarmer.putCashReservePct", "volFarmer.crossing", "volFarmer.putExpiry", "volFarmer.hedgeRuleCallPremiums", "volFarmer.minPutProtectionPct", "volFarmer.hedgeWithoutCall", "volFarmer.maxPutCostPctOfCallPremium", "volFarmer.putRoll"].map((path) => ({
+      path,
+      appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer"] }], explanation: "Applies only with the Vol Farmer as decision maker." },
+    })),
+  },
+  {
     group: "Capital and sizing",
     section: "pluto_rules",
     rows: ["pluto.capitalBudgetPct", "pluto.orderSizePctOfBudget", "pluto.maxTickerPctOfBudget", "pluto.maxSectorPctOfBudget", "pluto.maxOpenPositions", "pluto.minCashReservePct", "trading.maxOrderPctOfPortfolio", "trading.maxConcentrationPerTickerPct", "trading.minCashReservePct", "pluto.stressRiskBudgetPct", "pluto.stressSigmas", "kellyFraction"].map((path) => ({ path })),
@@ -692,6 +768,7 @@ export function readBacktestSettingValue(settings: BacktestSettings, settingPath
   if (section === "policy") return ({ ...defaultBacktestPolicySettings, ...settings.policy } as unknown as Record<string, string>)[field]!;
   if (section === "baseline") return ({ ...defaultBacktestBaselineSettings, ...settings.baseline } as unknown as Record<string, number | string>)[field]!;
   if (section === "steadyStake") return ({ ...defaultBacktestSteadyStakeSettings, ...settings.steadyStake } as unknown as Record<string, number | string>)[field]!;
+  if (section === "volFarmer") return ({ ...defaultBacktestVolFarmerSettings, ...settings.volFarmer } as unknown as Record<string, number | string>)[field]!;
   if (section === "model") {
     const model = { ...defaultBacktestModelSettings, ...settings.model };
     return field === "spreadCostChargedPct" ? (model.spreadCostChargedPct ?? settings.trading.spreadCostChargedPct) : (model as unknown as Record<string, number | string>)[field]!;

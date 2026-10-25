@@ -18,9 +18,10 @@ export type BacktestTablesMode = "walk_forward" | "current";
  * Who makes the choices the AI model makes live: the stand-in rules (BacktestPolicySettings), or the model itself (Claude
  * through the subscription, src/backtest/llm/). "baseline": none of Pluto or Signals, the naive wheel of
  * BacktestBaselineSettings (Marcelo 2026-10-13), to measure what each rule adds. "steady_stake": the Steady Stake of
- * BacktestSteadyStakeSettings, also without Pluto or Signals.
+ * BacktestSteadyStakeSettings, also without Pluto or Signals. "vol_farmer": the Vol Farmer of BacktestVolFarmerSettings, also
+ * without Pluto or Signals.
  */
-export type BacktestDecisionMaker = "rules" | "llm" | "baseline" | "steady_stake";
+export type BacktestDecisionMaker = "rules" | "llm" | "baseline" | "steady_stake" | "vol_farmer";
 
 /**
  * The naive wheel (approved by Marcelo 2026-10-13; the research log has the full rules). At every look: free round lots of
@@ -260,6 +261,49 @@ export interface BacktestSteadyStakeSettings {
 export const defaultBacktestSteadyStakeSettings: BacktestSteadyStakeSettings = { stakePct: 80, rebalanceBandPct: 5, callCoveragePct: 100, callAbsDelta: 0.2, putCashPct: 100, putAbsDelta: 0.2, deltaTolerance: 0.05, maxSpreadPctOfMid: 50 };
 
 /**
+ * The Vol Farmer (decision maker "vol_farmer", Marcelo 2026-10-23): shares with a Covered Call and a long Put that hedges
+ * them. A cycle buys the shares, sells the Call and buys the Put at a 10:00 look; when the stock reaches the Call's
+ * strike the whole position is unwound (the shares sold, the Call bought back, the Put sold) and the next cycle starts at
+ * the next day's 10:00 look. A Call that expires below its strike is followed by the next one at the next day's 10:00
+ * look, the Put kept. It decides at the 10:00 look only; no Pluto rules and no Signals (backtestVolFarmerLook.ts).
+ */
+export interface BacktestVolFarmerSettings {
+  /** The Calls' |delta| range, from each quote's own implied volatility. */
+  callMinAbsDelta: number;
+  callMaxAbsDelta: number;
+  /** The Calls' days to expiry (the engine reads Calls up to 45 days out). */
+  callMinDte: number;
+  callMaxDte: number;
+  /** The Puts' days to expiry; a Put also expires on or after the Call's expiry (0 from: from the Call's expiry). */
+  putMinDte: number;
+  putMaxDte: number;
+  /** The highest Put strike, as a percent above the stock price: 0 = at or below the price, −5 = at least 5% below it. */
+  putMaxStrikeAbovePricePct: number;
+  /** The fall the Put's protection is measured on, as a percent of the stock price. */
+  protectionFallPct: number;
+  /** Widest spread traded into, as a percent of the mid: (ask − bid) ÷ mid. */
+  maxSpreadPctOfMid: number;
+  /** The percent of the free cash a cycle's first purchase leaves in cash, for the later Puts (with the Calls' premiums). */
+  putCashReservePct: number;
+  /** When the stock reaches the Call's strike: "unwind" the whole position there, or "hold_to_expiry" (the Call is assigned at its expiry if it ends in the money). */
+  crossing: "unwind" | "hold_to_expiry";
+  /** Which Puts are tried: "in_range" (putMinDte to putMaxDte, on or after the Call's expiry) or "with_the_call" (only the Call's own expiry). */
+  putExpiry: "in_range" | "with_the_call";
+  /** Whether the cycle's realized Call P&L counts in the hedge rule, beside the Puts' realized P&L. */
+  hedgeRuleCallPremiums: "excluded" | "included";
+  /** The least protection a new Put may offer, as a percent (0 = any). */
+  minPutProtectionPct: number;
+  /** Shares held with no Put and no Call that qualifies: "none" leaves them unhedged, "put" buys the Put at the strike cap for the nearest expiry 7 or more days out. */
+  hedgeWithoutCall: "none" | "put";
+  /** The most a new Put may cost, as a percent of the Call's premium (0 = no limit; 100 = a zero-cost collar). */
+  maxPutCostPctOfCallPremium: number;
+  /** Puts held and no Call that passes with them: "none" waits, "when_no_call" sells them when their banked P&L lets a Call pass with a new Put. */
+  putRoll: "none" | "when_no_call";
+}
+
+export const defaultBacktestVolFarmerSettings: BacktestVolFarmerSettings = { callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, callMinDte: 1, callMaxDte: 45, putMinDte: 0, putMaxDte: 360, putMaxStrikeAbovePricePct: 0, protectionFallPct: 20, maxSpreadPctOfMid: 50, putCashReservePct: 10, crossing: "unwind", putExpiry: "in_range", hedgeRuleCallPremiums: "excluded", minPutProtectionPct: 0, hedgeWithoutCall: "none", maxPutCostPctOfCallPremium: 0, putRoll: "none" };
+
+/**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5). Everything else in a pass is
  * Pluto's own code. A pass considers closes first, then rolls, then opens, and takes at most one action; an open is
  * always Pluto's own top pick (Edge Yield, then Edge $).
@@ -348,6 +392,8 @@ export interface BacktestSettings {
   baseline?: BacktestBaselineSettings;
   /** Absent on sessions created before the Steady Stake existed: the defaults apply. */
   steadyStake?: BacktestSteadyStakeSettings;
+  /** Absent on sessions created before the Vol Farmer existed: the defaults apply. */
+  volFarmer?: BacktestVolFarmerSettings;
 }
 
 export interface BacktestSettingsOverrides {
@@ -359,6 +405,7 @@ export interface BacktestSettingsOverrides {
   model?: Partial<BacktestModelSettings>;
   baseline?: Partial<BacktestBaselineSettings>;
   steadyStake?: Partial<BacktestSteadyStakeSettings>;
+  volFarmer?: Partial<BacktestVolFarmerSettings>;
 }
 
 /**
@@ -459,6 +506,7 @@ export interface EffectiveBacktestSettings extends BacktestSettings {
   model: BacktestModelSettings;
   baseline: BacktestBaselineSettings;
   steadyStake: BacktestSteadyStakeSettings;
+  volFarmer: BacktestVolFarmerSettings;
 }
 
 export interface BacktestJobView {
@@ -702,6 +750,7 @@ export type BacktestSettingGroup =
   | "Exits"
   | "Hedge"
   | "Steady Stake"
+  | "Vol Farmer"
   | "Capital and sizing"
   | "Candidate quality"
   | "Model"
@@ -709,8 +758,9 @@ export type BacktestSettingGroup =
   | "Rules' choices";
 
 /** "baseline_wheel": rows a Baseline wheel session (the CC + Put Ladder) reads, some shared with the rules and the AI model;
- *  "steady_stake": rows only the Steady Stake reads; "pluto_rules": rows only the rules and the AI model read. */
-export type BacktestSettingSection = "baseline_wheel" | "steady_stake" | "pluto_rules";
+ *  "steady_stake": rows only the Steady Stake reads; "vol_farmer": rows only the Vol Farmer reads; "pluto_rules": rows only
+ *  the rules and the AI model read. */
+export type BacktestSettingSection = "baseline_wheel" | "steady_stake" | "vol_farmer" | "pluto_rules";
 
 /** A row's value against another row's: `oneOf` / `noneOf` its choice values, or a number `above`. */
 export interface BacktestSettingCondition {
@@ -1318,6 +1368,8 @@ export interface BacktestCycleTimelineRow {
   ladderRung?: BacktestLadderRungRecord | null;
   /** Free cash ÷ the account value once the row's moment was done (sessionFreeCash.ts), the whole account's; null for a day not recorded; added when the cycle is read. */
   freeCashShare?: number | null;
+  /** True on a row written at a Vol Farmer crossing (the stock reached the Call's strike and the position was unwound); absent otherwise; added when the cycle is read. */
+  crossing?: boolean;
 }
 
 /**

@@ -12,7 +12,7 @@ import { loadTickerSuitability } from "../tickerSuitabilityStore.js";
 import { validateBaselineSettings } from "../jobs/backtestSessionRequest.js";
 import { deriveJobDisplayStatus } from "../jobs/backtestJobRules.js";
 import { BacktestRequestError, cancelBacktestJob, findUnfinishedDownloadJob, insertClaimedAnalysisJob, startClaimedBacktestJob } from "../jobs/backtestJobStore.js";
-import { analysisFormulasVersion, type AnalysisFigureValues, type AnalysisStep } from "./analysisFigures.js";
+import { analysisFormulasVersion, computeAnalysisFileFigures, type AnalysisFigureValues, type AnalysisFileFigures, type AnalysisStep } from "./analysisFigures.js";
 
 // The stored analyses (backtest_ticker_analyses): the values each was computed with, starting one as an "analysis" job,
 // and what the Analyse window and the Data files table read.
@@ -320,6 +320,16 @@ export async function loadTickerAnalysisView(givenSymbol: string, connection: Kn
     suitability: await loadTickerSuitability(symbol, connection),
     detectedSplits: cachedSplitsBetween(readBacktestDataDirectory(), symbol, "0000-01-01", "9999-12-31"),
   };
+}
+
+/** The figures the data file gives without an analysis, at the ticker's values now (only the shock reads them): the window before a ticker's first analysis. Nothing is stored. */
+export async function loadAnalysisFileFigures(givenSymbol: string, connection: Knex = db): Promise<AnalysisFileFigures> {
+  const symbol = normalizeBacktestSymbol(givenSymbol);
+  const contents = readBacktestDataFileContents(symbol);
+  if (!contents) throw new BacktestRequestError(`There is no data file for ${symbol}: download it first.`, 404);
+  if (!contents.firstDate) throw new BacktestRequestError(`The ${symbol} data file has no complete days yet.`, 409);
+  const { effective } = await resolveAnalysisLabValues(symbol, null, connection);
+  return computeAnalysisFileFigures({ symbol, values: effective, connection });
 }
 
 export async function loadTickerAnalysisRun(analysisId: string, connection: Knex = db): Promise<AnalysisRunView> {
