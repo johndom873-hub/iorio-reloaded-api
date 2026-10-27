@@ -56,7 +56,7 @@ export async function finishPlutoPass(passId: string, input: FinishPlutoPassInpu
     });
 }
 
-export type PlutoActionKind = "open_covered_call" | "open_cash_secured_put" | "roll" | "close_shares" | "close_leg" | "close_position" | "no_trade";
+export type PlutoActionKind = "open_covered_call" | "open_cash_secured_put" | "buy_leaps" | "sell_leaps" | "roll" | "close_shares" | "close_leg" | "close_position" | "no_trade";
 export type PlutoActionOutcome = "validated" | "blocked" | "order_built" | "confirmed" | "filled" | "partially_filled" | "cancelled" | "cancelled_partially_filled" | "rejected" | "error" | "no_trade";
 
 export interface PlutoGateResult {
@@ -83,6 +83,8 @@ export interface RecordPlutoActionInput {
   blockReason: string | null;
   referenceBid: number | null;
   referenceMid: number | null;
+  /** The strategy the action was taken under; the CC + Put Ladder when absent. */
+  executionStrategy?: "cc_put_ladder" | "vol_farmer_v2";
 }
 
 export async function recordPlutoAction(input: RecordPlutoActionInput): Promise<string> {
@@ -104,7 +106,7 @@ export async function recordPlutoAction(input: RecordPlutoActionInput): Promise<
       reference_bid: input.referenceBid,
       reference_mid: input.referenceMid,
       // The order gates judge an action by the strategy it ran under; earlier actions may carry Edge Margin's.
-      execution_strategy: "cc_put_ladder",
+      execution_strategy: input.executionStrategy ?? "cc_put_ladder",
     })
     .returning("id");
   return row.id as string;

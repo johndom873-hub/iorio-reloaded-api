@@ -54,7 +54,7 @@ describe("watchPlutoOrder: routine order problems", () => {
 
 describe("executePlutoOrder: a refusal at confirm", () => {
   it("the ladder's book-wide cap refusing at confirm (HTTP 409) is a blocked action, cancelled, no breaker", async () => {
-    const reason = "The CC + Put Ladder's tickers would commit $100,420 together, above Pluto's capital budget of $100,000 (50.0% of portfolio value); $96,000 is already committed, counting orders still working.";
+    const reason = "Pluto's tickers would commit $100,420 together, above Pluto's capital budget of $100,000 (50.0% of portfolio value); $96,000 is already committed, counting orders still working.";
     const post = vi.fn(async (path: string) => {
       if (path === "/positions/orders") return { id: "o9", status: "pending_confirmation", errorMessage: null, payload: { legs: [] } };
       if (path.endsWith("/confirm")) throw new InternalApiError(409, reason);

@@ -31,7 +31,7 @@ interface OrderRequestResponse {
   updatedAt?: string | null;
 }
 
-/** A CC + Put Ladder sale (ladderOrders.ts): no Signals candidate, its own contract record and the shares it buys. */
+/** A sale opening a position (the CC + Put Ladder's, ladderOrders.ts, and Vol Farmer v2's, volFarmerV2Round.ts): its contract and the shares it buys. */
 export interface ExecuteLadderOpenInput {
   kind: "ladder_open";
   actionId: string;
@@ -45,7 +45,30 @@ export interface ExecuteLadderOpenInput {
   scoresSnapshot: unknown;
 }
 
-export type ExecuteInput = ExecuteLadderOpenInput;
+/** Vol Farmer v2's LEAPS purchase: a Call bought through the order route as a "leaps" position. */
+export interface ExecuteLeapsPurchaseInput {
+  kind: "leaps_buy";
+  actionId: string;
+  symbol: string;
+  contract: { expiry: string; strike: number; right: "C"; dte: number };
+  plan: PlutoOrderPlan;
+  reasons: string[];
+  scoresSnapshot: unknown;
+}
+
+/** Vol Farmer v2's LEAPS sale: one LEAPS position's leg sold whole through the close route. */
+export interface ExecuteLeapsSaleInput {
+  kind: "leaps_sell";
+  actionId: string;
+  symbol: string;
+  positionId: string;
+  legId: string;
+  contract: { expiry: string; strike: number; right: "C"; dte: number };
+  plan: PlutoOrderPlan;
+  reasons: string[];
+}
+
+export type ExecuteInput = ExecuteLadderOpenInput | ExecuteLeapsPurchaseInput | ExecuteLeapsSaleInput;
 
 export interface ExecuteResult {
   outcome: PlutoActionOutcome;
@@ -78,9 +101,24 @@ function isoToIbkrExpiry(expiryIso: string): string {
   return expiryIso.replace(/-/g, "");
 }
 
-/** "SMCI Sell $46 Call · 9 Oct (2DTE) · 11× @ 0.39". */
+/** "SMCI Sell $46 Call · 9 Oct (2DTE) · 11× @ 0.39"; a LEAPS purchase "Buy". */
 export function describeOrder(input: ExecuteInput): string {
-  return `${input.symbol} Sell ${describeOptionContract(input.contract)}${describeOrderSize(input.plan.quantity, input.plan.limitPrice)}`;
+  return `${input.symbol} ${input.kind === "leaps_buy" ? "Buy" : "Sell"} ${describeOptionContract(input.contract)}${describeOrderSize(input.plan.quantity, input.plan.limitPrice)}`;
+}
+
+/** Builds the order through the route the screens use: a LEAPS sale through the close route, everything else through POST /positions/orders. */
+function buildOrder(api: InternalApiClient, input: ExecuteInput): Promise<OrderRequestResponse> {
+  if (input.kind === "leaps_sell") return api.post<OrderRequestResponse>(`/positions/${input.positionId}/close`, { legs: [{ legId: input.legId, limitPrice: input.plan.limitPrice }], plutoActionId: input.actionId });
+  const option = { quantity: input.plan.quantity, limitPrice: input.plan.limitPrice, strikePrice: input.contract.strike, expiryDate: isoToIbkrExpiry(input.contract.expiry) };
+  if (input.kind === "leaps_buy") return api.post<OrderRequestResponse>("/positions/orders", { symbol: input.symbol, strategyKey: "leaps", option, signalSnapshot: input.scoresSnapshot, plutoActionId: input.actionId });
+  return api.post<OrderRequestResponse>("/positions/orders", {
+    symbol: input.symbol,
+    strategyKey: input.strategyKey,
+    option,
+    ...(input.buyEveryShare ? { buyEveryShare: true } : {}),
+    signalSnapshot: input.scoresSnapshot,
+    plutoActionId: input.actionId,
+  });
 }
 
 /** Builds and confirms; returns once IBKR has the order (confirmed) or the route refused it (blocked). */
@@ -88,14 +126,7 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
   const description = describeOrder(input);
   let built: OrderRequestResponse;
   try {
-    built = await api.post<OrderRequestResponse>("/positions/orders", {
-      symbol: input.symbol,
-      strategyKey: input.strategyKey,
-      option: { quantity: input.plan.quantity, limitPrice: input.plan.limitPrice, strikePrice: input.contract.strike, expiryDate: isoToIbkrExpiry(input.contract.expiry) },
-      ...(input.buyEveryShare ? { buyEveryShare: true } : {}),
-      signalSnapshot: input.scoresSnapshot,
-      plutoActionId: input.actionId,
-    });
+    built = await buildOrder(api, input);
   } catch (error) {
     if (error instanceof InternalApiError && (error.status === 400 || error.status === 404 || error.status === 409)) return await blocked(input, `build refused: ${error.message}`);
     return await errored(input, `build failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -213,14 +244,14 @@ export function describeActionOrder(action: { kind: string; symbol: string; limi
   if (action.kind === "close_position") return `${action.symbol} Close ${option(contract.strike, contract.expiry, true)} + sell ${quantity ?? "?"} shares${quantity === null ? "" : ` · ${Math.round(quantity / 100)}×`}`;
   const size = quantity === null ? "" : describeOrderSize(quantity, price);
   if (action.kind === "roll") return `${action.symbol} Roll ${option(contract.fromStrike, contract.fromExpiry, false)} → ${option(contract.strike, contract.expiry, true)}${size}`;
-  return `${action.symbol} ${action.kind === "close_leg" ? "Buy back" : "Sell"} ${option(contract.strike, contract.expiry, true)}${size}`;
+  return `${action.symbol} ${action.kind === "close_leg" ? "Buy back" : action.kind === "buy_leaps" ? "Buy" : "Sell"} ${option(contract.strike, contract.expiry, true)}${size}`;
 }
 
 /** Pure: the watch reference for an order found working after a restart, rebuilt from its action row. */
 export function referenceForAdoptedOrder(action: { kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown; reference_other_legs?: unknown }, todayIso = easternIsoDate(new Date())): AdoptableOrder["reference"] & { description: string } {
   const num = (value: unknown) => (value === null || value === undefined || Number.isNaN(Number(value)) ? null : Number(value));
   const price = num(action.reference_bid) ?? num(action.reference_mid) ?? num(action.limit_price) ?? 0;
-  const side: "sell" | "buy" = action.kind === "close_leg" ? "buy" : "sell";
+  const side: "sell" | "buy" = action.kind === "close_leg" || action.kind === "buy_leaps" ? "buy" : "sell";
   // A close_position (a whole covered call) is referenced on its shares, the call being its other leg.
   const multiplier = action.kind === "close_shares" || action.kind === "close_position" ? 1 : 100;
   const description = describeActionOrder(action, todayIso);

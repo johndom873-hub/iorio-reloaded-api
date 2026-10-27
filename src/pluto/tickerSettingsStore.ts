@@ -152,6 +152,11 @@ export async function updatePlutoTickerSettings(symbol: string, input: PlutoTick
       audit.push({ ticker_id: current.tickerId, user_id: userId, field, old_value: before === null ? null : String(before), new_value: value === null ? null : String(value) });
     }
     if (audit.length === 0) return current;
+    // A ticker changing strategy is looked at afresh by the new one: v2 adopts its holdings, the ladder's cycle starts there.
+    if (audit.some((row) => row.field === "strategy")) {
+      await trx("pluto_vol_farmer_v2_cycles").where({ ticker_id: current.tickerId }).delete();
+      await trx("pluto_ladder_cycles").where({ ticker_id: current.tickerId }).delete();
+    }
     await trx("pluto_ticker_settings")
       .insert({ ticker_id: current.tickerId, ...update, updated_at: trx.fn.now(), updated_by_user_id: userId })
       .onConflict("ticker_id")

@@ -3,7 +3,7 @@ import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { blackScholesDelta, blackScholesPriceOnForward, yearsBetweenIsoDates } from "./impliedVolatilitySurface.js";
 import { evaluateLadderDeltaForOrderRequest, ladderDeltaVerdict, type LadderOrderGateContext } from "./ladderOrderGates.js";
 
-const context: LadderOrderGateContext = { potFraction: 0.25, book: { symbols: ["AAA"], budgetFraction: 0.5 }, isEntryPut: false, minAbsDelta: 0.05, maxAbsDelta: 0.3, forwardAnchor: { forward: 100.3, spotPrice: 100 }, riskFreeRate: 0.04, todayIso: "2026-10-20", closeMinutesEt: 16 * 60 };
+const context: LadderOrderGateContext = { potFraction: 0.25, book: { symbols: ["AAA"], budgetFraction: 0.5 }, deltaChecked: true, isEntryPut: false, minAbsDelta: 0.05, maxAbsDelta: 0.3, forwardAnchor: { forward: 100.3, spotPrice: 100 }, riskFreeRate: 0.04, todayIso: "2026-10-20", closeMinutesEt: 16 * 60 };
 const now = new Date("2026-10-20T15:00:00Z");
 const expiryIso = "2026-11-20";
 const years = yearsBetweenIsoDates(context.todayIso, expiryIso);

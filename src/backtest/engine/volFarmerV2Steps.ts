@@ -120,6 +120,11 @@ export function volFarmerV2BreakEven(position: Pick<VolFarmerV2Position, "shares
   return position.shares > 0 ? position.costPerShare - position.premiumDollars / position.shares : null;
 }
 
+/** A position's premium from its share of a Call order: its contracts at the fill, less its share of the order's commission. */
+export function volFarmerV2CallPremiumShare(fillPrice: number, positionContracts: number, orderContracts: number, orderCommissionDollars: number): number {
+  return fillPrice * sharesPerContract * positionContracts - (orderCommissionDollars * positionContracts) / orderContracts;
+}
+
 /** The highest strike step 3 sells a Put at, as traded today: the first break-even × (1 − pct ÷ 100). */
 export function volFarmerV2PutStrikeCap(firstBreakEvenAsTraded: number, stepBelowFirstBreakEvenPct: number): number {
   return firstBreakEvenAsTraded * (1 - stepBelowFirstBreakEvenPct / 100);
@@ -517,7 +522,7 @@ function sellCalls(input: VolFarmerV2LookInput, orders: readonly CallOrder[]): s
     const breakEvensBefore = Object.fromEntries(group.map((order) => [order.name === "first" ? "breakEvenFirst" : "breakEvenSecond", volFarmerV2BreakEven(order.position)! / priceToCycleScale]));
     const whose: string[] = [];
     for (const order of group) {
-      order.position.premiumDollars += call.fillPrice * sharesPerContract * order.contracts - (commission * order.contracts) / contracts;
+      order.position.premiumDollars += volFarmerV2CallPremiumShare(call.fillPrice, order.contracts, contracts, commission);
       whose.push(`${order.name} position ${order.contracts}×, break-even now ${(volFarmerV2BreakEven(order.position)! / priceToCycleScale).toFixed(2)}`);
     }
     const contractLabel = describeOptionContract({ strike: call.strike, right: "C", expiry: call.expiry, dte: call.dte });

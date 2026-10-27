@@ -22,8 +22,10 @@ import type { LadderBookInput } from "./orderLimits.js";
 // The route reads this context for an order whose Pluto action was taken under the ladder (ladderOrderGateContext.ts).
 
 export interface LadderOrderGateContext {
-  /** The ticker's pot as a share of the account: its effective allocation × Pluto's capital budget (0.25 = 25%). */
-  potFraction: number;
+  /** The ticker's pot as a share of the account: its effective allocation × Pluto's capital budget (0.25 = 25%); null: no pot cap (Vol Farmer v2's LEAPS). */
+  potFraction: number | null;
+  /** False for an order with no |delta| range (Vol Farmer v2's LEAPS). */
+  deltaChecked: boolean;
   /** The ladder's book: Pluto's enabled tickers and its capital budget as a share of the account. */
   book: LadderBookInput;
   /** The order is a Cash-Secured Put entry (its Pluto action's sale step): its own delta is held to the range like a Call's. */
@@ -94,7 +96,7 @@ export const pooledLadderDeltaQuoteReader: LadderDeltaQuoteReader = {
 
 /** The delta verdict of a ladder order's option leg; null for an order with no opening option leg (closes, rolls). */
 export async function evaluateLadderDeltaForOrderRequest(orderRequest: Pick<OrderRequestForGates, "request_type" | "payload">, context: LadderOrderGateContext, reader: LadderDeltaQuoteReader = pooledLadderDeltaQuoteReader): Promise<DeltaComplianceResult | null> {
-  if (!orderRequest.request_type.startsWith("open_")) return null;
+  if (!orderRequest.request_type.startsWith("open_") || !context.deltaChecked) return null;
   const optionLeg = orderRequest.payload.legs.find((leg) => leg.role === "option");
   if (!optionLeg?.strike || !optionLeg.expiry || !optionLeg.right) return null;
   // The ladder's Puts have no |delta| range: nothing to read the live quote for. An entry Put is held to it.

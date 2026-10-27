@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// runPlutoPass (the CC + Put Ladder only since 2026-10-27): system checks, market stress and the opening-look wait in front of
-// the ladder's round, and the pass row closed whatever happens. The ladder itself, the ledger and the checks are mocked.
+// runPlutoPass: system checks, market stress and the opening-look wait in front of the strategies' rounds (the CC + Put
+// Ladder's, then Vol Farmer v2's), and the pass row closed whatever happens. The rounds, the ledger and the checks are mocked.
 
 const harness = vi.hoisted(() => ({
   enabledSymbols: ["AAA", "BBB"],
@@ -12,6 +12,15 @@ const harness = vi.hoisted(() => ({
   ladderThrows: null as unknown,
   ladderRounds: [] as Record<string, unknown>[],
   ladderOutcome: { looked: [] as string[], planned: 0, outcomes: [] as { outcome: string }[], notes: [] as string[] },
+  volFarmerV2Rounds: [] as Record<string, unknown>[],
+  volFarmerV2Outcome: { looked: [] as string[], planned: 0, sent: 0, notes: [] as string[] },
+}));
+
+vi.mock("./volFarmerV2Round.js", () => ({
+  runVolFarmerV2Round: async (input: Record<string, unknown>) => {
+    harness.volFarmerV2Rounds.push(input);
+    return harness.volFarmerV2Outcome;
+  },
 }));
 
 vi.mock("./ladderRound.js", () => ({
@@ -62,6 +71,8 @@ beforeEach(() => {
   harness.ladderThrows = null;
   harness.ladderRounds.length = 0;
   harness.ladderOutcome = { looked: [], planned: 0, outcomes: [], notes: [] };
+  harness.volFarmerV2Rounds.length = 0;
+  harness.volFarmerV2Outcome = { looked: [], planned: 0, sent: 0, notes: [] };
   vi.mocked(ledger.finishPlutoPass).mockClear();
   vi.mocked(ledger.recordPlutoEvent).mockClear();
 });
@@ -83,18 +94,28 @@ describe("runPlutoPass", () => {
 
   it("says why nothing was sent", async () => {
     harness.ladderOutcome = { looked: ["AAA"], planned: 0, outcomes: [], notes: ["AAA: no previous-session option volume was captured, so nothing can be sold (the 20% rule)"] };
-    expect((await runPlutoPass(round(["AAA"]), context)).skippedReason).toBe("the ladder planned no sale (1 ticker(s) looked at; AAA: no previous-session option volume was captured, so nothing can be sold (the 20% rule))");
+    expect((await runPlutoPass(round(["AAA"]), context)).skippedReason).toBe("no order planned (1 ticker(s) looked at; AAA: no previous-session option volume was captured, so nothing can be sold (the 20% rule))");
     harness.ladderOutcome = { looked: ["AAA"], planned: 1, outcomes: [{ outcome: "blocked" }], notes: [] };
-    expect((await runPlutoPass(round(["AAA"]), context)).skippedReason).toBe("none of the ladder's 1 planned sale(s) was sent");
+    expect((await runPlutoPass(round(["AAA"]), context)).skippedReason).toBe("none of the 1 planned order(s) was sent");
   });
 
-  it("stops at the ladder's SPY stress level", async () => {
+  it("runs Vol Farmer v2's round after the ladder's, and counts its orders with the ladder's", async () => {
+    harness.volFarmerV2Outcome = { looked: ["BBB"], planned: 1, sent: 1, notes: [] };
+    const summary = await runPlutoPass(round([]), context);
+    expect(harness.volFarmerV2Rounds).toEqual([expect.objectContaining({ passId: "pass-1", netLiquidationValue: 1_000_000, symbols: [], stressed: false })]);
+    expect(summary).toMatchObject({ skippedReason: null, outcome: "trade" });
+    expect(ledger.finishPlutoPass).toHaveBeenCalledWith("pass-1", expect.objectContaining({ candidateCount: 1 }));
+  });
+
+  it("stops the ladder at the SPY stress level, and runs Vol Farmer v2 stressed (its LEAPS sales only)", async () => {
     harness.spyDayChangePct = -4.9;
     await runPlutoPass(round(["AAA"]), context);
     expect(harness.ladderRounds).toHaveLength(1);
+    expect(harness.volFarmerV2Rounds.at(-1)).toMatchObject({ stressed: false });
     harness.spyDayChangePct = -5.2;
-    expect((await runPlutoPass(round(["AAA"]), context)).skippedReason).toBe("market stress: the ladder sells nothing while SPY is down");
+    expect((await runPlutoPass(round(["AAA"]), context)).skippedReason).toBe("market stress: Pluto opens nothing while SPY is down");
     expect(harness.ladderRounds).toHaveLength(1);
+    expect(harness.volFarmerV2Rounds.at(-1)).toMatchObject({ stressed: true });
   });
 
   it("skips on a failing system check without running the ladder", async () => {
@@ -104,10 +125,11 @@ describe("runPlutoPass", () => {
   });
 
   it("sells nothing before today's opening look, nor without a net liquidation value", async () => {
-    expect((await runPlutoPass(round(["AAA"], { heldPositionsOnly: true }), context)).skippedReason).toBe("the ladder's sales wait for today's opening look");
+    expect((await runPlutoPass(round(["AAA"], { heldPositionsOnly: true }), context)).skippedReason).toBe("the strategies' orders wait for today's opening look");
     harness.netLiquidationValue = null;
-    expect((await runPlutoPass(round(["AAA"]), context)).skippedReason).toBe("no net liquidation value for the ladder's pots");
+    expect((await runPlutoPass(round(["AAA"]), context)).skippedReason).toBe("no net liquidation value for the strategies' pots");
     expect(harness.ladderRounds).toHaveLength(0);
+    expect(harness.volFarmerV2Rounds).toHaveLength(0);
   });
 
   it("a round that throws closes its pass as failed and rethrows", async () => {

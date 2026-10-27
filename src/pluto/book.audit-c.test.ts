@@ -93,7 +93,7 @@ afterAll(async () => {
 });
 
 describe("loadPlutoBook (test DB)", () => {
-  it("scopes the book to open, non-hedge, non-LEAPS positions on bot-enabled, not-removed shortlist tickers, and labels Pluto's own", async () => {
+  it("scopes the book to open, non-hedge positions (LEAPS included) on bot-enabled, not-removed shortlist tickers, and labels Pluto's own", async () => {
     try {
       const enabled = await createTicker({ botEnabled: true });
       const disabled = await createTicker({ botEnabled: false });
@@ -116,8 +116,8 @@ describe("loadPlutoBook (test DB)", () => {
 
       const book = await loadPlutoBook();
       const ids = book.openPositions.map((position) => position.positionId);
-      expect(ids).toEqual(expect.arrayContaining([human.positionId, plutoOwn.positionId, fromPluto.positionId]));
-      for (const excluded of [hedge, leaps, closed, plutoOnDisabled, onRemoved, onNotListed]) expect(ids).not.toContain(excluded.positionId);
+      expect(ids).toEqual(expect.arrayContaining([human.positionId, plutoOwn.positionId, fromPluto.positionId, leaps.positionId]));
+      for (const excluded of [hedge, closed, plutoOnDisabled, onRemoved, onNotListed]) expect(ids).not.toContain(excluded.positionId);
       // No duplicates from the shortlist join.
       expect(new Set(ids).size).toBe(ids.length);
 

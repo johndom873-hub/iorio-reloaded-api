@@ -11,7 +11,7 @@ import { ladderDayUniverse, planLadderBand, type LadderBandPlan, type LadderCloc
 import { forwardAnchorsFromBandQuotes } from "./ladderForwardAnchors.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState } from "./stateStore.js";
-import { loadEnabledPlutoTickerSettings, type PlutoTickerSettings } from "./tickerSettingsStore.js";
+import { effectivePlutoStrategy, loadEnabledPlutoTickerSettings, type PlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // The ladder band's inputs for the market quote loop (ladderBandPlan.ts). The day's part (universe, last night's IVs, the
 // clock) is read once per trading day and ticker; the forwards once the band has quotes; the band quotes and the price per cycle.
@@ -22,7 +22,7 @@ export interface LadderBandTicker {
 }
 
 export interface LadderBandPlanner {
-  /** The tickers whose band the loop quotes today: Pluto's enabled tickers while the CC + Put Ladder is the active strategy and Pluto is not paused. */
+  /** The tickers whose band the loop quotes today: Pluto's enabled tickers, under either strategy, while Pluto is not paused. */
   tickers(tradingDateIso: string): Promise<LadderBandTicker[]>;
   /** Each ladder ticker's contracts for this cycle, at its live price; a ticker without a price is left out. */
   plan(tradingDateIso: string, spotByTicker: ReadonlyMap<string, number | null>, now: Date): Promise<Map<string, LadderBandTicker & { plan: LadderBandPlan }>>;
@@ -87,7 +87,11 @@ export function createLadderBandPlanner(dependencies: LadderBandPlannerDependenc
 
   const tickerDay = async (ticker: PlutoTickerSettings, settings: PlutoSettings, tradingDateIso: string): Promise<TickerDay> => {
     const cached = day!.byTicker.get(ticker.tickerId);
-    const deltaRange = { ladderMinAbsDelta: ticker.ladderMinAbsDelta ?? settings.ladderMinAbsDelta, ladderMaxAbsDelta: ticker.ladderMaxAbsDelta ?? settings.ladderMaxAbsDelta };
+    // A Vol Farmer v2 ticker's Calls are quoted in v2's Calls' range (its Puts, every strike below the price, as the ladder's).
+    const deltaRange =
+      effectivePlutoStrategy(ticker) === "vol_farmer_v2"
+        ? { ladderMinAbsDelta: settings.volFarmerV2CallMinAbsDelta, ladderMaxAbsDelta: settings.volFarmerV2CallMaxAbsDelta }
+        : { ladderMinAbsDelta: ticker.ladderMinAbsDelta ?? settings.ladderMinAbsDelta, ladderMaxAbsDelta: ticker.ladderMaxAbsDelta ?? settings.ladderMaxAbsDelta };
     if (cached) {
       if (cached.anchors.size === 0) cached.anchors = await dependencies.loadForwardAnchors(ticker.tickerId, tradingDateIso);
       cached.deltaRange = deltaRange;

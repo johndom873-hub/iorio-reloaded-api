@@ -76,14 +76,14 @@ describe("evaluateOrderLimitFigures for a CC + Put Ladder order", () => {
   it("refuses an order that takes the ticker past its pot, counting orders still working", () => {
     const over = evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 30_000, inFlight: { totalNotional: 8_000, tickerNotional: 8_000 }, orderNotional: 15_000, ladderPotFraction: 0.25 });
     expect(over.blocked).toBe(true);
-    expect(over.reasons).toEqual(["LADR would be $53,000, above its CC + Put Ladder pot of $50,000 (25.0% of portfolio value) (counting $8,000 of orders still working)."]);
+    expect(over.reasons).toEqual(["LADR would be $53,000, above its Pluto pot of $50,000 (25.0% of portfolio value) (counting $8,000 of orders still working)."]);
   });
 
   it("refuses an order that takes the ladder's book past Pluto's capital budget (A1), with its reason at confirm", () => {
     // Budget 50% of $200,000 = $100,000; the book commits $96,000. A $45 Put ×1 at 0.80 adds $4,420 → $100,420: refused.
     const book = { committedBeforeDollars: 96_000, budgetFraction: 0.5 };
     const over = evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 4_420, ladderPotFraction: 0.25, ladderBook: book });
-    expect(over.reasons).toEqual(["The CC + Put Ladder's tickers would commit $100,420 together, above Pluto's capital budget of $100,000 (50.0% of portfolio value); $96,000 is already committed, counting orders still working."]);
+    expect(over.reasons).toEqual(["Pluto's tickers would commit $100,420 together, above Pluto's capital budget of $100,000 (50.0% of portfolio value); $96,000 is already committed, counting orders still working."]);
     expect(over.details!.ladderBook).toEqual({ committedBeforeDollars: 96_000, committedAfterDollars: 100_420, capDollars: 100_000, fits: false });
     expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 4_000, ladderPotFraction: 0.25, ladderBook: book })).toMatchObject({ blocked: false, details: { ladderBook: { committedAfterDollars: 100_000, fits: true } } });
     // A Call on shares already held commits nothing: it passes an already full book.

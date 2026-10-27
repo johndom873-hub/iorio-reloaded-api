@@ -11,7 +11,7 @@ function putOpen(symbol: string, plutoActionId: string | null): WorkingOrderForC
 describe("sumCapitalInUseOutsidePluto", () => {
   const plutoEnabledSymbols = new Set(["PLTO"]);
 
-  it("counts every open position's EXP $ except Pluto's book: non-hedge, non-LEAPS positions on a ticker Pluto is enabled on", () => {
+  it("counts every open position's EXP $ except Pluto's book: non-hedge positions on a ticker Pluto is enabled on, its LEAPS included", () => {
     const openPositions = [
       { symbol: "MANU", strategyKey: "cash_secured_put", capitalAtRisk: "10000" },
       { symbol: "MANU", strategyKey: "covered_call", capitalAtRisk: 4500.5 },
@@ -20,7 +20,7 @@ describe("sumCapitalInUseOutsidePluto", () => {
       { symbol: "PLTO", strategyKey: "leaps", capitalAtRisk: "1200" },
       { symbol: "MANU", strategyKey: "unstructured", capitalAtRisk: null },
     ];
-    expect(sumCapitalInUseOutsidePluto(openPositions, [], plutoEnabledSymbols)).toBeCloseTo(10_000 + 4_500.5 + 250 + 1_200, 6);
+    expect(sumCapitalInUseOutsidePluto(openPositions, [], plutoEnabledSymbols)).toBeCloseTo(10_000 + 4_500.5 + 250, 6);
   });
 
   it("counts working orders unless they are Pluto's or on a ticker Pluto is enabled on", () => {
