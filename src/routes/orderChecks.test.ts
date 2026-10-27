@@ -108,8 +108,8 @@ describe("GET /order-checks/limits: input validation", () => {
     await expectBadRequest("/order-checks/limits?symbol=AAA&symbol=BBB&strategyKey=cash_secured_put&quantity=1&strike=90", "symbol is required.");
   });
 
-  it("requires strategyKey to be covered_call or cash_secured_put", async () => {
-    const message = "strategyKey must be covered_call or cash_secured_put.";
+  it("requires strategyKey to be covered_call, cash_secured_put or leaps", async () => {
+    const message = "strategyKey must be covered_call, cash_secured_put or leaps.";
     await expectBadRequest(limitsQuery({ strategyKey: undefined }), message);
     await expectBadRequest(limitsQuery({ strategyKey: "iron_condor" }), message);
     await expectBadRequest(limitsQuery({ strategyKey: "hedge" }), message);
@@ -183,6 +183,11 @@ describe("GET /order-checks/limits: a valid call", () => {
   it("passes the premium, spotPrice and a roll's strike and buyback price through as numbers", async () => {
     await call("GET", limitsQuery({ strategyKey: "covered_call", premium: "0", spotPrice: "101.5", rollFromStrike: "90", rollFromPremium: "0.4" }));
     expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toEqual({ strategyKey: "covered_call", symbol: "AAA", tickerId: "ticker-1", quantity: 2, strike: 90, premium: 0, spotPrice: 101.5, rollFromStrike: 90, rollFromPremium: 0.4 });
+  });
+
+  it("passes a LEAPS buy through with its premium", async () => {
+    await call("GET", limitsQuery({ strategyKey: "leaps", strike: "300", premium: "71.69" }));
+    expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toEqual({ strategyKey: "leaps", symbol: "AAA", tickerId: "ticker-1", quantity: 2, strike: 300, premium: 71.69, spotPrice: undefined, rollFromStrike: undefined, rollFromPremium: undefined });
   });
 
   it("does not carry an excludeOrderRequestId: a setup form's check is not an existing order", async () => {

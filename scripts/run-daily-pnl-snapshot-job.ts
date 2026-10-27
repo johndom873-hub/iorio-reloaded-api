@@ -69,6 +69,7 @@ import { buildPnlSnapshotJobOutcome, type PnlSnapshotProblem } from "../src/lib/
 import { assignFlowsToSnapshots } from "../src/lib/flexCashFlowAssignment.js";
 import { fillWorthlessExpiredOptionPrices } from "../src/lib/expiredOptionWorthlessPrice.js";
 import { fetchOpenLegsOfOpenPositions, type OpenPositionLegRow } from "../src/lib/openPositionLegsForPnlSnapshot.js";
+import { sendLeapsExpiryWarnings } from "../src/lib/leapsExpiryWarnings.js";
 
 interface RecentAccountSnapshotRow {
   snapshotDate: string;
@@ -391,6 +392,16 @@ async function main(): Promise<void> {
       legsWithoutGreeks.length === 0
         ? null
         : `greeks saved for ${greeksSnapshotted}/${optionLegRows.length} open option leg(s) for ${snapshotDate} (missing: ${legsWithoutGreeks.map((leg) => `${leg.symbol} ${leg.optionType} ${Number(leg.strikePrice)} ${leg.expiryDate}`).join(", ")})${greeksError ? `. Error: ${greeksError}` : ""}`;
+    // LEAPS expiry warnings (leapsExpiryWarnings.ts), after the closes and the account summary are in.
+    let leapsExpiryWarningsSent = 0;
+    try {
+      const leapsWarnings = await sendLeapsExpiryWarnings(snapshotDate, accountSummaryResult.status === "fulfilled" ? accountSummaryResult.value.totalCashValue : null);
+      leapsExpiryWarningsSent = leapsWarnings.sent;
+      if (leapsWarnings.failed.length > 0) problems.push({ message: `LEAPS expiry warning not delivered on Telegram: ${leapsWarnings.failed.join(", ")}`, errorCount: leapsWarnings.failed.length, nothingUsable: false });
+    } catch (error) {
+      console.error(`LEAPS expiry warnings failed: ${describeError(error)}`);
+      problems.push({ message: `LEAPS expiry warnings failed - ${describeError(error).split("\n")[0]}`, errorCount: 1, nothingUsable: false });
+    }
     if (!accountSnapshotWritten) problems.push({ message: `account-level P&L failed for ${snapshotDate} - ${accountSnapshotError}`, errorCount: 1, nothingUsable: true });
     if (greeksFailure) problems.push({ message: greeksFailure, errorCount: legsWithoutGreeks.length, nothingUsable: false });
     return {
@@ -403,6 +414,7 @@ async function main(): Promise<void> {
         greeksSnapshotted,
         greeksExpected: optionLegRows.length,
         greeksError,
+        leapsExpiryWarningsSent,
       },
       ...buildPnlSnapshotJobOutcome(problems),
     };

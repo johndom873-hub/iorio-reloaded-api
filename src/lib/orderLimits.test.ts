@@ -10,6 +10,7 @@ describe("computeOrderNotional", () => {
     expect(computeOrderNotional({ strategyKey: "cash_secured_put", strike: 90, quantity: 2, premium: 1.5 }, 100, 0)).toBe(17_700);
     expect(computeOrderNotional({ strategyKey: "covered_call", strike: 110, quantity: 2, premium: 1 }, 100, 0)).toBe(19_800);
     expect(computeOrderNotional({ strategyKey: "covered_call", strike: 110, quantity: 2, premium: 1 }, 100, 150)).toBe(4_950);
+    expect(computeOrderNotional({ strategyKey: "leaps", strike: 300, quantity: 2, premium: 71.69 }, 343.91, 0)).toBeCloseTo(14_338, 6);
     expect(computeOrderNotional({ strategyKey: "covered_call", strike: 110, quantity: 2, premium: 1 }, 100, 300)).toBe(0);
   });
 
@@ -47,6 +48,12 @@ describe("computeInFlightOrderNotional", () => {
     ] } as OrderRequestPayload;
     expect(computeInFlightOrderNotional("roll_leg", putRoll)).toBe(800); // (95 − 90 − (2 − 1)) × 100 × 2
     expect(computeInFlightOrderNotional("roll_leg", { ...putRoll, strategyKey: "covered_call" } as OrderRequestPayload)).toBe(0);
+  });
+
+  it("counts a LEAPS buy at the premium it pays, and nothing for its sale", () => {
+    const leapsBuy = { symbol: "AAA", strategyKey: "leaps", legs: [{ role: "option", action: "BUY", symbol: "AAA", quantity: 2, unitPrice: 71.69, strike: 300, expiry: "20271217", right: "C" }] } as OrderRequestPayload;
+    expect(computeInFlightOrderNotional("open_leaps", leapsBuy)).toBeCloseTo(14_338, 6);
+    expect(computeInFlightOrderNotional("close_position", leapsBuy)).toBe(0);
   });
 
   it("ignores closes and orders with no strategy", () => {

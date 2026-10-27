@@ -54,7 +54,7 @@ export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGa
   if (!requestType.startsWith("open_") && !isRoll) return null;
   const payload = orderRequest.payload;
   const strategyKey = payload.strategyKey;
-  if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put") return null;
+  if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put" && strategyKey !== "leaps") return null;
   // A roll is one combo with two option legs: the close leg carries positionLegId, the open leg does not. Only the strike difference adds notional.
   const optionLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && !leg.positionLegId) : payload.legs.find((leg) => leg.role === "option");
   const closeLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && leg.positionLegId) : undefined;

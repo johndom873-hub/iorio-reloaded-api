@@ -47,6 +47,8 @@ positionsRouter.use(requireAuth);
 
 // v1 strategy scope — matches shortlist.ts.
 const validStrategyKeys = ["covered_call", "cash_secured_put"];
+// What POST /orders opens: the two short strategies, and a LEAPS (a long Call bought, Marcelo 2026-10-27).
+const validOpenStrategyKeys = [...validStrategyKeys, "leaps"];
 // Reading (not creating) also covers "unstructured" (bare stock and anything fitting neither strategy
 // is a real open holding, Genosuke filters by it), "hedge" (a long Put bought outside the app) and "leaps" (a long Call).
 const validListStrategyKeys = [...validStrategyKeys, "unstructured", "hedge", "leaps"];
@@ -1047,8 +1049,13 @@ positionsRouter.post("/orders", async (request, response) => {
     response.status(409).json({ error: frozenRefusal });
     return;
   }
-  if (!strategyKey || !validStrategyKeys.includes(strategyKey)) {
+  if (!strategyKey || !validOpenStrategyKeys.includes(strategyKey)) {
     response.status(400).json({ error: "A valid strategyKey is required." });
+    return;
+  }
+  const isLeaps = strategyKey === "leaps";
+  if (isLeaps && (request.body as { plutoActionId?: unknown }).plutoActionId) {
+    response.status(400).json({ error: "Pluto does not buy LEAPS." });
     return;
   }
   if (!option || !Number.isInteger(option.quantity) || option.quantity <= 0) {
@@ -1057,7 +1064,7 @@ positionsRouter.post("/orders", async (request, response) => {
   }
   // Judged after rounding to cents: a price like 0.004 is sent to IBKR as 0.00, which the message below says is never allowed.
   if (typeof option.limitPrice !== "number" || !(roundToCents(option.limitPrice) > 0)) {
-    response.status(400).json({ error: "option.limitPrice must be a positive number — a short option is never sold for $0." });
+    response.status(400).json({ error: "option.limitPrice must be a positive number — an option is never traded for $0." });
     return;
   }
   if (typeof option.strikePrice !== "number" || option.strikePrice <= 0 || !option.expiryDate) {
@@ -1165,15 +1172,16 @@ positionsRouter.post("/orders", async (request, response) => {
       unitPrice: roundToCents(resolvedStock.limitPrice),
     });
   }
+  // A LEAPS buys its Call; the two short strategies sell theirs.
   legs.push({
     role: "option",
-    action: OrderAction.SELL,
+    action: isLeaps ? OrderAction.BUY : OrderAction.SELL,
     symbol: ticker.symbol,
     quantity: option.quantity,
     unitPrice: roundToCents(option.limitPrice),
     strike: option.strikePrice,
     expiry: normalizedExpiry,
-    right: strategyKey === "covered_call" ? "C" : "P",
+    right: strategyKey === "cash_secured_put" ? "P" : "C",
   });
 
   const payload: OrderRequestPayload = { symbol: ticker.symbol, strategyKey, legs };
@@ -1197,7 +1205,7 @@ positionsRouter.post("/orders", async (request, response) => {
   const [orderRequest] = await db("order_requests")
     .insert({
       requested_by_user_id: request.session.userId,
-      request_type: strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put",
+      request_type: `open_${strategyKey}`,
       payload: JSON.stringify(payload),
       pluto_action_id: plutoActionId.value,
       signal_snapshot: signalSnapshot.value === null ? null : JSON.stringify(signalSnapshot.value),

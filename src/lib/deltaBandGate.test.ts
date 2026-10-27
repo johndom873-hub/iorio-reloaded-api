@@ -77,6 +77,11 @@ describe("isDeltaBandGated", () => {
     expect(isDeltaBandGated({ request_type: "", payload: putOpen })).toBe(false);
   });
 
+  it("does not gate a LEAPS buy: the band is for the options sold", () => {
+    const leapsBuy = { ...callOpen, strategyKey: "leaps", legs: [{ role: "option", action: "BUY", symbol: callOpen.symbol, quantity: 2, unitPrice: 71.69, strike: 300, expiry: "20271217", right: "C" }] } as OrderRequestPayload;
+    expect(isDeltaBandGated({ request_type: "open_leaps", payload: leapsBuy })).toBe(false);
+  });
+
   it("does not gate an order with no strategy key", () => {
     expect(isDeltaBandGated({ request_type: "open_cash_secured_put", payload: { ...putOpen, strategyKey: undefined } as unknown as OrderRequestPayload })).toBe(false);
     expect(isDeltaBandGated({ request_type: "open_cash_secured_put", payload: { ...putOpen, strategyKey: "" } })).toBe(false);

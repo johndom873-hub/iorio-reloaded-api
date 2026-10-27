@@ -333,11 +333,11 @@ describe("POST /positions/orders: cash-secured put details", () => {
     const ticker = await createTicker();
     const cases: [string, unknown, string][] = [
       ["no option object", undefined, "A positive whole number of option contracts is required."],
-      ["limit price as a string", { ...optionBody, limitPrice: "1.5" }, "option.limitPrice must be a positive number — a short option is never sold for $0."],
-      ["negative limit price", { ...optionBody, limitPrice: -1 }, "option.limitPrice must be a positive number — a short option is never sold for $0."],
-      ["missing limit price", { quantity: 2, strikePrice: 90, expiryDate: "20261120" }, "option.limitPrice must be a positive number — a short option is never sold for $0."],
-      ["a price that rounds to $0.00 (0.004)", { ...optionBody, limitPrice: 0.004 }, "option.limitPrice must be a positive number — a short option is never sold for $0."],
-      ["a price just under half a cent (0.0049)", { ...optionBody, limitPrice: 0.0049 }, "option.limitPrice must be a positive number — a short option is never sold for $0."],
+      ["limit price as a string", { ...optionBody, limitPrice: "1.5" }, "option.limitPrice must be a positive number — an option is never traded for $0."],
+      ["negative limit price", { ...optionBody, limitPrice: -1 }, "option.limitPrice must be a positive number — an option is never traded for $0."],
+      ["missing limit price", { quantity: 2, strikePrice: 90, expiryDate: "20261120" }, "option.limitPrice must be a positive number — an option is never traded for $0."],
+      ["a price that rounds to $0.00 (0.004)", { ...optionBody, limitPrice: 0.004 }, "option.limitPrice must be a positive number — an option is never traded for $0."],
+      ["a price just under half a cent (0.0049)", { ...optionBody, limitPrice: 0.0049 }, "option.limitPrice must be a positive number — an option is never traded for $0."],
       ["zero strike", { ...optionBody, strikePrice: 0 }, "option.strikePrice and option.expiryDate are required."],
       ["negative strike", { ...optionBody, strikePrice: -90 }, "option.strikePrice and option.expiryDate are required."],
       ["strike as a string", { ...optionBody, strikePrice: "90" }, "option.strikePrice and option.expiryDate are required."],
@@ -358,6 +358,27 @@ describe("POST /positions/orders: cash-secured put details", () => {
     expect((await call("POST", "/positions/orders", { symbol: "   ", strategyKey: "cash_secured_put", option: optionBody })).json.error).toBe("Symbol is required.");
     expect((await call("POST", "/positions/orders", { symbol: "X", option: optionBody })).json.error).toBe("A valid strategyKey is required.");
     expect((await call("POST", "/positions/orders", { symbol: "X", strategyKey: "unstructured", option: optionBody })).json.error).toBe("A valid strategyKey is required.");
+    expect(await orderCount()).toBe(0);
+  });
+});
+
+describe("POST /positions/orders: LEAPS", () => {
+  const optionBody = { quantity: 2, limitPrice: 71.69, strikePrice: 300, expiryDate: "20271217" };
+
+  it("builds one BUY Call leg as an open_leaps order, ignoring any stock object", async () => {
+    const ticker = await createTicker();
+    const response = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "leaps", option: optionBody, stock: { quantity: 200, limitPrice: 340 } });
+    expect(response.status).toBe(201);
+    expect(response.json.payload).toEqual({ symbol: ticker.symbol, strategyKey: "leaps", legs: [{ role: "option", action: "BUY", symbol: ticker.symbol, quantity: 2, unitPrice: 71.69, strike: 300, expiry: "20271217", right: "C" }] });
+    expect((await orderRow(response.json.id)).request_type).toBe("open_leaps");
+    expect(fetchPricesPoolFirstMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a LEAPS sent for Pluto, and builds nothing", async () => {
+    const ticker = await createTicker();
+    const response = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "leaps", option: optionBody, plutoActionId: "00000000-0000-0000-0000-000000000001" });
+    expect(response.status).toBe(400);
+    expect(response.json.error).toBe("Pluto does not buy LEAPS.");
     expect(await orderCount()).toBe(0);
   });
 });

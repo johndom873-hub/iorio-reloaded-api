@@ -331,7 +331,7 @@ describe("POST /positions/orders", () => {
     }
     await bad({ symbol: ticker.symbol, strategyKey: "covered_call", option: optionBody, stock: { quantity: 150.5, limitPrice: 50 } }, "stock.quantity must be a positive whole number of shares when stock is provided.");
     await bad({ symbol: ticker.symbol, strategyKey: "covered_call", option: optionBody, stock: { quantity: 0, limitPrice: 50 } }, "stock.quantity must be a positive whole number of shares when stock is provided.");
-    await bad({ symbol: ticker.symbol, strategyKey: "cash_secured_put", option: { ...optionBody, limitPrice: 0 } }, "option.limitPrice must be a positive number — a short option is never sold for $0.");
+    await bad({ symbol: ticker.symbol, strategyKey: "cash_secured_put", option: { ...optionBody, limitPrice: 0 } }, "option.limitPrice must be a positive number — an option is never traded for $0.");
     await bad({ symbol: ticker.symbol, strategyKey: "cash_secured_put", option: { ...optionBody, expiryDate: "2026-13" } }, 'option.expiryDate must be a YYYYMMDD date, got "2026-13".');
     await bad({ symbol: "NOSUCHSYMBOLZZ", strategyKey: "cash_secured_put", option: optionBody }, "Unknown symbol — add it via the Shortlist first.");
     expect(await testDb("order_requests").where({ requested_by_user_id: userId }).count({ count: "*" }).first()).toEqual({ count: "0" });

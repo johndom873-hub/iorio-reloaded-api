@@ -4,12 +4,14 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { db } from "../db/connection.js";
 import { loadStoredOptionChain, lookupExpiryStrikes, lookupOptionParams } from "../ibkr/fetchOptionChain.js";
 import { peekPooledQuote } from "../ibkr/marketDataPool.js";
-import { borrowSharedConnectionOrConnect, sharedReadConnection } from "../ibkr/sharedReadConnection.js";
+import { fetchDividendOutlook, type DividendOutlook } from "../ibkr/fetchDividendOutlook.js";
+import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } from "../ibkr/sharedReadConnection.js";
 import { loadAccountContext } from "../lib/accountContext.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { loadUpcomingMajorMacroEvents } from "../lib/macroEventCalendar.js";
 import { calendarDaysUntilExpiry } from "../lib/optionChainExpiryRange.js";
 import { loadOpenShortLegs } from "../lib/openShortLegs.js";
+import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { loadNextEarningsDate } from "../lib/tickerCalendarQueries.js";
 import { loadTradingSettings } from "../lib/tradingSettingsStore.js";
@@ -59,6 +61,44 @@ tickerTradingRouter.get("/:symbol/trading-context", async (request, response) =>
     macroEvents,
     nextEarningsDateIso,
   });
+});
+
+// What the LEAPS P&L-over-time chart values a Call with (approved by Marcelo 2026-10-27): IBKR's dividends expected over the next
+// 12 months (generic tick 456; the app divides by the stock price for the yield) and the FRED risk-free rate. IBKR's figure is
+// kept for the Eastern day per ticker; when IBKR sends nothing in time it comes back null and the chart leaves dividends out.
+const dividendOutlookTimeoutMs = 8_000;
+const dividendOutlookCache = new Map<string, { dayIso: string; outlook: DividendOutlook }>();
+let fallbackDividendRequestId = 970_000;
+
+async function loadDividendOutlook(symbol: string): Promise<DividendOutlook | null> {
+  const dayIso = easternIsoDate(new Date());
+  const cached = dividendOutlookCache.get(symbol);
+  if (cached && cached.dayIso === dayIso) return cached.outlook;
+  const connection = await borrowSharedConnectionOrConnect(sharedReadConnection, "valuation inputs");
+  try {
+    const outlook = await fetchDividendOutlook(connection, nextReqIdFor(connection.ib, () => fallbackDividendRequestId++), symbol, dividendOutlookTimeoutMs);
+    // No tick in time is not kept: the next request asks IBKR again.
+    if (outlook) dividendOutlookCache.set(symbol, { dayIso, outlook });
+    return outlook;
+  } finally {
+    connection.disconnect();
+  }
+}
+
+tickerTradingRouter.get("/:symbol/valuation-inputs", async (request, response) => {
+  const ticker = await loadTicker(request.params.symbol);
+  if (!ticker) {
+    response.status(404).json({ error: `${request.params.symbol.toUpperCase()} is not a known ticker.` });
+    return;
+  }
+  const [outlook, riskFreeRate] = await Promise.all([
+    loadDividendOutlook(ticker.symbol).catch((error) => {
+      console.warn(`Valuation inputs: no IBKR dividend outlook for ${ticker.symbol} (${error instanceof Error ? error.message : error}).`);
+      return null;
+    }),
+    getRiskFreeRate().catch(() => null),
+  ]);
+  response.json({ symbol: ticker.symbol, nextTwelveMonthsDividends: outlook?.nextTwelveMonths ?? null, nextDividendDate: outlook?.nextDate ?? null, riskFreeRate });
 });
 
 // Strike grids looked up live, kept for the trading day (an expiry's listed strikes rarely change within a day).

@@ -27,8 +27,8 @@ orderChecksRouter.get("/limits", async (request, response) => {
     response.status(400).json({ error: "symbol is required." });
     return;
   }
-  if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put") {
-    response.status(400).json({ error: "strategyKey must be covered_call or cash_secured_put." });
+  if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put" && strategyKey !== "leaps") {
+    response.status(400).json({ error: "strategyKey must be covered_call, cash_secured_put or leaps." });
     return;
   }
   const parsedQuantity = Number(quantity);

@@ -30,6 +30,8 @@ import { formatWholeDollars } from "./formatWholeDollars.js";
 // cash, so two orders confirmed seconds apart cannot both pass a limit only one fits under. A partly filled order
 // is counted in full, so its filled part is briefly counted twice: the check errs towards blocking.
 //
+// A LEAPS buy (Marcelo 2026-10-27) adds the premium it pays, premium × 100 × quantity: its maximum loss, and the cash it takes.
+//
 // A CC + Put Ladder order also gets the ladder's book-wide cap: every ladder ticker's exposure and working orders together, after
 // the order, at most Pluto's capital budget (ladderBookCapitalVerdict, Marcelo 2026-10-21).
 //
@@ -39,7 +41,7 @@ import { formatWholeDollars } from "./formatWholeDollars.js";
 // Fails closed: if account/portfolio data can't be verified, every check is reported as blocked rather than
 // silently skipped (Marcelo approved 2026-09-24) -- this function gates real order confirmations.
 
-export type OrderLimitsStrategyKey = "covered_call" | "cash_secured_put";
+export type OrderLimitsStrategyKey = "covered_call" | "cash_secured_put" | "leaps";
 
 export interface OrderLimitsInput {
   strategyKey: OrderLimitsStrategyKey;
@@ -47,7 +49,7 @@ export interface OrderLimitsInput {
   tickerId: string;
   quantity: number;
   strike: number;
-  /** Price per share the option is sold at (the limit, or the mid for a preview): the order's notional is net of it. */
+  /** Price per share the option trades at (the limit, or the mid for a preview): a sale's notional is net of it, a LEAPS buy's is it. */
   premium: number;
   /** Underlying stock price, used only for a covered call's share-shortfall notional. Omit to read the pool, then fetch a live price. */
   spotPrice?: number;
@@ -130,6 +132,7 @@ function putRollNotionalPerShare(newStrike: number, oldStrike: number, newPremiu
 
 /** Pure: this order's own added notional -- see file header for the CSP/covered-call formulas and the roll rule. */
 export function computeOrderNotional(input: Pick<OrderLimitsInput, "strategyKey" | "strike" | "quantity" | "premium" | "rollFromStrike" | "rollFromPremium">, spotPrice: number, availableUncoveredShares: number): number {
+  if (input.strategyKey === "leaps") return input.premium * 100 * input.quantity;
   if (input.rollFromStrike !== undefined) {
     if (input.strategyKey === "covered_call") return 0;
     if (input.rollFromPremium === undefined) throw new Error("A roll's limit check needs the closed leg's buyback price (rollFromPremium).");
@@ -144,10 +147,14 @@ export function computeOrderNotional(input: Pick<OrderLimitsInput, "strategyKey"
  * Pure: the notional an order already on its way to IBKR still ties up, read from its stored payload (no market data needed), net of
  * the premium at its limit prices: a put open reserves (strike − premium) × 100 × contracts, a covered-call open costs the stock leg
  * of its Covered Call entry less the call's premium on those shares (nothing when it is written against shares already held), a put roll adds the
- * strike difference less its net credit when that is positive, a call roll and every close add nothing.
+ * strike difference less its net credit when that is positive, a LEAPS buy its premium, a call roll and every close add nothing.
  */
 export function computeInFlightOrderNotional(requestType: string, payload: OrderRequestPayload): number {
   const strategyKey = payload.strategyKey;
+  if (strategyKey === "leaps") {
+    const callLeg = payload.legs.find((leg) => leg.role === "option");
+    return requestType.startsWith("open_") && callLeg ? callLeg.unitPrice * 100 * callLeg.quantity : 0;
+  }
   if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put") return 0;
   if (requestType === "roll_leg") {
     if (strategyKey === "covered_call") return 0;
