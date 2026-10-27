@@ -29,13 +29,22 @@ export interface SessionFreeCash {
   /** The dollars behind it at the day's 10:00 marks; null for a day not recorded. */
   atMark(tradingDate: string): { freeCash: number; locked: number; accountValue: number } | null;
   /**
+   * The same just before the day's close: after every order of the day, before its expiries settle (stamped 16:00 Eastern),
+   * so a Put expiring that day still locks its cash; over the account value at the day's marks. Null for a day not recorded.
+   */
+  beforeClose(tradingDate: string): { freeCash: number; locked: number; accountValue: number } | null;
+  /**
    * The lowest Cash % from `fromDate` to `toDate`: at each recorded day's marks and after each of `moments` (Marcelo
    * 2026-10-21, a closed cycle's Cash); null when none was recorded. Ties keep the first.
    */
   lowestShareBetween(fromDate: string, toDate: string, moments: readonly { tradingDate: string; at: string }[]): { share: number; on: string } | null;
 }
 
-/** Each recorded day of a session at its 10:00 marks: [date, free cash, cash locked in open puts, account value] (the price chart's Cash available). */
+/**
+ * Each recorded day of a session just before its close: [date, free cash, cash locked in open puts, account value at the
+ * day's marks] (the price chart's Cash available, Marcelo 2026-10-27: whether the cash was used through the session, not
+ * the moment before the first look spends what an expiry freed).
+ */
 export type CashAvailableByDay = [string, number, number, number][];
 
 export async function loadCashAvailableByDay(sessionId: string, connection: Knex = db): Promise<CashAvailableByDay> {
@@ -45,8 +54,8 @@ export async function loadCashAvailableByDay(sessionId: string, connection: Knex
   const days: { date: string }[] = await connection("backtest_session_days").where({ session_id: sessionId }).orderBy("trading_date").select(connection.raw("trading_date::text as date"));
   const cents = (value: number) => Math.round(value * 100) / 100;
   return days.flatMap(({ date }) => {
-    const mark = freeCash.atMark(date);
-    return mark ? [[date, cents(mark.freeCash), cents(mark.locked), cents(mark.accountValue)] as CashAvailableByDay[number]] : [];
+    const close = freeCash.beforeClose(date);
+    return close ? [[date, cents(close.freeCash), cents(close.locked), cents(close.accountValue)] as CashAvailableByDay[number]] : [];
   });
 }
 
@@ -116,6 +125,14 @@ export async function loadSessionFreeCash(sessionId: string, fromDate: string, t
       for (const date of markByDate.keys()) if (date >= fromDate && date <= toDate) consider(shareAtMark(date), date);
       for (const moment of moments) if (moment.tradingDate >= fromDate && moment.tradingDate <= toDate) consider(shareAfter(moment.tradingDate, moment.at), moment.tradingDate);
       return lowest;
+    },
+    beforeClose(tradingDate) {
+      const mark = markByDate.get(tradingDate);
+      if (!mark) return null;
+      const atMs = easternInstant(tradingDate, 16, 0).getTime() - 1;
+      const cash = mark.cash + (flowsByDate.get(tradingDate) ?? []).reduce((sum, flow) => sum + (flow.atMs <= atMs ? flow.dollars : 0), 0);
+      const locked = puts.reduce((sum, put) => sum + (put.entryMs <= atMs && put.exitMs > atMs ? put.locked : 0), 0);
+      return { freeCash: Math.max(0, cash - locked), locked, accountValue: mark.accountValue };
     },
     atMark(tradingDate) {
       const mark = markByDate.get(tradingDate);

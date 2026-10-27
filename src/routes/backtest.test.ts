@@ -993,13 +993,13 @@ describe("backtest routes", () => {
       // The same figures over every symbol together, and a session narrowed to one symbol.
       expect(detail.allSymbolsStatistics).toEqual({ ...detail.tickerStatistics[0]!, symbol: "All symbols" });
       // The tiles' P&L sources need the session's metrics: the shares are the account's P&L less its interest and the
-      // Put's premium; no Call or hedge here.
+      // Put's premium (49.32, the Puts' own part); no Call or hedge here.
       expect(detail.pnlSources).toBeNull();
       const { metrics: storedMetrics } = await testDb("backtest_sessions").where({ id: session.id }).first("metrics");
       await testDb("backtest_sessions").where({ id: session.id }).update({ metrics: JSON.stringify({ startValue: 1_000_000, endValue: 1_001_000, cagr: 0.05, interestDollars: 100 }) });
       try {
         const withMetrics = (await request("GET", `/backtest/sessions/${session.id}`)).body as BacktestSessionDetail;
-        expect(withMetrics.pnlSources).toEqual({ shares: { pnlDollars: expect.closeTo(850.68, 6), cagrPart: expect.closeTo((0.05 * 850.68) / 1_000, 9), daysHeldShare: expect.any(Number) }, coveredCalls: null, hedge: null, leaps: null });
+        expect(withMetrics.pnlSources).toEqual({ shares: { pnlDollars: expect.closeTo(850.68, 6), cagrPart: expect.closeTo((0.05 * 850.68) / 1_000, 9), daysHeldShare: expect.any(Number) }, coveredCalls: null, hedge: null, cashSecuredPuts: { pnlDollars: expect.closeTo(49.32, 6), cagrPart: expect.closeTo((0.05 * 49.32) / 1_000, 9), daysHeldShare: expect.any(Number), quotedYieldMedian: null, quotedCount: 0 }, leaps: null });
       } finally {
         await testDb("backtest_sessions").where({ id: session.id }).update({ metrics: storedMetrics === null ? null : JSON.stringify(storedMetrics) });
       }
@@ -1141,9 +1141,9 @@ describe("backtest routes", () => {
         bestYield: null,
       });
       expect(withRung.detail.timeline[0]!.ladderRung).toBeNull();
-      // Cash available at each day's marks: the put sold at 14:00 on 1 Sep is open from 2 Sep ($4,000 locked).
+      // Cash available just before each day's close: the put sold at 14:00 on 1 Sep already locks $4,000 and its 49.32 premium is in.
       expect(chart.cashAvailable).toEqual([
-        ["2026-09-01", 1_000_000, 0, 1_000_000],
+        ["2026-09-01", 996_049.32, 4000, 1_000_000],
         ["2026-09-02", 996_100, 4000, 1_010_000],
         ["2026-09-03", 996_200, 4000, 999_900],
       ]);

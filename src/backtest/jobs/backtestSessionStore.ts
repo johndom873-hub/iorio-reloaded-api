@@ -936,19 +936,20 @@ async function loadHedgePurchaseRecords(sessionId: string, symbol: string, timel
   };
 }
 
-/** Every symbol's yearly yields recorded at each Call sale (premiumYield) and yearly costs of each hedge Put bought (hedgePutCostYield), for the session tiles. */
-async function loadQuotedYields(sessionId: string): Promise<{ callSaleYields: number[]; hedgeCostYields: number[] }> {
+/** Every symbol's yearly yields recorded at each Call and Put sale (premiumYield) and yearly costs of each hedge Put bought (hedgePutCostYield), for the session tiles. */
+async function loadQuotedYields(sessionId: string): Promise<{ callSaleYields: number[]; putSaleYields: number[]; hedgeCostYields: number[] }> {
   const rows: { kind: string; premium_yield: string | null; fill_price: string | null; strike: string | null; stock_price: string | null; dte: string | null }[] = await db("backtest_actions")
     .where({ session_id: sessionId, outcome: "filled" })
-    .whereIn("kind", ["open_covered_call", "buy_hedge"])
+    .whereIn("kind", ["open_covered_call", "open_cash_secured_put", "buy_hedge"])
     .select("kind", db.raw("candidate_scores->>'premiumYield' as premium_yield"), "fill_price", db.raw("contract->>'strike' as strike"), db.raw("candidate_scores->>'stockPrice' as stock_price"), db.raw("candidate_scores->>'dte' as dte"));
   const callSaleYields = rows.flatMap((row) => (row.kind === "open_covered_call" && row.premium_yield !== null ? [Number(row.premium_yield)] : []));
+  const putSaleYields = rows.flatMap((row) => (row.kind === "open_cash_secured_put" && row.premium_yield !== null ? [Number(row.premium_yield)] : []));
   const hedgeCostYields = rows.flatMap((row) => {
     if (row.kind !== "buy_hedge" || row.fill_price === null || row.strike === null || row.stock_price === null || row.dte === null) return [];
     const costYield = hedgePutCostYield({ fillPrice: Number(row.fill_price), strike: Number(row.strike), stockPrice: Number(row.stock_price), dte: Number(row.dte), commissionDollarsPerContract: optionCommissionDollars(1) });
     return costYield === null ? [] : [costYield];
   });
-  return { callSaleYields, hedgeCostYields };
+  return { callSaleYields, putSaleYields, hedgeCostYields };
 }
 
 /** Per ticker in its turn order (alphabetical), the looks and days at which the cash cut one of its orders (backtest_look_shortfalls). */

@@ -192,7 +192,7 @@ function daysHeldBy(legs: readonly { entryAt: string; exitAt: string | null }[],
  * The account's P&L by what made it (Marcelo 2026-10-26, the session tiles): the Calls', the hedge's and the LEAPS' from
  * the wheel cycles' buckets (an open option at its last mark), the shares' the rest after interest and every option's, so
  * that shares + Calls + hedge + LEAPS + Puts sold + interest = the account's P&L. Each part of the CAGR = CAGR × its P&L ÷ the
- * account's P&L. The quoted figures are those recorded at each Call sale (premiumYield) and each hedge purchase
+ * account's P&L. The quoted figures are those recorded at each Call and Put sale (premiumYield) and each hedge purchase
  * (hedgePutCostYield). Null without wheel cycles.
  */
 export function computePnlSources(input: {
@@ -201,6 +201,7 @@ export function computePnlSources(input: {
   cycles: readonly Pick<BacktestCycle, "buckets">[];
   positions: readonly Pick<BacktestPosition, "strategyKey" | "legs">[];
   callSaleYields: readonly number[];
+  putSaleYields: readonly number[];
   hedgeCostYields: readonly number[];
 }): BacktestPnlSources | null {
   const { metrics, tradingDates, cycles, positions } = input;
@@ -212,6 +213,7 @@ export function computePnlSources(input: {
   const legsOf = (keep: (position: Pick<BacktestPosition, "strategyKey">, leg: BacktestPosition["legs"][number]) => boolean) => positions.flatMap((position) => position.legs.filter((leg) => keep(position, leg)));
   const shareLegs = legsOf((_, leg) => leg.legType === "stock");
   const callLegs = legsOf((_, leg) => leg.legType === "option" && leg.optionType === "call" && leg.side === "short");
+  const putLegs = legsOf((position, leg) => position.strategyKey === "cash_secured_put" && leg.legType === "option" && leg.optionType === "put" && leg.side === "short");
   const hedgeLegs = legsOf((position, leg) => position.strategyKey === "hedge" && leg.legType === "option");
   const leapsLegs = legsOf((position, leg) => position.strategyKey === "leaps" && leg.legType === "option");
   return {
@@ -224,6 +226,10 @@ export function computePnlSources(input: {
       hedgeLegs.length === 0
         ? null
         : { ...source(sum((buckets) => buckets.hedge.premium), daysHeldBy(hedgeLegs, tradingDates)), quotedCostMedian: input.hedgeCostYields.length === 0 ? null : median([...input.hedgeCostYields]), quotedCount: input.hedgeCostYields.length },
+    cashSecuredPuts:
+      putLegs.length === 0
+        ? null
+        : { ...source(sum((buckets) => buckets.csp.premium), daysHeldBy(putLegs, tradingDates)), quotedYieldMedian: input.putSaleYields.length === 0 ? null : median([...input.putSaleYields]), quotedCount: input.putSaleYields.length },
     leaps: leapsLegs.length === 0 ? null : source(sum((buckets) => buckets.leaps?.premium ?? 0), daysHeldBy(leapsLegs, tradingDates)),
   };
 }

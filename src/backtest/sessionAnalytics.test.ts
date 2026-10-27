@@ -167,7 +167,9 @@ describe("computePnlSources", () => {
   const buckets = (cc: [number, number], hedge: number, csp: number, unstructuredStock: number): Pick<BacktestCycle, "buckets"> => ({ buckets: { cc: bucket(...cc), hedge: bucket(hedge), csp: bucket(csp), unstructured: bucket(0, unstructuredStock) } });
   const leg = (overrides: Partial<BacktestPositionLeg>): BacktestPositionLeg => ({ legId: "leg", parentLegId: null, legType: "stock", side: "long", quantity: 100, optionType: null, strike: null, expiry: null, multiplier: 1, entryPrice: 10, entryAt: "2026-03-03T15:00:00.000Z", exitPrice: null, exitAt: null, settledAs: null, expiryClose: null, dteAtEntry: null, realizedPnlDollars: null, priceScale: 1, ...overrides });
   const tradingDates = ["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06"];
-  // Shares from Tuesday on, still held; a Call sold Tuesday that expired Friday at 16:00 ET; a hedge Put bought and sold on Monday.
+  // Shares from Tuesday on, still held; a Call sold Tuesday that expired Friday at 16:00 ET; a hedge Put bought and sold on
+  // Monday; a Cash-Secured Put sold Monday that expired Wednesday.
+  const cashSecuredPut = { strategyKey: "cash_secured_put" as const, legs: [leg({ legType: "option", side: "short", optionType: "put", multiplier: 100, quantity: 1, entryAt: "2026-03-02T15:00:00.000Z", exitAt: "2026-03-04T21:00:00.000Z" })] };
   const positions = [
     { strategyKey: "unstructured" as const, legs: [leg({})] },
     { strategyKey: "covered_call" as const, legs: [leg({ exitAt: "2026-03-04T20:00:00.000Z" }), leg({ legType: "option", side: "short", optionType: "call", multiplier: 100, quantity: 1, exitAt: "2026-03-06T21:00:00.000Z" })] },
@@ -175,27 +177,29 @@ describe("computePnlSources", () => {
   ];
   const metrics = { startValue: 100_000, endValue: 120_000, cagr: 0.1, interestDollars: 1_000 };
 
-  it("splits the account's P&L into shares, Calls and hedge, each with its part of the CAGR and its days held", () => {
-    const sources = computePnlSources({ metrics, tradingDates, cycles: [buckets([3_000, 5_000], -1_500, 500, 2_000), buckets([1_000, 0], -500, 0, 4_000)], positions, callSaleYields: [0.5, 1.2, 0.8], hedgeCostYields: [0.4, 0.2] })!;
+  it("splits the account's P&L into shares, Calls, Puts and hedge, each with its part of the CAGR and its days held", () => {
+    const sources = computePnlSources({ metrics, tradingDates, cycles: [buckets([3_000, 5_000], -1_500, 500, 2_000), buckets([1_000, 0], -500, 0, 4_000)], positions: [...positions, cashSecuredPut], callSaleYields: [0.5, 1.2, 0.8], putSaleYields: [0.6, 0.9], hedgeCostYields: [0.4, 0.2] })!;
     // Options: Calls 4,000, hedge -2,000, Puts sold 500; the shares are the rest after 1,000 of interest: 20,000 - 1,000 - 2,500.
     expect(sources.shares).toEqual({ pnlDollars: 16_500, cagrPart: expect.closeTo(0.0825, 12), daysHeldShare: 0.8 });
     // The Call counts its expiry Friday: Tuesday to Friday.
     expect(sources.coveredCalls).toEqual({ pnlDollars: 4_000, cagrPart: expect.closeTo(0.02, 12), daysHeldShare: 0.8, quotedYieldMedian: 0.8, quotedCount: 3 });
     expect(sources.hedge).toEqual({ pnlDollars: -2_000, cagrPart: expect.closeTo(-0.01, 12), daysHeldShare: 0.2, quotedCostMedian: expect.closeTo(0.3, 10), quotedCount: 2 });
-    // With the Puts sold and interest, the parts add up to the CAGR.
-    expect(sources.shares!.cagrPart! + sources.coveredCalls!.cagrPart! + sources.hedge!.cagrPart! + (0.1 * 500) / 20_000 + (0.1 * 1_000) / 20_000).toBeCloseTo(0.1, 12);
+    // The Puts sold: their premiums from the cycles' csp bucket, 0.1 × 500 ÷ 20,000; held Monday to Wednesday.
+    expect(sources.cashSecuredPuts).toEqual({ pnlDollars: 500, cagrPart: expect.closeTo(0.0025, 12), daysHeldShare: 0.6, quotedYieldMedian: expect.closeTo(0.75, 12), quotedCount: 2 });
+    // With interest, the parts add up to the CAGR.
+    expect(sources.shares!.cagrPart! + sources.coveredCalls!.cagrPart! + sources.hedge!.cagrPart! + sources.cashSecuredPuts!.cagrPart! + (0.1 * 1_000) / 20_000).toBeCloseTo(0.1, 12);
   });
 
   it("leaves out what was never held, gives no CAGR part when the account made nothing, and nothing without cycles", () => {
-    const sharesOnly = computePnlSources({ metrics: { ...metrics, endValue: 100_000 }, tradingDates, cycles: [buckets([0, 0], 0, 0, 0)], positions: [positions[0]!], callSaleYields: [], hedgeCostYields: [] })!;
-    expect(sharesOnly).toEqual({ shares: { pnlDollars: -1_000, cagrPart: null, daysHeldShare: 0.8 }, coveredCalls: null, hedge: null, leaps: null });
-    expect(computePnlSources({ metrics, tradingDates, cycles: [], positions, callSaleYields: [], hedgeCostYields: [] })).toBeNull();
+    const sharesOnly = computePnlSources({ metrics: { ...metrics, endValue: 100_000 }, tradingDates, cycles: [buckets([0, 0], 0, 0, 0)], positions: [positions[0]!], callSaleYields: [], putSaleYields: [], hedgeCostYields: [] })!;
+    expect(sharesOnly).toEqual({ shares: { pnlDollars: -1_000, cagrPart: null, daysHeldShare: 0.8 }, coveredCalls: null, hedge: null, cashSecuredPuts: null, leaps: null });
+    expect(computePnlSources({ metrics, tradingDates, cycles: [], positions, callSaleYields: [], putSaleYields: [], hedgeCostYields: [] })).toBeNull();
   });
 
   it("gives Vol Farmer v2's LEAPS a part of its own, from the cycles' leaps bucket, and none to the hedge", () => {
     // A LEAPS Call bought Wednesday and still held: its mark is 3,000 under what it cost.
     const leaps = { strategyKey: "leaps" as const, legs: [leg({ legType: "option", optionType: "call", multiplier: 100, quantity: 10, entryAt: "2026-03-04T15:00:00.000Z" })] };
-    const sources = computePnlSources({ metrics, tradingDates, cycles: [{ buckets: { ...buckets([1_000, 0], 0, 0, 0).buckets, leaps: bucket(-3_000) } }], positions: [positions[0]!, positions[1]!, leaps], callSaleYields: [], hedgeCostYields: [] })!;
+    const sources = computePnlSources({ metrics, tradingDates, cycles: [{ buckets: { ...buckets([1_000, 0], 0, 0, 0).buckets, leaps: bucket(-3_000) } }], positions: [positions[0]!, positions[1]!, leaps], callSaleYields: [], putSaleYields: [], hedgeCostYields: [] })!;
     expect(sources.leaps).toEqual({ pnlDollars: -3_000, cagrPart: expect.closeTo(-0.015, 12), daysHeldShare: 0.6 });
     expect(sources.hedge).toBeNull();
     // The shares are the rest after interest and every option's: 20,000 - 1,000 - (1,000 - 3,000).

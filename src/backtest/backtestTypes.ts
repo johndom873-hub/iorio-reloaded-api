@@ -1604,6 +1604,8 @@ export interface BacktestPnlSources {
   coveredCalls: (BacktestPnlSource & { quotedYieldMedian: number | null; quotedCount: number }) | null;
   /** The hedge Puts: what they were sold or settled for less their cost and commissions, an open one at its last mark; with the median yearly cost of each purchase (hedgePutCostYield). */
   hedge: (BacktestPnlSource & { quotedCostMedian: number | null; quotedCount: number }) | null;
+  /** The Cash-Secured Puts sold: premiums less buybacks and commissions, an open one at its last mark; with the median yearly yield recorded at each sale. */
+  cashSecuredPuts: (BacktestPnlSource & { quotedYieldMedian: number | null; quotedCount: number }) | null;
   /** Vol Farmer v2's LEAPS Calls: what they were sold or settled for less their cost and commissions, an open one at its last mark. */
   leaps: BacktestPnlSource | null;
 }
