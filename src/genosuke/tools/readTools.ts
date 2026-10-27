@@ -137,7 +137,7 @@ export const readTools: GenosukeTool[] = [
   },
   {
     name: "get_system_health_status",
-    description: "Latest run status per scheduled job (daily market data, P&L snapshot, option chain capture/fit, Day Signals seed, IBKR health check, watchdog).",
+    description: "Latest run status per scheduled job (daily market data, P&L snapshot, option chain structure refresh, option volume capture, IBKR health check, watchdog).",
     tier: "read",
     parameters: { type: "object", properties: {} },
     execute: (_input, api) => api.get("/system-health/status"),
