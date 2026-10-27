@@ -75,9 +75,6 @@ export interface AnalysisBarIndicators {
    *  volatility at or below the bar's ÷ those with one (the Analyse window's IV percentile tile); null for a bar without
    *  an IV or a window under 20 IVs. */
   ivPercentile: ([number, number, number] | null)[];
-  /** The average of the last 50 / 200 closes, the bar's own included; null until that many closes. */
-  movingAverage50: (number | null)[];
-  movingAverage200: (number | null)[];
 }
 
 const ivPercentileWindowBars = 252;
@@ -86,7 +83,6 @@ const toFourDecimals = (value: number) => Math.round(value * 10_000) / 10_000;
 
 /** Work them out over a symbol's whole history, then cut them to the bars shown, so the first bar shown has its look-back. */
 export function barIndicatorsOf(bars: readonly { close: number; impliedVolatility: number | null }[]): AnalysisBarIndicators {
-  const movingAverage = (days: number) => bars.map((_, index) => (index < days - 1 ? null : toFourDecimals(bars.slice(index - days + 1, index + 1).reduce((sum, bar) => sum + bar.close, 0) / days)));
   const ivPercentile = bars.map((bar, index): [number, number, number] | null => {
     if (bar.impliedVolatility === null) return null;
     const window = bars.slice(Math.max(0, index - ivPercentileWindowBars + 1), index + 1).flatMap((entry) => (entry.impliedVolatility === null ? [] : [entry.impliedVolatility]));
@@ -94,12 +90,12 @@ export function barIndicatorsOf(bars: readonly { close: number; impliedVolatilit
     const atOrBelow = window.filter((value) => value <= bar.impliedVolatility!).length;
     return [toFourDecimals(atOrBelow / window.length), atOrBelow, window.length];
   });
-  return { ivPercentile, movingAverage50: movingAverage(50), movingAverage200: movingAverage(200) };
+  return { ivPercentile };
 }
 
 /** The indicators of the bars from `from` to `to` (inclusive), cut from those of every bar. */
 export function sliceBarIndicators(indicators: AnalysisBarIndicators, from: number, to: number): AnalysisBarIndicators {
-  return { ivPercentile: indicators.ivPercentile.slice(from, to + 1), movingAverage50: indicators.movingAverage50.slice(from, to + 1), movingAverage200: indicators.movingAverage200.slice(from, to + 1) };
+  return { ivPercentile: indicators.ivPercentile.slice(from, to + 1) };
 }
 
 /** 21- and 63-day Yang-Zhang volatility ending at each bar (null until the window fills). */

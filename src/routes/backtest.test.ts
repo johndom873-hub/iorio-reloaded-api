@@ -1100,7 +1100,9 @@ describe("backtest routes", () => {
       expect(chart).toMatchObject({ symbol: fileSymbol, bars: [["2026-09-11", 20, 21, 19, 20.5, null]], ladderLevels: [["2026-09-08", 38, 35, null]], ladderRungsSold: [["2026-09-08", 37, [[37, "2026-09-18", 1]], [3, 5, 2.25, 1000]]], tooLargeDays: [], splits: [{ lastDayBefore: "2026-09-04", firstDayAfter: "2026-09-08", ratio: 2 }] });
       expect(chart.maxDrawdown.All).toBeNull();
       // One indicator per bar shown, worked out over the whole file (here too short for any).
-      expect(chart.barIndicators).toEqual({ ivPercentile: [null], movingAverage50: [null], movingAverage200: [null] });
+      expect(chart.barIndicators).toEqual({ ivPercentile: [null] });
+      expect(chart.breakEvenLevels).toEqual([]);
+      expect(chart.leapsEvents).toEqual([]);
       // An analysis stored before the rung numbers reads its rungs again from its session; one without a session left keeps its own.
       const storedRung: [string, number, [number, string, number][]] = ["2026-09-08", 37, [[37, "2026-09-18", 1]]];
       // Its Cash available is read from the session too.

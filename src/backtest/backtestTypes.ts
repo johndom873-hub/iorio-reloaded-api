@@ -546,6 +546,20 @@ export interface BacktestLadderLevel {
   levels: LadderLevels;
 }
 
+/** Vol Farmer v2: each position's break-even per share after a look, as traded, per symbol whose cycle holds shares. */
+export interface BacktestBreakEvenLevel {
+  tradingDate: string;
+  at: string;
+  lookTimeEt: string;
+  symbol: string;
+  /** Today's cumulative split factor: the price as traded ÷ it = split-adjusted. */
+  splitFactor: number;
+  /** Null while the first position holds no shares. */
+  firstBreakEven: number | null;
+  /** Null while the second position (the assigned Puts' shares) holds none. */
+  secondBreakEven: number | null;
+}
+
 /** A problem with a ticker's values in a request: the value it is about (a per-ticker baseline key or "potDollars"; null for the combination), and the sentence. */
 export interface BacktestTickerProblem {
   key: string | null;

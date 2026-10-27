@@ -100,6 +100,10 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(firstBreakEven).toBeCloseTo((40_000 + 400 * 0.005 + 1 - (firstCall.fillPrice! * 400 - 4 * 0.68)) / 400, 1);
     expect(firstCall.contract!.strike).toBeGreaterThanOrEqual(firstBreakEven);
 
+    // Thursday 12 March at 80, the Call sold on Monday is still open: no Put, however far the price fell.
+    const callStillOpen = await look(ledger, "2026-03-12", 80, "2026-03-13");
+    expect(callStillOpen.actions).toEqual([]);
+
     // The Call expires below its strike; Monday 16 March at 80 no Call reaches the first break-even, so Puts are sold.
     settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
     const afterFall = await look(ledger, "2026-03-16", 80, "2026-03-20");

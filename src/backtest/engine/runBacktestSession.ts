@@ -5,7 +5,7 @@ import { contractKey } from "../../lib/signalsLiveScoring.js";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import { isEtfSector, tickerCalendarProfile } from "../../lib/tickerCalendarRelevance.js";
 import { effectiveWindowEndEt } from "../../pluto/sessionSchedule.js";
-import { isRetiredBacktestDecisionMaker, retiredBacktestDecisionMakerMessage, type BacktestAction, type BacktestBookMode, type BacktestCycle, type BacktestCycleGap, type BacktestFill, type BacktestLadderLevel, type BacktestOrderShortfall, type BacktestPosition, type BacktestRunStatistics, type BacktestSettings, type BacktestSettingsOverrides, type BacktestSymbolSettings, type BacktestTablesMode } from "../backtestTypes.js";
+import { isRetiredBacktestDecisionMaker, retiredBacktestDecisionMakerMessage, type BacktestAction, type BacktestBookMode, type BacktestBreakEvenLevel, type BacktestCycle, type BacktestCycleGap, type BacktestFill, type BacktestLadderLevel, type BacktestOrderShortfall, type BacktestPosition, type BacktestRunStatistics, type BacktestSettings, type BacktestSettingsOverrides, type BacktestSymbolSettings, type BacktestTablesMode } from "../backtestTypes.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
 import { calendarDaysBetween, computeBacktestMetrics, computeDailyReturns, cycleFiguresOf, type AccountDay } from "../sessionAnalytics.js";
@@ -289,6 +289,7 @@ export interface SimulatedSessionResult {
   shortfalls: BacktestOrderShortfall[];
   /** The put ladder's levels, per symbol and day: the day's first look while the cycle held shares. */
   ladderLevels: BacktestLadderLevel[];
+  breakEvenLevels: BacktestBreakEvenLevel[];
   /** What the run tells about the session as a whole. */
   notes: string[];
   runStatistics: BacktestRunStatistics;
@@ -529,6 +530,16 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         if (ladderLevelKeys.has(key)) continue;
         ladderLevelKeys.add(key);
         ladderLevels.push(level);
+      }
+    };
+    const breakEvenLevels: BacktestBreakEvenLevel[] = [];
+    const breakEvenLevelKeys = new Set<string>();
+    const keepBreakEvenLevels = (found: readonly BacktestBreakEvenLevel[]) => {
+      for (const level of found) {
+        const key = `${level.tradingDate}|${level.symbol}`;
+        if (breakEvenLevelKeys.has(key)) continue;
+        breakEvenLevelKeys.add(key);
+        breakEvenLevels.push(level);
       }
     };
     const optionSales: BacktestOptionSale[] = [];
@@ -921,6 +932,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         optionSales.push(...look.optionSales);
         if (look.shortfalls) keepShortfalls(look.shortfalls);
         if (look.ladderLevels) keepLadderLevels(look.ladderLevels);
+        if (look.breakEvenLevels) keepBreakEvenLevels(look.breakEvenLevels);
         if (look.noSaleNotes) for (const note of look.noSaleNotes) noSaleNotes.push(note);
         if (look.noCandidateNotes) keepNoCandidateNotes(look.noCandidateNotes);
         const filledAtLook = look.actions.filter((action) => action.outcome === "filled").length;
@@ -982,6 +994,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       actions,
       shortfalls,
       ladderLevels,
+      breakEvenLevels,
       notes: sessionNotes,
       runStatistics,
     };
@@ -1037,7 +1050,7 @@ export function computeSessionMetrics(startingValue: number, days: readonly Simu
   };
 }
 
-const sessionResultTables = ["backtest_session_days", "backtest_trades", "backtest_positions", "backtest_position_legs", "backtest_fills", "backtest_actions", "backtest_cycles", "backtest_cycle_gaps", "backtest_look_shortfalls", "backtest_ladder_levels"] as const;
+const sessionResultTables = ["backtest_session_days", "backtest_trades", "backtest_positions", "backtest_position_legs", "backtest_fills", "backtest_actions", "backtest_cycles", "backtest_cycle_gaps", "backtest_look_shortfalls", "backtest_ladder_levels", "backtest_break_even_levels"] as const;
 
 async function clearSessionResult(sessionId: string, connection: Knex): Promise<void> {
   for (const table of sessionResultTables) await connection(table).where({ session_id: sessionId }).delete();
@@ -1257,6 +1270,16 @@ async function persistSessionResult(sessionId: string, startingValue: number, re
     next_put_cap: levels.nextPutCap,
     blocked_because: levels.blockedBecause,
   }));
+  const breakEvenLevelRows = result.breakEvenLevels.map(({ tradingDate, at, lookTimeEt, symbol, splitFactor, firstBreakEven, secondBreakEven }) => ({
+    session_id: sessionId,
+    trading_date: tradingDate,
+    at,
+    look_time: lookTimeEt,
+    symbol,
+    split_factor: splitFactor,
+    first_break_even: firstBreakEven,
+    second_break_even: secondBreakEven,
+  }));
   const rowsByTable: [string, Record<string, unknown>[]][] = [
     ["backtest_session_days", dayRows],
     ["backtest_trades", tradeRows],
@@ -1268,6 +1291,7 @@ async function persistSessionResult(sessionId: string, startingValue: number, re
     ["backtest_cycle_gaps", cycleGapRows],
     ["backtest_look_shortfalls", shortfallRows],
     ["backtest_ladder_levels", ladderLevelRows],
+    ["backtest_break_even_levels", breakEvenLevelRows],
   ];
   await connection.transaction(async (transaction) => {
     for (const [table, rows] of rowsByTable) for (let index = 0; index < rows.length; index += insertBatchSize) await transaction(table).insert(rows.slice(index, index + insertBatchSize));

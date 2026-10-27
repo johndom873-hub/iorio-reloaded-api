@@ -3,7 +3,7 @@ import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
 import { blackScholesDelta, impliedVolatilityFromPrice } from "../../lib/impliedVolatilitySurface.js";
 import { daysToExpiry, describeOptionContract, describeOrderSize } from "../../lib/optionContractLabel.js";
 import { openCandidateId } from "./candidateIds.js";
-import type { BacktestAction, BacktestVolFarmerSettings, BacktestVolFarmerV2Settings } from "../backtestTypes.js";
+import type { BacktestAction, BacktestBreakEvenLevel, BacktestVolFarmerSettings, BacktestVolFarmerV2Settings } from "../backtestTypes.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { BacktestLookContext, BacktestLookResult, BacktestLookSymbol, BacktestOptionSale } from "./backtestLookTypes.js";
 import { captureLookTimeEt, lookInstantMs } from "./backtestTickerInputs.js";
@@ -27,8 +27,9 @@ import { cycleSplitFactorFor, isSymbolFlat, legsOfPosition, positionsOfSymbol, t
 //                              commissions ÷ its shares
 //        break-even, second  = the assigned Put's strike − the premiums net of commissions of every Put sold for it and of
 //                              its Calls ÷ its shares
-//   3. Puts: the first position holds shares, the second holds none and has no Put open, and the best Call 2 finds for
-//      the first position (open Calls not excluded) yields under stepCallYieldPct a year (the Step; no Call: 0%): the Puts of
+//   3. Puts: at a look where the first position holds shares and needed a new Call (none open when the look began; one
+//      still open defers the check to its expiry, Marcelo 2026-10-27), the second holds none and has no Put open, and the
+//      best Call 2 finds for the first position yields under stepCallYieldPct a year (the Step; no Call: 0%): the Puts of
 //      the same next expiry with |delta| ≤ putMaxAbsDelta, struck ≤ the first break-even × (1 − putStrikeBelowFirstBreak-
 //      EvenPct ÷ 100), spread and volume as the Calls', by premium yield; contracts = min(floor(P ÷ 2 ÷ (100 × strike)),
 //      floor(free cash ÷ (100 × strike)), the volume limit). Assigned, the Put's shares are the second position.
@@ -187,12 +188,30 @@ export async function runVolFarmerV2Look(context: BacktestLookContext): Promise<
   const actions: BacktestAction[] = [];
   const optionSales: BacktestOptionSale[] = [];
   const summaries: string[] = [];
+  const breakEvenLevels: BacktestBreakEvenLevel[] = [];
   for (const lookSymbol of context.symbols) {
     const summary = lookAtSymbol({ context, lookSymbol, farmer: settings.volFarmer, v2: settings.volFarmerV2, at, actions, optionSales });
     if (summary !== null) summaries.push(summary);
+    const level = breakEvenLevelAfterLook(ledger, lookSymbol, at);
+    if (level !== null) breakEvenLevels.push({ tradingDate: todayIso, at: at.toISOString(), lookTimeEt, ...level });
   }
   const summary = summaries.length === 0 ? "No action" : summaries.join(" · ");
-  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [] };
+  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [], breakEvenLevels };
+}
+
+/** Both positions' break-evens as traded once the look is done (the price chart's B-E and B-E2); null when neither holds shares. */
+function breakEvenLevelAfterLook(ledger: SimulatedLedger, lookSymbol: BacktestLookSymbol, at: Date): Pick<BacktestBreakEvenLevel, "symbol" | "splitFactor" | "firstBreakEven" | "secondBreakEven"> | null {
+  const symbol = lookSymbol.profile.symbol;
+  const state = stateOf(ledger, symbol);
+  const priceToCycleScale = cycleSplitFactorFor(ledger, symbol, lookSymbol.splitFactorToday, at) / lookSymbol.splitFactorToday;
+  const asTraded = (position: VolFarmerV2Position | null) => {
+    const breakEven = position === null || position.shares <= 0 ? null : volFarmerV2BreakEven(position);
+    return breakEven === null ? null : breakEven / priceToCycleScale;
+  };
+  const firstBreakEven = asTraded(state.first);
+  const secondBreakEven = asTraded(state.second);
+  if (firstBreakEven === null && secondBreakEven === null) return null;
+  return { symbol, splitFactor: lookSymbol.splitFactorToday, firstBreakEven, secondBreakEven };
 }
 
 interface SymbolLook {
@@ -304,6 +323,7 @@ function lookAtSymbol(input: SymbolLook): string | null {
     const breakEven = position === null ? null : volFarmerV2BreakEven(position);
     return breakEven === null ? null : asTraded(breakEven);
   };
+  const firstNeedsCall = state.first !== null && state.first.shares > 0 && state.first.call === null;
   const volumeUsed = new Map<string, number>();
   const orders: { name: "first" | "second"; position: VolFarmerV2Position; call: BaselineCandidate; contracts: number }[] = [];
   let secondFindsNoCall = false;
@@ -332,10 +352,10 @@ function lookAtSymbol(input: SymbolLook): string | null {
   }
   if (orders.length > 0) say(sellCalls(input, orders, priceToCycleScale, sharesPerContractOnCycleScale, stockPrice));
 
-  // 3. Puts for the second position, while the first's best Call yields under the trigger.
+  // 3. Puts for the second position, when the first needed a new Call and its best yields under the Step.
   const first = state.first;
   const second = state.second;
-  if (first !== null && first.shares > 0 && (second === null || (second.shares === 0 && second.put === null))) {
+  if (firstNeedsCall && first !== null && first.shares > 0 && (second === null || (second.shares === 0 && second.put === null))) {
     const firstBreakEven = breakEvenAsTraded(first)!;
     const bestCall = callCandidates(firstBreakEven, false).calls[0] ?? null;
     const bestYield = bestCall?.premiumYield ?? 0;

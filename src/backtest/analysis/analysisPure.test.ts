@@ -163,18 +163,8 @@ describe("barIndicatorsOf", () => {
     expect(ivPercentile[21]).toEqual([0.5238, 11, 21]);
   });
 
-  it("the 50- and 200-day averages of the closes, the bar's own included, from the 50th and the 200th bar", () => {
-    const { movingAverage50, movingAverage200 } = barIndicatorsOf(rising);
-    expect(movingAverage50[48]).toBeNull();
-    // Closes 1 to 50, then 2 to 51.
-    expect(movingAverage50[49]).toBe(25.5);
-    expect(movingAverage50[50]).toBe(26.5);
-    expect(movingAverage200[198]).toBeNull();
-    expect(movingAverage200[199]).toBe(100.5);
-  });
-
   it("cuts the indicators of a whole file to a session's bars", () => {
     const all = barIndicatorsOf(rising);
-    expect(sliceBarIndicators(all, 199, 201)).toEqual({ ivPercentile: all.ivPercentile.slice(199, 202), movingAverage50: [175.5, 176.5, 177.5], movingAverage200: [100.5, 101.5, 102.5] });
+    expect(sliceBarIndicators(all, 199, 201)).toEqual({ ivPercentile: all.ivPercentile.slice(199, 202) });
   });
 });

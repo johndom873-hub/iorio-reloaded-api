@@ -1,4 +1,4 @@
-import type { BacktestAction, BacktestBaselineSettings, BacktestLadderLevel, BacktestOrderShortfall, EffectiveBacktestSettings } from "../backtestTypes.js";
+import type { BacktestAction, BacktestBaselineSettings, BacktestBreakEvenLevel, BacktestLadderLevel, BacktestOrderShortfall, EffectiveBacktestSettings } from "../backtestTypes.js";
 import type { BaselineNoCandidate, BaselineNoSaleReason } from "./baselineSaleSteps.js";
 import type { BacktestBarHistory } from "./backtestBarHistory.js";
 import type { HedgePutQuoteSource } from "./backtestBaselineHedge.js";
@@ -115,6 +115,8 @@ export interface BacktestLookResult {
   shortfalls?: BacktestOrderShortfall[];
   /** The baseline: the put ladder's levels at this look, per symbol whose cycle holds shares. */
   ladderLevels?: BacktestLadderLevel[];
+  /** Vol Farmer v2: both positions' break-evens after the look, per symbol whose cycle holds shares. */
+  breakEvenLevels?: BacktestBreakEvenLevel[];
   /** The baseline: sales that were due and not made for a reason the shortfalls do not hold. */
   noSaleNotes?: BacktestNoSaleNote[];
   /** The baseline: orders that found no contract within the rules, with what each check left out. */
