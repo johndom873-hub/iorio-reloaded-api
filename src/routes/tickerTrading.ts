@@ -1,5 +1,6 @@
 import { formatExpiryAsIsoDate } from "../lib/expiryFormat.js";
 import { Router } from "express";
+import { requireAuth } from "../middleware/requireAuth.js";
 import { db } from "../db/connection.js";
 import { loadStoredOptionChain, lookupExpiryStrikes, lookupOptionParams } from "../ibkr/fetchOptionChain.js";
 import { peekPooledQuote } from "../ibkr/marketDataPool.js";
@@ -19,6 +20,7 @@ import { loadTradingSettings } from "../lib/tradingSettingsStore.js";
 // universe, or an expiry past the stored 90 days). Live quotes for the chain's cells come from the `optionQuotes` stream.
 
 export const tickerTradingRouter = Router();
+tickerTradingRouter.use(requireAuth);
 
 interface TickerRow {
   id: string;

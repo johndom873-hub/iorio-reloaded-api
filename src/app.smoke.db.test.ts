@@ -176,7 +176,7 @@ const guardedMounts = [
   "/notifications",
   "/stream",
   "/trade-blotter",
-  "/signals",
+  "/volatility",
   "/order-checks",
   "/system-health",
   "/calendar-events",
@@ -205,7 +205,8 @@ function readMountsFromAppSource(): { pathedMounts: string[]; unpathedUses: stri
 describe("router mounting inventory", () => {
   it("has no mount that is not classified as guarded or public by design", () => {
     const mounts = readMountsFromAppSource();
-    expect([...mounts.pathedMounts].sort()).toEqual([...guardedMounts, ...publicByDesignMounts].sort());
+    // A path may carry more than one router (/tickers: the ticker detail and the ticker trading endpoints).
+    expect([...new Set(mounts.pathedMounts)].sort()).toEqual([...guardedMounts, ...publicByDesignMounts].sort());
     expect([...mounts.unpathedUses].sort()).toEqual([...unpathedUses].sort());
   });
 });

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { requireAuth } from "../middleware/requireAuth.js";
 import { loadTradingSettings } from "../lib/tradingSettingsStore.js";
 import { touchVolatilityDemand, type DeltaBand } from "../lib/volatilityLive.js";
 import { loadVolatilityScreen, type BestCallYield, type VolatilityRow } from "../lib/volatilityScreen.js";
@@ -7,6 +8,7 @@ import { loadVolatilityScreen, type BestCallYield, type VolatilityRow } from "..
 // wanted (a lease, volatilityLive.ts), so the loop quotes Calls only while a Volatility screen or Pulse is open.
 
 export const volatilityRouter = Router();
+volatilityRouter.use(requireAuth);
 
 /** Pulse's Top premiums: this many tickers, by best 0-7 DTE Call yield (Marcelo 2026-10-27). */
 export const topPremiumsCount = 10;
