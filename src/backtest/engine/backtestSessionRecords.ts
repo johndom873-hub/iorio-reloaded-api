@@ -47,8 +47,8 @@ export interface SessionRecordInputs {
   noSaleRecords: NoSaleRecords;
 }
 
-/** A cycle with its detail, as a finished session stores it. */
-export type BacktestCycleRecord = BacktestCycle & BacktestCycleDetail;
+/** A cycle with its detail, as a finished session stores it (its No Call runs are read from its legs when the session is read). */
+export type BacktestCycleRecord = BacktestCycle & Omit<BacktestCycleDetail, "noCallRuns">;
 
 function closingCommissionByLegId(ledger: SimulatedLedger): Map<string, number> {
   const commissionByLegId = new Map<string, number>();

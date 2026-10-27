@@ -44,6 +44,12 @@ Whether the book made money is the **wheel cycle's P&L**, as the platform comput
   - days held = the session's trading days with the source held at any time of the day ÷ all of them; a leg counts from its entry's Eastern date to its exit's, both included.
   - quoted: the median of the yearly yield recorded at each Call sale (`premiumYield`, as the cycle rows show it) and of each hedge purchase's yearly cost (`hedgePutCostYield`).
   - Example (R4 VF4 · HOOD): account +$74,246 at a CAGR of 11.26%, interest +$11,037, Calls +$17,464, hedge −$11,167, so shares = 74,246 − 11,037 − 6,297 = +$56,912; shares 11.26% × 56,912 ÷ 74,246 = +8.6%, Calls +2.6%, hedge −1.7%, interest +1.7%.
+- **No-Call days** (the Wheel cycles' column and its No Call rows, approved by Marcelo 2026-10-27; `cycleNoCallDays.ts`, from the cycle's legs when a session is read):
+  - share days = the cycle's session days with shares held while the market was open: a stock leg counts from its entry's Eastern date to its exit's, both included; shares that arrive at or after the 16:00 close (a put's assignment) count from the next session, since no Call could be sold on them that day.
+  - Call days = the session days with a Call sold open at any time, from its sale's date to its expiry's, assignment's or buy-back's, both included (the Covered Calls tile's days held).
+  - no-Call days = share days that are not Call days, shown "no-Call days of share days". A No Call row is a run of consecutive session days of them: its first and last days, its Session # span, the 10:00 price on its first day, the shares held on it (the most at its start or end), its length, and the stock's move = C(last day) ÷ C(the day before the first) − 1 on split-adjusted closes.
+  - why no Call: a Vol Farmer session reads the 10:00 look's note on the symbol in each day's summary ("no Call passes the hedge rule …", its figure the break-even the note states, else the shares' cost); any other takes its stock-only stretches' stored counts for their days and, for days with an option open, the calls' recorded shortfalls (cash, volume, no candidate) and a ladder put sold in their place. A day counts under every reason seen; none: no reason recorded.
+  - Example (R5 30% · AAPL #6): 200 shares from session 34 to 91 (58 share days); its Calls covered 34–40, 45–50, 83–84 and 89–91 (18 days), so 40 of 58, in runs 41→44, 51→82 and 85→88.
 
 EXP $ is net of premium, as everywhere else: a put's (strike − premium) × 100 × contracts; a covered call's (share price − premium) × 100 × contracts.
 

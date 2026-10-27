@@ -1346,6 +1346,8 @@ export interface BacktestCycle {
   sharesHeldMost?: { shares: number; on: string } | null;
   /** A closed cycle's lowest free cash ÷ the account value, at each day's marks and after each of its looks (sessionFreeCash.ts), read with the session's detail; null otherwise. */
   freeCashShareLowest?: { share: number; on: string } | null;
+  /** The cycle's session days with shares and no Call open, and its session days with shares (cycleNoCallDays.ts), read with the session's detail. */
+  noCallDays?: { days: number; shareDays: number };
   buckets: { csp: BacktestCycleBucket; unstructured: BacktestCycleBucket; cc: BacktestCycleBucket; hedge: BacktestCycleBucket };
   dataFlags: string[];
 }
@@ -1509,10 +1511,38 @@ export interface BacktestStockOnlyStretch extends BacktestIdleStretch {
   sharesHeld: number;
 }
 
+/** Why no Call was sold on some days of a No Call run. */
+export interface BacktestNoCallReason {
+  /** As a phrase: "no Call passed the hedge rule", "the volume limit", "no reason recorded". */
+  reason: string;
+  /** The run's days it was seen on; a day counts under every reason seen at any of its looks. */
+  days: number;
+  /** A Vol Farmer hedge-rule reason's figure on the first day it was seen: the shares' break-even under the rule where the look stated it, else what they cost. */
+  figure: { kind: "breakEven" | "shareCost"; dollars: number } | null;
+  /** A Vol Farmer reason: the look's note on the symbol on the first day it was seen, as written. */
+  firstNote: { date: string; text: string } | null;
+}
+
+/** A run of a cycle's consecutive session days with shares and no Call open (cycleNoCallDays.ts): a No Call row of the Wheel cycles. */
+export interface BacktestNoCallRun {
+  firstDay: string;
+  lastDay: string;
+  sessions: number;
+  /** Shares held as traded on the first day: the most at its start or its end. */
+  sharesHeld: number;
+  /** The run's days with a hedge Put held at any time. */
+  hedgePutDays: number;
+  /** Most days first. */
+  reasons: BacktestNoCallReason[];
+  /** Why no Call contract qualified, from the first stock-only stretch of the run with that detail; null otherwise. */
+  noCandidate: BacktestNoCandidateDetail | null;
+}
+
 /** A cycle's detail, read when its row is opened; null for sessions run before cycles kept it. */
 export interface BacktestCycleDetail {
   timeline: BacktestCycleTimelineRow[];
   stockOnlyStretches: BacktestStockOnlyStretch[];
+  noCallRuns: BacktestNoCallRun[];
 }
 
 /** One source of the account's P&L (approved 2026-10-26). */

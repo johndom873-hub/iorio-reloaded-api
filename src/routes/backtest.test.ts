@@ -1074,7 +1074,35 @@ describe("backtest routes", () => {
       ];
       await testDb("backtest_cycles").where({ session_id: session.id, symbol: fileSymbol, cycle_number: 1 }).update({ timeline: JSON.stringify(timeline), stock_only_stretches: JSON.stringify(stockOnlyStretches) });
       // A sale's row carries the yield and delta the engine recorded for it (none here), contract-weighted over its fills.
-      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline: [{ ...timeline[0]!, premiumYield: null, delta: null, breakEvenAtSale: null, sharesHeld: 0, ladderRung: null, freeCashShare: expect.closeTo(0.99604932, 8) }, { ...timeline[1]!, sharesHeld: 100, freeCashShare: null }], stockOnlyStretches: stockOnlyStretches.map((stretch) => ({ ...stretch, freeCashShareAtStart: null })) } } });
+      // No No Call run yet: the shares the put's assignment delivered at the 4 Sep close count from the next session, and the
+      // session recorded none after the 3rd.
+      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline: [{ ...timeline[0]!, premiumYield: null, delta: null, breakEvenAtSale: null, sharesHeld: 0, ladderRung: null, freeCashShare: expect.closeTo(0.99604932, 8) }, { ...timeline[1]!, sharesHeld: 100, freeCashShare: null }], stockOnlyStretches: stockOnlyStretches.map((stretch) => ({ ...stretch, freeCashShareAtStart: null })), noCallRuns: [] } } });
+      expect(((await request("GET", `/backtest/sessions/${session.id}`)).body as BacktestSessionDetail).cycles[0]!.noCallDays).toEqual({ days: 0, shareDays: 0 });
+      // With 8–10 Sep recorded, the shares had no Call on any of them: one run of 3 sessions. Its reasons: the stock-only
+      // stretch's stored counts for 8–9 Sep, the calls' volume shortfall recorded on the 10th.
+      const laterDays = ["2026-09-08", "2026-09-09", "2026-09-10"].map((tradingDate) => ({ session_id: session.id, trading_date: tradingDate, account_value: 1_000_000, cash: 996_000, exposure_dollars: 4_000, interest_dollars: 0, daily_return: 0, baseline_value: 1_000_000, baseline_daily_return: 0, decision_summary: null }));
+      await testDb("backtest_session_days").insert(laterDays);
+      await testDb("backtest_look_shortfalls").insert({ session_id: session.id, trading_date: "2026-09-10", at: "2026-09-10T14:00:00.000Z", look_time: "10:00", symbol: fileSymbol, step: "held_calls", option_right: "C", wanted_contracts: 1, filled_contracts: 0, unsold_contracts: 1, reason: "volume" });
+      try {
+        expect(((await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail }).detail.noCallRuns).toEqual([
+          {
+            firstDay: "2026-09-08",
+            lastDay: "2026-09-10",
+            sessions: 3,
+            sharesHeld: 100,
+            hedgePutDays: 0,
+            reasons: [
+              { reason: "no candidate", days: 2, figure: null, firstNote: null },
+              { reason: "the volume limit", days: 1, figure: null, firstNote: null },
+            ],
+            noCandidate: null,
+          },
+        ]);
+        expect(((await request("GET", `/backtest/sessions/${session.id}`)).body as BacktestSessionDetail).cycles[0]!.noCallDays).toEqual({ days: 3, shareDays: 3 });
+      } finally {
+        await testDb("backtest_session_days").where({ session_id: session.id }).whereIn("trading_date", laterDays.map((day) => day.trading_date)).delete();
+        await testDb("backtest_look_shortfalls").where({ session_id: session.id }).delete();
+      }
       // The Cash at the put's sale: the 1 Sep marks' $1,000,000 cash + the sale's $49.32 − the put's $4,000 locked, ÷ the $1,000,000 account; the 4 Sep assignment and 8 Sep stretch fall on days the session did not record.
       await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3, premiumYield: 0.42, delta: -0.21 }) });
       expect(((await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail }).detail.timeline.map((entry) => [entry.premiumYield, entry.delta])).toEqual([[0.42, -0.21], [undefined, undefined]]);

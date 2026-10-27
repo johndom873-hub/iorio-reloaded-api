@@ -19,6 +19,7 @@ import type {
   BacktestJobStatus,
   BacktestJobView,
   BacktestMetrics,
+  BacktestNoCallRun,
   BacktestNoSaleDays,
   BacktestPnlBasis,
   BacktestPosition,
@@ -54,6 +55,7 @@ import { cachedSplitsBetween, readSplitScheduleCache, splitFactorOn } from "../e
 import { withPositionCycle, type BacktestPositionRecord } from "../engine/backtestSessionRecords.js";
 import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment, sharesHeldAtInstant, sharesHeldAtMarks, type CashBreakEvenOptions, type SplitFactorOfDay } from "../cycleCashBreakEven.js";
 import { withHedgeMarkedAtHandOvers, type HedgePutMarkOf } from "../cycleHedgeHandOvers.js";
+import { cycleNoCallDays, recordedRunReasons, volFarmerNoteOn, volFarmerRunReasons } from "../cycleNoCallDays.js";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 
 const spyBaselineLabel = "Buy and hold · SPY";
@@ -387,10 +389,19 @@ function detectedSplitsInPeriod(symbols: readonly string[], startDateIso: string
 const isoTime = (value: Date | string | null): string | null => (value === null ? null : new Date(value).toISOString());
 
 /** The session's simulated positions with their legs, in the order the simulated book created them. */
-async function loadSessionPositions(sessionId: string): Promise<BacktestPositionRecord[]> {
+/** The session's positions with their legs; with `symbol`, that symbol's only. */
+async function loadSessionPositions(sessionId: string, symbol: string | null = null): Promise<BacktestPositionRecord[]> {
+  const symbolPositionIds = () => db("backtest_positions").where({ session_id: sessionId, symbol }).select("position_id");
   const [positionRows, legRows]: [Record<string, unknown>[], Record<string, unknown>[]] = await Promise.all([
-    db("backtest_positions").where({ session_id: sessionId }).orderBy("sequence"),
-    db("backtest_position_legs").where({ session_id: sessionId }).orderBy("sequence").select("*", db.raw("expiry_date::text as expiry_date")),
+    db("backtest_positions")
+      .where({ session_id: sessionId })
+      .modify((query) => (symbol === null ? query : query.where({ symbol })))
+      .orderBy("sequence"),
+    db("backtest_position_legs")
+      .where({ session_id: sessionId })
+      .modify((query) => (symbol === null ? query : query.whereIn("position_id", symbolPositionIds())))
+      .orderBy("sequence")
+      .select("*", db.raw("expiry_date::text as expiry_date")),
   ]);
   const legsByPositionId = new Map<string, BacktestPositionLeg[]>();
   for (const row of legRows) {
@@ -654,7 +665,8 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
   // A Vol Farmer cycle shows its hedge marked at every hand-over of the shares; what the cycle reads per moment (break-even,
   // shares held) stays the stored timeline's, through each shown row's source row.
   let shown: { rows: BacktestCycleDetail["timeline"]; sourceIndexes: number[] } = { rows: row.timeline, sourceIndexes: row.timeline.map((_, index) => index) };
-  if (await isVolFarmerSession(sessionId)) {
+  const volFarmer = await isVolFarmerSession(sessionId);
+  if (volFarmer) {
     const marks = hedgePutMarksFromFile(symbol);
     try {
       shown = withHedgeMarkedAtHandOvers(row.timeline, marks.markOf, splitFactorOf);
@@ -688,7 +700,78 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
       noCandidate: stretch.noCandidate ?? null,
       freeCashShareAtStart: freeCash?.shareAtMark(stretch.firstIdleDay) ?? null,
     })),
+    noCallRuns: await loadCycleNoCallRuns({ sessionId, symbol, cycleNumber, volFarmer, timeline: row.timeline, stretches, splitFactorOf }),
   };
+}
+
+/**
+ * A cycle's No Call runs (cycleNoCallDays.ts): its days with shares and no Call from its positions' legs, the shares from
+ * its own trades, and why no Call was sold from a Vol Farmer's day summaries, else the session's records of the calls on
+ * the free shares and the cycle's stock-only stretches.
+ */
+async function loadCycleNoCallRuns(input: { sessionId: string; symbol: string; cycleNumber: number; volFarmer: boolean; timeline: readonly BacktestCycleTimelineRow[]; stretches: BacktestCycleDetail["stockOnlyStretches"]; splitFactorOf: SplitFactorOfDay }): Promise<BacktestNoCallRun[]> {
+  const { sessionId, symbol, cycleNumber } = input;
+  const cycleRows: Record<string, unknown>[] = await db("backtest_cycles").where({ session_id: sessionId, symbol }).select("cycle_number", "opened_at", "closed_at", db.raw("opened_on::text as opened_on"), db.raw("closed_on::text as closed_on"));
+  const cycles = cycleRows.map((row) => ({ symbol, cycleNumber: Number(row.cycle_number), openedAt: isoTime(row.opened_at as Date)!, closedAt: isoTime(row.closed_at as Date | null), openedOn: row.opened_on as string, closedOn: (row.closed_on as string | null) ?? null }));
+  const cycle = cycles.find((entry) => entry.cycleNumber === cycleNumber);
+  if (!cycle) return [];
+  const [positionRecords, dayRows]: [BacktestPositionRecord[], { trading_date: string; decision_summary: string | null }[]] = await Promise.all([
+    loadSessionPositions(sessionId, symbol),
+    db("backtest_session_days")
+      .where({ session_id: sessionId })
+      .where("trading_date", ">=", cycle.openedOn)
+      .modify((query) => (cycle.closedOn === null ? query : query.where("trading_date", "<=", cycle.closedOn)))
+      .orderBy("trading_date")
+      .select(db.raw("trading_date::text as trading_date"), "decision_summary"),
+  ]);
+  const positions = positionRecords.map((position) => withPositionCycle(position, cycles)).filter((position) => position.cycleNumber === cycleNumber);
+  const coverage = cycleNoCallDays({ sessionDays: dayRows.map((day) => day.trading_date), cycle, positions });
+  const runDays = coverage.runs.flat();
+  if (runDays.length === 0) return [];
+  let reasonsOf: (days: string[]) => BacktestNoCallRun["reasons"];
+  if (input.volFarmer) {
+    const summaryOn = new Map(dayRows.map((day) => [day.trading_date, day.decision_summary]));
+    reasonsOf = (days) => volFarmerRunReasons(days.map((date) => ({ date, note: volFarmerNoteOn(summaryOn.get(date) ?? null, symbol) })));
+  } else {
+    const recorded = await loadHeldCallReasonsByDay(sessionId, symbol, runDays[0]!, runDays.at(-1)!);
+    reasonsOf = (days) => recordedRunReasons({ days, stretches: input.stretches, reasonsOn: (date) => [...(recorded.get(date) ?? [])] });
+  }
+  return coverage.runs.map((days) => {
+    const firstDay = days[0]!;
+    const lastDay = days.at(-1)!;
+    const sharesAt = (hour: number, minute: number) => sharesHeldAtInstant(input.timeline, easternInstant(firstDay, hour, minute).getTime(), firstDay, input.splitFactorOf);
+    return {
+      firstDay,
+      lastDay,
+      sessions: days.length,
+      sharesHeld: Math.max(sharesAt(0, 0), sharesAt(23, 59)),
+      hedgePutDays: days.filter((day) => coverage.hedgePutDays.has(day)).length,
+      reasons: reasonsOf(days),
+      noCandidate: input.stretches.find((stretch) => stretch.firstIdleDay >= firstDay && stretch.lastIdleDay <= lastDay && stretch.noCandidate)?.noCandidate ?? null,
+    };
+  });
+}
+
+/**
+ * Per day, what a session's looks recorded about the calls on a symbol's free shares, as backtestIdleStretches.ts reads
+ * them while the session runs: their shortfalls, and a ladder put sold in their place (its reason, as baselineSaleSteps.ts
+ * words it: "its yield … beats the best call's …", or "no call qualifies").
+ */
+async function loadHeldCallReasonsByDay(sessionId: string, symbol: string, fromDate: string, toDate: string): Promise<Map<string, Set<Exclude<keyof BacktestNoSaleDays, "unrecorded">>>> {
+  const [shortfalls, ladderPuts]: [{ trading_date: string; reason: "cash" | "volume" | "no_candidate" }[], { trading_date: string; chosen_because: string }[]] = await Promise.all([
+    db("backtest_look_shortfalls").where({ session_id: sessionId, symbol, step: "held_calls" }).whereBetween("trading_date", [fromDate, toDate]).select(db.raw("trading_date::text as trading_date"), "reason"),
+    db("backtest_actions")
+      .where({ session_id: sessionId, symbol, kind: "open_cash_secured_put", outcome: "filled" })
+      .whereBetween("trading_date", [fromDate, toDate])
+      .where((query) => query.where("chosen_because", "like", "%beats the best call's%").orWhere("chosen_because", "like", "%(no call qualifies)%"))
+      .select(db.raw("trading_date::text as trading_date"), "chosen_because"),
+  ]);
+  const byDay = new Map<string, Set<Exclude<keyof BacktestNoSaleDays, "unrecorded">>>();
+  const add = (date: string, reason: Exclude<keyof BacktestNoSaleDays, "unrecorded">) => byDay.set(date, (byDay.get(date) ?? new Set()).add(reason));
+  const shortfallReason = { cash: "cash", volume: "volume", no_candidate: "noCandidate" } as const;
+  for (const row of shortfalls) add(row.trading_date, shortfallReason[row.reason]);
+  for (const row of ladderPuts) add(row.trading_date, row.chosen_because.includes("(no call qualifies)") ? "noCandidate" : "ladderPutInstead");
+  return byDay;
 }
 
 /**
@@ -906,8 +989,16 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
     .select("symbol", "cycle_number", "timeline");
   const timelineOf = new Map(closedTimelines.map((entry) => [`${entry.symbol}#${entry.cycle_number}`, entry.timeline ?? []]));
   const splitFactorBySymbol = new Map<string, SplitFactorOfDay>();
+  // Each cycle's days with shares and no Call, from its positions' legs (Marcelo 2026-10-27).
+  const sessionDates = days.map((day) => day.tradingDate);
+  const positionsByCycle = new Map<string, BacktestPosition[]>();
+  for (const position of positions) if (position.cycleNumber !== null) positionsByCycle.set(`${position.symbol}#${position.cycleNumber}`, [...(positionsByCycle.get(`${position.symbol}#${position.cycleNumber}`) ?? []), position]);
+  const noCallDaysOf = (cycle: BacktestCycle) => {
+    const coverage = cycleNoCallDays({ sessionDays: sessionDates, cycle, positions: positionsByCycle.get(`${cycle.symbol}#${cycle.cycleNumber}`) ?? [] });
+    return { days: coverage.runs.reduce((sum, run) => sum + run.length, 0), shareDays: coverage.shareDays };
+  };
   const cycles = ofSymbol(everyCycle).map((cycle) => {
-    if (cycle.status === "open") return { ...cycle, freeCashShareNow: freeCash === null || lastDay === null ? null : freeCash.shareAfter(lastDay, null), sharesHeldMost: null, freeCashShareLowest: null };
+    if (cycle.status === "open") return { ...cycle, freeCashShareNow: freeCash === null || lastDay === null ? null : freeCash.shareAfter(lastDay, null), sharesHeldMost: null, freeCashShareLowest: null, noCallDays: noCallDaysOf(cycle) };
     const timeline = timelineOf.get(`${cycle.symbol}#${cycle.cycleNumber}`) ?? [];
     if (!splitFactorBySymbol.has(cycle.symbol)) splitFactorBySymbol.set(cycle.symbol, splitFactorOfDayFor(cycle.symbol));
     const splitFactorOf = splitFactorBySymbol.get(cycle.symbol)!;
@@ -923,6 +1014,7 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
       freeCashShareNow: null,
       sharesHeldMost: most === null ? null : { shares: (most as { shares: number }).shares, on: (most as { on: string }).on },
       freeCashShareLowest: freeCash === null || cycle.closedOn === null ? null : freeCash.lowestShareBetween(cycle.openedOn, cycle.closedOn, moments),
+      noCallDays: noCallDaysOf(cycle),
     };
   });
   const cycleGaps = ofSymbol(everyCycleGap).map((gap) => ({ ...gap, freeCashShareAtStart: freeCash?.shareAtMark(gap.firstIdleDay) ?? null }));
