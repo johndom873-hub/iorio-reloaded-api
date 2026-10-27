@@ -105,6 +105,8 @@ describe("analysis routes", () => {
     expect(figures.status).toBe(200);
     expect(figures.body).toMatchObject({ symbol, optionLastDate: "2026-03-04", barsLastDate: "2026-03-04" });
     expect(figures.body.bars.map(([date]) => date)).toEqual(["2026-03-02", "2026-03-03", "2026-03-04"]);
+    // One per bar; three bars are too few for any of them.
+    expect(figures.body.barIndicators).toEqual({ ivPercentile: [null, null, null], movingAverage50: [null, null, null], movingAverage200: [null, null, null] });
     expect(figures.body.dataQuality).toMatchObject({ completeDays: 3, firstDate: "2026-03-02", lastDate: "2026-03-04" });
     for (const scanField of ["chains", "fitDays", "largestPotWithoutModel"]) expect(figures.body).not.toHaveProperty(scanField);
     for (const scanField of ["scannedDays", "daysWithoutPrice", "daysWithNothingPassing"]) expect(figures.body.dataQuality).not.toHaveProperty(scanField);
@@ -182,9 +184,10 @@ describe("analysis routes", () => {
     expect(view.body.stored).toMatchObject({ id: savedRunId, status: "succeeded", figures: { marker: "saved" }, summary: { headline: "Saved." }, optionLastDate: "2026-03-04" });
     expect(view.body.trial).toBeNull();
 
-    await testDb("backtest_ticker_analyses").where({ id: trialRunId }).update({ status: "succeeded", figures: JSON.stringify({ symbol, marker: "trial" }), finished_at: testDb.fn.now() });
+    // Stored figures with bars gain the price chart's indicators as they are read, one per bar.
+    await testDb("backtest_ticker_analyses").where({ id: trialRunId }).update({ status: "succeeded", figures: JSON.stringify({ symbol, marker: "trial", bars: [["2026-03-04", 10, 11, 9, 10.5, 0.4]] }), finished_at: testDb.fn.now() });
     view = await call<TickerAnalysisView>("GET", `/analyses/${symbol}`);
-    expect(view.body.trial).toMatchObject({ id: trialRunId, figures: { marker: "trial" } });
+    expect(view.body.trial).toMatchObject({ id: trialRunId, figures: { marker: "trial", barIndicators: { ivPercentile: [null], movingAverage50: [null], movingAverage200: [null] } } });
     expect(view.body.active).toEqual([]);
 
     const statuses = await call<Record<string, { status: string; optionLastDate: string | null }>>("GET", "/analyses");

@@ -226,7 +226,7 @@ describe("backtest routes", () => {
       ...Array(2).fill("baseline_wheel · Exits"),
       ...Array(18).fill("baseline_wheel · Hedge"),
       ...Array(8).fill("steady_stake · Steady Stake"),
-      ...Array(17).fill("vol_farmer · Vol Farmer"),
+      ...Array(25).fill("vol_farmer · Vol Farmer"),
       ...Array(12).fill("pluto_rules · Capital and sizing"),
       ...Array(14).fill("pluto_rules · Candidate quality"),
       ...Array(6).fill("pluto_rules · Model"),
@@ -235,13 +235,13 @@ describe("backtest routes", () => {
     ]);
     // Every row once, and every condition on a row that is there.
     const paths = template.rows.map((row) => row.path);
-    expect(new Set(paths).size).toBe(133);
-    expect(paths.length).toBe(133);
+    expect(new Set(paths).size).toBe(141);
+    expect(paths.length).toBe(141);
     const conditionPaths = template.rows.flatMap((row) => [...(row.appliesWhen?.allOf ?? []), ...(row.appliesWhen?.anyOf ?? [])].map((condition) => condition.path));
     expect(conditionPaths.filter((path) => !paths.includes(path))).toEqual([]);
     expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", hedgePutTenorDays: 0, hedgePutExpiry: "nearest", hedgePutStrikeFrom: "stock_price", hedgePutBelowPricePct: 0, hedgePutSize: "share_level", hedgePutCoveragePct: 100, hedgePutRollDaysLeft: 7, hedgePutCovers: "entries", hedgePutStaggeredExpiries: 3, hedgePutStrikeBy: "price", hedgePutAbsDelta: 0.25, hedgePutPriceGate: "off", hedgePutCostFallShare: 0.3, hedgePutIvMultiple: 1.3, hedgeInBreakEven: "excluded", hedgePutTurnover: "sell_when_shares_leave", hedgePutTurnoverDays: 30, hedgePutFarBelowPct: 10 });
     expect(template.rows.find((row) => row.path === "decisionMaker")?.choices?.map((choice) => choice.value)).toEqual(["rules", "llm", "baseline", "steady_stake", "vol_farmer"]);
-    expect(template.settings.volFarmer).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, callMinDte: 1, callMaxDte: 45, putMinDte: 0, putMaxDte: 360, putMaxStrikeAbovePricePct: 0, protectionFallPct: 20, maxSpreadPctOfMid: 50, putCashReservePct: 10, crossing: "unwind", putExpiry: "in_range", hedgeRuleCallPremiums: "excluded", minPutProtectionPct: 0, hedgeWithoutCall: "none", maxPutCostPctOfCallPremium: 0, putRoll: "none" });
+    expect(template.settings.volFarmer).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, callMinDte: 1, callMaxDte: 45, callExpiry: "in_range", putMinDte: 0, putMaxDte: 360, putMaxStrikeAbovePricePct: 0, protectionFallPct: 20, maxSpreadPctOfMid: 50, putCashReservePct: 10, crossing: "unwind", putExpiry: "in_range", hedgeRuleCallPremiums: "excluded", minPutProtectionPct: 0, hedgeWithoutCall: "none", putChoice: "most_protection", maxPutCostPctOfCallPremium: 0, putRoll: "none", hedgeAfterExpiry: "keep", afterAssignment: "end", hedgeRuleStockPnl: "excluded", putCashIn: "none", cashInPutMinProtectionPct: 0, hedge: "put" });
     expect(template.rows.filter((row) => row.perTicker).map((row) => row.path)).toEqual(["baseline.ladderSharesPct", "baseline.ladderRungs", "baseline.ladderShock", "baseline.ladderShockPct", "baseline.ladderShockMinPct", "baseline.ladderShockMaxPct", "baseline.minAbsDelta", "baseline.maxAbsDelta"]);
     expect(template.rows.find((row) => row.path === "pluto.capitalBudgetPct")).toEqual({ path: "pluto.capitalBudgetPct", group: "Capital and sizing", section: "pluto_rules", label: "Capital budget", unit: "percent", now: Number(plutoRow.capital_budget_pct), editable: true, note: "% of the account" });
     // A row the CC + Put Ladder reads only under a condition says so.
@@ -1043,6 +1043,17 @@ describe("backtest routes", () => {
       ]);
       // The same figures over every symbol together, and a session narrowed to one symbol.
       expect(detail.allSymbolsStatistics).toEqual({ ...detail.tickerStatistics[0]!, symbol: "All symbols" });
+      // The tiles' P&L sources need the session's metrics: the shares are the account's P&L less its interest and the
+      // Put's premium; no Call or hedge here.
+      expect(detail.pnlSources).toBeNull();
+      const { metrics: storedMetrics } = await testDb("backtest_sessions").where({ id: session.id }).first("metrics");
+      await testDb("backtest_sessions").where({ id: session.id }).update({ metrics: JSON.stringify({ startValue: 1_000_000, endValue: 1_001_000, cagr: 0.05, interestDollars: 100 }) });
+      try {
+        const withMetrics = (await request("GET", `/backtest/sessions/${session.id}`)).body as BacktestSessionDetail;
+        expect(withMetrics.pnlSources).toEqual({ shares: { pnlDollars: expect.closeTo(850.68, 6), cagrPart: expect.closeTo((0.05 * 850.68) / 1_000, 9), daysHeldShare: expect.any(Number) }, coveredCalls: null, hedge: null });
+      } finally {
+        await testDb("backtest_sessions").where({ id: session.id }).update({ metrics: storedMetrics === null ? null : JSON.stringify(storedMetrics) });
+      }
       const otherSymbol = (await request("GET", `/backtest/sessions/${session.id}?symbol=zzzz`)).body as BacktestSessionDetail;
       expect(otherSymbol).toMatchObject({ trades: [], positions: [], cycles: [], tickerStatistics: [], allSymbolsStatistics: null });
       expect(otherSymbol.days).toHaveLength(3);
@@ -1068,6 +1079,13 @@ describe("backtest routes", () => {
       await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3, premiumYield: 0.42, delta: -0.21 }) });
       expect(((await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail }).detail.timeline.map((entry) => [entry.premiumYield, entry.delta])).toEqual([[0.42, -0.21], [undefined, undefined]]);
       await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3 }) });
+      // A hedge Put's purchase row carries its yearly cost from what the purchase recorded: (2.00 × 100 + 0.68) ÷ (41 × 100) ÷ (108 ÷ 365).
+      await testDb("backtest_actions").insert({ session_id: session.id, action_id: "action-3", sequence: 2, trading_date: "2026-09-01", at, pass_number: 1, symbol: fileSymbol, kind: "buy_hedge", candidate_id: `${fileSymbol}:hedge:2026-12-18:38`, description: `${fileSymbol} Buy $38 Put · 18 Dec (108DTE) · 1× @ 2.00`, automatic: false, chosen_because: "hedge", outcome: "filled", gate_results: JSON.stringify([]), contract: JSON.stringify({ strategyKey: "hedge", expiry: "2026-12-18", strike: 38, right: "P" }), candidate_scores: JSON.stringify({ stockPrice: 41, dte: 108 }), quantity: 1, limit_price: 2, fill_price: 2, position_ids: JSON.stringify(["position-9"]) });
+      const hedgePurchaseRow: BacktestCycleTimelineRow = { at, tradingDate: "2026-09-01", label: "Bought put @ 2.00", bucket: "hedge", instrument: "option", quantity: 100, strike: 38, expiryDate: "2026-12-18", stockPrice: 41, stockPriceSource: "execution", commissionDollars: 0.68, premiumDollars: -200.68, stockDollars: 0, unrealized: false };
+      await testDb("backtest_cycles").where({ session_id: session.id, symbol: fileSymbol, cycle_number: 1 }).update({ timeline: JSON.stringify([...timeline, hedgePurchaseRow]) });
+      expect(((await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail }).detail.timeline.map((entry) => entry.hedgeCostYield)).toEqual([undefined, undefined, expect.closeTo(0.16542, 5)]);
+      await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-3" }).delete();
+      await testDb("backtest_cycles").where({ session_id: session.id, symbol: fileSymbol, cycle_number: 1 }).update({ timeline: JSON.stringify(timeline) });
       // The summary rows the session carries leave the detail out.
       expect(((await request("GET", `/backtest/sessions/${session.id}`)).body as BacktestSessionDetail).cycles[0]).not.toHaveProperty("timeline");
       expect((await request("GET", `/backtest/sessions/${session.id}/cycles/${fileSymbol}/2`)).status).toBe(404);
@@ -1104,6 +1122,8 @@ describe("backtest routes", () => {
       const chart = (await request("GET", `/backtest/sessions/${session.id}/price-chart?symbol=${fileSymbol.toLowerCase()}`)).body as BacktestSessionPriceChart;
       expect(chart).toMatchObject({ symbol: fileSymbol, bars: [["2026-09-11", 20, 21, 19, 20.5, null]], ladderLevels: [["2026-09-08", 38, 35, null]], ladderRungsSold: [["2026-09-08", 37, [[37, "2026-09-18", 1]], [3, 5, 2.25, 1000]]], tooLargeDays: [], splits: [{ lastDayBefore: "2026-09-04", firstDayAfter: "2026-09-08", ratio: 2 }] });
       expect(chart.maxDrawdown.All).toBeNull();
+      // One indicator per bar shown, worked out over the whole file (here too short for any).
+      expect(chart.barIndicators).toEqual({ ivPercentile: [null], movingAverage50: [null], movingAverage200: [null] });
       // An analysis stored before the rung numbers reads its rungs again from its session; one without a session left keeps its own.
       const storedRung: [string, number, [number, string, number][]] = ["2026-09-08", 37, [[37, "2026-09-18", 1]]];
       // Its Cash available is read from the session too.

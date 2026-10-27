@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { computeBacktestMetrics, computeCycleAccuracyBands, computeDailyReturns, computeDrawdowns, computeMonthlyReturns, computeSortino, computeTradeAccuracyBands, cycleFiguresOf, type AccountDay, type ClosedTradeFigures, type CycleFigures } from "./sessionAnalytics.js";
+import { computeBacktestMetrics, computeCycleAccuracyBands, computeDailyReturns, computeDrawdowns, computeMonthlyReturns, computePnlSources, computeSortino, computeTradeAccuracyBands, cycleFiguresOf, type AccountDay, type ClosedTradeFigures, type CycleFigures } from "./sessionAnalytics.js";
+import type { BacktestCycle, BacktestPositionLeg } from "./backtestTypes.js";
 
 const day = (tradingDate: string, value: number, exposureDollars = 0, interestDollars = 0): AccountDay => ({ tradingDate, value, exposureDollars, interestDollars });
 
@@ -158,5 +159,36 @@ describe("computeTradeAccuracyBands", () => {
       ["30% and over", 1, 200],
     ]);
     expect(bands.every((band) => band.cycleCount === null)).toBe(true);
+  });
+});
+
+describe("computePnlSources", () => {
+  const bucket = (premium: number, stock = 0) => ({ premium, stock, total: premium + stock, capital: 0 });
+  const buckets = (cc: [number, number], hedge: number, csp: number, unstructuredStock: number): Pick<BacktestCycle, "buckets"> => ({ buckets: { cc: bucket(...cc), hedge: bucket(hedge), csp: bucket(csp), unstructured: bucket(0, unstructuredStock) } });
+  const leg = (overrides: Partial<BacktestPositionLeg>): BacktestPositionLeg => ({ legId: "leg", parentLegId: null, legType: "stock", side: "long", quantity: 100, optionType: null, strike: null, expiry: null, multiplier: 1, entryPrice: 10, entryAt: "2026-03-03T15:00:00.000Z", exitPrice: null, exitAt: null, settledAs: null, expiryClose: null, dteAtEntry: null, realizedPnlDollars: null, priceScale: 1, ...overrides });
+  const tradingDates = ["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06"];
+  // Shares from Tuesday on, still held; a Call sold Tuesday that expired Friday at 16:00 ET; a hedge Put bought and sold on Monday.
+  const positions = [
+    { strategyKey: "unstructured" as const, legs: [leg({})] },
+    { strategyKey: "covered_call" as const, legs: [leg({ exitAt: "2026-03-04T20:00:00.000Z" }), leg({ legType: "option", side: "short", optionType: "call", multiplier: 100, quantity: 1, exitAt: "2026-03-06T21:00:00.000Z" })] },
+    { strategyKey: "hedge" as const, legs: [leg({ legType: "option", optionType: "put", multiplier: 100, quantity: 1, entryAt: "2026-03-02T15:00:00.000Z", exitAt: "2026-03-02T19:00:00.000Z" })] },
+  ];
+  const metrics = { startValue: 100_000, endValue: 120_000, cagr: 0.1, interestDollars: 1_000 };
+
+  it("splits the account's P&L into shares, Calls and hedge, each with its part of the CAGR and its days held", () => {
+    const sources = computePnlSources({ metrics, tradingDates, cycles: [buckets([3_000, 5_000], -1_500, 500, 2_000), buckets([1_000, 0], -500, 0, 4_000)], positions, callSaleYields: [0.5, 1.2, 0.8], hedgeCostYields: [0.4, 0.2] })!;
+    // Options: Calls 4,000, hedge -2,000, Puts sold 500; the shares are the rest after 1,000 of interest: 20,000 - 1,000 - 2,500.
+    expect(sources.shares).toEqual({ pnlDollars: 16_500, cagrPart: expect.closeTo(0.0825, 12), daysHeldShare: 0.8 });
+    // The Call counts its expiry Friday: Tuesday to Friday.
+    expect(sources.coveredCalls).toEqual({ pnlDollars: 4_000, cagrPart: expect.closeTo(0.02, 12), daysHeldShare: 0.8, quotedYieldMedian: 0.8, quotedCount: 3 });
+    expect(sources.hedge).toEqual({ pnlDollars: -2_000, cagrPart: expect.closeTo(-0.01, 12), daysHeldShare: 0.2, quotedCostMedian: expect.closeTo(0.3, 10), quotedCount: 2 });
+    // With the Puts sold and interest, the parts add up to the CAGR.
+    expect(sources.shares!.cagrPart! + sources.coveredCalls!.cagrPart! + sources.hedge!.cagrPart! + (0.1 * 500) / 20_000 + (0.1 * 1_000) / 20_000).toBeCloseTo(0.1, 12);
+  });
+
+  it("leaves out what was never held, gives no CAGR part when the account made nothing, and nothing without cycles", () => {
+    const sharesOnly = computePnlSources({ metrics: { ...metrics, endValue: 100_000 }, tradingDates, cycles: [buckets([0, 0], 0, 0, 0)], positions: [positions[0]!], callSaleYields: [], hedgeCostYields: [] })!;
+    expect(sharesOnly).toEqual({ shares: { pnlDollars: -1_000, cagrPart: null, daysHeldShare: 0.8 }, coveredCalls: null, hedge: null });
+    expect(computePnlSources({ metrics, tradingDates, cycles: [], positions, callSaleYields: [], hedgeCostYields: [] })).toBeNull();
   });
 });

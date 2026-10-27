@@ -964,11 +964,12 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       const scanVolFarmerCrossings = (throughEt: string) => {
         if (settings.decisionMaker !== "vol_farmer" || settings.volFarmer.crossing === "hold_to_expiry") return;
         for (const entry of symbols) {
-          const crossing = scanVolFarmerCrossing({ ledger, symbol: entry.symbol, todayIso, adjustedBars: entry.intradayPrices.barsOn(todayIso), splitFactorToday: splitFactorToday(entry), throughEt, riskFreeRate: (riskFreeRatePercentOn(todayIso) ?? 0) / 100, priceByLegId, nextActionId });
+          const crossing = scanVolFarmerCrossing({ ledger, symbol: entry.symbol, todayIso, adjustedBars: entry.intradayPrices.barsOn(todayIso), splitFactorToday: splitFactorToday(entry), throughEt, riskFreeRate: (riskFreeRatePercentOn(todayIso) ?? 0) / 100, priceByLegId, nextActionId, onlyIfCycleNetPositive: settings.volFarmer.crossing === "unwind_if_net_positive" });
           if (crossing === null) continue;
           actions.push(...crossing.actions);
           filledActionsToday += crossing.actions.length;
-          looksOfDay.push({ lookTimeEt: crossing.lookTimeEt, summary: crossing.summary, filledCount: crossing.actions.length, refusedCount: 0, opensStopped: [] });
+          // A crossing held (no actions) is an unwind refused: the day's summary shows it.
+          looksOfDay.push({ lookTimeEt: crossing.lookTimeEt, summary: crossing.summary, filledCount: crossing.actions.length, refusedCount: crossing.actions.length === 0 ? 1 : 0, opensStopped: [] });
         }
       };
       for (const lookTimeEt of lookTimes) {

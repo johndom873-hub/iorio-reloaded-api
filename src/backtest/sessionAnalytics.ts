@@ -1,4 +1,6 @@
-import type { BacktestAccuracyBand, BacktestMetrics, BacktestMonthlyReturn } from "./backtestTypes.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { median } from "../lib/statistics.js";
+import type { BacktestAccuracyBand, BacktestCycle, BacktestMetrics, BacktestMonthlyReturn, BacktestPnlSource, BacktestPnlSources, BacktestPosition } from "./backtestTypes.js";
 
 // The backtest's headline figures, exactly as approved in docs/backtesting/FORMULAS.md (Marcelo 2026-10-12). Pure.
 
@@ -165,6 +167,62 @@ export function computeBacktestMetrics(days: readonly AccountDay[], book: Sessio
     returnOnCapitalInUse: book && exposureDays > 0 ? (everyCycleTotal / exposureDays) * calendarDaysPerYear : null,
     inTheMoneyAtExpiryShare: settledWithOutcome.length === 0 ? null : settledWithOutcome.filter((sale) => sale.inTheMoneyAtExpiry).length / settledWithOutcome.length,
     interestDollars: days.reduce((sum, day) => sum + day.interestDollars, 0),
+  };
+}
+
+/** The trading days (ascending) on which any of the legs was held at any time: each from its entry's Eastern date to its exit's, both included (an open one to the last day). */
+function daysHeldBy(legs: readonly { entryAt: string; exitAt: string | null }[], tradingDates: readonly string[]): number {
+  const held = new Set<number>();
+  for (const leg of legs) {
+    const from = easternIsoDate(new Date(leg.entryAt));
+    const to = leg.exitAt === null ? null : easternIsoDate(new Date(leg.exitAt));
+    let low = 0;
+    let high = tradingDates.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (tradingDates[middle]! < from) low = middle + 1;
+      else high = middle;
+    }
+    for (let index = low; index < tradingDates.length && (to === null || tradingDates[index]! <= to); index++) held.add(index);
+  }
+  return held.size;
+}
+
+/**
+ * The account's P&L by what made it (Marcelo 2026-10-26, the session tiles): the Calls' and the hedge's from the wheel
+ * cycles' buckets (an open option at its last mark), the shares' the rest after interest and every option's, so that
+ * shares + Calls + hedge + Puts sold + interest = the account's P&L. Each part of the CAGR = CAGR × its P&L ÷ the
+ * account's P&L. The quoted figures are those recorded at each Call sale (premiumYield) and each hedge purchase
+ * (hedgePutCostYield). Null without wheel cycles.
+ */
+export function computePnlSources(input: {
+  metrics: Pick<BacktestMetrics, "startValue" | "endValue" | "cagr" | "interestDollars">;
+  tradingDates: readonly string[];
+  cycles: readonly Pick<BacktestCycle, "buckets">[];
+  positions: readonly Pick<BacktestPosition, "strategyKey" | "legs">[];
+  callSaleYields: readonly number[];
+  hedgeCostYields: readonly number[];
+}): BacktestPnlSources | null {
+  const { metrics, tradingDates, cycles, positions } = input;
+  if (cycles.length === 0 || tradingDates.length === 0) return null;
+  const accountPnl = metrics.endValue - metrics.startValue;
+  const sum = (pick: (buckets: BacktestCycle["buckets"]) => number) => cycles.reduce((total, cycle) => total + pick(cycle.buckets), 0);
+  const everyOptionPnl = sum((buckets) => buckets.csp.premium + buckets.unstructured.premium + buckets.cc.premium + buckets.hedge.premium);
+  const source = (pnlDollars: number, daysHeld: number): BacktestPnlSource => ({ pnlDollars, cagrPart: accountPnl === 0 ? null : (metrics.cagr * pnlDollars) / accountPnl, daysHeldShare: daysHeld / tradingDates.length });
+  const legsOf = (keep: (position: Pick<BacktestPosition, "strategyKey">, leg: BacktestPosition["legs"][number]) => boolean) => positions.flatMap((position) => position.legs.filter((leg) => keep(position, leg)));
+  const shareLegs = legsOf((_, leg) => leg.legType === "stock");
+  const callLegs = legsOf((_, leg) => leg.legType === "option" && leg.optionType === "call" && leg.side === "short");
+  const hedgeLegs = legsOf((position, leg) => position.strategyKey === "hedge" && leg.legType === "option");
+  return {
+    shares: shareLegs.length === 0 ? null : source(accountPnl - metrics.interestDollars - everyOptionPnl, daysHeldBy(shareLegs, tradingDates)),
+    coveredCalls:
+      callLegs.length === 0
+        ? null
+        : { ...source(sum((buckets) => buckets.cc.premium), daysHeldBy(callLegs, tradingDates)), quotedYieldMedian: input.callSaleYields.length === 0 ? null : median([...input.callSaleYields]), quotedCount: input.callSaleYields.length },
+    hedge:
+      hedgeLegs.length === 0
+        ? null
+        : { ...source(sum((buckets) => buckets.hedge.premium), daysHeldBy(hedgeLegs, tradingDates)), quotedCostMedian: input.hedgeCostYields.length === 0 ? null : median([...input.hedgeCostYields]), quotedCount: input.hedgeCostYields.length },
   };
 }
 

@@ -323,9 +323,10 @@ export function validateVolFarmerSettings(values: Record<string, unknown>): stri
   if (!isNumberIn(values.protectionFallPct, 1, 90)) return "volFarmer.protectionFallPct must be a number from 1 to 90.";
   if (!isNumberIn(values.maxSpreadPctOfMid, 1, 200)) return "volFarmer.maxSpreadPctOfMid must be a number from 1 to 200.";
   if (!isNumberIn(values.putCashReservePct, 0, 50)) return "volFarmer.putCashReservePct must be a number from 0 to 50.";
-  const choices: Record<string, readonly string[]> = { crossing: ["unwind", "hold_to_expiry"], putExpiry: ["in_range", "with_the_call"], hedgeRuleCallPremiums: ["excluded", "included"], hedgeWithoutCall: ["none", "put"], putRoll: ["none", "when_no_call"] };
+  const choices: Record<string, readonly string[]> = { callExpiry: ["in_range", "next"], crossing: ["unwind", "hold_to_expiry", "unwind_if_net_positive"], putExpiry: ["in_range", "with_the_call"], hedgeRuleCallPremiums: ["excluded", "included"], hedgeWithoutCall: ["none", "put", "cheapest_per_year"], putChoice: ["most_protection", "cheapest_per_year"], putRoll: ["none", "when_no_call"], hedgeAfterExpiry: ["keep", "sell_if_in_profit"], afterAssignment: ["end", "continue_if_under_water"], hedgeRuleStockPnl: ["excluded", "included"], putCashIn: ["none", "when_no_call"], hedge: ["put", "none"] };
   for (const [field, allowed] of Object.entries(choices)) if (!allowed.includes(values[field] as string)) return `volFarmer.${field} must be one of ${allowed.join(", ")}.`;
   if (!isNumberIn(values.minPutProtectionPct, 0, 100)) return "volFarmer.minPutProtectionPct must be a number from 0 to 100.";
+  if (!isNumberIn(values.cashInPutMinProtectionPct, 0, 100)) return "volFarmer.cashInPutMinProtectionPct must be a number from 0 to 100.";
   if (!isNumberIn(values.maxPutCostPctOfCallPremium, 0, 500)) return "volFarmer.maxPutCostPctOfCallPremium must be a number from 0 to 500.";
   return null;
 }

@@ -4,6 +4,7 @@ import { analysisSessionName } from "./analysisBacktest.js";
 import { treasuryBillCagr } from "./analysisSessions.js";
 import { hashAnalysisLabValues, validateAnalysisTrialValues } from "./analysisStore.js";
 import { fitByDay, ladderBasePath, largestPotOfDay, potOnDayFrom, tooLargeByYear, yieldGivenUp, type AnalysisOrder } from "./analysisPotSizing.js";
+import { barIndicatorsOf, sliceBarIndicators } from "./analysisPriceFigures.js";
 import type { BacktestSettings } from "../backtestTypes.js";
 
 describe("analysisSessionName", () => {
@@ -139,5 +140,41 @@ describe("pot sizing", () => {
     const byYear = tooLargeByYear([multi, order({ date: "2025-03-04", unsold: 2, unsoldReason: "volume" }), order({ date: "2026-01-05", right: "C" })]);
     expect(byYear["2025"]).toEqual({ saleDays: 2, callDaysOverOneStrike: 0, putDaysOverOneStrike: 1, medianYieldGivenUp: yieldGivenUp(multi), callDaysPartlyUnsold: 0, putDaysPartlyUnsold: 1 });
     expect(byYear["2026"]!.saleDays).toBe(1);
+  });
+});
+
+describe("barIndicatorsOf", () => {
+  // Closes 1, 2, 3, … and IVs rising with them, so each bar's IV is its window's highest.
+  const rising = Array.from({ length: 260 }, (_, index) => ({ close: index + 1, impliedVolatility: 0.3 + index / 100 }));
+
+  it("IV Percentile: from the 20th bar with an IV, the last 252 bars' IVs at or below the bar's ÷ those with one", () => {
+    const { ivPercentile } = barIndicatorsOf(rising);
+    expect(ivPercentile.slice(0, 19)).toEqual(Array(19).fill(null));
+    expect(ivPercentile[19]).toEqual([1, 20, 20]);
+    // The window stops at 252 bars: the 260th bar reads bars 9 to 260.
+    expect(ivPercentile[259]).toEqual([1, 252, 252]);
+  });
+
+  it("counts ties and the bar's own IV, and skips the bars without one", () => {
+    const bars = [...Array.from({ length: 20 }, (_, index) => ({ close: 10, impliedVolatility: index < 10 ? 0.5 : 0.7 })), { close: 10, impliedVolatility: null }, { close: 10, impliedVolatility: 0.5 }];
+    const { ivPercentile } = barIndicatorsOf(bars);
+    expect(ivPercentile[20]).toBeNull();
+    // 21 IVs in the window, the bar without one left out: the ten at 0.5 before it and its own are at or below it.
+    expect(ivPercentile[21]).toEqual([0.5238, 11, 21]);
+  });
+
+  it("the 50- and 200-day averages of the closes, the bar's own included, from the 50th and the 200th bar", () => {
+    const { movingAverage50, movingAverage200 } = barIndicatorsOf(rising);
+    expect(movingAverage50[48]).toBeNull();
+    // Closes 1 to 50, then 2 to 51.
+    expect(movingAverage50[49]).toBe(25.5);
+    expect(movingAverage50[50]).toBe(26.5);
+    expect(movingAverage200[198]).toBeNull();
+    expect(movingAverage200[199]).toBe(100.5);
+  });
+
+  it("cuts the indicators of a whole file to a session's bars", () => {
+    const all = barIndicatorsOf(rising);
+    expect(sliceBarIndicators(all, 199, 201)).toEqual({ ivPercentile: all.ivPercentile.slice(199, 202), movingAverage50: [175.5, 176.5, 177.5], movingAverage200: [100.5, 101.5, 102.5] });
   });
 });

@@ -38,10 +38,12 @@ import type {
   BacktestBookMode,
 } from "../backtestTypes.js";
 import { ladderRungReached } from "../engine/backtestBaselineLadder.js";
+import { hedgePutCostYield } from "../engine/baselineSaleSteps.js";
+import { optionCommissionDollars } from "../engine/ledger/ledgerFills.js";
 import { loadLadderRungs } from "../analysis/analysisBacktest.js";
 import { loadSessionFreeCash } from "../analysis/sessionFreeCash.js";
 import { backtestCaptureLookTimeEt, backtestEngineVersion } from "../backtestTypes.js";
-import { computeCycleAccuracyBands, computeDrawdowns, computeMonthlyReturns, computeTradeAccuracyBands, cycleFiguresOf, type ClosedTradeFigures } from "../sessionAnalytics.js";
+import { computeCycleAccuracyBands, computeDrawdowns, computeMonthlyReturns, computePnlSources, computeTradeAccuracyBands, cycleFiguresOf, type ClosedTradeFigures } from "../sessionAnalytics.js";
 import { computeAllSymbolsStatistics, computeTickerStatistics } from "../tickerStatistics.js";
 import { BacktestRequestError, insertQueuedBacktestJob, kickBacktestQueue, loadBacktestJobView, loadLatestJobViewForSession, loadLatestSessionRunStates, stopJobsOfSession } from "./backtestJobStore.js";
 import type { BacktestBookPageFilters, BacktestSessionsPageFilters, ValidatedBacktestSessionRequest } from "./backtestSessionRequest.js";
@@ -50,7 +52,7 @@ import { sqlContainsPattern } from "../../lib/sqlContainsPattern.js";
 import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { cachedSplitsBetween, readSplitScheduleCache, splitFactorOn } from "../engine/splitFactors.js";
 import { withPositionCycle, type BacktestPositionRecord } from "../engine/backtestSessionRecords.js";
-import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment, sharesHeldAtInstant, sharesHeldAtMarks, type SplitFactorOfDay } from "../cycleCashBreakEven.js";
+import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment, sharesHeldAtInstant, sharesHeldAtMarks, type CashBreakEvenOptions, type SplitFactorOfDay } from "../cycleCashBreakEven.js";
 import { withHedgeMarkedAtHandOvers, type HedgePutMarkOf } from "../cycleHedgeHandOvers.js";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 
@@ -563,13 +565,21 @@ function hedgePutMarksFromFile(symbol: string): { markOf: HedgePutMarkOf; close(
   };
 }
 
-async function hedgeRealizedPnlInBreakEven(sessionId: string): Promise<boolean> {
+/**
+ * How the session's Wheel cycles read the break-even: a Vol Farmer's as its hedge rule does (Marcelo 2026-10-27), the
+ * hedge's realized P&L in and the Calls' premium only where the rule counts it; any other with the baseline's
+ * hedgeInBreakEven.
+ */
+async function breakEvenOptionsOf(sessionId: string): Promise<CashBreakEvenOptions> {
   const row: { settings_snapshot: BacktestSettings; overrides: BacktestSettingsOverrides | null } | undefined = await db("backtest_sessions").where({ id: sessionId }).first("settings_snapshot", "overrides");
-  return row !== undefined && applyBacktestOverrides(row.settings_snapshot, row.overrides ?? {}).baseline.hedgeInBreakEven === "included";
+  if (row === undefined) return {};
+  const settings = applyBacktestOverrides(row.settings_snapshot, row.overrides ?? {});
+  if (settings.decisionMaker === "vol_farmer") return { hedgeRealizedPnlIncluded: true, optionPremiumsIncluded: settings.volFarmer.hedgeRuleCallPremiums === "included" };
+  return { hedgeRealizedPnlIncluded: settings.baseline.hedgeInBreakEven === "included" };
 }
 
 async function loadSessionCycles(sessionId: string): Promise<BacktestCycle[]> {
-  const hedgeIncluded = await hedgeRealizedPnlInBreakEven(sessionId);
+  const breakEvenOptions = await breakEvenOptionsOf(sessionId);
   const rows: Record<string, unknown>[] = await db("backtest_cycles")
     .where({ session_id: sessionId })
     .orderBy([{ column: "symbol" }, { column: "cycle_number" }])
@@ -589,7 +599,7 @@ async function loadSessionCycles(sessionId: string): Promise<BacktestCycle[]> {
     netPremiumDollars: Number(row.net_premium_dollars),
     sharesHeld: Number(row.shares_held),
     breakEvenPerShare: nullableNumber(row.break_even_per_share as string | null),
-    cashBreakEvenPerShare: row.open_timeline ? (hedgeIncluded ? cycleCashBreakEven(row.open_timeline as BacktestCycleTimelineRow[], splitFactorOfDayFor(row.symbol as string), { hedgeRealizedPnlIncluded: true }) : cycleCashBreakEven(row.open_timeline as BacktestCycleTimelineRow[])) : null,
+    cashBreakEvenPerShare: row.open_timeline ? (breakEvenOptions.hedgeRealizedPnlIncluded ? cycleCashBreakEven(row.open_timeline as BacktestCycleTimelineRow[], splitFactorOfDayFor(row.symbol as string), breakEvenOptions) : cycleCashBreakEven(row.open_timeline as BacktestCycleTimelineRow[])) : null,
     sharesHeldNow: row.open_timeline ? sharesHeldAtMarks(row.open_timeline as BacktestCycleTimelineRow[]) : null,
     buckets: row.buckets as BacktestCycle["buckets"],
     dataFlags: row.data_flags as string[],
@@ -636,9 +646,10 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
   if (!row) throw new BacktestRequestError(`The session has no cycle ${symbol} #${cycleNumber}.`, 404);
   if (row.timeline === null) return null;
   const sales = await loadSaleRecords(sessionId, symbol, row.timeline);
+  const hedgePurchases = await loadHedgePurchaseRecords(sessionId, symbol, row.timeline);
   const crossingInstants = await loadVolFarmerCrossingInstants(sessionId, symbol, row.timeline);
   const splitFactorOf = splitFactorOfDayFor(symbol);
-  const breakEvens = cashBreakEvenBeforeEachRow(row.timeline, splitFactorOf, { hedgeRealizedPnlIncluded: await hedgeRealizedPnlInBreakEven(sessionId) });
+  const breakEvens = cashBreakEvenBeforeEachRow(row.timeline, splitFactorOf, await breakEvenOptionsOf(sessionId));
   const sharesHeld = sharesHeldAfterEachMoment(row.timeline, splitFactorOf);
   // A Vol Farmer cycle shows its hedge marked at every hand-over of the shares; what the cycle reads per moment (break-even,
   // shares held) stays the stored timeline's, through each shown row's source row.
@@ -662,6 +673,8 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
       const sold = entry.bucket === "hedge" ? null : /^Sold (put|call) @/.exec(entry.label);
       const freeCashShare = freeCash?.shareAfter(entry.tradingDate, entry.at) ?? null;
       const crossing = entry.at !== null && crossingInstants.has(Date.parse(entry.at)) ? { crossing: true } : {};
+      // A hedge Put's purchase (a Vol Farmer cycle shows a copy of it, its cost moved to the hand-over marks).
+      if (entry.bucket === "hedge" && entry.instrument === "option" && /^Bought put @/.test(entry.label)) return { ...entry, hedgeCostYield: hedgePurchases.costYieldOf(entry.tradingDate, entry.strike, entry.expiryDate), sharesHeld: sharesHeld[index]!, freeCashShare, ...crossing };
       if (!sold || entry.instrument !== "option" || !isSourceRow) return { ...entry, sharesHeld: sharesHeld[index]!, freeCashShare, ...crossing };
       const { premiumYield, delta, ladderRung } = sales.recordedOf(entry.tradingDate, sold[1] === "put" ? "P" : "C", entry.strike, entry.expiryDate, entry.at);
       return { ...entry, premiumYield, delta, breakEvenAtSale: breakEvens[index]!, sharesHeld: sharesHeld[index]!, ...(sold[1] === "put" ? { ladderRung } : {}), freeCashShare, ...crossing };
@@ -804,6 +817,49 @@ async function loadSaleRecords(sessionId: string, symbol: string, timeline: read
   };
 }
 
+/** The hedge Puts bought in the cycle's days, read by day, strike and expiry: their yearly cost (hedgePutCostYield) from what each purchase recorded, contract-weighted. */
+async function loadHedgePurchaseRecords(sessionId: string, symbol: string, timeline: readonly BacktestCycleTimelineRow[]): Promise<{ costYieldOf: (date: string, strike: number | null, expiry: string | null) => number | null }> {
+  const dates = timeline.map((entry) => entry.tradingDate).sort();
+  if (dates.length === 0) return { costYieldOf: () => null };
+  const purchases: { date: string; contract: { strike: number; expiry: string }; quantity: string; fill_price: string; stock_price: string | null; dte: string | null }[] = await db("backtest_actions")
+    .where({ session_id: sessionId, symbol, outcome: "filled", kind: "buy_hedge" })
+    .whereBetween("trading_date", [dates[0]!, dates.at(-1)!])
+    .select(db.raw("trading_date::text as date"), "contract", "quantity", "fill_price", db.raw("candidate_scores->>'stockPrice' as stock_price"), db.raw("candidate_scores->>'dte' as dte"));
+  const keyOf = (date: string, strike: number, expiry: string) => `${date}|${Math.round(strike * 10_000)}|${expiry}`;
+  const totals = new Map<string, { weightedCostYield: number; contracts: number }>();
+  for (const purchase of purchases) {
+    if (purchase.stock_price === null || purchase.dte === null) continue;
+    const costYield = hedgePutCostYield({ fillPrice: Number(purchase.fill_price), strike: Number(purchase.contract.strike), stockPrice: Number(purchase.stock_price), dte: Number(purchase.dte), commissionDollarsPerContract: optionCommissionDollars(1) });
+    if (costYield === null) continue;
+    const key = keyOf(purchase.date, Number(purchase.contract.strike), purchase.contract.expiry);
+    const total = totals.get(key) ?? { weightedCostYield: 0, contracts: 0 };
+    total.weightedCostYield += costYield * Number(purchase.quantity);
+    total.contracts += Number(purchase.quantity);
+    totals.set(key, total);
+  }
+  return {
+    costYieldOf: (date, strike, expiry) => {
+      const total = strike === null || expiry === null ? undefined : totals.get(keyOf(date, strike, expiry));
+      return total && total.contracts > 0 ? total.weightedCostYield / total.contracts : null;
+    },
+  };
+}
+
+/** Every symbol's yearly yields recorded at each Call sale (premiumYield) and yearly costs of each hedge Put bought (hedgePutCostYield), for the session tiles. */
+async function loadQuotedYields(sessionId: string): Promise<{ callSaleYields: number[]; hedgeCostYields: number[] }> {
+  const rows: { kind: string; premium_yield: string | null; fill_price: string | null; strike: string | null; stock_price: string | null; dte: string | null }[] = await db("backtest_actions")
+    .where({ session_id: sessionId, outcome: "filled" })
+    .whereIn("kind", ["open_covered_call", "buy_hedge"])
+    .select("kind", db.raw("candidate_scores->>'premiumYield' as premium_yield"), "fill_price", db.raw("contract->>'strike' as strike"), db.raw("candidate_scores->>'stockPrice' as stock_price"), db.raw("candidate_scores->>'dte' as dte"));
+  const callSaleYields = rows.flatMap((row) => (row.kind === "open_covered_call" && row.premium_yield !== null ? [Number(row.premium_yield)] : []));
+  const hedgeCostYields = rows.flatMap((row) => {
+    if (row.kind !== "buy_hedge" || row.fill_price === null || row.strike === null || row.stock_price === null || row.dte === null) return [];
+    const costYield = hedgePutCostYield({ fillPrice: Number(row.fill_price), strike: Number(row.strike), stockPrice: Number(row.stock_price), dte: Number(row.dte), commissionDollarsPerContract: optionCommissionDollars(1) });
+    return costYield === null ? [] : [costYield];
+  });
+  return { callSaleYields, hedgeCostYields };
+}
+
 /** Per ticker in its turn order (alphabetical), the looks and days at which the cash cut one of its orders (backtest_look_shortfalls). */
 async function loadCashBoundBySymbol(sessionId: string, symbols: readonly string[]): Promise<{ symbol: string; looks: number; days: number }[]> {
   const rows: { symbol: string; looks: string; days: string }[] = await db("backtest_look_shortfalls")
@@ -823,7 +879,7 @@ async function loadCashBoundBySymbol(sessionId: string, symbols: readonly string
 export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: string | null = null): Promise<BacktestSessionDetail> {
   const row = await loadSessionRow(sessionId);
   const ofSymbol = <Row extends { symbol: string }>(rows: Row[]): Row[] => (onlySymbol === null ? rows : rows.filter((entry) => entry.symbol === onlySymbol));
-  const [dayRows, tradeRows, job, everyPositionRecord, everyCycle, everyCycleGap, bookCounts, cashBoundBySymbol] = await Promise.all([
+  const [dayRows, tradeRows, job, everyPositionRecord, everyCycle, everyCycleGap, bookCounts, cashBoundBySymbol, quotedYields] = await Promise.all([
     loadSessionDayRows([sessionId]),
     loadSessionTradeRows(sessionId),
     loadLatestJobViewForSession(sessionId),
@@ -832,6 +888,7 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
     loadSessionCycleGaps(sessionId),
     loadSessionBookCounts(sessionId),
     row.book_mode === "pots" ? loadCashBoundBySymbol(sessionId, symbolsOf(row)) : null,
+    loadQuotedYields(sessionId),
   ]);
   const days = toSessionDays(dayRows);
   // A row stored before trades named their symbol belongs to the session's one symbol.
@@ -902,6 +959,8 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
     cycleGaps,
     tickerStatistics: computeTickerStatistics(positions, cycles),
     allSymbolsStatistics: computeAllSymbolsStatistics(positions, cycles),
+    // The whole account's, like the metrics, whichever symbol is shown.
+    pnlSources: row.metrics ? computePnlSources({ metrics: row.metrics, tradingDates: days.map((day) => day.tradingDate), cycles: everyCycle, positions: everyPositionRecord, ...quotedYields }) : null,
     bookCounts,
   };
 }

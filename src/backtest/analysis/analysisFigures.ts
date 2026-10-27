@@ -27,6 +27,7 @@ import {
   toOhlcvBars,
   yangZhangSeries,
   type AnalysisBarChecks,
+  type AnalysisBarIndicators,
   type AnalysisIvPremiumStats,
   type AnalysisMaxDrawdown,
   type AnalysisPriceRange,
@@ -60,6 +61,8 @@ export interface AnalysisFigures {
   bars: [string, number, number, number, number, number | null][];
   /** 21-day Yang-Zhang, one per bar (null until 21 sessions). */
   yangZhang21: (number | null)[];
+  /** IV Percentile and the 50- and 200-day averages, one per bar: added when the figures are read (analysisStore.ts), not stored. */
+  barIndicators?: AnalysisBarIndicators;
   volatility: {
     impliedNow: number | null;
     yangZhang21Now: number | null;

@@ -174,6 +174,19 @@ export function baselineSaleYield(input: { isCall: boolean; fillPrice: number; s
 }
 
 /**
+ * A hedge Put's yearly cost at its purchase, the sale yield's twin (Marcelo 2026-10-26, the Wheel cycles' hedge rows): its
+ * time value (the fill less any in-the-money part) plus one contract's commission, on the stock it protects, annualized
+ * over its own days to expiry: (time value × 100 + commission) ÷ (stock price × 100) ÷ (days ÷ 365). Null when that
+ * cost is not above 0.
+ */
+export function hedgePutCostYield(input: { fillPrice: number; strike: number; stockPrice: number; dte: number; commissionDollarsPerContract: number }): number | null {
+  const timeValue = input.fillPrice - Math.max(input.strike - input.stockPrice, 0);
+  const costDollars = timeValue * sharesPerContract + input.commissionDollarsPerContract;
+  if (!(costDollars > 0) || !(input.stockPrice > 0)) return null;
+  return yieldOnExposure(costDollars, input.stockPrice * sharesPerContract, Math.max(input.dte / 365, minimumAnnualizationYears));
+}
+
+/**
  * The lowest premium yield a sale needs (a fraction, annualized), or null for any: minCallYieldPct for the entries always
  * (a Covered Call's call, or a Cash-Secured Put entry's put: Marcelo 2026-10-19), for the calls on held shares with
  * "every_call"; the ladder's puts at any yield.

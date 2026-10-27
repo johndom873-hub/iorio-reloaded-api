@@ -21,13 +21,13 @@ export function shareDirectionOf(label: string): 1 | -1 | 0 {
  * A row's part in the cash break-even: dollars into and out of shares, premium, and shares in or out (as traded on its day).
  * `hedgeRealized` is what a hedge row adds: its realized P&L with the hedge in the break-even, else nothing.
  */
-function rowAmounts(row: BacktestCycleTimelineRow, hedgeRealized = 0): { acquired: number; disposed: number; premium: number; shares: number } {
+function rowAmounts(row: BacktestCycleTimelineRow, hedgeRealized = 0, optionPremiumsIncluded = true): { acquired: number; disposed: number; premium: number; shares: number } {
   const dollars = row.quantity * (row.label.startsWith("Put assigned") || row.label.startsWith("Call assigned") ? (row.strike ?? 0) : (row.stockPrice ?? 0));
   const commission = row.commissionDollars ?? 0;
   const bought = shareDirectionOf(row.label) === 1;
   const left = shareDirectionOf(row.label) === -1;
   // A hedge's cost is not premium earned on the shares; an open option's mark is not premium received.
-  const premium = row.bucket === "hedge" ? hedgeRealized : !(row.at === null && row.label.startsWith("Open ")) ? row.premiumDollars : 0;
+  const premium = row.bucket === "hedge" ? hedgeRealized : optionPremiumsIncluded && !(row.at === null && row.label.startsWith("Open ")) ? row.premiumDollars : 0;
   return { acquired: bought ? dollars + commission : 0, disposed: left ? dollars - commission : 0, premium, shares: bought ? row.quantity : left ? -row.quantity : 0 };
 }
 
@@ -68,9 +68,13 @@ function hedgeRealizedByRow(timeline: readonly BacktestCycleTimelineRow[], inclu
   });
 }
 
-/** How a timeline is read for the break-even: the hedge's realized P&L in it or not (hedgeInBreakEven). */
+/**
+ * How a timeline is read for the break-even: the hedge's realized P&L in it or not (hedgeInBreakEven), and the other
+ * options' premium (false: a Vol Farmer whose hedge rule leaves the Calls out, Marcelo 2026-10-27).
+ */
 export interface CashBreakEvenOptions {
   hedgeRealizedPnlIncluded?: boolean;
+  optionPremiumsIncluded?: boolean;
 }
 
 /** A day's split factor (1 where no split is known): the shares as traded that day × it are split-adjusted shares. */
@@ -88,7 +92,7 @@ export function cycleCashBreakEven(timeline: readonly BacktestCycleTimelineRow[]
   const hedgeRealized = hedgeRealizedByRow(timeline, options.hedgeRealizedPnlIncluded === true, splitFactorOf);
   let net = 0;
   for (const [index, row] of timeline.entries()) {
-    const amounts = rowAmounts(row, hedgeRealized[index]);
+    const amounts = rowAmounts(row, hedgeRealized[index], options.optionPremiumsIncluded !== false);
     net += amounts.acquired - amounts.disposed - amounts.premium;
   }
   const sharesHeld = sharesHeldAtMarks(timeline);
@@ -123,7 +127,7 @@ export function cashBreakEvenBeforeEachRow(timeline: readonly BacktestCycleTimel
   let atMomentStart: { net: number; adjustedShares: number } = { net: 0, adjustedShares: 0 };
   return timeline.map((row, position) => {
     if (position === 0 || moments[position] !== moments[position - 1]) atMomentStart = { net: net - (hedgeRealizedByMoment.get(moments[position]!) ?? 0), adjustedShares };
-    const amounts = rowAmounts(row, hedgeRealized[position]);
+    const amounts = rowAmounts(row, hedgeRealized[position], options.optionPremiumsIncluded !== false);
     net += amounts.acquired - amounts.disposed - amounts.premium;
     adjustedShares += amounts.shares * splitFactorOf(row.tradingDate);
     const sharesOnRowDay = atMomentStart.adjustedShares / splitFactorOf(row.tradingDate);

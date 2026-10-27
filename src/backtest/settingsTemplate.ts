@@ -86,6 +86,17 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
   { path: "volFarmer.callMaxAbsDelta", label: "Calls' |delta| to", unit: "number", editable: true, note: null },
   { path: "volFarmer.callMinDte", label: "Calls' days to expiry from", unit: "days", editable: true, note: "the data files' Calls are read up to 45 days out" },
   { path: "volFarmer.callMaxDte", label: "Calls' days to expiry to", unit: "days", editable: true, note: null },
+  {
+    path: "volFarmer.callExpiry",
+    label: "Calls tried",
+    unit: "choice",
+    editable: true,
+    note: "in the days-to-expiry range: every expiry from the Calls' days to expiry from/to. The next expiry: only the first listed expiry after today (the range is not read); a day none of its Calls passes the hedge rule sells no Call, and the next 10:00 look tries again",
+    choices: [
+      { value: "in_range", label: "Every expiry in the days-to-expiry range" },
+      { value: "next", label: "Only the next expiry" },
+    ],
+  },
   { path: "volFarmer.putMinDte", label: "Puts' days to expiry from", unit: "days", editable: true, note: "the Put also expires on or after the Call's expiry: 0 = from the Call's expiry" },
   { path: "volFarmer.putMaxDte", label: "Puts' days to expiry to", unit: "days", editable: true, note: null },
   { path: "volFarmer.putMaxStrikeAbovePricePct", label: "Puts' strike up to", unit: "percent", editable: true, note: "% above the stock price; 0 = at or below the price, −5 = at least 5% below it (−20 to 10)" },
@@ -97,10 +108,11 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "When the stock reaches the Call's strike",
     unit: "choice",
     editable: true,
-    note: "unwind: the shares sold at the strike, the Call bought back and the Put sold at their Black-Scholes values, there and then. Hold to expiry: nothing is traded; a Call in the money at its expiry is assigned (its shares go at the strike) and the Put is sold at the next 10:00 look, or settles with the Call",
+    note: "unwind: the shares sold at the strike, the Call bought back and the Put sold at their Black-Scholes values, there and then. Hold to expiry: nothing is traded; a Call in the money at its expiry is assigned (its shares go at the strike) and the Put is sold at the next 10:00 look, or settles with the Call. Unwind if the cycle nets a gain: the cycle's realized P&L (shares, Calls and Puts, commissions included) plus closing everything at the unwind's prices; above 0 it unwinds, else everything is held and the same sum, at each later look's prices (the fill rule), is checked at every look to the Call's expiry, unwinding at the first above 0",
     choices: [
       { value: "unwind", label: "Unwind the position at the crossing" },
       { value: "hold_to_expiry", label: "Hold to the Call's expiry (assignment)" },
+      { value: "unwind_if_net_positive", label: "Unwind if the cycle nets a gain, else check at every look" },
     ],
   },
   {
@@ -131,10 +143,22 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Shares with no Call that qualifies",
     unit: "choice",
     editable: true,
-    note: "a Put: shares held with no Put buy the Put at the strike cap (the highest strike up to the Puts' strike limit) of the nearest expiry 7 or more days out, the Calls tried again at the next 10:00 look with it",
+    note: "a Put: shares held with no Put buy the Put at the strike cap (the highest strike up to the Puts' strike limit) of the nearest expiry 7 or more days out, the Calls tried again at the next 10:00 look with it. The Put choice's Put: the one the Put choice below takes among the Puts tried, with no hedge rule (there is no Call) and protection measured to the next listed Call expiry; above all once the Put held has expired",
     choices: [
       { value: "none", label: "Left unhedged" },
       { value: "put", label: "A Put" },
+      { value: "cheapest_per_year", label: "The Put choice's Put" },
+    ],
+  },
+  {
+    path: "volFarmer.putChoice",
+    label: "Put chosen",
+    unit: "choice",
+    editable: true,
+    note: "of the Puts that pass the hedge rule and offer at least the least protection: the most protection, or the cheapest per year: (time value × 100 + one contract's commission) ÷ (stock price × 100) ÷ (days to expiry ÷ 365), a tie going to the more protection",
+    choices: [
+      { value: "most_protection", label: "The most protection" },
+      { value: "cheapest_per_year", label: "The cheapest per year" },
     ],
   },
   { path: "volFarmer.maxPutCostPctOfCallPremium", label: "A new Put costs at most", unit: "percent", editable: true, note: "% of the Call's premium (its fill): of the Puts that pass, the most protection within this budget; 100 = a zero-cost collar, 0 = no limit (0 to 500)" },
@@ -147,6 +171,62 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     choices: [
       { value: "none", label: "Wait" },
       { value: "when_no_call", label: "Roll the Put when that lets a Call pass" },
+    ],
+  },
+  {
+    path: "volFarmer.hedgeAfterExpiry",
+    label: "Put in profit after a Call expires",
+    unit: "choice",
+    editable: true,
+    note: "sell it: after a Call expired below its strike, Puts held whose sale would realize a gain (their fill less what they cost, commissions included) are sold, but only with a new Call and a new Put that pass the hedge rule with that gain counted; otherwise they are kept and the next Call is sold with them. Keep them: the next Call is sold with the Puts held",
+    choices: [
+      { value: "keep", label: "Keep it" },
+      { value: "sell_if_in_profit", label: "Sell it with a new Call and Put" },
+    ],
+  },
+  {
+    path: "volFarmer.afterAssignment",
+    label: "Shares called away, Put held",
+    unit: "choice",
+    editable: true,
+    note: "end the cycle: the Put is sold at the next 10:00 look. Buy back when under water: at the next 10:00 look the cycle's realized share and Put P&L plus the Put's sale (Calls left out) is worked out; above 0 the Put is sold and the cycle ends, else the shares called away are bought back at the 10:00 price (as many as the free cash pays for), the Put is kept and a Call that passes the hedge rule is sold on them",
+    choices: [
+      { value: "end", label: "End the cycle" },
+      { value: "continue_if_under_water", label: "Buy the shares back when under water" },
+    ],
+  },
+  {
+    path: "volFarmer.hedgeRuleStockPnl",
+    label: "Realized share P&L in the hedge rule",
+    unit: "choice",
+    editable: true,
+    note: "included: the cycle's realized share P&L (shares called away or sold) is added to the Puts' realized P&L in the hedge rule, so the gain on shares called away counts for the Calls on the shares bought back",
+    choices: [
+      { value: "excluded", label: "Left out" },
+      { value: "included", label: "Included" },
+    ],
+  },
+  {
+    path: "volFarmer.putCashIn",
+    label: "Put in profit and no Call sold",
+    unit: "choice",
+    editable: true,
+    note: "cash it in: at a 10:00 look that sells no Call (after the rolls above are tried), each Put held whose sale would realize a gain (its fill less what it cost, commissions included) is sold, so the gain counts in the hedge rule's realized Put P&L from then and lowers the price a Call must pass at; the lots left without a Put get the Put of \"Shares with no Call that qualifies\" at the same look. Keep it: the Put is held until a Call is sold with it, a roll sells it or it expires",
+    choices: [
+      { value: "none", label: "Keep it" },
+      { value: "when_no_call", label: "Cash it in" },
+    ],
+  },
+  { path: "volFarmer.cashInPutMinProtectionPct", label: "Least protection of the Put after a cash-in", unit: "percent", editable: true, note: "% of the fall the protection is measured on: the Put bought for the lots a cash-in left without one (with \"The Put choice's Put\") offers at least this much; 0 = any (0 to 100)" },
+  {
+    path: "volFarmer.hedge",
+    label: "Hedge",
+    unit: "choice",
+    editable: true,
+    note: "none (research): no Put is ever bought; a Call passes the hedge rule on the shares alone, (strike − what the shares cost) + the cycle's realized P&L the rule counts ≥ 0, and a new cycle's lots = free cash × (1 − the cash kept ÷ 100) ÷ (100 × price + stock commission). The Put settings above are not read",
+    choices: [
+      { value: "put", label: "A long Put" },
+      { value: "none", label: "None" },
     ],
   },
   { path: "steadyStake.stakePct", label: "Stake", unit: "percent", editable: true, note: "% of the pot: the share of each ticker's pot held in its shares. At the 10:00 look, whole shares are bought or sold back to it when their value drifts out of the band" },
@@ -726,7 +806,7 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
   {
     group: "Vol Farmer",
     section: "vol_farmer",
-    rows: ["volFarmer.callMinAbsDelta", "volFarmer.callMaxAbsDelta", "volFarmer.callMinDte", "volFarmer.callMaxDte", "volFarmer.putMinDte", "volFarmer.putMaxDte", "volFarmer.putMaxStrikeAbovePricePct", "volFarmer.protectionFallPct", "volFarmer.maxSpreadPctOfMid", "volFarmer.putCashReservePct", "volFarmer.crossing", "volFarmer.putExpiry", "volFarmer.hedgeRuleCallPremiums", "volFarmer.minPutProtectionPct", "volFarmer.hedgeWithoutCall", "volFarmer.maxPutCostPctOfCallPremium", "volFarmer.putRoll"].map((path) => ({
+    rows: ["volFarmer.callMinAbsDelta", "volFarmer.callMaxAbsDelta", "volFarmer.callMinDte", "volFarmer.callMaxDte", "volFarmer.callExpiry", "volFarmer.putMinDte", "volFarmer.putMaxDte", "volFarmer.putMaxStrikeAbovePricePct", "volFarmer.protectionFallPct", "volFarmer.maxSpreadPctOfMid", "volFarmer.putCashReservePct", "volFarmer.crossing", "volFarmer.putExpiry", "volFarmer.hedgeRuleCallPremiums", "volFarmer.minPutProtectionPct", "volFarmer.hedgeWithoutCall", "volFarmer.putChoice", "volFarmer.maxPutCostPctOfCallPremium", "volFarmer.putRoll", "volFarmer.hedgeAfterExpiry", "volFarmer.afterAssignment", "volFarmer.hedgeRuleStockPnl", "volFarmer.putCashIn", "volFarmer.cashInPutMinProtectionPct", "volFarmer.hedge"].map((path) => ({
       path,
       appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer"] }], explanation: "Applies only with the Vol Farmer as decision maker." },
     })),

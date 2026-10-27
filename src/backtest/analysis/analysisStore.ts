@@ -12,7 +12,8 @@ import { loadTickerSuitability } from "../tickerSuitabilityStore.js";
 import { validateBaselineSettings } from "../jobs/backtestSessionRequest.js";
 import { deriveJobDisplayStatus } from "../jobs/backtestJobRules.js";
 import { BacktestRequestError, cancelBacktestJob, findUnfinishedDownloadJob, insertClaimedAnalysisJob, startClaimedBacktestJob } from "../jobs/backtestJobStore.js";
-import { analysisFormulasVersion, computeAnalysisFileFigures, type AnalysisFigureValues, type AnalysisFileFigures, type AnalysisStep } from "./analysisFigures.js";
+import { analysisFormulasVersion, computeAnalysisFileFigures, type AnalysisFigures, type AnalysisFigureValues, type AnalysisFileFigures, type AnalysisStep } from "./analysisFigures.js";
+import { barIndicatorsOf } from "./analysisPriceFigures.js";
 
 // The stored analyses (backtest_ticker_analyses): the values each was computed with, starting one as an "analysis" job,
 // and what the Analyse window and the Data files table read.
@@ -272,6 +273,13 @@ function toRunView(row: AnalysisRow, now = new Date()): AnalysisRunView {
 
 const selectAnalyses = (connection: Knex) => connection("backtest_ticker_analyses as a").leftJoin("backtest_jobs as j", "j.id", "a.job_id");
 
+/** The price chart's indicators (barIndicatorsOf) added to figures as they are read, so analyses already stored show them. */
+function withBarIndicators<T>(figures: T): T {
+  const bars = (figures as { bars?: AnalysisFigures["bars"] } | null)?.bars;
+  if (!Array.isArray(bars)) return figures;
+  return { ...figures, barIndicators: barIndicatorsOf(bars.map((bar) => ({ close: bar[4], impliedVolatility: bar[5] }))) };
+}
+
 export interface TickerAnalysisView {
   symbol: string;
   /** The latest succeeded saved analysis, with its figures and summary. */
@@ -304,7 +312,7 @@ export async function loadTickerAnalysisView(givenSymbol: string, connection: Kn
   const withBody = async (view: AnalysisRunView | null) => {
     if (!view) return null;
     const body = await connection("backtest_ticker_analyses").where({ id: view.id }).first("figures", "summary");
-    return { ...view, figures: body?.figures == null ? null : await withFreshSessionFigures(body.figures, symbol, connection), summary: body?.summary ?? null };
+    return { ...view, figures: body?.figures == null ? null : withBarIndicators(await withFreshSessionFigures(body.figures, symbol, connection)), summary: body?.summary ?? null };
   };
   const current = await resolveAnalysisLabValues(symbol, null, connection);
   return {
@@ -329,7 +337,7 @@ export async function loadAnalysisFileFigures(givenSymbol: string, connection: K
   if (!contents) throw new BacktestRequestError(`There is no data file for ${symbol}: download it first.`, 404);
   if (!contents.firstDate) throw new BacktestRequestError(`The ${symbol} data file has no complete days yet.`, 409);
   const { effective } = await resolveAnalysisLabValues(symbol, null, connection);
-  return computeAnalysisFileFigures({ symbol, values: effective, connection });
+  return withBarIndicators(await computeAnalysisFileFigures({ symbol, values: effective, connection }));
 }
 
 export async function loadTickerAnalysisRun(analysisId: string, connection: Knex = db): Promise<AnalysisRunView> {

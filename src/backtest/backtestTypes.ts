@@ -285,23 +285,51 @@ export interface BacktestVolFarmerSettings {
   maxSpreadPctOfMid: number;
   /** The percent of the free cash a cycle's first purchase leaves in cash, for the later Puts (with the Calls' premiums). */
   putCashReservePct: number;
-  /** When the stock reaches the Call's strike: "unwind" the whole position there, or "hold_to_expiry" (the Call is assigned at its expiry if it ends in the money). */
-  crossing: "unwind" | "hold_to_expiry";
+  /** Which Calls are tried: "in_range" (callMinDte to callMaxDte) or "next" (only the next listed expiry after today). */
+  callExpiry: "in_range" | "next";
+  /**
+   * When the stock reaches the Call's strike: "unwind" the whole position there, "hold_to_expiry" (the Call is assigned
+   * at its expiry if it ends in the money), or "unwind_if_net_positive" (unwind only when closing everything nets the
+   * cycle a gain, else hold and check that again at every later look to the Call's expiry).
+   */
+  crossing: "unwind" | "hold_to_expiry" | "unwind_if_net_positive";
   /** Which Puts are tried: "in_range" (putMinDte to putMaxDte, on or after the Call's expiry) or "with_the_call" (only the Call's own expiry). */
   putExpiry: "in_range" | "with_the_call";
   /** Whether the cycle's realized Call P&L counts in the hedge rule, beside the Puts' realized P&L. */
   hedgeRuleCallPremiums: "excluded" | "included";
   /** The least protection a new Put may offer, as a percent (0 = any). */
   minPutProtectionPct: number;
-  /** Shares held with no Put and no Call that qualifies: "none" leaves them unhedged, "put" buys the Put at the strike cap for the nearest expiry 7 or more days out. */
-  hedgeWithoutCall: "none" | "put";
+  /**
+   * Shares held with no Put and no Call that qualifies: "none" leaves them unhedged, "put" buys the Put at the strike cap
+   * for the nearest expiry 7 or more days out, "cheapest_per_year" the Put putChoice takes (no hedge rule; protection to
+   * the next listed Call expiry).
+   */
+  hedgeWithoutCall: "none" | "put" | "cheapest_per_year";
+  /** Of the Puts that pass the hedge rule and minPutProtectionPct: "most_protection", or "cheapest_per_year" (the lowest yearly cost). */
+  putChoice: "most_protection" | "cheapest_per_year";
   /** The most a new Put may cost, as a percent of the Call's premium (0 = no limit; 100 = a zero-cost collar). */
   maxPutCostPctOfCallPremium: number;
   /** Puts held and no Call that passes with them: "none" waits, "when_no_call" sells them when their banked P&L lets a Call pass with a new Put. */
   putRoll: "none" | "when_no_call";
+  /** A Call expired below its strike with a Put held whose sale would realize a gain: "keep" it, or "sell_if_in_profit" with a new Call and a new Put that pass the hedge rule. */
+  hedgeAfterExpiry: "keep" | "sell_if_in_profit";
+  /** Shares called away with a Put held: "end" the cycle (the Put sold), or "continue_if_under_water" (the shares bought back and the Put kept unless the cycle's share and Put P&L with the Put's sale is above 0). */
+  afterAssignment: "end" | "continue_if_under_water";
+  /** Whether the cycle's realized share P&L counts in the hedge rule, beside the Puts' realized P&L. */
+  hedgeRuleStockPnl: "excluded" | "included";
+  /**
+   * Shares and a Put held and no Call sold at the look: "none" keeps the Put; "when_no_call" sells every Put whose sale
+   * realizes a gain, so the gain counts in the hedge rule from then, and hedges the lots left without a Put with the
+   * hedgeWithoutCall Put.
+   */
+  putCashIn: "none" | "when_no_call";
+  /** The least protection of the Put bought after a cash-in, as a percent (0 = any); hedgeWithoutCall "cheapest_per_year" only. */
+  cashInPutMinProtectionPct: number;
+  /** "put": the long Put hedge above; "none": no Put at all, a Call passing the hedge rule on the shares alone (research). */
+  hedge: "put" | "none";
 }
 
-export const defaultBacktestVolFarmerSettings: BacktestVolFarmerSettings = { callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, callMinDte: 1, callMaxDte: 45, putMinDte: 0, putMaxDte: 360, putMaxStrikeAbovePricePct: 0, protectionFallPct: 20, maxSpreadPctOfMid: 50, putCashReservePct: 10, crossing: "unwind", putExpiry: "in_range", hedgeRuleCallPremiums: "excluded", minPutProtectionPct: 0, hedgeWithoutCall: "none", maxPutCostPctOfCallPremium: 0, putRoll: "none" };
+export const defaultBacktestVolFarmerSettings: BacktestVolFarmerSettings = { callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, callMinDte: 1, callMaxDte: 45, callExpiry: "in_range", putMinDte: 0, putMaxDte: 360, putMaxStrikeAbovePricePct: 0, protectionFallPct: 20, maxSpreadPctOfMid: 50, putCashReservePct: 10, crossing: "unwind", putExpiry: "in_range", hedgeRuleCallPremiums: "excluded", minPutProtectionPct: 0, hedgeWithoutCall: "none", putChoice: "most_protection", maxPutCostPctOfCallPremium: 0, putRoll: "none", hedgeAfterExpiry: "keep", afterAssignment: "end", hedgeRuleStockPnl: "excluded", putCashIn: "none", cashInPutMinProtectionPct: 0, hedge: "put" };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5). Everything else in a pass is
@@ -1357,6 +1385,12 @@ export interface BacktestCycleTimelineRow {
   /** A sold option's delta as the engine recorded it at the sale (a put's negative), contract-weighted over the row's fills; null when none was kept. */
   delta?: number | null;
   /**
+   * A hedge Put bought: its yearly cost as a fraction of the stock price (hedgePutCostYield), from what its purchase
+   * recorded, contract-weighted over the row's fills; added when the cycle is read, null when the purchase kept no stock
+   * price or days to expiry. Absent on other rows.
+   */
+  hedgeCostYield?: number | null;
+  /**
    * An option sold while the cycle held shares: the cycle's cash break-even just before the sale (cycleCashBreakEven.ts),
    * added when the cycle is read; for a call on held shares under a break-even rule, the floor its strike was held to
    * (engine version 3 on). Null while no shares were held; absent on other rows.
@@ -1481,6 +1515,25 @@ export interface BacktestCycleDetail {
   stockOnlyStretches: BacktestStockOnlyStretch[];
 }
 
+/** One source of the account's P&L (approved 2026-10-26). */
+export interface BacktestPnlSource {
+  pnlDollars: number;
+  /** CAGR × pnlDollars ÷ the account's P&L: with interest and the Puts sold, the parts add up to the CAGR; null when the account made nothing. */
+  cagrPart: number | null;
+  /** The session's trading days on which it was held at any time ÷ all of them. */
+  daysHeldShare: number;
+}
+
+/** The session tiles' Shares, Covered Calls and Hedge, the whole account's; null on a session without wheel cycles. */
+export interface BacktestPnlSources {
+  /** The account's P&L less its interest and every option's: what the shares made, sold and still held at the account's last marks; null when none were held. */
+  shares: BacktestPnlSource | null;
+  /** The Calls sold: premiums less buybacks and commissions, an open one at its last mark; with the median yearly yield recorded at each sale. */
+  coveredCalls: (BacktestPnlSource & { quotedYieldMedian: number | null; quotedCount: number }) | null;
+  /** The hedge Puts: what they were sold or settled for less their cost and commissions, an open one at its last mark; with the median yearly cost of each purchase (hedgePutCostYield). */
+  hedge: (BacktestPnlSource & { quotedCostMedian: number | null; quotedCount: number }) | null;
+}
+
 /** Per-ticker figures over the session's positions, option sales and cycles. */
 export interface BacktestTickerStatistics {
   symbol: string;
@@ -1550,6 +1603,8 @@ export interface BacktestSessionDetail {
   tickerStatistics: BacktestTickerStatistics[];
   /** The same figures over every symbol together (symbol "All symbols"); null when the session has no book. */
   allSymbolsStatistics: BacktestTickerStatistics | null;
+  /** What the shares, the Covered Calls and the hedge each made, the whole account's, worked out when the session is read. */
+  pnlSources: BacktestPnlSources | null;
   /** How many actions and fills the session stored; they are read page by page (BacktestActionsPage, BacktestFillsPage). */
   bookCounts: { filledActions: number; blockedActions: number; fills: number };
 }

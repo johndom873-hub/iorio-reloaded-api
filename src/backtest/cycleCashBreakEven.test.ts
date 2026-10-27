@@ -132,6 +132,14 @@ describe("the hedge's realized P&L in the break-even", () => {
     expect(cashBreakEvenBeforeEachRow([...timeline.slice(0, 4), callAtTheSameLook])[4]).toBeCloseTo(withoutHedge, 6);
   });
 
+  it("leaves the Calls' premium out where a Vol Farmer's hedge rule does: the shares' cost less the hedge's realized P&L", () => {
+    // A Call kept for 1.00 × 900 before the Put's sale: in the cash break-even, not in the hedge rule's.
+    const keptCall = row({ at: "2022-04-25T13:00:00.000Z", tradingDate: "2022-04-25", label: "Sold call @ 1.00", bucket: "cc", strike: 450, quantity: 900, premiumDollars: 900 });
+    const withCall = [...timeline.slice(0, 3), keptCall, ...timeline.slice(3)];
+    expect(cycleCashBreakEven(withCall, undefined, { hedgeRealizedPnlIncluded: true })).toBeCloseTo(withoutHedge - (115_249.92 + 900) / 900, 6);
+    expect(cycleCashBreakEven(withCall, undefined, { hedgeRealizedPnlIncluded: true, optionPremiumsIncluded: false })).toBeCloseTo(withoutHedge - 115_249.92 / 900, 6);
+  });
+
   it("matches a sale after a split to its purchase before it by split-adjusted shares", () => {
     // NFLX's 10-for-1 split between the purchase (factor 10) and the sale (factor 1): 300 shares as traded at $690 are 3,000 at $69.
     const splitFactorOf = (tradingDate: string) => (tradingDate < "2022-04-23" ? 10 : 1);

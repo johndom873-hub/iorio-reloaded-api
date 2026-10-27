@@ -4,7 +4,7 @@ import { BacktestRequestError } from "../jobs/backtestJobStore.js";
 import { loadAnalysisLadder, tooLargeDaysOf, type AnalysisBacktestFigures } from "./analysisBacktest.js";
 import { loadDailyBarsOf, type AnalysisFigures } from "./analysisFigures.js";
 import { loadAnalysisOrders } from "./analysisPotSizing.js";
-import { maxDrawdownByRange, toOhlcvBars } from "./analysisPriceFigures.js";
+import { barIndicatorsOf, maxDrawdownByRange, sliceBarIndicators, toOhlcvBars, type AnalysisBarIndicators } from "./analysisPriceFigures.js";
 import { loadCashAvailableByDay, type CashAvailableByDay } from "./sessionFreeCash.js";
 import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { cachedSplitsBetween } from "../engine/splitFactors.js";
@@ -19,6 +19,8 @@ export interface BacktestSessionPriceChart {
   bars: AnalysisFigures["bars"];
   /** Of those bars, each range counted back from the last. */
   maxDrawdown: AnalysisFigures["maxDrawdown"];
+  /** One per bar, worked out over the whole file: the first day has its look-back even when the file starts earlier. */
+  barIndicators: AnalysisBarIndicators;
   ladderLevels: AnalysisBacktestFigures["ladderLevels"];
   ladderRungsSold: AnalysisBacktestFigures["ladderRungsSold"];
   tooLargeDays: AnalysisBacktestFigures["tooLargeDays"];
@@ -41,11 +43,14 @@ export async function loadBacktestSessionPriceChart(sessionId: string, symbol: s
     loadAnalysisLadder(sessionId, symbol, connection),
     loadCashAvailableByDay(sessionId, connection),
   ]);
-  const bars = toOhlcvBars(dailyBars).filter((bar) => bar.tradingDate >= session.start_date && bar.tradingDate <= session.end_date);
+  const allBars = toOhlcvBars(dailyBars);
+  const from = Math.max(0, allBars.findIndex((bar) => bar.tradingDate >= session.start_date));
+  const bars = allBars.slice(from).filter((bar) => bar.tradingDate >= session.start_date && bar.tradingDate <= session.end_date);
   return {
     symbol,
     bars: bars.map((bar) => [bar.tradingDate, bar.open, bar.high, bar.low, bar.close, bar.impliedVolatility]),
     maxDrawdown: maxDrawdownByRange(bars),
+    barIndicators: sliceBarIndicators(barIndicatorsOf(allBars), from, from + bars.length - 1),
     ...ladder,
     tooLargeDays: tooLargeDaysOf(orders),
     cashAvailable,
