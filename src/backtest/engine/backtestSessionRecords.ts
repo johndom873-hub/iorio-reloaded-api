@@ -6,7 +6,7 @@ import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import type { BacktestAction, BacktestCycle, BacktestCycleDetail, BacktestCycleGap, BacktestCycleTimelineRow, BacktestFill, BacktestPosition, BacktestPositionLeg, BacktestTrade } from "../backtestTypes.js";
 import { buildCycleGaps, buildStockOnlyStretches, closeLookupOf, type NoSaleRecords } from "./backtestIdleStretches.js";
 import { shareDirectionOf } from "../cycleCashBreakEven.js";
-import type { BacktestOptionSale } from "./backtestLook.js";
+import type { BacktestOptionSale } from "./backtestLookTypes.js";
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import { ledgerCapitalAtRisk, ledgerCapitalDeployed, ledgerCycles, ledgerRealizedPnl, ledgerUnrealizedPnl } from "./ledger/ledgerSelectors.js";
 import { legsOfPosition, positionsOfSymbol, requireLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";

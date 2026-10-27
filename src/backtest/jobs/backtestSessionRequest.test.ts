@@ -55,6 +55,8 @@ const snapshot: BacktestSettings = {
     orderUnfilledCancelMinutes: 30,
   },
   kellyFraction: 0.25,
+  // A lab set to Vol Farmer v2: a session on the shared account, its starting value given.
+  decisionMaker: "vol_farmer_v2",
 };
 
 const context: BacktestSessionRequestContext = {
@@ -63,12 +65,9 @@ const context: BacktestSessionRequestContext = {
   coverageFor: (symbol) =>
     symbol === "AAOI" ? { firstDate: "2020-01-02", lastDate: "2026-10-09" } : symbol === "HOOD" ? { firstDate: "2021-07-29", lastDate: "2026-10-09" } : symbol === "INTC" ? { firstDate: "2020-01-02", lastDate: "2026-06-30" } : symbol === "OLDF" ? { firstDate: "2016-01-04", lastDate: "2019-12-31" } : symbol === "EMPTY" ? { firstDate: null, lastDate: null } : null,
   periodContentsFor: () => wholePeriod,
-  claudeCliAvailable: true,
   tickerValuesFor: () => null,
   defaultPotDollars: null,
 };
-/** BACKTEST_CLAUDE_CLI_PATH is set. */
-const withClaudeCli = { claudeCliAvailable: true };
 /** A file that holds every weekday of the period, intraday quotes included. */
 const wholePeriod: DataFilePeriodContents = { missingWeekdays: 0, firstMissingWeekday: null, lastMissingWeekday: null, completeDays: 100, completeDaysWithoutIntradayQuotes: 0 };
 
@@ -150,114 +149,76 @@ describe("validateCreateBacktestSessionRequest", () => {
 
 describe("validateBacktestSettingsOverrides", () => {
   it("keeps only the values that differ from the snapshot", () => {
-    const result = validateBacktestSettingsOverrides({ pluto: { minEdgeYieldPct: 20, maxAbsDelta: 0.3 }, trading: { spreadCostChargedPct: 50 }, kellyFraction: 0.5 }, snapshot, editableBacktestSettingPaths, withClaudeCli);
-    expect(result).toEqual({ ok: true, overrides: { pluto: { minEdgeYieldPct: 20 }, kellyFraction: 0.5 } });
-  });
-
-  it("lets a session change the sector cap, which binds once several symbols share the book", () => {
-    expect(validateBacktestSettingsOverrides({ pluto: { maxSectorPctOfBudget: 25 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { pluto: { maxSectorPctOfBudget: 25 } } });
-    expect(validateBacktestSettingsOverrides({ pluto: { maxSectorPctOfBudget: 101 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toMatchObject({ ok: false });
+    const result = validateBacktestSettingsOverrides({ trading: { spreadCostChargedPct: 40 }, baseline: { ladderRungs: 3, entry: "put" } }, snapshot, editableBacktestSettingPaths);
+    expect(result).toEqual({ ok: true, overrides: { trading: { spreadCostChargedPct: 40 }, baseline: { ladderRungs: 3 } } });
+    expect(validateBacktestSettingsOverrides({ trading: { spreadCostChargedPct: 50 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: {} });
   });
 
   it("refuses settings a session cannot change", () => {
-    expect(validateBacktestSettingsOverrides({ pluto: { maxQuoteAgeMinutes: 1 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "pluto.maxQuoteAgeMinutes cannot be changed for a session." });
-    expect(validateBacktestSettingsOverrides({ pluto: { modelId: "x" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "pluto.modelId cannot be changed for a session." });
+    expect(validateBacktestSettingsOverrides({ pluto: { maxQuoteAgeMinutes: 1 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "pluto.maxQuoteAgeMinutes cannot be changed for a session." });
+    expect(validateBacktestSettingsOverrides({ pluto: { modelId: "x" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "pluto.modelId cannot be changed for a session." });
     // The window is shown, not changed: the looks follow Pluto's own.
-    expect(validateBacktestSettingsOverrides({ pluto: { windowStartEt: "11:00" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "pluto.windowStartEt cannot be changed for a session." });
-    expect(validateBacktestSettingsOverrides({ fixed: { forecastWindowDays: 30 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "overrides.fixed is not a setting a session can change." });
+    expect(validateBacktestSettingsOverrides({ pluto: { windowStartEt: "11:00" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "pluto.windowStartEt cannot be changed for a session." });
+    expect(validateBacktestSettingsOverrides({ fixed: { forecastWindowDays: 30 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "overrides.fixed is not a setting a session can change." });
   });
 
-  it("lets a session change what the looks inside the window brought into play: the system checks and the intraday IV-shift limit", () => {
-    const changes = { maxIvShiftVp: 3, maxActionsPerSession: 4, tickerCooldownMinutes: 90, dailyLossBreakerPct: 3, spyStressBreakerPct: 2 };
-    expect(validateBacktestSettingsOverrides({ pluto: changes }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { pluto: changes } });
-    expect(validateBacktestSettingsOverrides({ pluto: { dailyLossBreakerPct: 101 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "dailyLossBreakerPct cannot be above 100." });
-    expect(validateBacktestSettingsOverrides({ pluto: { tickerCooldownMinutes: 7.5 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "tickerCooldownMinutes must be a whole number." });
+  it("refuses the retired rules' settings: Pluto's, the trading settings but the spread cost share, the policy, the model and the Kelly fraction", () => {
+    expect(validateBacktestSettingsOverrides({ pluto: { minEdgeYieldPct: 20 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "pluto.minEdgeYieldPct cannot be changed for a session." });
+    expect(validateBacktestSettingsOverrides({ pluto: { dailyLossBreakerPct: 3 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "pluto.dailyLossBreakerPct cannot be changed for a session." });
+    expect(validateBacktestSettingsOverrides({ trading: { deltaTargetMin: 0.2 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "trading.deltaTargetMin cannot be changed for a session." });
+    expect(validateBacktestSettingsOverrides({ policy: { roll: "never" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "overrides.policy is not a setting a session can change." });
+    expect(validateBacktestSettingsOverrides({ model: { forecastMethod: "implied_volatility_30_day" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "overrides.model is not a setting a session can change." });
+    expect(validateBacktestSettingsOverrides({ kellyFraction: 0.5 }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "overrides.kellyFraction is not a setting a session can change." });
   });
 
-  it("applies Pluto's and the trading settings' own rules, cross-field ones included", () => {
-    expect(validateBacktestSettingsOverrides({ pluto: { maxAbsDelta: 1.5 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "maxAbsDelta cannot be above 1." });
-    expect(validateBacktestSettingsOverrides({ pluto: { minDte: 50 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "minDte cannot exceed maxDte." });
-    expect(validateBacktestSettingsOverrides({ pluto: { minGrade: "best" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "minGrade must be one of strong, good, weak." });
-    expect(validateBacktestSettingsOverrides({ trading: { deltaTargetMin: 0.4 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "deltaTargetMin cannot exceed deltaTargetMax." });
-    expect(validateBacktestSettingsOverrides({ trading: { spreadCostChargedPct: 120 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "spreadCostChargedPct must be between 0 and 100." });
-    expect(validateBacktestSettingsOverrides({ trading: { maxOrderPctOfPortfolio: 101 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "maxOrderPctOfPortfolio must be between 0 and 100." });
-    expect(validateBacktestSettingsOverrides({ trading: { maxConcentrationPerTickerPct: 30, minCashReservePct: 5 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { trading: { maxConcentrationPerTickerPct: 30 } } });
+  it("applies the trading settings' own rules to the spread cost share", () => {
+    expect(validateBacktestSettingsOverrides({ trading: { spreadCostChargedPct: 120 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "spreadCostChargedPct must be between 0 and 100." });
   });
 
-  it("takes the decision rules as choices, keeping only those that differ from the defaults", () => {
-    expect(validateBacktestSettingsOverrides({ policy: { roll: "never", buyback: "when_offered", sharesInProfit: "always_sell" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { policy: { roll: "never", sharesInProfit: "always_sell" } } });
-    expect(validateBacktestSettingsOverrides({ policy: { roll: "flagged_legs" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: {} });
-    // Against a snapshot that stored another rule, the default is a change.
-    expect(validateBacktestSettingsOverrides({ policy: { roll: "flagged_legs" } }, { ...snapshot, policy: { roll: "never", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "stop" } }, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { policy: { roll: "flagged_legs" } } });
-    expect(validateBacktestSettingsOverrides({ policy: { roll: "sometimes" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "policy.roll must be one of flagged_legs, any_eligible, never." });
-    expect(validateBacktestSettingsOverrides({ policy: { buyback: true } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "policy.buyback must be one of when_offered, never." });
-    expect(validateBacktestSettingsOverrides({ policy: { eventClose: "never" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { policy: { eventClose: "never" } } });
-    expect(validateBacktestSettingsOverrides({ policy: { eventClose: "sometimes" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "policy.eventClose must be one of stress_vs_remaining, never, always." });
-    expect(validateBacktestSettingsOverrides({ policy: { openOrder: "x" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "policy.openOrder cannot be changed for a session." });
-    expect(validateBacktestSettingsOverrides({ policy: "never" }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "overrides.policy must be an object." });
-    // Choosing again after a refusal is the default; stopping the look is the change.
-    expect(validateBacktestSettingsOverrides({ policy: { afterBlockedChoice: "try_next" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: {} });
-    expect(validateBacktestSettingsOverrides({ policy: { afterBlockedChoice: "stop" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { policy: { afterBlockedChoice: "stop" } } });
-    expect(validateBacktestSettingsOverrides({ policy: { afterBlockedChoice: "retry" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "policy.afterBlockedChoice must be one of try_next, stop." });
-  });
-
-  it("takes the AI model as decision maker only when the Claude Code CLI is configured; the rules stay the default", () => {
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "rules" }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: {} });
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "llm" }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { decisionMaker: "llm" } });
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "llm" }, snapshot, editableBacktestSettingPaths, { claudeCliAvailable: false })).toEqual({
-      ok: false,
-      error: "The AI model as decision maker needs BACKTEST_CLAUDE_CLI_PATH in the API's .env (the Claude Code CLI to call): set it and restart the API.",
-    });
-    // Without the CLI the rules can still be chosen.
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "rules" }, snapshot, editableBacktestSettingPaths, { claudeCliAvailable: false })).toEqual({ ok: true, overrides: {} });
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "decisionMaker must be rules, llm, baseline, steady_stake, vol_farmer or vol_farmer_v2." });
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } }, snapshot, editableBacktestSettingPaths, { claudeCliAvailable: false })).toEqual({ ok: true, overrides: { decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } } });
-    expect(validateBacktestSettingsOverrides({ baseline: { minAbsDelta: 0.7 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "baseline.minAbsDelta must not be above baseline.maxAbsDelta." });
-    expect(validateBacktestSettingsOverrides({ baseline: { strangle: true } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "baseline.strangle cannot be changed for a session." });
-    expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "llm" } }, { ...context, claudeCliAvailable: false })).toMatchObject({ ok: false, error: expect.stringContaining("BACKTEST_CLAUDE_CLI_PATH") });
-    expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "llm" } }, context)).toMatchObject({ ok: true, value: { overrides: { decisionMaker: "llm" } } });
+  it("refuses the retired rules and AI model as decision makers, and takes the others", () => {
+    const retired = { ok: false, error: "The rules and llm backtests were retired with Signals; their past sessions stay readable." };
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "rules" }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "llm" }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "decisionMaker must be baseline, steady_stake, vol_farmer or vol_farmer_v2." });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer_v2" }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: {} });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } } });
+    expect(validateBacktestSettingsOverrides({ baseline: { minAbsDelta: 0.7 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "baseline.minAbsDelta must not be above baseline.maxAbsDelta." });
+    expect(validateBacktestSettingsOverrides({ baseline: { strangle: true } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "baseline.strangle cannot be changed for a session." });
+    expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "rules" } }, context)).toEqual(retired);
+    expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "llm" } }, context)).toEqual(retired);
+    // A lab still set to a retired decision maker (or a snapshot from before the choice, a rules one) starts nothing unless the request names another.
+    for (const retiredSnapshot of [{ ...snapshot, decisionMaker: "rules" as const }, { ...snapshot, decisionMaker: undefined }]) {
+      expect(validateCreateBacktestSessionRequest(validRequest, { ...context, snapshot: retiredSnapshot })).toEqual(retired);
+      expect(validateCreateBacktestSessionRequest({ ...validRequest, overrides: { decisionMaker: "steady_stake" } }, { ...context, snapshot: retiredSnapshot })).toMatchObject({ ok: true, value: { overrides: { decisionMaker: "steady_stake" } } });
+    }
   });
 
   it("takes the Steady Stake as decision maker with its own values, each checked, on a starting value", () => {
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "steady_stake", steadyStake: { stakePct: 70, putCashPct: 0, callAbsDelta: 0.2 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { decisionMaker: "steady_stake", steadyStake: { stakePct: 70, putCashPct: 0 } } });
-    expect(validateBacktestSettingsOverrides({ steadyStake: { stakePct: 0 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "steadyStake.stakePct must be a number from 1 to 100." });
-    expect(validateBacktestSettingsOverrides({ steadyStake: { ladderRungs: 3 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "steadyStake.ladderRungs is not a Steady Stake setting." });
-    expect(validateBacktestSettingsOverrides({ steadyStake: 70 }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "overrides.steadyStake must be an object." });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "steady_stake", steadyStake: { stakePct: 70, putCashPct: 0, callAbsDelta: 0.2 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { decisionMaker: "steady_stake", steadyStake: { stakePct: 70, putCashPct: 0 } } });
+    expect(validateBacktestSettingsOverrides({ steadyStake: { stakePct: 0 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "steadyStake.stakePct must be a number from 1 to 100." });
+    expect(validateBacktestSettingsOverrides({ steadyStake: { ladderRungs: 3 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "steadyStake.ladderRungs is not a Steady Stake setting." });
+    expect(validateBacktestSettingsOverrides({ steadyStake: 70 }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "overrides.steadyStake must be an object." });
     // The Vol Farmer: only the values that differ from the defaults are kept; ranges in order, Calls up to the 45 days the engine reads.
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer", volFarmer: { putMinDte: 30, putMaxDte: 360, protectionFallPct: 20 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { decisionMaker: "vol_farmer", volFarmer: { putMinDte: 30 } } });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putMinDte: 400 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.putMinDte must not be above volFarmer.putMaxDte." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { callMaxDte: 60 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.callMaxDte must be a whole number from 0 to 45 (the Calls the engine reads)." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putMaxStrikeAbovePricePct: 12 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.putMaxStrikeAbovePricePct must be a number from −20 to 10." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { stakePct: 70 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.stakePct is not a Vol Farmer setting." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putCashReservePct: 60 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.putCashReservePct must be a number from 0 to 50." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { crossing: "hold_to_expiry", putExpiry: "with_the_call", hedgeRuleCallPremiums: "included", minPutProtectionPct: 20, hedgeWithoutCall: "put" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { volFarmer: { crossing: "hold_to_expiry", putExpiry: "with_the_call", hedgeRuleCallPremiums: "included", minPutProtectionPct: 20, hedgeWithoutCall: "put" } } });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { crossing: "roll" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.crossing must be one of unwind, hold_to_expiry, unwind_if_net_positive." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { callExpiry: "next", crossing: "unwind_if_net_positive", hedgeAfterExpiry: "sell_if_in_profit", afterAssignment: "continue_if_under_water", hedgeRuleStockPnl: "included" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { volFarmer: { callExpiry: "next", crossing: "unwind_if_net_positive", hedgeAfterExpiry: "sell_if_in_profit", afterAssignment: "continue_if_under_water", hedgeRuleStockPnl: "included" } } });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { afterAssignment: "rebuy" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.afterAssignment must be one of end, continue_if_under_water." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putChoice: "cheapest_per_year", hedgeWithoutCall: "cheapest_per_year" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { volFarmer: { putChoice: "cheapest_per_year", hedgeWithoutCall: "cheapest_per_year" } } });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putChoice: "cheapest" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.putChoice must be one of most_protection, cheapest_per_year." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { minPutProtectionPct: 120 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.minPutProtectionPct must be a number from 0 to 100." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { maxPutCostPctOfCallPremium: 600 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.maxPutCostPctOfCallPremium must be a number from 0 to 500." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putCashIn: "when_no_call", cashInPutMinProtectionPct: 30 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { volFarmer: { putCashIn: "when_no_call", cashInPutMinProtectionPct: 30 } } });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putCashIn: "always" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.putCashIn must be one of none, when_no_call." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { hedge: "none" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { volFarmer: { hedge: "none" } } });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { hedge: "call" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.hedge must be one of put, none." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { cashInPutMinProtectionPct: -5 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "volFarmer.cashInPutMinProtectionPct must be a number from 0 to 100." });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer", volFarmer: { putMinDte: 30, putMaxDte: 360, protectionFallPct: 20 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { decisionMaker: "vol_farmer", volFarmer: { putMinDte: 30 } } });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { putMinDte: 400 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.putMinDte must not be above volFarmer.putMaxDte." });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { callMaxDte: 60 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.callMaxDte must be a whole number from 0 to 45 (the Calls the engine reads)." });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { putMaxStrikeAbovePricePct: 12 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.putMaxStrikeAbovePricePct must be a number from −20 to 10." });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { stakePct: 70 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.stakePct is not a Vol Farmer setting." });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { putCashReservePct: 60 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.putCashReservePct must be a number from 0 to 50." });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { crossing: "hold_to_expiry", putExpiry: "with_the_call", hedgeRuleCallPremiums: "included", minPutProtectionPct: 20, hedgeWithoutCall: "put" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmer: { crossing: "hold_to_expiry", putExpiry: "with_the_call", hedgeRuleCallPremiums: "included", minPutProtectionPct: 20, hedgeWithoutCall: "put" } } });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { crossing: "roll" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.crossing must be one of unwind, hold_to_expiry, unwind_if_net_positive." });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { callExpiry: "next", crossing: "unwind_if_net_positive", hedgeAfterExpiry: "sell_if_in_profit", afterAssignment: "continue_if_under_water", hedgeRuleStockPnl: "included" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmer: { callExpiry: "next", crossing: "unwind_if_net_positive", hedgeAfterExpiry: "sell_if_in_profit", afterAssignment: "continue_if_under_water", hedgeRuleStockPnl: "included" } } });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { afterAssignment: "rebuy" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.afterAssignment must be one of end, continue_if_under_water." });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { putChoice: "cheapest_per_year", hedgeWithoutCall: "cheapest_per_year" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmer: { putChoice: "cheapest_per_year", hedgeWithoutCall: "cheapest_per_year" } } });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { putChoice: "cheapest" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.putChoice must be one of most_protection, cheapest_per_year." });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { minPutProtectionPct: 120 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.minPutProtectionPct must be a number from 0 to 100." });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { maxPutCostPctOfCallPremium: 600 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.maxPutCostPctOfCallPremium must be a number from 0 to 500." });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { putCashIn: "when_no_call", cashInPutMinProtectionPct: 30 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmer: { putCashIn: "when_no_call", cashInPutMinProtectionPct: 30 } } });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { putCashIn: "always" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.putCashIn must be one of none, when_no_call." });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { hedge: "none" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmer: { hedge: "none" } } });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { hedge: "call" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.hedge must be one of put, none." });
+    expect(validateBacktestSettingsOverrides({ volFarmer: { cashInPutMinProtectionPct: -5 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.cashInPutMinProtectionPct must be a number from 0 to 100." });
     expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "steady_stake" } }, context)).toMatchObject({ ok: true, value: { bookMode: "shared_account", overrides: { decisionMaker: "steady_stake" } } });
-  });
-
-  it("takes the model's forecast and rest-of-day curve as choices, and no other model value", () => {
-    expect(validateBacktestSettingsOverrides({ model: { forecastMethod: "implied_volatility_30_day", restOfDayCurve: "measured_2020_to_2026" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { model: { forecastMethod: "implied_volatility_30_day", restOfDayCurve: "measured_2020_to_2026" } } });
-    expect(validateBacktestSettingsOverrides({ model: { forecastMethod: "yang_zhang_21", restOfDayCurve: "measured_2026_june_to_october" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: {} });
-    expect(validateBacktestSettingsOverrides({ model: { forecastMethod: "yang_zhang_63" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "model.forecastMethod must be one of yang_zhang_21, yang_zhang_21_without_earnings, implied_volatility_30_day." });
-    expect(validateBacktestSettingsOverrides({ model: { restOfDayCurve: "flat" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "model.restOfDayCurve must be one of measured_2026_june_to_october, measured_2020_to_2026." });
-    expect(validateBacktestSettingsOverrides({ model: { forecastWindowDays: 30 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "model.forecastWindowDays cannot be changed for a session." });
-    expect(validateBacktestSettingsOverrides({ model: "iv" }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "overrides.model must be an object." });
-  });
-
-  it("keeps the Kelly fraction above 0 and at most 1", () => {
-    expect(validateBacktestSettingsOverrides({ kellyFraction: 0 }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "kellyFraction must be a number above 0 and at most 1." });
-    expect(validateBacktestSettingsOverrides({ kellyFraction: 1.2 }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "kellyFraction must be a number above 0 and at most 1." });
   });
 });
 

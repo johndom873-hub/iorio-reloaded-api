@@ -55,10 +55,4 @@ describe("maxDayMoveMultiple setting", () => {
     const actionColumns = (await testDb("information_schema.columns").where({ table_name: "pluto_actions" }).pluck("column_name")) as string[];
     expect(actionColumns).not.toContain("pessimistic_pnl");
   });
-
-  it("the prompt_version default follows the last prompt migration (the code's plutoPromptVersion)", async () => {
-    const column = await testDb("information_schema.columns").where({ table_name: "pluto_settings", column_name: "prompt_version" }).first("column_default");
-    const { plutoPromptVersion } = await import("./prompt.js");
-    expect(String(column.column_default)).toContain(plutoPromptVersion);
-  });
 });

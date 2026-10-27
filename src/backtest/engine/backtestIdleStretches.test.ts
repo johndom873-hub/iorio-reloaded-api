@@ -3,7 +3,7 @@ import { easternInstant } from "../../lib/easternIsoDate.js";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import { backtestCandidateChecks, type BacktestOrderShortfall } from "../backtestTypes.js";
 import { buildCycleGaps, buildStockOnlyStretches, closeLookupOf, type NoSaleRecords } from "./backtestIdleStretches.js";
-import type { BacktestNoCandidateNote, BacktestNoSaleNote } from "./backtestLook.js";
+import type { BacktestNoCandidateNote, BacktestNoSaleNote } from "./backtestLookTypes.js";
 import { describeBaselineRules, type BaselineRejections } from "./baselineSaleSteps.js";
 import type { LedgerLeg } from "./ledger/simulatedLedger.js";
 

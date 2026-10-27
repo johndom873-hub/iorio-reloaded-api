@@ -3,7 +3,7 @@ import { easternInstant } from "../../lib/easternIsoDate.js";
 import { blackScholesDelta, blackScholesPriceOnForward } from "../../lib/impliedVolatilitySurface.js";
 import { contractKey } from "../../lib/signalsLiveScoring.js";
 import { defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, type BacktestVolFarmerV2Settings, type EffectiveBacktestSettings } from "../backtestTypes.js";
-import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLook.js";
+import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { chooseVolFarmerV2Leaps, contractsAffordable, describeVolFarmerV2Run, runVolFarmerV2Look, volFarmerV2BreakEven, volFarmerV2PutStrikeCap } from "./backtestVolFarmerV2Look.js";
 import { expirySettlementInstant, settleExpiry } from "./ledger/ledgerEvents.js";

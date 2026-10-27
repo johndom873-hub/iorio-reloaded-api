@@ -2,11 +2,11 @@ import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib
 import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
 import { blackScholesPriceOnForward, impliedVolatilityFromPrice } from "../../lib/impliedVolatilitySurface.js";
 import { daysToExpiry, describeOptionContract, describeOrderSize } from "../../lib/optionContractLabel.js";
-import { openCandidateId } from "../../pluto/candidateFilters.js";
+import { openCandidateId } from "./candidateIds.js";
 import type { BacktestAction, BacktestVolFarmerSettings } from "../backtestTypes.js";
 import type { FileIntradayBarPrices } from "../backtestFileStockBars.js";
 import { sharesPerContract } from "./backtestBook.js";
-import type { BacktestLookContext, BacktestLookResult, BacktestLookSymbol, BacktestOptionSale } from "./backtestLook.js";
+import type { BacktestLookContext, BacktestLookResult, BacktestLookSymbol, BacktestOptionSale } from "./backtestLookTypes.js";
 import { captureLookTimeEt, lookInstantMs } from "./backtestTickerInputs.js";
 import { baselineQuoteRejection, hedgePutCostYield, noteBaselineForwardAnchors, roundedStrike, selectBaselineCandidates, type BaselineCandidate, type BaselineCommissions, type BaselineForwardAnchor, type BaselineRejections } from "./baselineSaleSteps.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
@@ -585,7 +585,7 @@ export async function runVolFarmerLook(context: BacktestLookContext): Promise<Ba
   }
 
   const summary = summaries.length === 0 ? "No action" : summaries.join(" · ");
-  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [], fitIssueBySymbol: new Map(), scoredBySymbol: new Map(), llmCalls: { asked: 0, fromCache: 0 } };
+  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [] };
 }
 
 function openSymbol(input: { context: BacktestLookContext; lookSymbol: BacktestLookSymbol; farmer: BacktestVolFarmerSettings; at: Date; priceToCycleScale: number; actions: BacktestAction[]; optionSales: BacktestOptionSale[] }): string | null {

@@ -4,7 +4,6 @@ import { computeInFlightOrderNotional, inFlightOrderRequestsQuery } from "../lib
 import { orderFillsPendingSql } from "../lib/orderFills.js";
 import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { positionSelect } from "../lib/positionQueries.js";
-import type { OccupiedContract } from "./candidateFilters.js";
 import { daysToExpiry, describeOptionContract, formatDayMonth, formatStrike } from "../lib/optionContractLabel.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 
@@ -141,6 +140,13 @@ export async function anyOpenPositionOn(symbols: string[]): Promise<boolean> {
   if (symbols.length === 0) return false;
   const row = await db("positions as p").join("tickers as t", "t.id", "p.ticker_id").where("p.status", "open").whereIn("t.symbol", symbols).first("p.id");
   return Boolean(row);
+}
+
+/** A contract on the ticker that is already taken: an open option leg (anyone's) or a leg of a working order. */
+export interface OccupiedContract {
+  expiry: string;
+  strike: number;
+  detail: string;
 }
 
 export async function loadOccupiedContracts(symbol: string): Promise<OccupiedContract[]> {

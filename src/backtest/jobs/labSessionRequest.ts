@@ -1,18 +1,13 @@
 import { readBacktestDataFileContents, readBacktestDataFilePeriodContents } from "../dataFileSummary.js";
 import { editableBacktestSettingPaths } from "../settingsTemplate.js";
 import { loadBacktestLabSettings, loadBacktestLabTickerOverrides, tickerOverridesToValues } from "../labSettingsStore.js";
-import { readBacktestClaudeCliPath } from "../backtestClaudeCli.js";
-import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
-import { lookTimesInWindow, regularCloseMinutesEt } from "../engine/runBacktestSession.js";
-import { estimateLlmSession } from "../llm/estimateLlmSession.js";
 import { BacktestRequestError } from "./backtestJobStore.js";
 import { batchRunSessionName, validateBatchRequestShape } from "./backtestBatchRequest.js";
 import { validateCreateBacktestSessionRequest } from "./backtestSessionRequest.js";
 
 // A New session request checked against the lab's settings (Marcelo 2026-10-15: new sessions start from the lab's global
 // values and each ticker's lab values, never from Pluto's live settings), as the create route and the analysis job both
-// create sessions. Answers the snapshot the session freezes, the validated request, its warnings and, with the AI model
-// deciding, the estimate of its calls.
+// create sessions. Answers the snapshot the session freezes, the validated request and its warnings.
 export async function validateSessionRequestAgainstLab(body: unknown) {
   const checked = await checkSessionRequestAgainstLab(body);
   if (checked.kind === "ticker_problems") throw new BacktestRequestError(checked.error, 400);
@@ -22,7 +17,7 @@ export async function validateSessionRequestAgainstLab(body: unknown) {
 /**
  * A batch request (POST /backtest/batches) checked run by run as session requests against the lab. Every problem is
  * listed, "Run 2: …" with two or more runs; two or more runs need the baseline deciding. Answers each run's checked
- * request, the warnings (named by run with two or more) and, for a single run with the AI model, its estimate.
+ * request and the warnings (named by run with two or more).
  */
 export async function validateBatchRequestAgainstLab(body: unknown) {
   const shape = validateBatchRequestShape(body);
@@ -50,7 +45,6 @@ export async function validateBatchRequestAgainstLab(body: unknown) {
     name,
     runs,
     warnings: runs.flatMap((run, index) => run.warnings.map((warning) => named(index, warning))),
-    llmEstimate: runCount === 1 ? runs[0]!.llmEstimate : null,
   };
 }
 
@@ -67,7 +61,6 @@ export async function checkSessionRequestAgainstLab(body: unknown) {
     editablePaths: editableBacktestSettingPaths,
     coverageFor: (symbol) => readBacktestDataFileContents(symbol),
     periodContentsFor: (symbol, startDate, endDate) => readBacktestDataFilePeriodContents(symbol, startDate, endDate),
-    claudeCliAvailable: readBacktestClaudeCliPath() !== null,
     tickerValuesFor: (symbol) => tickerValues.get(symbol) ?? null,
     defaultPotDollars: lab.defaultPotDollars,
   });
@@ -75,11 +68,5 @@ export async function checkSessionRequestAgainstLab(body: unknown) {
     if (validation.symbolResolution) return { kind: "ticker_problems" as const, tickerProblems: validation.symbolResolution, error: validation.error, warnings: validation.warnings ?? [] };
     throw new BacktestRequestError(validation.error, 400);
   }
-  // With the AI model deciding, the calls a full day of looks may take (a day without intraday quotes has one look).
-  const effective = applyBacktestOverrides(snapshot, validation.value.overrides);
-  const llmEstimate =
-    effective.decisionMaker === "llm"
-      ? estimateLlmSession(validation.value.startDate, validation.value.endDate, lookTimesInWindow(effective.pluto.windowStartEt, effective.pluto.windowEndEt, regularCloseMinutesEt).length)
-      : null;
-  return { kind: "valid" as const, snapshot, value: validation.value, warnings: validation.warnings, llmEstimate };
+  return { kind: "valid" as const, snapshot, value: validation.value, warnings: validation.warnings };
 }

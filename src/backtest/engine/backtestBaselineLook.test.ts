@@ -13,7 +13,7 @@ import { makeBaselineSelector, noteBaselineForwardAnchors, type BaselineCommissi
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib/commissionEstimate.js";
 
 const flatCommissions: BaselineCommissions = { option: flatCommissionEstimator, stock: flatStockCommissionEstimator };
-import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLook.js";
+import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { openCashSecuredPut, settleExpiry } from "./ledger/ledgerEvents.js";
 import { ledgerFreeShares, ledgerHeldSharesAverageCost } from "./ledger/ledgerSelectors.js";

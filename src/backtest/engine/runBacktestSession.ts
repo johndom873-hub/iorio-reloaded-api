@@ -4,39 +4,30 @@ import { describeOptionContract } from "../../lib/optionContractLabel.js";
 import { contractKey } from "../../lib/signalsLiveScoring.js";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import { isEtfSector, tickerCalendarProfile } from "../../lib/tickerCalendarRelevance.js";
-import { dailyLossPercent } from "../../pluto/systemChecks.js";
 import { effectiveWindowEndEt } from "../../pluto/sessionSchedule.js";
-import type { BacktestAction, BacktestBookMode, BacktestCycle, BacktestCycleGap, BacktestFill, BacktestLadderLevel, BacktestOrderShortfall, BacktestPosition, BacktestRunStatistics, BacktestSettings, BacktestSettingsOverrides, BacktestSymbolSettings, BacktestTablesMode } from "../backtestTypes.js";
+import { isRetiredBacktestDecisionMaker, retiredBacktestDecisionMakerMessage, type BacktestAction, type BacktestBookMode, type BacktestCycle, type BacktestCycleGap, type BacktestFill, type BacktestLadderLevel, type BacktestOrderShortfall, type BacktestPosition, type BacktestRunStatistics, type BacktestSettings, type BacktestSettingsOverrides, type BacktestSymbolSettings, type BacktestTablesMode } from "../backtestTypes.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
 import { calendarDaysBetween, computeBacktestMetrics, computeDailyReturns, cycleFiguresOf, type AccountDay } from "../sessionAnalytics.js";
 import type { FileIntradayPrices } from "../backtestFileStockBars.js";
 import { BacktestBarHistory, loadBacktestBarHistory } from "./backtestBarHistory.js";
 import { computeInterestDollars } from "./backtestBook.js";
-import { runBacktestLook, type BacktestLookSymbol, type BacktestNoCandidateNote, type BacktestNoSaleNote, type BacktestOptionSale, type BacktestPreparedSymbolDay, type BacktestTickerSetup } from "./backtestLook.js";
+import type { BacktestLookSymbol, BacktestNoCandidateNote, BacktestNoSaleNote, BacktestOptionSale, BacktestTickerSetup } from "./backtestLookTypes.js";
 import { buildCycleGapRecords, buildCycleRecords, buildFillRecords, buildOptionTrades, buildPositionRecords, withPositionCycle, type BacktestCycleRecord, type SimulatedTrade } from "./backtestSessionRecords.js";
 import type { NoSaleRecords } from "./backtestIdleStretches.js";
-import { captureLookTimeEt, decisionInstantMs, lookInstantMs, selectLookDayQuotes, type BacktestTickerProfile } from "./backtestTickerInputs.js";
-import type { LiveOptionQuote } from "../../lib/signalsLiveScoring.js";
+import { captureLookTimeEt, decisionInstantMs, type BacktestTickerProfile } from "./backtestTickerInputs.js";
 import { firstTwoSidedMids, markKey, markMidByContract, roundedStrike } from "./backtestOptionMarks.js";
 import { BacktestSymbolFile, type SymbolFileDayIssue, type SymbolFileEndOfDayRow, type SymbolFileQuote } from "./backtestSymbolFile.js";
 import { describeDaysWithoutIntradayQuotes } from "../jobs/backtestSessionRequest.js";
-import { loadMacroEventHistory } from "../macroEventHistory.js";
 import { loadMarketStressPrices, marketStressSymbol } from "../marketStressBars.js";
 import { SpyBuyAndHold } from "./spyBuyAndHold.js";
-import { backtestClaudeCliPathMissingMessage, ensureBacktestLlmWorkingDirectory, readBacktestClaudeCliPath } from "../backtestClaudeCli.js";
-import { createPlutoPromptMasking } from "../llm/plutoPromptMasking.js";
-import type { ClaudeCall } from "../llm/askPlutoThroughSubscription.js";
-import { backtestClaudeModel, backtestClaudeReasoningEffort } from "../llm/claudeSubscriptionModelClient.js";
-import { BacktestLlmSession, type BacktestLlmRound } from "./backtestLlmDecider.js";
 
 import { alignOpenOptionLegsToSplitFactor, creditInterest, settleExpiry, settleHedgePut, settleLeapsCall } from "./ledger/ledgerEvents.js";
-import { ledgerCommittedDollars, ledgerHedgeLegsDueForSettlement, ledgerLastFilledActionAt, ledgerLeapsLegsDueForSettlement, ledgerLegsDueForSettlement, ledgerNetLiquidationValue, ledgerSharesValue } from "./ledger/ledgerSelectors.js";
+import { ledgerCommittedDollars, ledgerHedgeLegsDueForSettlement, ledgerLeapsLegsDueForSettlement, ledgerLegsDueForSettlement, ledgerNetLiquidationValue, ledgerSharesValue } from "./ledger/ledgerSelectors.js";
 import { describeHedgeTotals, hedgeIsOn, summarizeHedge, type HedgePutQuoteSource } from "./backtestBaselineHedge.js";
 import { createSimulatedLedger, cycleSplitFactorFor, rememberedForRevision, requirePosition, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { loadOrInferSplitSchedule, requireSplitFactors, splitFactorOn, type SplitSchedule } from "./splitFactors.js";
 import { BacktestTradingCalendar, loadMarketCalendarRowsFrom } from "./backtestTradingCalendar.js";
-import { BacktestScoringPool, scoringWorkerCount } from "./backtestScoringPool.js";
 import { BacktestDayDataReader, type PrefetchedSymbolDay } from "./backtestDayDataReader.js";
 import { loadTreasuryBillRates } from "./treasuryBillRates.js";
 import { prepareModelTablesForSession } from "./walkForwardModelTables.js";
@@ -62,27 +53,18 @@ import { describeVolFarmerV2Run, runVolFarmerV2Look } from "./backtestVolFarmerV
 //        has its shares marked at its previous close and is not scored)
 //   d. the looks inside Pluto's trading window, every half hour the files hold quotes for (10:00 … 15:30) from the
 //      window's start to its end, the end never later than 30 minutes before the day's close (sessionSchedule.ts: 12:30
-//      on a 13:00 day). At each look, in passRunner's order:
-//        - each symbol's stock price at the look is the close of IBKR's 30-minute bar ending then (10:00 reads the 09:30
-//          bar), and the look's quotes re-mark its legs; a symbol whose file has no intraday quotes that day is looked at
-//          only at 10:00, and one without quotes or a bar at a look is left out of that look
-//        - the daily-loss breaker: the account at the look against its value at the previous session's close; at the
-//          breaker's percentage or worse nothing more is done that day (live needs a human to reset it: assumed done
-//          before the next open)
-//        - the actions cap, counted over the day's looks
-//        - market stress: SPY's change on the day at the look (its 30-minute bars, marketStressBars.ts) at the stress
-//          percentage or worse bars new opens at that look; rolls and closes stay
-//        - Pluto's passes over every scored symbol on the shared book until a pass takes no action (backtestLook.ts)
-//   e. the account at the close, for the next day's breaker: shares at the IBKR close, short options at the mid of
-//      their closing quotes, an option expiring that day at its intrinsic value
-//   f. the buy-and-hold baselines, for comparison only: the starting value split equally between the symbols, each
+//      on a 13:00 day). At each look each symbol's stock price is the close of IBKR's 30-minute bar ending then (10:00
+//      reads the 09:30 bar), and the look's quotes re-mark its legs; a symbol whose file has no intraday quotes that day
+//      is looked at only at 10:00, and one without quotes or a bar at a look is left out of that look. The decision
+//      maker (the baseline wheel, the Steady Stake, the Vol Farmer, Vol Farmer v2) then decides the look on the shared
+//      book; the Steady Stake and Vol Farmer v2 decide at 10:00 only, the baseline at 10:00 only when its looks say so
+//   e. the buy-and-hold baselines, for comparison only: the starting value split equally between the symbols, each
 //      share bought whole on the first day its symbol has a price and never rebalanced, the rest in cash at the same
 //      interest; and the starting value in whole SPY shares at SPY's 10:00 price (spyBuyAndHold.ts)
 // The day's row is its 10:00 mark, taken before its looks: what the looks do shows in the account from the next session
 // day, so the last day's actions are in the book but outside the account series and the metrics.
 // Days no symbol's file holds are not session days; the next session day's summary names those the downloader could not
-// retrieve. A previous day whose end-of-day data is missing leaves volume unknown, which Pluto's volume rule refuses,
-// and the day's summary says so.
+// retrieve. A previous day whose end-of-day data is missing leaves volume unknown, and the day's summary says so.
 // A wheel cycle stays on the price scale of its first day: IBKR's bars are split-adjusted and the option file is as
 // traded, so with F(D) the symbol's cumulative split factor a price traded on day D is put on the cycle's scale by
 // × F(cycle) ÷ F(D).
@@ -92,10 +74,6 @@ export interface BacktestRunHooks {
   reportProgress(done: number, total: number, label: string): Promise<void>;
   /** True once the screen asked to cancel; the engine then throws BacktestCancelledError. */
   isCancelRequested(): Promise<boolean>;
-  /** LLM mode: the Claude call, in place of the CLI (tests). */
-  callModel?: ClaudeCall;
-  /** Scoring worker threads (backtestScoringPool.ts): 0 scores on this thread; absent, one per symbol up to the cores for a rules-mode session of several symbols. */
-  scoringWorkers?: number;
 }
 
 export class BacktestCancelledError extends Error {
@@ -185,7 +163,6 @@ async function loadTickerProfile(symbol: string, connection: Knex): Promise<Back
 export const lookGridTimesEt: readonly string[] = ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30", "13:00", "13:30", "14:00", "14:30", "15:00", "15:30"];
 /** A look's quotes are read for the strikes from this share of the 10:00 stock price to that multiple of it (the capture's widest window at any price the day can reach), and for the held legs' strikes. */
 const lookStrikeRangeOfStockPrice = { lowest: 0.45, highest: 2.2 };
-const marketStressOpensBlockedReason = "market stress: new opens blocked while SPY is down";
 
 const clockTime = (minutesOfDay: number) => `${String(Math.floor(minutesOfDay / 60)).padStart(2, "0")}:${String(minutesOfDay % 60).padStart(2, "0")}`;
 
@@ -317,13 +294,13 @@ export interface SimulatedSessionResult {
   runStatistics: BacktestRunStatistics;
 }
 
-/** A symbol's file day at 10:00: its quotes, the stock price then (IBKR), and what Signals reads with them. */
+/** A symbol's file day at 10:00: its quotes, the stock price then (IBKR), and what the looks read with them. */
 interface DayCapture {
   quotes: SymbolFileQuote[];
   /** The close of IBKR's 09:30 bar on the day's traded scale; null without that bar. */
   stockPrice: number | null;
   previousSessionVolumeByContract: Map<string, number> | null;
-  /** What the day's inputs are built from; null without a 10:00 price. */
+  /** The 10:00 market the looks read; null without a 10:00 price. */
   market: BacktestLookSymbol["market"] | null;
 }
 
@@ -343,7 +320,7 @@ interface SessionSymbol {
   completeDays: Set<string>;
   /** The days whose intraday quotes the file holds. */
   intradayDays: Set<string>;
-  /** A day's end-of-day rows (the last days read are kept: the close marks, the next day's volume and a settlement read the same day). */
+  /** A day's end-of-day rows (the last days read are kept: the day's later marks and the next day's volume read the same day). */
   endOfDayRows(tradingDate: string): readonly SymbolFileEndOfDayRow[];
   /** The complete file day before each complete day; null for the first. */
   previousFileDayOf: Map<string, string | null>;
@@ -351,7 +328,7 @@ interface SessionSymbol {
   ownSessionDays: string[];
   /** The days the reader thread read for the symbol, the last few kept (a day's end-of-day rows are read again the next day). */
   prefetchedDays: Map<string, PrefetchedSymbolDay | null>;
-  /** Each file day's 10:00 capture, worked out once (the next day's ahead of it, to build its inputs early); the last few kept. */
+  /** Each file day's 10:00 capture, worked out once; the last few kept. */
   captureByDay: Map<string, DayCapture>;
   lastCompleteDay: string;
   /** Days inside the period the downloader could not retrieve at all. */
@@ -380,9 +357,8 @@ function sessionSymbolsOf(session: Pick<SessionRow, "symbol" | "symbols">): stri
 export async function runBacktestSession(sessionId: string, hooks: BacktestRunHooks, connection: Knex = db): Promise<void> {
   const session = await loadSessionRow(sessionId, connection);
   const settings = applyBacktestOverrides(session.settingsSnapshot, session.overrides ?? {});
-  // LLM mode (FULL-FIDELITY-DESIGN.md §5): Claude through the CLI decides where the rules otherwise do.
-  const claudeCliPath = settings.decisionMaker === "llm" ? readBacktestClaudeCliPath() : null;
-  if (settings.decisionMaker === "llm" && claudeCliPath === null && !hooks.callModel) throw new Error(backtestClaudeCliPathMissingMessage);
+  // A past rules or AI model session is never run again: its stored results stay as they are.
+  if (isRetiredBacktestDecisionMaker(settings.decisionMaker)) throw new Error(retiredBacktestDecisionMakerMessage);
   // With per-ticker pots the tickers take their turn at a look alphabetically, so the one that finds the cash short is
   // known in advance (approved by Marcelo 2026-10-15); a shared account keeps the order given.
   const symbolNames = session.bookMode === "pots" ? sessionSymbolsOf(session).sort() : sessionSymbolsOf(session);
@@ -398,7 +374,6 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
   const dataDirectory = requireBacktestDataDirectory();
   // Every file is opened once and stays open for the run.
   const files: BacktestSymbolFile[] = [];
-  let scoringPool: BacktestScoringPool | null = null;
   // The files are read ahead on a thread of their own (backtestDayDataReader.ts).
   const dayDataReader = new BacktestDayDataReader();
   try {
@@ -496,18 +471,11 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     }
     const symbolByName = new Map(symbols.map((entry) => [entry.symbol, entry]));
     const sectorBySymbol = new Map(symbols.map((entry) => [entry.symbol, entry.profile.sector]));
-    // The symbols of a look are scored in parallel on worker threads; the AI model's sessions stay on one thread.
-    const scoringWorkers = hooks.scoringWorkers ?? (settings.decisionMaker === "rules" && severalSymbols ? scoringWorkerCount(symbols.length) : 0);
-    if (scoringWorkers > 0) {
-      scoringPool = new BacktestScoringPool({ calendar: { fileDays: unionFileDays, marketCalendarRows }, symbols: symbols.map((entry) => ({ symbol: entry.symbol, profile: entry.profile, barRows: entry.bars.rows })), model: { forecastMethod: settings.model.forecastMethod, restOfDayCurve: settings.model.restOfDayCurve }, workerCount: scoringWorkers });
-      console.log(`backtest ${sessionId}: scoring on ${scoringPool.workerCount} worker thread(s)`);
-    }
     // A day no file holds is skipped; those the downloader could not retrieve for any symbol are named on the next day.
     const sessionDaySet = new Set(sessionDays);
     const skippedUnavailableDays = [...new Set(symbols.flatMap((entry) => entry.unavailableDaysInPeriod))].filter((dateIso) => !sessionDaySet.has(dateIso)).sort();
     const tables = await prepareModelTablesForSession(session.tablesMode, sessionDays, dataDirectory, (year) => hooks.reportProgress(0, sessionDays.length, `Model tables for ${year}`), connection);
     for (const line of tables.report) console.log(`backtest ${sessionId} tables: ${line}`);
-    const macroEventHistory = await loadMacroEventHistory(dataDirectory, sessionDays.at(-1)!);
     const marketStressPrices = await loadMarketStressPrices(sessionDays[0]!, sessionDays.at(-1)!, connection);
     // SPY at 10:00: the close of its 09:30 bar, else the day's IBKR open (the daily bar has no 10:00 price).
     const spyTicker: { id: string } | undefined = await connection("tickers").where({ symbol: marketStressSymbol }).first("id");
@@ -565,18 +533,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     };
     const optionSales: BacktestOptionSale[] = [];
     const days: SimulatedDay[] = [];
-    /** The account at the previous session's close: what the daily-loss breaker measures a look against. A new account starts at its funding. */
-    let previousEndOfDayAccountValue = startingValue;
+    // Pluto's system checks (the daily-loss breaker, market stress) ran with the rules only: their figures stay at zero.
     const runStatistics: BacktestRunStatistics = { looksRun: 0, daysWithIntradayLooks: 0, dailyLossBreakerTripDates: [], marketStressLooks: 0, marketStressDates: [], daysWithoutMarketStressBars: 0 };
-    // LLM mode: the masking the model sees (symbols aliased in the session's order, dates shifted), stored with the
-    // session, and what the session's model state keeps across looks and days.
-    let llmSession: BacktestLlmSession | null = null;
-    if (settings.decisionMaker === "llm") {
-      const masking = createPlutoPromptMasking(symbolNames);
-      await connection("backtest_sessions").where({ id: sessionId }).update({ llm_masking: JSON.stringify(masking) });
-      llmSession = new BacktestLlmSession({ sessionId, connection, cliPath: claudeCliPath ?? "", workingDirectory: ensureBacktestLlmWorkingDirectory(), masking, callModel: hooks.callModel });
-      runStatistics.llmCalls = { asked: 0, fromCache: 0 };
-    }
     let actionCount = 0;
     const nextActionId = () => `action-${(actionCount += 1)}`;
     // Buy and hold: each symbol's pot, or the starting value in equal parts; a part waits in cash until its symbol has a price.
@@ -591,12 +549,9 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
 
     /** The risk-free rate a day reads: DTB3 on or before the session day before it. */
     const riskFreeRatePercentOn = (dateIso: string) => rates.ratePercentOnOrBefore(addCalendarDays(dateIso, -1));
-    /** The macro events a day reads, one list per day (the same list for every symbol, and for the day built ahead). */
-    const macroEventsByDay = new Map<string, ReturnType<typeof macroEventHistory.upcomingOn>>();
-    const macroEventsOn = (dateIso: string) => macroEventsByDay.get(dateIso) ?? macroEventsByDay.set(dateIso, macroEventHistory.upcomingOn(dateIso)).get(dateIso)!;
     /** F on a day: the symbol's own on a day its file holds, else the factor of the last segment before the date; null when it cannot be inferred. */
     const splitFactorOnDay = (entry: SessionSymbol, dateIso: string): number | null => entry.splitFactorByDay.get(dateIso) ?? splitFactorOn(entry.schedule, dateIso);
-    /** The reader thread's copy of a symbol's file day, taken once (today's at the top of the day, the next day's maybe earlier). */
+    /** The reader thread's copy of a symbol's file day, taken once, at the top of the day. */
     const takePrefetchedDay = async (entry: SessionSymbol, dateIso: string) => {
       if (entry.prefetchedDays.has(dateIso)) return;
       entry.prefetchedDays.set(dateIso, await dayDataReader.take(entry.symbol, dateIso, captureLookTimeEt));
@@ -619,25 +574,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       if (entry.captureByDay.size > 3) entry.captureByDay.delete(entry.captureByDay.keys().next().value!);
       return capture;
     };
-    /** The session day being replayed: a day built ahead is not sent once its day has begun. */
-    let replayedDayIndex = 0;
-    /** With a scoring pool: builds the next session day's inputs on the workers while today's last look runs (backtestScoringPool.ts prepareDayAhead). */
-    const prepareNextDayAhead = async (dayIndexAtRequest: number) => {
-      const nextDayIso = sessionDays[dayIndexAtRequest + 1];
-      if (!scoringPool || nextDayIso === undefined) return;
-      for (const entry of symbols) {
-        if (!entry.completeDays.has(nextDayIso)) continue;
-        await takePrefetchedDay(entry, nextDayIso);
-        if (replayedDayIndex !== dayIndexAtRequest) return;
-        const splitFactor = splitFactorOnDay(entry, nextDayIso);
-        const { market } = captureOf(entry, nextDayIso);
-        if (splitFactor === null || market === null) continue;
-        scoringPool.prepareDayAhead({ symbol: entry.symbol, splitFactor, market, elevatedVolatility: undefined, macroEvents: macroEventsOn(nextDayIso) });
-      }
-    };
-
     for (let dayIndex = 0; dayIndex < sessionDays.length; dayIndex++) {
-      replayedDayIndex = dayIndex;
       const todayIso = sessionDays[dayIndex]!;
       const nowMs = Date.now();
       if (nowMs - lastCancelCheckAtMs >= cancelCheckIntervalMs) {
@@ -652,7 +589,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       for (const entry of symbols) {
         const ownDayIndex = entry.ownSessionDays.indexOf(todayIso);
         const nextDayIndex = ownDayIndex === -1 ? entry.ownSessionDays.findIndex((dateIso) => dateIso > todayIso) : ownDayIndex;
-        // A day already taken (the next one, when it was built ahead) is not read again.
+        // A day already taken is not read again.
         if (nextDayIndex !== -1) for (const dateIso of entry.ownSessionDays.slice(nextDayIndex, nextDayIndex + prefetchDaysAhead)) if (!entry.prefetchedDays.has(dateIso)) dayDataReader.prefetch(entry.symbol, dateIso, captureLookTimeEt);
         if (ownDayIndex === -1) continue;
         await takePrefetchedDay(entry, todayIso);
@@ -785,8 +722,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         });
       };
 
-      // c. The 10:00 marks, symbol by symbol, and what the day's looks score.
-      const macroEvents = macroEventsOn(todayIso);
+      // c. The 10:00 marks, symbol by symbol, and the symbols the day's looks read.
       const openLegs = openLegsOf(ledger);
       /**
        * Marks a symbol's open legs at a stock price and the quotes of the same instant; an option those quotes lack (or
@@ -867,7 +803,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         }
         entry.lastAdjustedStockPrice = stockPrice / splitFactor;
 
-        // f. Buy and hold: the symbol's part in whole shares on its first day with a price (as traded that day).
+        // e. Buy and hold: the symbol's part in whole shares on its first day with a price (as traded that day).
         if (!entry.baseline.bought) {
           entry.baseline = { shares: Math.floor(baselineDollarsOf(entry.symbol) / stockPrice), splitFactorAtPurchase: splitFactor, bought: true };
           baselineCash -= entry.baseline.shares * stockPrice;
@@ -898,7 +834,6 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
             profile: entry.profile,
             bars: entry.barsOnTradedScale(splitFactor),
             market: capture!.market!,
-            macroEvents,
             splitFactorToday: splitFactor,
             splitFactorNextSession: nextSessionIso === undefined ? splitFactor : (splitFactorOnDay(entry, nextSessionIso) ?? splitFactor),
             optionContractsRepresentable: aligned.representable,
@@ -922,11 +857,10 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       const exposureDollars = ledgerCommittedDollars(ledger);
       const baselineValue = baselineSharesValue + baselineCash;
 
-      // d. The looks inside Pluto's window, over every symbol scored today.
+      // d. The looks inside Pluto's window, over every symbol of the day.
       const lookTimes = lookTimesInWindow(pluto.windowStartEt, pluto.windowEndEt, closeMinutesByDay.get(todayIso) ?? regularCloseMinutesEt);
       const laterLookTimes = lookTimes.filter((lookTimeEt) => lookTimeEt > captureLookTimeEt);
       const modelTables = tables.tablesFor(todayIso);
-      const preparedDayBySymbol = new Map<string, BacktestPreparedSymbolDay>();
       /** A symbol's quotes at the looks after 10:00, read once, at the first of them. */
       const intradayQuotesBySymbol = new Map<string, Map<string, SymbolFileQuote[]>>();
       const intradayQuotesOf = (entry: SessionSymbol, stockPriceAtCapture: number, splitFactor: number): Map<string, SymbolFileQuote[]> => {
@@ -941,52 +875,9 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         }
         return quotesByLookTime;
       };
-      /**
-       * A later look's prices and day quotes by symbol, worked out ahead while the previous look's scoring runs: they come
-       * from the files alone. Only once the day's intraday quotes are read (their strike range takes in the legs held at
-       * the first later look), so nothing is read earlier than it would be.
-       */
-      const lookAheadBySymbolAndTime = new Map<string, { stockPrice: number | null; dayQuotes: LiveOptionQuote[] | null }>();
-      const lookAheadOf = (entry: SessionSymbol, lookTimeEt: string): { quotes: SymbolFileQuote[] | undefined; stockPrice: number | null; dayQuotes: LiveOptionQuote[] | null } | null => {
-        const quotes = intradayQuotesBySymbol.get(entry.symbol)?.get(lookTimeEt);
-        const key = `${entry.symbol}|${lookTimeEt}`;
-        let ahead = lookAheadBySymbolAndTime.get(key);
-        if (!ahead) {
-          const adjustedPrice = entry.intradayPrices.priceAt(todayIso, lookTimeEt);
-          const stockPrice = adjustedPrice === null ? null : adjustedPrice * splitFactorToday(entry);
-          const prepared = preparedDayBySymbol.get(entry.symbol);
-          const dayQuotes = quotes && stockPrice !== null && prepared ? selectLookDayQuotes(quotes, prepared.capturedContracts, todayIso, stockPrice, prepared.referenceVolatility, new Date(lookInstantMs(todayIso, lookTimeEt)).toISOString()) : null;
-          lookAheadBySymbolAndTime.set(key, (ahead = { stockPrice, dayQuotes }));
-        }
-        return { quotes, ...ahead };
-      };
-      const warmNextLook = (lookTimeEt: string) => {
-        const nextLookTimeEt = lookTimes[lookTimes.indexOf(lookTimeEt) + 1];
-        if (!scoringPool) return;
-        if (nextLookTimeEt === undefined) {
-          // A failure here is the next day's own to report, when it reads the same data.
-          prepareNextDayAhead(dayIndex).catch(() => {});
-          return;
-        }
-        for (const { entry } of daySymbols) {
-          if (!entry.intradayDays.has(todayIso) || !intradayQuotesBySymbol.has(entry.symbol)) continue;
-          // A symbol scored on two workers in turn gets the look after next too, on the other one (each look once).
-          const lookTimesAhead = lookTimes.slice(lookTimes.indexOf(lookTimeEt) + 1, lookTimes.indexOf(lookTimeEt) + 1 + scoringPool.laneCountOf(entry.symbol));
-          for (const lookTimeAhead of lookTimesAhead) {
-            const ahead = lookAheadOf(entry, lookTimeAhead)!;
-            if (ahead.stockPrice !== null && ahead.dayQuotes) scoringPool.warm(entry.symbol, { todayIso, dayQuotes: ahead.dayQuotes, spotPrice: ahead.stockPrice, scoredAtMs: lookInstantMs(todayIso, lookTimeAhead) });
-          }
-        }
-      };
       const looksOfDay: DayLookSummary[] = [];
-      const checkNotes: string[] = [];
-      const marketStressLookTimes: string[] = [];
-      let marketStressBarsMissing = false;
       let filledActionsToday = 0;
       let lookedAfterCapture = false;
-      /** LLM mode: the day's opening analysis has run; the instant of the day's previous look (cooldowns that ended since then queue rounds). */
-      let openingAnalysisDone = false;
-      let previousLookAtMs: number | null = null;
       /** The Vol Farmer: unwinds a position whose Call's strike today's bars reached, by `throughEt`, before the look that reads it (none when its Calls are held to expiry). */
       const scanVolFarmerCrossings = (throughEt: string) => {
         if (settings.decisionMaker !== "vol_farmer" || settings.volFarmer.crossing === "hold_to_expiry") return;
@@ -999,6 +890,10 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           looksOfDay.push({ lookTimeEt: crossing.lookTimeEt, summary: crossing.summary, filledCount: crossing.actions.length, refusedCount: crossing.actions.length === 0 ? 1 : 0, opensStopped: [] });
         }
       };
+      // The Steady Stake and Vol Farmer v2 decide at 10:00 only, the Vol Farmer too but reads every look's quotes (the IVs
+      // a crossing is priced on), the baseline at every look unless its looks say the first only.
+      const decidesAtCaptureLookOnly = settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" : settings.decisionMaker === "steady_stake" || settings.decisionMaker === "vol_farmer_v2";
+      const runLook = settings.decisionMaker === "baseline" ? runBaselineLook : settings.decisionMaker === "steady_stake" ? runSteadyStakeLook : settings.decisionMaker === "vol_farmer_v2" ? runVolFarmerV2Look : runVolFarmerLook;
       for (const lookTimeEt of lookTimes) {
         const isCaptureLook = lookTimeEt === captureLookTimeEt;
         scanVolFarmerCrossings(lookTimeEt);
@@ -1008,144 +903,43 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           const openLegsAtLook = openLegsOf(ledger);
           for (const { entry, lookSymbol, splitFactor } of daySymbols) {
             if (!entry.intradayDays.has(todayIso)) continue;
-            intradayQuotesOf(entry, lookSymbol.market.stockPrice, splitFactor);
-            const { quotes, stockPrice: lookPrice, dayQuotes } = lookAheadOf(entry, lookTimeEt)!;
+            const quotes = intradayQuotesOf(entry, lookSymbol.market.stockPrice, splitFactor).get(lookTimeEt);
+            const adjustedPrice = entry.intradayPrices.priceAt(todayIso, lookTimeEt);
+            const lookPrice = adjustedPrice === null ? null : adjustedPrice * splitFactorToday(entry);
             // Without this look's quotes or an IBKR price then, the symbol keeps its last marks and is left out of the look.
             if (!quotes || lookPrice === null) continue;
             markLegs(entry, openLegsAtLook.filter((leg) => symbolOfLeg(leg) === entry), lookPrice, quotes, splitFactor);
             entry.lastAdjustedStockPrice = lookPrice / splitFactor;
             const hedgePutQuotes = hedgePutQuotesAt(entry, lookTimeEt);
-            lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: lookPrice, ...(dayQuotes ? { dayQuotes } : {}) }, ...(hedgePutQuotes ? { hedgePutQuotes } : {}) });
+            lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: lookPrice }, ...(hedgePutQuotes ? { hedgePutQuotes } : {}) });
           }
         }
         if (lookSymbols.length === 0) continue;
-
-        // The baseline wheel, the Steady Stake and both Vol Farmers have none of Pluto's checks; the Steady Stake and Vol
-        // Farmer v2 decide at 10:00 only, the Vol Farmer too but reads every look's quotes (the IVs a crossing is priced on).
-        if (settings.decisionMaker === "baseline" || settings.decisionMaker === "steady_stake" || settings.decisionMaker === "vol_farmer" || settings.decisionMaker === "vol_farmer_v2") {
-          if (settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" && !isCaptureLook : (settings.decisionMaker === "steady_stake" || settings.decisionMaker === "vol_farmer_v2") && !isCaptureLook) continue;
-          const runLook = settings.decisionMaker === "baseline" ? runBaselineLook : settings.decisionMaker === "steady_stake" ? runSteadyStakeLook : settings.decisionMaker === "vol_farmer_v2" ? runVolFarmerV2Look : runVolFarmerLook;
-          const look = await runLook({ todayIso, lookTimeEt, symbols: lookSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
-          actions.push(...look.actions);
-          optionSales.push(...look.optionSales);
-          if (look.shortfalls) keepShortfalls(look.shortfalls);
-          if (look.ladderLevels) keepLadderLevels(look.ladderLevels);
-          if (look.noSaleNotes) for (const note of look.noSaleNotes) noSaleNotes.push(note);
-          if (look.noCandidateNotes) keepNoCandidateNotes(look.noCandidateNotes);
-          const filledAtLook = look.actions.filter((action) => action.outcome === "filled").length;
-          filledActionsToday += filledAtLook;
-          looksOfDay.push({ lookTimeEt, summary: look.summaryOfActions, filledCount: filledAtLook, refusedCount: look.actions.length - filledAtLook, opensStopped: look.opensStopped });
-          if (!isCaptureLook) lookedAfterCapture = true;
-          continue;
-        }
-
-        // The system checks, in passRunner's order. The daily-loss breaker stops Pluto for the rest of the day.
-        const accountValueAtLook = isCaptureLook ? accountValueForDecisions : ledgerNetLiquidationValue(ledger, priceByLegId);
-        const dayLossPercent = dailyLossPercent(accountValueAtLook, previousEndOfDayAccountValue);
-        if (dayLossPercent !== null && dayLossPercent <= -pluto.dailyLossBreakerPct) {
-          runStatistics.dailyLossBreakerTripDates.push(todayIso);
-          checkNotes.push(`daily-loss breaker tripped at ${lookTimeEt}: the account is ${dayLossPercent.toFixed(2)}% from the previous close (breaker at -${pluto.dailyLossBreakerPct}%), nothing more is done today`);
-          break;
-        }
-        if (filledActionsToday >= pluto.maxActionsPerSession) {
-          checkNotes.push(`actions cap reached before the ${lookTimeEt} look: ${filledActionsToday} of ${pluto.maxActionsPerSession} actions a session`);
-          break;
-        }
-        const marketDayChangePercent = marketStressPrices.dayChangePercentAt(todayIso, lookTimeEt);
-        if (marketDayChangePercent === null) marketStressBarsMissing = true;
-        const marketStress = marketDayChangePercent !== null && marketDayChangePercent <= -pluto.spyStressBreakerPct;
-        if (marketStress) marketStressLookTimes.push(`${lookTimeEt} (${marketStressSymbol} ${marketDayChangePercent.toFixed(2)}%)`);
-
-        // LLM mode, the live agent's rounds: the day's first look is the opening analysis; later, a ticker whose cooldown
-        // after a fill ended since the previous look gets its own forced round, then the look's own round over the
-        // tickers it re-quoted (live's Day Signals update).
-        let llmRounds: BacktestLlmRound[] = [];
-        const lookAtMs = lookInstantMs(todayIso, lookTimeEt);
-        if (llmSession) {
-          if (!openingAnalysisDone) llmRounds = [{ trigger: "opening_analysis", detail: { date: todayIso }, symbols: null, force: true }];
-          else {
-            const cooldownMs = pluto.tickerCooldownMinutes * 60_000;
-            for (const lookSymbol of lookSymbols) {
-              const lastFillAt = ledgerLastFilledActionAt(ledger, lookSymbol.profile.symbol);
-              const cooldownEndsAtMs = lastFillAt === null || cooldownMs <= 0 ? null : lastFillAt.getTime() + cooldownMs;
-              if (cooldownEndsAtMs !== null && previousLookAtMs !== null && cooldownEndsAtMs > previousLookAtMs && cooldownEndsAtMs <= lookAtMs) llmRounds.push({ trigger: "cooldown_ended", detail: { symbol: lookSymbol.profile.symbol }, symbols: [lookSymbol.profile.symbol], force: true });
-            }
-            llmRounds.push({ trigger: "day_signals_update", detail: { symbols: lookSymbols.map((lookSymbol) => lookSymbol.profile.symbol) }, symbols: lookSymbols.map((lookSymbol) => lookSymbol.profile.symbol), force: false });
-          }
-          openingAnalysisDone = true;
-          previousLookAtMs = lookAtMs;
-        }
-        const look = await runBacktestLook({
-          todayIso,
-          lookTimeEt,
-          symbols: lookSymbols,
-          sectorBySymbol,
-          calendar,
-          settings,
-          modelTables,
-          ledger,
-          previousSessionDateIso: previousSessionDay,
-          priceByLegId,
-          nextActionId,
-          preparedDayBySymbol,
-          scoringPool,
-          onFirstScoresSent: () => warmNextLook(lookTimeEt),
-          filledActionsEarlierToday: filledActionsToday,
-          opensBlockedBecause: marketStress ? marketStressOpensBlockedReason : null,
-          ...(llmSession ? { llm: { session: llmSession, rounds: llmRounds, windowEndEt: effectiveWindowEndEt(pluto.windowEndEt, clockTime(closeMinutesByDay.get(todayIso) ?? regularCloseMinutesEt)), spyDayChangePercent: marketDayChangePercent } } : {}),
-        });
-        if (runStatistics.llmCalls) {
-          runStatistics.llmCalls.asked += look.llmCalls.asked;
-          runStatistics.llmCalls.fromCache += look.llmCalls.fromCache;
-        }
+        if (decidesAtCaptureLookOnly && !isCaptureLook) continue;
+        const look = await runLook({ todayIso, lookTimeEt, symbols: lookSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
         actions.push(...look.actions);
         optionSales.push(...look.optionSales);
+        if (look.shortfalls) keepShortfalls(look.shortfalls);
+        if (look.ladderLevels) keepLadderLevels(look.ladderLevels);
+        if (look.noSaleNotes) for (const note of look.noSaleNotes) noSaleNotes.push(note);
+        if (look.noCandidateNotes) keepNoCandidateNotes(look.noCandidateNotes);
         const filledAtLook = look.actions.filter((action) => action.outcome === "filled").length;
         filledActionsToday += filledAtLook;
         looksOfDay.push({ lookTimeEt, summary: look.summaryOfActions, filledCount: filledAtLook, refusedCount: look.actions.length - filledAtLook, opensStopped: look.opensStopped });
         if (!isCaptureLook) lookedAfterCapture = true;
       }
       scanVolFarmerCrossings(clockTime(closeMinutesByDay.get(todayIso) ?? regularCloseMinutesEt));
-      if (marketStressLookTimes.length > 0) {
-        checkNotes.push(`market stress barred new opens at ${marketStressLookTimes.join(", ")} (at -${pluto.spyStressBreakerPct}% or worse)`);
-        runStatistics.marketStressLooks += marketStressLookTimes.length;
-        runStatistics.marketStressDates.push(todayIso);
-      }
-      if (marketStressBarsMissing) runStatistics.daysWithoutMarketStressBars += 1;
       if (lookedAfterCapture) runStatistics.daysWithIntradayLooks += 1;
       runStatistics.looksRun += looksOfDay.length;
-      const summaryParts = looksOfDay.length > 0 ? summarizeDayLooks(looksOfDay) : checkNotes.length > 0 ? [] : [`No action: ${daySymbols.length > 0 ? `no look inside the trading window ${pluto.windowStartEt}–${pluto.windowEndEt} ET has quotes` : nothingScoredReason}`];
+      const summaryParts = looksOfDay.length > 0 ? summarizeDayLooks(looksOfDay) : [`No action: ${daySymbols.length > 0 ? `no look inside the trading window ${pluto.windowStartEt}–${pluto.windowEndEt} ET has quotes` : nothingScoredReason}`];
       // The day is recorded as marked at 10:00, before its looks: an action's cash and exposure show from the next day.
-      days.push({ tradingDate: todayIso, accountValue, cash: cashAtMark, exposureDollars, sharesValueDollars, interestDollars, baselineValue, baselineExposureDollars: baselineSharesValue, baselineInterestDollars, spyBaselineValue: spyBaselineDay?.value ?? null, spyBaselineExposureDollars: spyBaselineDay?.exposureDollars ?? null, spyBaselineInterestDollars: spyBaselineDay?.interestDollars ?? null, decisionSummary: [...summaryParts, ...checkNotes, ...notes].join(" · "), looksRun: looksOfDay.length, actionsTaken: filledActionsToday });
+      days.push({ tradingDate: todayIso, accountValue, cash: cashAtMark, exposureDollars, sharesValueDollars, interestDollars, baselineValue, baselineExposureDollars: baselineSharesValue, baselineInterestDollars, spyBaselineValue: spyBaselineDay?.value ?? null, spyBaselineExposureDollars: spyBaselineDay?.exposureDollars ?? null, spyBaselineInterestDollars: spyBaselineDay?.interestDollars ?? null, decisionSummary: [...summaryParts, ...notes].join(" · "), looksRun: looksOfDay.length, actionsTaken: filledActionsToday });
 
-      // e. The account at the close: what tomorrow's daily-loss breaker measures against.
       // The later marks of the day replace the ones the 10:00 decisions kept, unless a later look marked the option since.
       const openLegIdsAfterLooks = new Set(openLegsOf(ledger).map((leg) => leg.id));
       for (const [legId, mark] of laterMarkByLegId) {
         if (openLegIdsAfterLooks.has(legId) && priceByLegId.get(legId) === decisionMarkByLegId.get(legId)) priceByLegId.set(legId, mark);
       }
-      const openLegsAtClose = openLegsOf(ledger);
-      const closingPriceByLegId = new Map(priceByLegId);
-      for (const entry of symbols) {
-        const legsOfSymbol = openLegsAtClose.filter((leg) => symbolOfLeg(leg) === entry);
-        if (legsOfSymbol.length === 0) continue;
-        const splitFactor = splitFactorToday(entry);
-        const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
-        const endOfDayRows = entry.completeDays.has(todayIso) ? entry.endOfDayRows(todayIso) : [];
-        const adjustedClose = adjustedCloseOn(todayIso, entry.bars, entry.intradayPrices);
-        const closeAsTraded = adjustedClose === null ? null : adjustedClose.close * splitFactor;
-        const closingMidByContract = markMidByContract(endOfDayRows, new Set(legsOfSymbol.flatMap((leg) => (leg.legType === "stock" ? [] : [roundedStrike(leg.strikePrice! / priceToCycleScale)]))));
-        for (const leg of legsOfSymbol) {
-          if (leg.legType === "stock") {
-            if (closeAsTraded !== null) closingPriceByLegId.set(leg.id, closeAsTraded * priceToCycleScale);
-            continue;
-          }
-          const strikeAsTraded = leg.strikePrice! / priceToCycleScale;
-          const closingMark = leg.expiryDate === todayIso ? (closeAsTraded === null ? null : Math.max(0, leg.optionType === "call" ? closeAsTraded - strikeAsTraded : strikeAsTraded - closeAsTraded)) : (closingMidByContract.get(markKey(leg.expiryDate!, strikeAsTraded, leg.optionType === "call" ? "C" : "P")) ?? null);
-          if (closingMark !== null) closingPriceByLegId.set(leg.id, closingMark * priceToCycleScale);
-        }
-      }
-      previousEndOfDayAccountValue = ledgerNetLiquidationValue(ledger, closingPriceByLegId);
     }
     const elapsedSeconds = (Date.now() - startedAtMs) / 1000;
     const lastSessionDateIso = sessionDays.at(-1)!;
@@ -1160,14 +954,6 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         if (daysWithoutIntradayQuotes > 0) sessionNotes.push(describeDaysWithoutIntradayQuotes(entry.symbol, daysWithoutIntradayQuotes, ownSessionDays.length));
       }
     }
-    if (runStatistics.daysWithoutMarketStressBars > 0)
-      sessionNotes.push(
-        marketStressPrices.lastDate === null
-          ? `Market stress was not checked: the local DB holds no ${marketStressSymbol} 30-minute bars (npm run backtest:backfill-market-stress-bars).`
-          : `Market stress was not checked at every look of ${formatCount(runStatistics.daysWithoutMarketStressBars)} day(s): the ${marketStressSymbol} 30-minute bars in the local DB run from ${marketStressPrices.firstDate} to ${marketStressPrices.lastDate} (npm run backtest:backfill-market-stress-bars tops them up).`,
-      );
-    if (runStatistics.marketStressDates.length > 0) sessionNotes.push(`Market stress (${marketStressSymbol} down ${pluto.spyStressBreakerPct}% or more on the day) barred new opens at ${formatCount(runStatistics.marketStressLooks)} look(s) on ${formatCount(runStatistics.marketStressDates.length)} day(s).`);
-    if (runStatistics.dailyLossBreakerTripDates.length > 0) sessionNotes.push(`The daily-loss breaker (account down ${pluto.dailyLossBreakerPct}% or more from the previous close) tripped on ${formatCount(runStatistics.dailyLossBreakerTripDates.length)} day(s): ${runStatistics.dailyLossBreakerTripDates.join(", ")}. Nothing more was done on those days; the reset a human gives live is assumed before the next open.`);
     const spyPurchase = spyBuyAndHold?.purchase ?? null;
     sessionNotes.push(
       spyPurchase === null
@@ -1175,10 +961,6 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         : `Buy and hold of SPY (comparison only): ${formatCount(spyPurchase.shares)} shares at ${spyPurchase.price.toFixed(2)} on ${spyPurchase.dateIso}, SPY's price at 10:00, the rest in cash at the same interest; dividends not counted${spyBuyAndHold!.daysMarkedAtAnEarlierPrice > 0 ? `; ${formatCount(spyBuyAndHold!.daysMarkedAtAnEarlierPrice)} day(s) without a SPY price marked at the last one` : ""}.`,
     );
     sessionNotes.push(`Buy and hold of ${symbols.map((entry) => entry.symbol).join(", ")} (comparison only): the starting value in equal parts, whole shares at each symbol's first 10:00 price, never rebalanced; dividends not counted.`);
-    if (llmSession && runStatistics.llmCalls) {
-      const aliases = Object.entries(llmSession.options.masking.aliasBySymbol).map(([symbol, alias]) => `${symbol} as ${alias}`).join(", ");
-      sessionNotes.push(`Decisions by Claude (${backtestClaudeModel}, ${backtestClaudeReasoningEffort} effort) through the subscription, as live Pluto asks its model: ${formatCount(runStatistics.llmCalls.asked)} decision(s) asked, ${formatCount(runStatistics.llmCalls.fromCache)} answered from the cache. The model saw ${aliases}, every date ${llmSession.options.masking.dateShiftWeeks} weeks later. The decision rules (roll, buyback, shares in profit, closes before macro events, after a refused choice) do not apply.`);
-    }
     if (skippedUnavailableDays.length > 0) sessionNotes.push(`${formatCount(skippedUnavailableDays.length)} day(s) inside the period could not be downloaded for any symbol and were skipped: ${skippedUnavailableDays.join(", ")}.`);
     if (symbols.some((entry) => hedgeOnFor(entry.symbol))) {
       runStatistics.hedge = summarizeHedge(ledger, actions, priceByLegId);
@@ -1208,7 +990,6 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     await persistSessionResult(sessionId, startingValue, result, dataLastDate, connection);
   } finally {
     for (const file of files) file.close();
-    await scoringPool?.close();
     await dayDataReader.close();
   }
 }
@@ -1256,8 +1037,7 @@ export function computeSessionMetrics(startingValue: number, days: readonly Simu
   };
 }
 
-// A session run again asks its model calls again, from the cache: its call log starts over with it.
-const sessionResultTables = ["backtest_session_days", "backtest_trades", "backtest_positions", "backtest_position_legs", "backtest_fills", "backtest_actions", "backtest_cycles", "backtest_cycle_gaps", "backtest_session_llm_calls", "backtest_look_shortfalls", "backtest_ladder_levels"] as const;
+const sessionResultTables = ["backtest_session_days", "backtest_trades", "backtest_positions", "backtest_position_legs", "backtest_fills", "backtest_actions", "backtest_cycles", "backtest_cycle_gaps", "backtest_look_shortfalls", "backtest_ladder_levels"] as const;
 
 async function clearSessionResult(sessionId: string, connection: Knex): Promise<void> {
   for (const table of sessionResultTables) await connection(table).where({ session_id: sessionId }).delete();

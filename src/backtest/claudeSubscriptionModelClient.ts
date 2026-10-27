@@ -1,16 +1,10 @@
 import { spawn as spawnProcess } from "node:child_process";
-import { plutoDecisionJsonSchema } from "../../pluto/decisionSchema.js";
-import type { PlutoModelCallResult } from "../../pluto/modelClient.js";
 
-// The backtest's LLM mode (Marcelo 2026-10-12): Pluto's decision asked of Claude through Marcelo's subscription, not
-// OpenRouter: the Claude Code CLI run headless (the sgtechno pattern), on the CLI's own subscription login. Same
-// system prompt, payload and strict JSON schema as the live call; Claude Code's own prompt, tools, MCP servers,
-// skills and settings files are left out so the call carries Pluto's prompt and little else. Returns the live
-// client's result shape, so the pass treats both alike. Cost is the CLI's API-equivalent figure: nothing is billed,
-// it counts toward the plan's usage limits.
-
-export const backtestClaudeModel = "sonnet";
-export const backtestClaudeReasoningEffort = "medium";
+// Claude through Marcelo's subscription, not the API (Marcelo 2026-10-12), for the Analyse window's Summary and
+// Recommendation (analysisSummary.ts): the Claude Code CLI run headless (the sgtechno pattern), on the CLI's own
+// subscription login, with a strict JSON schema for the answer. Claude Code's own prompt, tools, MCP servers, skills and
+// settings files are left out so the call carries the caller's prompt and little else. Cost is the CLI's API-equivalent
+// figure: nothing is billed, it counts toward the plan's usage limits.
 
 export type ClaudeReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -21,22 +15,34 @@ export interface ClaudeSubscriptionCallInput {
   timeoutSeconds: number;
   systemPrompt: string;
   userPayload: string;
-  /** The answer's JSON schema; Pluto's decision when absent. */
-  jsonSchema?: object;
-  /** The model and its effort; the backtest's (backtestClaudeModel, backtestClaudeReasoningEffort) when absent. */
-  model?: string;
-  effort?: ClaudeReasoningEffort;
+  /** The answer's JSON schema. */
+  jsonSchema: object;
+  /** The model ("sonnet", "claude-opus-5-5") and its effort. */
+  model: string;
+  effort: ClaudeReasoningEffort;
 }
 
 /**
- * Why a call failed, which decides what the session does (Marcelo 2026-10-12): the plan's limit and a CLI that cannot
- * run stop the session at once; a failure that passes (overloaded, rate limited, a timeout, the CLI crashing) is retried,
- * then stops it; the model answering without the decision's shape is a failed call, as live counts one.
+ * Why a call failed: the plan's limit; a CLI that cannot run (every later call would fail the same way); a failure that
+ * passes (overloaded, rate limited, a timeout, the CLI crashing); or the model answering without the schema's shape.
  */
 export type ClaudeCallFailureKind = "usage_limit" | "fatal" | "transient" | "answer";
 
-export interface ClaudeSubscriptionCallResult extends PlutoModelCallResult {
-  /** The plan's usage limit stopped the call: the session should stop and be resumed later, not fail. */
+export interface ClaudeSubscriptionCallResult {
+  ok: boolean;
+  /** The structured answer as JSON text; on a failure, whatever the CLI printed, when anything. */
+  rawText: string | null;
+  servedModelId: string | null;
+  latencyMs: number;
+  tokensIn: number | null;
+  tokensOut: number | null;
+  costUsd: number | null;
+  /** "subscription" once the CLI answered; null when it printed no envelope. */
+  serviceTier: string | null;
+  error: string | null;
+  /** Always null: the CLI reports no HTTP status. */
+  httpStatus: number | null;
+  /** The plan's usage limit stopped the call. */
   usageLimitReached: boolean;
   /** Null when the call answered. */
   failureKind: ClaudeCallFailureKind | null;
@@ -82,7 +88,7 @@ function failed(kind: ClaudeCallFailureKind) {
   return { usageLimitReached: kind === "usage_limit", failureKind: kind };
 }
 
-export function claudeCliArguments(systemPrompt: string, jsonSchema: object = plutoDecisionJsonSchema, model: string = backtestClaudeModel, effort: ClaudeReasoningEffort = backtestClaudeReasoningEffort): string[] {
+export function claudeCliArguments(systemPrompt: string, jsonSchema: object, model: string, effort: ClaudeReasoningEffort): string[] {
   return [
     "-p",
     "--output-format", "json",
@@ -164,7 +170,7 @@ export function callClaudeSubscriptionModel(input: ClaudeSubscriptionCallInput, 
     child.on("error", (error) =>
       finish({ ok: false, rawText: null, servedModelId: null, latencyMs: Date.now() - startedAt, tokensIn: null, tokensOut: null, costUsd: null, serviceTier: "subscription", httpStatus: null, error: `Claude CLI could not start: ${error.message}`, ...failed("fatal") }),
     );
-    child.on("close", (exitCode) => finish(readClaudeCliOutput(stdout, stderr, exitCode, Date.now() - startedAt, input.model ?? backtestClaudeModel)));
+    child.on("close", (exitCode) => finish(readClaudeCliOutput(stdout, stderr, exitCode, Date.now() - startedAt, input.model)));
     child.stdin.write(input.userPayload);
     child.stdin.end();
   });

@@ -1,6 +1,6 @@
 import { Worker } from "node:worker_threads";
 import os from "node:os";
-import { engineWorkerExecArgv } from "../engine/backtestScoringPool.js";
+import { engineWorkerExecArgv } from "../engine/engineWorkerThreads.js";
 import type { ChainMapContract, ChainScanDayInput, ChainScanDayRow, ChainScanSettings } from "./analysisChainScan.js";
 import type { ChainScanWorkerRequest, ChainScanWorkerResponse } from "./analysisChainScanWorker.js";
 

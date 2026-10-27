@@ -1,6 +1,7 @@
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
-import type { BacktestJobKind, BacktestJobStatus, BacktestJobView, BacktestSessionRunState } from "../backtestTypes.js";
+import { isRetiredBacktestDecisionMaker, retiredBacktestDecisionMakerMessage, type BacktestJobKind, type BacktestJobStatus, type BacktestJobView, type BacktestSessionRunState, type BacktestSettings, type BacktestSettingsOverrides } from "../backtestTypes.js";
+import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
 import {
   appendProgressSample,
   computeJobRunSeconds,
@@ -434,6 +435,10 @@ export async function resumeBacktestJob(jobId: string): Promise<BacktestJobView>
   if (displayStatus === "queued" || displayStatus === "running") throw new BacktestRequestError("This job is already running or waiting to start.", 409);
   if (job.kind === "backtest" && !job.session_id) throw new BacktestRequestError("This backtest job has no session.", 409);
   if (job.kind === "analysis") throw new BacktestRequestError("An analysis is not resumed: run Update Analysis again.", 409);
+  if (job.kind === "backtest") {
+    const session: { settings_snapshot: BacktestSettings; overrides: BacktestSettingsOverrides | null } | undefined = await db("backtest_sessions").where({ id: job.session_id }).first("settings_snapshot", "overrides");
+    if (session && isRetiredBacktestDecisionMaker(applyBacktestOverrides(session.settings_snapshot, session.overrides ?? {}).decisionMaker)) throw new BacktestRequestError(retiredBacktestDecisionMakerMessage, 409);
+  }
 
   terminateLeftoverJobProcesses(job.pid, jobId);
   if (job.kind === "download") {

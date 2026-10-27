@@ -2,10 +2,10 @@ import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib
 import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
 import { blackScholesDelta, impliedVolatilityFromPrice } from "../../lib/impliedVolatilitySurface.js";
 import { daysToExpiry, describeOptionContract, describeOrderSize } from "../../lib/optionContractLabel.js";
-import { openCandidateId } from "../../pluto/candidateFilters.js";
+import { openCandidateId } from "./candidateIds.js";
 import type { BacktestAction, BacktestVolFarmerSettings, BacktestVolFarmerV2Settings } from "../backtestTypes.js";
 import { sharesPerContract } from "./backtestBook.js";
-import type { BacktestLookContext, BacktestLookResult, BacktestLookSymbol, BacktestOptionSale } from "./backtestLook.js";
+import type { BacktestLookContext, BacktestLookResult, BacktestLookSymbol, BacktestOptionSale } from "./backtestLookTypes.js";
 import { captureLookTimeEt, lookInstantMs } from "./backtestTickerInputs.js";
 import { baselineQuoteRejection, describeRejections, noteBaselineForwardAnchors, roundedStrike, selectBaselineCandidates, type BaselineCandidate, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
 import { buyLeapsCall, expirySettlementInstant, openCashSecuredPut, openCoveredCall, sellLeapsCall } from "./ledger/ledgerEvents.js";
@@ -192,7 +192,7 @@ export async function runVolFarmerV2Look(context: BacktestLookContext): Promise<
     if (summary !== null) summaries.push(summary);
   }
   const summary = summaries.length === 0 ? "No action" : summaries.join(" · ");
-  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [], fitIssueBySymbol: new Map(), scoredBySymbol: new Map(), llmCalls: { asked: 0, fromCache: 0 } };
+  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [] };
 }
 
 interface SymbolLook {

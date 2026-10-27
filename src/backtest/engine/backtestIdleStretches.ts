@@ -1,7 +1,7 @@
 import { easternInstant } from "../../lib/easternIsoDate.js";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import { backtestCandidateChecks, type BacktestCycle, type BacktestCycleGap, type BacktestIdleStretch, type BacktestNoCandidateDetail, type BacktestNoSaleDays, type BacktestOrderShortfall, type BacktestStockOnlyStretch } from "../backtestTypes.js";
-import type { BacktestNoCandidateNote, BacktestNoSaleNote } from "./backtestLook.js";
+import type { BacktestNoCandidateNote, BacktestNoSaleNote } from "./backtestLookTypes.js";
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import type { LedgerLeg } from "./ledger/simulatedLedger.js";
 

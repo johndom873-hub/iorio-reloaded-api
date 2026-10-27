@@ -1,20 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { easternInstant } from "../../../lib/easternIsoDate.js";
-import { checkCalledAway, commissionPerShare } from "../../../pluto/heldShareCalls.js";
 import { buyBackCoveredCallKeepingShares, openCashSecuredPut, openCoveredCall, rollLeg, sellShares, settleExpiry } from "./ledgerEvents.js";
 import { ledgerBreakEvenForPosition, ledgerCycles, ledgerFreeShares, ledgerHeldSharesAverageCost, ledgerLatestShareAcquisitionPrice, ledgerOpenCycleSummary, ledgerTotalRealizedPnl } from "./ledgerSelectors.js";
 import { createSimulatedLedger, type SimulatedLedger } from "./simulatedLedger.js";
 
-// Whole wheels through the simulated ledger, worked by hand, read back through the live cycle engine (deriveCycles),
-// the live break-even (summarizeOpenCycle) and Pluto's held-shares rule (checkCalledAway). In each, the cash the
-// symbol moved equals the cycle's total, bucket by bucket, with no data flag. $0.68 per contract, $0.005 per share.
+// Whole wheels through the simulated ledger, worked by hand, read back through the live cycle engine (deriveCycles) and
+// the live break-even (summarizeOpenCycle). In each, the cash the symbol moved equals the cycle's total, bucket by
+// bucket, with no data flag. $0.68 per contract, $0.005 per share.
 
 const startingCash = 100_000;
 const decisionAt = (dateIso: string) => easternInstant(dateIso, 10, 0);
 const newLedger = () => createSimulatedLedger(startingCash, easternInstant("2026-03-02", 9, 30));
 const symbolCash = (ledger: SimulatedLedger, symbol: string) => ledger.cashJournal.filter((entry) => entry.symbol === symbol).reduce((sum, entry) => sum + entry.amount, 0);
 // Pluto's minimum profit on shares: 1% of their cost, at least $50.
-const profitFloorSettings = { unstructuredCloseMinPct: 1, unstructuredCloseMinDollars: 50 };
 
 describe("ledgerLatestShareAcquisitionPrice", () => {
   it("reads the latest purchase or assignment of the symbol's shares, not their average cost", () => {
@@ -102,19 +100,10 @@ describe("put assigned, a call expires, the next call takes the shares", () => {
     expect(cycles[0]!.total).toBeCloseTo(symbolCash(ledger, "WHL") + 100 * 48, 6);
     expect(ledgerFreeShares(ledger, "WHL")).toBe(100);
 
-    // Pluto's rule for a call on these shares: a $51 call at 0.80 leaves a break-even of 48.8068 − 0.7932 = 48.0136 and
-    // (51 − 48.0136) × 100 = 298.64 if called away, over the floor of max(1% × 50 × 100, 50) = 50. A $48.50 call would leave 48.64.
-    const firstCallCheck = checkCalledAway({ cycle: summary, strike: 51, contracts: 1, cashPerShareCovered: 0.8 - commissionPerShare(undefined), settings: profitFloorSettings });
-    expect(firstCallCheck.check).toMatchObject({ floor: 50, passes: true });
-    expect(firstCallCheck.check!.breakEvenAfter).toBeCloseTo(48.0136, 6);
-    expect(firstCallCheck.check!.profitIfCalledAway).toBeCloseTo(298.64, 6);
-    const tooLowCheck = checkCalledAway({ cycle: summary, strike: 48.5, contracts: 1, cashPerShareCovered: 0.8 - commissionPerShare(undefined), settings: profitFloorSettings });
-    expect(tooLowCheck.check!.profitIfCalledAway).toBeCloseTo(48.64, 6);
-    expect(tooLowCheck.check!.passes).toBe(false);
-
+    // A $51 call at 0.80 leaves a break-even of 48.8068 − 0.7932 = 48.0136 (the premium less $0.68 commission).
     const firstCall = openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-13", strike: 51, contracts: 1, callFillPrice: 0.8, stockFillPrice: null, at: decisionAt("2026-03-09"), actionId: "action-2", splitFactorToday: 1 });
     summary = ledgerOpenCycleSummary(ledger, "WHL")!;
-    expect(summary.breakEvenPerShare).toBeCloseTo(firstCallCheck.check!.breakEvenAfter, 6);
+    expect(summary.breakEvenPerShare).toBeCloseTo(48.0136, 6);
     expect(ledgerBreakEvenForPosition(ledger, firstCall.positionId).breakEven).toBeCloseTo(48.0136, 6);
     expect(ledgerFreeShares(ledger, "WHL")).toBe(0);
 
@@ -128,12 +117,7 @@ describe("put assigned, a call expires, the next call takes the shares", () => {
     expect(cycles[0]).toMatchObject({ status: "open", sharesHeld: 100, dataFlags: [] });
     expect(cycles[0]!.total).toBeCloseTo(symbolCash(ledger, "WHL") + 100 * 50.5, 6);
 
-    // The $50 call at 0.90: break-even 48.0136 − 0.8932 = 47.1204, (50 − 47.1204) × 100 = 287.96 if called away.
-    const secondCallCheck = checkCalledAway({ cycle: summary, strike: 50, contracts: 1, cashPerShareCovered: 0.9 - commissionPerShare(undefined), settings: profitFloorSettings });
-    expect(secondCallCheck.check!.breakEvenAfter).toBeCloseTo(47.1204, 6);
-    expect(secondCallCheck.check!.profitIfCalledAway).toBeCloseTo(287.96, 6);
-    expect(secondCallCheck.check!.passes).toBe(true);
-
+    // The $50 call at 0.90: break-even 48.0136 − 0.8932 = 47.1204.
     const secondCall = openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-20", strike: 50, contracts: 1, callFillPrice: 0.9, stockFillPrice: null, at: decisionAt("2026-03-16"), actionId: "action-3", splitFactorToday: 1 });
     expect(ledgerOpenCycleSummary(ledger, "WHL")!.breakEvenPerShare).toBeCloseTo(47.1204, 6);
 
@@ -149,8 +133,7 @@ describe("put assigned, a call expires, the next call takes the shares", () => {
     expect(cycle.buckets.cc.total).toBeCloseTo(238.64, 6);
     expect(cycle.buckets.hedge.total).toBe(0);
     expect(cycle.total).toBeCloseTo(287.96, 6);
-    // The cycle made what the rule said the call would leave if assigned, and it is the cash the symbol moved.
-    expect(cycle.total).toBeCloseTo(secondCallCheck.check!.profitIfCalledAway, 6);
+    // The cycle made what the call left if assigned, (50 − 47.1204) × 100, and it is the cash the symbol moved.
     expect(symbolCash(ledger, "WHL")).toBeCloseTo(287.96, 6);
     expect(ledger.cash).toBeCloseTo(100_287.96, 6);
     expect(ledgerTotalRealizedPnl(ledger)).toBeCloseTo(287.96, 6);

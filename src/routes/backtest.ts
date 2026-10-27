@@ -39,10 +39,6 @@ import { registerTickerAnalysisRoutes } from "./backtestAnalysisRoutes.js";
 import { listAnalysedSymbols, rerunAnalysesAfterSave } from "../backtest/analysis/analysisStore.js";
 import { loadBacktestSessionPriceChart } from "../backtest/analysis/sessionPriceChart.js";
 import { loadBacktestSessionStockPrices } from "../backtest/analysis/sessionStockPrices.js";
-import { readBacktestClaudeCliPath } from "../backtest/backtestClaudeCli.js";
-import { applyBacktestOverrides } from "../backtest/backtestSettingsOverrides.js";
-import { lookTimesInWindow, regularCloseMinutesEt } from "../backtest/engine/runBacktestSession.js";
-import { estimateLlmSession } from "../backtest/llm/estimateLlmSession.js";
 import {
   createBacktestBatch,
   createBacktestSession,
@@ -149,7 +145,7 @@ backtestRouter.post("/jobs/:id/resume", async (request, response) => {
 });
 
 function labSettingsView(lab: BacktestLabSettings): BacktestLabSettingsView {
-  const template: BacktestSettingsTemplate = { settings: lab.settings, rows: buildBacktestSettingRows(lab.settings, { claudeCliAvailable: readBacktestClaudeCliPath() !== null }), notReplayed: [...backtestNotReplayed] };
+  const template: BacktestSettingsTemplate = { settings: lab.settings, rows: buildBacktestSettingRows(lab.settings), notReplayed: [...backtestNotReplayed] };
   return { ...template, defaultPotDollars: lab.defaultPotDollars, updatedAt: lab.updatedAt };
 }
 
@@ -234,15 +230,15 @@ backtestRouter.put("/lab-ticker-overrides/:symbol", async (request, response) =>
 });
 
 backtestRouter.post("/sessions", async (request, response) => {
-  const { snapshot, value, warnings, llmEstimate } = await validateSessionRequestAgainstLab(request.body);
-  response.status(201).json({ ...(await createBacktestSession(value, snapshot)), warnings, llmEstimate, resolvedBySymbol: value.symbolSettings });
+  const { snapshot, value, warnings } = await validateSessionRequestAgainstLab(request.body);
+  response.status(201).json({ ...(await createBacktestSession(value, snapshot)), warnings, resolvedBySymbol: value.symbolSettings });
 });
 
 // The New session form starts a batch: 1 to 9 runs on one period and the same settings (CreateBacktestBatchRequest).
 backtestRouter.post("/batches", async (request, response) => {
-  const { name, runs, warnings, llmEstimate } = await validateBatchRequestAgainstLab(request.body);
+  const { name, runs, warnings } = await validateBatchRequestAgainstLab(request.body);
   const created = await createBacktestBatch(name, runs);
-  const answer: CreateBacktestBatchResponse = { ...created, warnings, llmEstimate };
+  const answer: CreateBacktestBatchResponse = { ...created, warnings };
   response.status(201).json(answer);
 });
 
@@ -278,8 +274,8 @@ backtestRouter.post("/sessions/estimate", async (request, response) => {
   // Tickers whose values cannot run still answer, each with its problems, so the screen shows them all at once.
   const estimate: BacktestSessionEstimateResponse =
     checked.kind === "ticker_problems"
-      ? { warnings: checked.warnings, llmEstimate: null, capital: checked.tickerProblems.capital, bookMode: "pots", resolvedBySymbol: checked.tickerProblems.bySymbol }
-      : { warnings: checked.warnings, llmEstimate: checked.llmEstimate, capital: checked.value.startingValue, bookMode: checked.value.bookMode, resolvedBySymbol: checked.value.symbolResolution };
+      ? { warnings: checked.warnings, capital: checked.tickerProblems.capital, bookMode: "pots", resolvedBySymbol: checked.tickerProblems.bySymbol }
+      : { warnings: checked.warnings, capital: checked.value.startingValue, bookMode: checked.value.bookMode, resolvedBySymbol: checked.value.symbolResolution };
   response.json(estimate);
 });
 

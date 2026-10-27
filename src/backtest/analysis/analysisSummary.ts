@@ -1,5 +1,5 @@
 import { ensureBacktestLlmWorkingDirectory, readBacktestClaudeCliPath } from "../backtestClaudeCli.js";
-import { callClaudeSubscriptionModel, type ClaudeSubscriptionCallResult } from "../llm/claudeSubscriptionModelClient.js";
+import { callClaudeSubscriptionModel, type ClaudeSubscriptionCallResult } from "../claudeSubscriptionModelClient.js";
 import type { AnalysisBacktestFigures } from "./analysisBacktest.js";
 import type { AnalysisFigureValues, AnalysisFigures } from "./analysisFigures.js";
 import { fitByDay, largestPotOfDay, potOnDayFrom } from "./analysisPotSizing.js";
@@ -13,7 +13,7 @@ import { ladderSettingsOf, type AnalysisSessionLadderSettings, type AnalysisSess
 
 export const analysisSummaryPromptVersion = 6;
 const summaryTimeoutSeconds = 600;
-// Opus 5.5 at extra-high effort (Marcelo 2026-10-16); the backtests' decisions keep backtestClaudeModel.
+// Opus 5.5 at extra-high effort (Marcelo 2026-10-16).
 const analysisSummaryClaudeModel = "claude-opus-5-5";
 const analysisSummaryReasoningEffort = "xhigh";
 

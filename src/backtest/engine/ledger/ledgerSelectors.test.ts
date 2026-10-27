@@ -6,20 +6,15 @@ import {
   ledgerCashLockedInCashSecuredPuts,
   ledgerCommittedDollars,
   ledgerCycles,
-  ledgerExposureRows,
   ledgerFreeCash,
   ledgerFreeShares,
-  ledgerLastFilledActionAt,
   ledgerLegsDueForSettlement,
   ledgerNetLiquidationValue,
-  ledgerOccupiedContracts,
   ledgerOpenCycleSummary,
-  ledgerOpenShortLegs,
-  ledgerPostModelBook,
   ledgerTotalRealizedPnl,
   ledgerUnrealizedPnl,
 } from "./ledgerSelectors.js";
-import { buildFinishedLedgerFixture, decisionAt, fixtureCashBySymbol, fixtureDailyCloses, fixtureFinalCash, fixtureInterestDollars, fixtureSectorBySymbol, fixtureStartingCash, fixtureSymbols } from "./testSupport/finishedLedgerFixture.js";
+import { buildFinishedLedgerFixture, fixtureCashBySymbol, fixtureDailyCloses, fixtureFinalCash, fixtureInterestDollars, fixtureStartingCash, fixtureSymbols } from "./testSupport/finishedLedgerFixture.js";
 
 // The selectors over the six-symbol book of testSupport/finishedLedgerFixture.ts (its cash is worked out there). At
 // the end three positions are open: the MIX covered call (200 sh at 30.063 under 2 calls $31 27 Mar sold at 0.40, entry
@@ -60,7 +55,7 @@ describe("position figures", () => {
     expect(ledgerFreeShares(ledger, "WHL")).toBe(0);
   });
 
-  it("marks the open legs: unrealized P&L, exposure and the account value", () => {
+  it("marks the open legs: unrealized P&L and the account value", () => {
     // MIX: shares (30.60 − 30.063) × 200 = 107.40, calls (0.3932 − 0.25) × 200 = 28.64. ROL: (1.3932 − 1.00) × 200 = 78.64. FRE: (9.80 − 10) × 100 = −20.
     const unrealized = ledgerUnrealizedPnl(ledger, priceByLegId);
     expect(unrealized.unrealizedByPositionId[open.mixCoveredCallPositionId]).toBeCloseTo(136.04, 6);
@@ -73,16 +68,6 @@ describe("position figures", () => {
     const withoutTheCallMark = new Map(priceByLegId);
     withoutTheCallMark.delete(open.mixCallLegId);
     expect(ledgerUnrealizedPnl(ledger, withoutTheCallMark).unrealizedByPositionId[open.mixCoveredCallPositionId]).toBeNull();
-
-    // Exposure: MIX 200 × 30.60 − 0.25 × 200 = 6,070; ROL 39 × 200 − 1.00 × 200 = 7,600; FRE 100 × 9.80 = 980.
-    const exposures = ledgerExposureRows(ledger, priceByLegId, fixtureSectorBySymbol);
-    expect(exposures.map((row) => [row.symbol, row.strategyKey, row.sector])).toEqual([["ROL", "cash_secured_put", "Financial"], ["FRE", "unstructured", "Unknown"], ["MIX", "covered_call", "Technology"]]);
-    const exposureBySymbol = new Map(exposures.map((row) => [row.symbol, row.exposure]));
-    expect(exposureBySymbol.get("MIX")).toBeCloseTo(6070, 6);
-    expect(exposureBySymbol.get("ROL")).toBeCloseTo(7600, 6);
-    expect(exposureBySymbol.get("FRE")).toBeCloseTo(980, 6);
-    // With no price a leg counts at its entry: 200 × 30.063 − 0.3932 × 200.
-    expect(ledgerExposureRows(ledger, new Map(), fixtureSectorBySymbol).find((row) => row.symbol === "MIX")!.exposure).toBeCloseTo(5933.96, 6);
 
     // Account value: 244,294.89 + 6,120 − 50 − 200 + 980.
     const netLiquidationValue = ledgerNetLiquidationValue(ledger, priceByLegId);
@@ -147,54 +132,9 @@ describe("cycles", () => {
   });
 });
 
-describe("what Pluto's filters and gates read", () => {
-  it("lists the contracts already held and the open short legs", () => {
-    expect(ledgerOccupiedContracts(ledger, "MIX", "2026-03-20")).toEqual([{ expiry: "2026-03-27", strike: 31, detail: "open position on MIX $31 Call · 27 Mar (7DTE)" }]);
-    expect(ledgerOccupiedContracts(ledger, "ROL", "2026-03-20")).toEqual([{ expiry: "2026-03-27", strike: 39, detail: "open position on ROL $39 Put · 27 Mar (7DTE)" }]);
-    expect(ledgerOccupiedContracts(ledger, "WHL", "2026-03-20")).toEqual([]);
-
-    const mixLegs = ledgerOpenShortLegs(ledger, "MIX");
-    expect(mixLegs).toEqual([expect.objectContaining({ legId: open.mixCallLegId, positionId: open.mixCoveredCallPositionId, strategyKey: "covered_call", expiry: "2026-03-27", strike: 31, right: "C", quantity: 2, entryAtIso: decisionAt("2026-03-16").toISOString() })]);
-    expect(mixLegs[0]!.entryPrice).toBeCloseTo(0.3932, 10);
-    expect(ledgerOpenShortLegs(ledger, "ROL")).toEqual([expect.objectContaining({ legId: open.rolPutLegId, strategyKey: "cash_secured_put", strike: 39, right: "P", quantity: 2, entryAtIso: decisionAt("2026-03-05").toISOString() })]);
-    expect(ledgerOpenShortLegs(ledger, "FRE")).toEqual([]);
-  });
-
+describe("settlement", () => {
   it("lists the legs a day's settlement is due on", () => {
     expect(ledgerLegsDueForSettlement(ledger, "2026-03-26")).toEqual([]);
     expect(ledgerLegsDueForSettlement(ledger, "2026-03-27").map((leg) => leg.id).sort()).toEqual([open.mixCallLegId, open.rolPutLegId].sort());
-  });
-
-  it("dates the ticker cooldown from the last action that filled, not from a settlement", () => {
-    expect(ledgerLastFilledActionAt(ledger, "MIX")).toEqual(decisionAt("2026-03-16"));
-    expect(ledgerLastFilledActionAt(ledger, "WHL")).toEqual(decisionAt("2026-03-16"));
-    expect(ledgerLastFilledActionAt(ledger, "FRE")).toEqual(decisionAt("2026-03-02"));
-    expect(ledgerLastFilledActionAt(ledger, "ZZZ")).toBeNull();
-  });
-
-  it("assembles the book the post-model gates size against", () => {
-    const nowMs = decisionAt("2026-03-20").getTime();
-    const request = { priceByLegId, sectorBySymbol: fixtureSectorBySymbol, todayIso: "2026-03-20", nowMs };
-    const mixBook = ledgerPostModelBook(ledger, { ...request, symbol: "MIX", sector: "Technology", contract: { expiry: "2026-03-27", strike: 31 }, spotPrice: 30.6 });
-    expect(mixBook).toMatchObject({
-      inFlight: { totalNotional: 0, tickerNotional: 0, managedNotional: 0 },
-      openPositionCount: 3,
-      freeShares: 0,
-      spotPrice: 30.6,
-      workingOrderOnSymbol: false,
-      lastFilledActionAt: decisionAt("2026-03-16"),
-      nowMs,
-      sameContractConflict: "open position on MIX $31 Call · 27 Mar (7DTE)",
-    });
-    expect(mixBook.netLiquidationValue).toBeCloseTo(251_144.89, 6);
-    expect(mixBook.freeCash).toBeCloseTo(236_494.89, 6);
-    expect(mixBook.committedDollars).toBeCloseTo(14_455.32, 6);
-    // WHL shares the sector but holds nothing any more.
-    expect(mixBook.existingTickerExposure).toBeCloseTo(6070, 6);
-    expect(mixBook.existingSectorExposure).toBeCloseTo(6070, 6);
-
-    const freBook = ledgerPostModelBook(ledger, { ...request, symbol: "FRE", sector: null, contract: { expiry: "2026-03-27", strike: 10.5 }, spotPrice: 9.8 });
-    expect(freBook).toMatchObject({ freeShares: 100, existingSectorExposure: 0, sameContractConflict: null, lastFilledActionAt: decisionAt("2026-03-02") });
-    expect(freBook.existingTickerExposure).toBeCloseTo(980, 6);
   });
 });

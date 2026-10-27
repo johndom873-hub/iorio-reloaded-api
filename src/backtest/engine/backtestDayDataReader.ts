@@ -1,6 +1,6 @@
 import { Worker } from "node:worker_threads";
 import { contractKey } from "../../lib/signalsLiveScoring.js";
-import { engineWorkerExecArgv, engineWorkerModuleUrl } from "./backtestScoringPool.js";
+import { engineWorkerExecArgv, engineWorkerModuleUrl } from "./engineWorkerThreads.js";
 import type { SymbolFileEndOfDayRow, SymbolFileQuote } from "./backtestSymbolFile.js";
 
 // Reading the symbol files ahead of the session (Marcelo 2026-10-12): a day's 10:00 quotes, end-of-day rows, open

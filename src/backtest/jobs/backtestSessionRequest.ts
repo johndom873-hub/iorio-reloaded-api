@@ -8,19 +8,14 @@ import {
   backtestMaxSymbolsPerSession,
   backtestSessionsPageDefaultLimit,
   backtestSessionsPageMaxLimit,
-  backtestRestOfDayCurves,
   backtestTickerBaselineKeys,
+  activeBacktestDecisionMakers,
   defaultBacktestBaselineSettings,
-  defaultBacktestModelSettings,
-  defaultBacktestPolicySettings,
   defaultBacktestSteadyStakeSettings,
   defaultBacktestVolFarmerSettings,
   defaultBacktestVolFarmerV2Settings,
   type BacktestBaselineSettings,
   type BacktestBookMode,
-  type BacktestModelSettings,
-  type BacktestPolicySettings,
-  type BacktestRestOfDayCurve,
   type BacktestSessionStatusFilter,
   type BacktestSettings,
   type BacktestSettingsOverrides,
@@ -36,9 +31,9 @@ import {
   type BacktestTickerBaselineKey,
   type BacktestTickerBaselineSettings,
   type BacktestTickerValues,
+  isRetiredBacktestDecisionMaker,
+  retiredBacktestDecisionMakerMessage,
 } from "../backtestTypes.js";
-import { backtestClaudeCliPathMissingMessage } from "../backtestClaudeCli.js";
-import { modelForecastMethods, type ModelForecastMethod } from "../../lib/volatilityEdge.js";
 import { isIsoCalendarDate } from "./backtestJobRules.js";
 
 // Validation of a New session request (CreateBacktestSessionRequest). Pure: the data files' coverage and the current
@@ -69,8 +64,6 @@ export interface BacktestSessionRequestContext {
   coverageFor: (symbol: string) => DataFileCoverage | null;
   /** What the symbol's file holds between two dates (both included); null when the symbol has no file. */
   periodContentsFor: (symbol: string, startDate: string, endDate: string) => DataFilePeriodContents | null;
-  /** BACKTEST_CLAUDE_CLI_PATH is set: the AI model can be the decision maker. */
-  claudeCliAvailable: boolean;
   /** The ticker's saved lab values (its pot and baseline values); null when it has none. */
   tickerValuesFor: (symbol: string) => BacktestTickerValues | null;
   /** The lab's pot for a ticker without its own; null when none is set. */
@@ -88,7 +81,7 @@ export interface ValidatedBacktestSessionRequest {
   tablesMode: BacktestTablesMode;
   /** Only the values that differ from the snapshot. */
   overrides: BacktestSettingsOverrides;
-  /** "pots" when the baseline decides; "shared_account" with the rules or the AI model. */
+  /** "pots" when the baseline decides; "shared_account" with the Steady Stake and the Vol Farmers. */
   bookMode: BacktestBookMode;
   /** Each ticker's pot, weight and values ("pots"); null otherwise. */
   symbolSettings: Record<string, BacktestSymbolSettings> | null;
@@ -119,24 +112,14 @@ function changedEntries(base: object, changes: Record<string, unknown>): Record<
   return Object.fromEntries(Object.entries(changes).filter(([field, value]) => (base as Record<string, unknown>)[field] !== value));
 }
 
-/** The values each decision rule can take (BacktestPolicySettings). */
-export const backtestPolicyChoices: { readonly [Rule in keyof BacktestPolicySettings]: readonly BacktestPolicySettings[Rule][] } = {
-  roll: ["flagged_legs", "any_eligible", "never"],
-  buyback: ["when_offered", "never"],
-  sharesInProfit: ["call_else_sell", "always_sell", "always_keep"],
-  eventClose: ["stress_vs_remaining", "never", "always"],
-  afterBlockedChoice: ["try_next", "stop"],
-};
-
-export function validateBacktestSettingsOverrides(
-  raw: unknown,
-  snapshot: BacktestSettings,
-  editablePaths: ReadonlySet<string>,
-  decisionMakers: { claudeCliAvailable: boolean },
-): { ok: true; overrides: BacktestSettingsOverrides } | { ok: false; error: string } {
+/**
+ * A session's overrides, checked against the snapshot: only the changed values are kept. The policy, the model and the
+ * Kelly fraction were the retired rules sessions' and are no longer settings a session can change.
+ */
+export function validateBacktestSettingsOverrides(raw: unknown, snapshot: BacktestSettings, editablePaths: ReadonlySet<string>): { ok: true; overrides: BacktestSettingsOverrides } | { ok: false; error: string } {
   if (raw === undefined || raw === null) return { ok: true, overrides: {} };
   if (!isPlainObject(raw)) return { ok: false, error: "overrides must be an object." };
-  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "kellyFraction" && key !== "policy" && key !== "decisionMaker" && key !== "baseline" && key !== "steadyStake" && key !== "volFarmer" && key !== "volFarmerV2" && key !== "model");
+  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "decisionMaker" && key !== "baseline" && key !== "steadyStake" && key !== "volFarmer" && key !== "volFarmerV2");
   if (unknownSection) return { ok: false, error: `overrides.${unknownSection} is not a setting a session can change.` };
 
   const overrides: BacktestSettingsOverrides = {};
@@ -150,26 +133,6 @@ export function validateBacktestSettingsOverrides(
     if (problem) return { ok: false, error: problem };
     const changed = changedEntries(snapshot[section], values);
     if (Object.keys(changed).length > 0) overrides[section] = changed;
-  }
-
-  if (raw.kellyFraction !== undefined) {
-    if (!editablePaths.has("kellyFraction")) return { ok: false, error: "kellyFraction cannot be changed for a session." };
-    const value = raw.kellyFraction;
-    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 1) return { ok: false, error: "kellyFraction must be a number above 0 and at most 1." };
-    if (value !== snapshot.kellyFraction) overrides.kellyFraction = value;
-  }
-
-  if (raw.policy !== undefined) {
-    if (!isPlainObject(raw.policy)) return { ok: false, error: "overrides.policy must be an object." };
-    const snapshotPolicy = { ...defaultBacktestPolicySettings, ...snapshot.policy };
-    const changedPolicy: Partial<Record<keyof BacktestPolicySettings, string>> = {};
-    for (const [rule, value] of Object.entries(raw.policy)) {
-      if (!editablePaths.has(`policy.${rule}`)) return { ok: false, error: `policy.${rule} cannot be changed for a session.` };
-      const choices: readonly string[] = backtestPolicyChoices[rule as keyof BacktestPolicySettings];
-      if (typeof value !== "string" || !choices.includes(value)) return { ok: false, error: `policy.${rule} must be one of ${choices.join(", ")}.` };
-      if (value !== snapshotPolicy[rule as keyof BacktestPolicySettings]) changedPolicy[rule as keyof BacktestPolicySettings] = value;
-    }
-    if (Object.keys(changedPolicy).length > 0) overrides.policy = changedPolicy as Partial<BacktestPolicySettings>;
   }
 
   if (raw.baseline !== undefined) {
@@ -220,27 +183,10 @@ export function validateBacktestSettingsOverrides(
     if (Object.keys(changed).length > 0) overrides.volFarmerV2 = changed as Partial<BacktestVolFarmerV2Settings>;
   }
 
-  // Two of the model's values can change for a session (Edge Margin audit 2026-10-22); the others stay live's.
-  if (raw.model !== undefined) {
-    if (!isPlainObject(raw.model)) return { ok: false, error: "overrides.model must be an object." };
-    const snapshotModel = { ...defaultBacktestModelSettings, ...snapshot.model };
-    const changedModel: Partial<BacktestModelSettings> = {};
-    for (const [field, value] of Object.entries(raw.model)) {
-      if (field === "forecastMethod") {
-        if (typeof value !== "string" || !modelForecastMethods.includes(value as ModelForecastMethod)) return { ok: false, error: `model.forecastMethod must be one of ${modelForecastMethods.join(", ")}.` };
-        if (value !== snapshotModel.forecastMethod) changedModel.forecastMethod = value as ModelForecastMethod;
-      } else if (field === "restOfDayCurve") {
-        if (typeof value !== "string" || !backtestRestOfDayCurves.includes(value as BacktestRestOfDayCurve)) return { ok: false, error: `model.restOfDayCurve must be one of ${backtestRestOfDayCurves.join(", ")}.` };
-        if (value !== snapshotModel.restOfDayCurve) changedModel.restOfDayCurve = value as BacktestRestOfDayCurve;
-      } else return { ok: false, error: `model.${field} cannot be changed for a session.` };
-    }
-    if (Object.keys(changedModel).length > 0) overrides.model = changedModel;
-  }
-
   if (raw.decisionMaker !== undefined) {
-    if (raw.decisionMaker !== "rules" && raw.decisionMaker !== "llm" && raw.decisionMaker !== "baseline" && raw.decisionMaker !== "steady_stake" && raw.decisionMaker !== "vol_farmer" && raw.decisionMaker !== "vol_farmer_v2") return { ok: false, error: "decisionMaker must be rules, llm, baseline, steady_stake, vol_farmer or vol_farmer_v2." };
-    if (raw.decisionMaker === "llm" && !decisionMakers.claudeCliAvailable) return { ok: false, error: backtestClaudeCliPathMissingMessage };
-    if (raw.decisionMaker !== (snapshot.decisionMaker ?? "rules")) overrides.decisionMaker = raw.decisionMaker;
+    if (raw.decisionMaker === "rules" || raw.decisionMaker === "llm") return { ok: false, error: retiredBacktestDecisionMakerMessage };
+    if (!(activeBacktestDecisionMakers as readonly unknown[]).includes(raw.decisionMaker)) return { ok: false, error: `decisionMaker must be ${activeBacktestDecisionMakers.slice(0, -1).join(", ")} or ${activeBacktestDecisionMakers.at(-1)}.` };
+    if (raw.decisionMaker !== (snapshot.decisionMaker ?? "rules")) overrides.decisionMaker = raw.decisionMaker as BacktestSettingsOverrides["decisionMaker"];
   }
   return { ok: true, overrides };
 }
@@ -446,12 +392,14 @@ export function validateCreateBacktestSessionRequest(body: unknown, context: Bac
   const tablesMode = body.tablesMode;
   if (typeof tablesMode !== "string" || !tablesModes.includes(tablesMode as BacktestTablesMode)) return { ok: false, error: `tablesMode must be one of ${tablesModes.join(", ")}.` };
 
-  const overrides = validateBacktestSettingsOverrides(body.overrides, context.snapshot, context.editablePaths, { claudeCliAvailable: context.claudeCliAvailable });
+  const overrides = validateBacktestSettingsOverrides(body.overrides, context.snapshot, context.editablePaths);
   if (!overrides.ok) return overrides;
   const base = { name, symbols, startDate, endDate, tablesMode: tablesMode as BacktestTablesMode, overrides: overrides.overrides };
 
-  // Per-ticker pots and values are the baseline's; the rules and the AI model run on the session's settings and its starting value.
+  // A lab still set to a retired decision maker starts none: the request must name another.
   const effective = applyBacktestOverrides(context.snapshot, overrides.overrides);
+  if (isRetiredBacktestDecisionMaker(effective.decisionMaker)) return { ok: false, error: retiredBacktestDecisionMakerMessage };
+  // Per-ticker pots and values are the baseline's; the Steady Stake and the Vol Farmers run on the session's settings and its starting value.
   if (effective.decisionMaker !== "baseline") {
     if (body.symbolSettings !== undefined && body.symbolSettings !== null) return { ok: false, error: "symbolSettings apply to the baseline only." };
     if (typeof startingValue !== "number") return { ok: false, error: "The starting account value must be a number above 0." };

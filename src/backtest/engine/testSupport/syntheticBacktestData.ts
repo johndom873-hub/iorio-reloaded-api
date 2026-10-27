@@ -1,5 +1,3 @@
-import { writeFileSync } from "node:fs";
-import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { easternInstant } from "../../../lib/easternIsoDate.js";
 import { blackScholesPriceOnForward, maximumSpreadFractionOfMid, yearsBetweenIsoDates } from "../../../lib/impliedVolatilitySurface.js";
@@ -10,7 +8,6 @@ import { fileIntradayBarMinutes, writeFileStockBars, type FileIntradayBar } from
 import type { StoredDailyBar } from "../backtestBarHistory.js";
 import { computeParityStockPrice } from "../backtestBook.js";
 import { BacktestSymbolFile, type SymbolFileQuote } from "../backtestSymbolFile.js";
-import type { HistoricalMacroEvent, MacroEventHistoryCache } from "../../macroEventHistory.js";
 
 // Synthetic market data for the engine's tests: a seeded random-walk bar history, Black-Scholes option quotes at a flat
 // implied volatility, settings shaped like the dev database's, a schema-version-1 symbol file and its IBKR bars.
@@ -176,12 +173,6 @@ export interface SyntheticSymbolFileQuality {
   intradayCompleteDays?: string[];
   /** "1" unless given; a version-2 file's day_issues also counts the attempts. */
   schemaVersion?: string;
-}
-
-/** The macro-event history a session reads from the data folder (macro-events.json), so a test never asks FRED or the Fed. */
-export function writeSyntheticMacroEventHistory(dataDirectory: string, events: HistoricalMacroEvent[] = []): void {
-  const cache: MacroEventHistoryCache = { builtAtIso: new Date().toISOString(), firstDateIso: "2019-01-01", events };
-  writeFileSync(path.join(dataDirectory, "macro-events.json"), JSON.stringify(cache));
 }
 
 /**

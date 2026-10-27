@@ -3,7 +3,7 @@ import { daysToExpiry, describeOptionContract, describeOrderSize } from "../../l
 import { contractKey } from "../../lib/signalsLiveScoring.js";
 import { regularCloseMinutesEt, varianceSessionsToExpiry } from "../../lib/varianceClock.js";
 import { selectModelVolatilityForecast } from "../../lib/volatilityEdge.js";
-import { openCandidateId } from "../../pluto/candidateFilters.js";
+import { openCandidateId } from "./candidateIds.js";
 import type { BacktestAction, BacktestLadderLevel, BacktestOrderShortfall } from "../backtestTypes.js";
 import { toOhlcvBars } from "./backtestBarHistory.js";
 import { makeBaselineSelector, noteBaselineForwardAnchors, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineCommissions, type BaselineLookBook, type BaselineForwardAnchor, type BaselineModelInput, type BaselineNoCandidate, type BaselineOrderShortfall, type BaselineSaleStep } from "./baselineSaleSteps.js";
@@ -12,7 +12,7 @@ import { ladderLevelsToday, ladderShock, noteLadderLook } from "./backtestBaseli
 import { BaselineHedgeSteps, hedgeIsOn } from "./backtestBaselineHedge.js";
 import { entryDropRiskBlock, entryDropRiskBlockingLimits, extensionZ, impliedVolatilitiesBefore, ivRankBefore, ivRankWindowDays } from "./entryDropRiskFilters.js";
 import { sharesPerContract } from "./backtestBook.js";
-import type { BacktestLookContext, BacktestLookResult, BacktestNoCandidateNote, BacktestNoSaleNote, BacktestOptionSale } from "./backtestLook.js";
+import type { BacktestLookContext, BacktestLookResult, BacktestNoCandidateNote, BacktestNoSaleNote, BacktestOptionSale } from "./backtestLookTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { captureLookTimeEt, earningsNotYetReported, forecastBarRowCount, lookInstantMs } from "./backtestTickerInputs.js";
 import { buyBackCoveredCallKeepingShares, buyBackPut, closeCoveredCall, openCashSecuredPut, openCoveredCall, sellShares } from "./ledger/ledgerEvents.js";
@@ -446,5 +446,5 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
   }
 
   const summary = summaries.length === 0 ? "No action: fully invested" : actions.length === 0 ? `No action: ${summaries.join(" | ")}` : summaries.join(" · ");
-  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [], fitIssueBySymbol: new Map(), scoredBySymbol: new Map(), llmCalls: { asked: 0, fromCache: 0 }, shortfalls, ladderLevels, noSaleNotes, noCandidateNotes };
+  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [], shortfalls, ladderLevels, noSaleNotes, noCandidateNotes };
 }

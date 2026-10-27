@@ -5,17 +5,16 @@ import { kellyFraction } from "../pluto/postModelGates.js";
 import { mapTradingSettingsRow } from "../lib/tradingSettingsStore.js";
 import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, type BacktestSettingApplicability, type BacktestSettingCondition, type BacktestSettingGroup, type BacktestSettingRow, type BacktestSettingSection, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
 import { earningsDateKnownCalendarDaysAhead } from "./engine/backtestTickerInputs.js";
-import { readBacktestClaudeCliPath } from "./backtestClaudeCli.js";
 
-// The New session settings table (docs/backtesting/): Pluto's and the trading settings as they are now, which a
-// session snapshots and may change for itself only.
+// The New session settings table (docs/backtesting/): the values a session snapshots and may change for itself only. The
+// policy, model, Pluto and Kelly values are still snapshotted (the retired rules sessions read them); no row shows them.
 
 /** Pluto's settings, the trading settings without the commission estimator (the flat commission applies) and the Kelly fraction. */
 export async function loadCurrentBacktestSettings(connection: Knex = db): Promise<BacktestSettings> {
   const [pluto, tradingRow] = await Promise.all([loadPlutoSettings(connection), connection("trading_settings").first()]);
   if (!tradingRow) throw new Error("No trading_settings row found.");
   const trading = mapTradingSettingsRow(tradingRow);
-  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "rules", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings }, steadyStake: { ...defaultBacktestSteadyStakeSettings }, volFarmer: { ...defaultBacktestVolFarmerSettings }, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings } };
+  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "baseline", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings }, steadyStake: { ...defaultBacktestSteadyStakeSettings }, volFarmer: { ...defaultBacktestVolFarmerSettings }, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings } };
 }
 
 type RowDefinition = Omit<BacktestSettingRow, "now" | "group" | "section" | "appliesWhen"> & { fixedValue?: number | string };
@@ -24,59 +23,20 @@ const percentOfAccount = "% of the account";
 
 /** Every row's label, unit and note; backtestSettingLayout places them. "fixed." rows are model constants, shown but not editable. */
 export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
-  { path: "pluto.capitalBudgetPct", label: "Capital budget", unit: "percent", editable: true, note: percentOfAccount },
-  { path: "pluto.orderSizePctOfBudget", label: "Order size", unit: "percent", editable: true, note: "% of the capital budget" },
-  { path: "pluto.maxTickerPctOfBudget", label: "Max per ticker", unit: "percent", editable: true, note: "% of the capital budget" },
-  { path: "pluto.maxSectorPctOfBudget", label: "Max per sector", unit: "percent", editable: true, note: "% of the capital budget; 100 = no cap; a symbol's sector is the one on its ticker" },
-  { path: "pluto.maxOpenPositions", label: "Max open positions", unit: "integer", editable: true, note: null },
-  { path: "pluto.minCashReservePct", label: "Min cash reserve", unit: "percent", editable: true, note: null },
-  { path: "trading.maxOrderPctOfPortfolio", label: "Max order size (order gate)", unit: "percent", editable: true, note: percentOfAccount },
-  { path: "trading.maxConcentrationPerTickerPct", label: "Max per ticker (order gate)", unit: "percent", editable: true, note: percentOfAccount },
-  { path: "trading.minCashReservePct", label: "Min cash reserve (order gate)", unit: "percent", editable: true, note: percentOfAccount },
-  { path: "pluto.stressRiskBudgetPct", label: "Stress cap per order", unit: "percent", editable: true, note: percentOfAccount },
-  { path: "pluto.stressSigmas", label: "Stress move", unit: "number", editable: true, note: "σ (standard deviations of the forecast move)" },
-  { path: "kellyFraction", label: "Kelly fraction", unit: "number", editable: true, note: `Pluto sizes with a fixed ${kellyFraction} of full Kelly` },
-
-  { path: "pluto.minGrade", label: "Min grade", unit: "grade", editable: true, note: null },
-  { path: "pluto.minEdgeYieldPct", label: "Min Edge Yield", unit: "percent", editable: true, note: null },
-  { path: "pluto.maxAbsDelta", label: "Max |delta|", unit: "number", editable: true, note: null },
-  { path: "trading.deltaTargetMin", label: "Delta band from", unit: "number", editable: true, note: null },
-  { path: "trading.deltaTargetMax", label: "Delta band to", unit: "number", editable: true, note: null },
-  { path: "pluto.minDte", label: "Min days to expiry", unit: "days", editable: true, note: null },
-  { path: "pluto.maxDte", label: "Max days to expiry", unit: "days", editable: true, note: "data files hold up to 45 days" },
-  { path: "pluto.minAnnualizedYieldPct", label: "Min premium yield", unit: "percent", editable: true, note: null },
-  { path: "trading.minAnnualizedYieldPct", label: "Min premium yield (Signals)", unit: "percent", editable: true, note: null },
-  { path: "pluto.maxSpreadPct", label: "Max spread", unit: "percent", editable: true, note: "% of mid" },
-  { path: "pluto.minOpenInterest", label: "Min open interest", unit: "integer", editable: true, note: "the previous day's, as Pluto sees at 10:00" },
-  { path: "pluto.minSessionVolume", label: "Min volume", unit: "integer", editable: true, note: "the previous day's full-day volume: today's at 10:00 is not in the history" },
-  { path: "pluto.maxContractsVolumeSharePct", label: "Max share of contract volume", unit: "percent", editable: true, note: "of the previous day's volume" },
-  { path: "pluto.maxDayMoveMultiple", label: "Max day move", unit: "number", editable: true, note: "× the normal daily move" },
-  { path: "fixed.earningsDateKnownCalendarDaysAhead", label: "Earnings dates known 30 days ahead", unit: "days", editable: false, note: "a report's date is seen from 30 calendar days before it: expiries spanning it are skipped, and Pluto's closes before earnings apply, only from then", fixedValue: earningsDateKnownCalendarDaysAhead },
+  { path: "fixed.earningsDateKnownCalendarDaysAhead", label: "Earnings dates known 30 days ahead", unit: "days", editable: false, note: "a report's date is seen from 30 calendar days before it: expiries spanning it are skipped only from then", fixedValue: earningsDateKnownCalendarDaysAhead },
 
   { path: "trading.spreadCostChargedPct", label: "Spread cost share", unit: "percent", editable: true, note: "how much of the half-spread a fill gives up" },
-  { path: "pluto.maxSliceRmseVp", label: "Max slice fit error", unit: "number", editable: true, note: "volatility points: worst surface fit error trusted for the expiry" },
-  { path: "pluto.minSlicePointCount", label: "Min slice points", unit: "integer", editable: true, note: "fewest quotes the expiry's fit must rest on" },
-  { path: "pluto.maxMidVsSurfaceIvVp", label: "Max mid vs surface IV", unit: "number", editable: true, note: "volatility points: largest gap between the mid's IV and the surface" },
-  { path: "pluto.maxIvShiftVp", label: "Max IV shift", unit: "number", editable: true, note: "volatility points: how far an expiry's quotes at a look may sit from the 10:00 surface; 0 at the 10:00 look and on days without intraday quotes" },
-  { path: "fixed.forecastWindowDays", label: "Forecast window", unit: "days", editable: false, note: null, fixedValue: 21 },
-  { path: "fixed.gradeCutPoints", label: "Grade cut points", unit: "percent", editable: false, note: null, fixedValue: "20 / 10 / 0%" },
 
   { path: "pluto.windowStartEt", label: "Looks from", unit: "time", editable: false, note: "ET; a look every 30 minutes where the data files hold quotes (10:00 to 15:30)" },
   { path: "pluto.windowEndEt", label: "Looks until", unit: "time", editable: false, note: "ET; never later than 30 minutes before the close (12:30 on a 13:00 day)" },
-  { path: "pluto.maxActionsPerSession", label: "Max orders per day", unit: "integer", editable: true, note: "across every symbol and every look of the day, automatic closes included" },
-  { path: "pluto.tickerCooldownMinutes", label: "Ticker cooldown after a fill", unit: "integer", editable: true, note: "minutes; 60 = no new open or roll on the ticker at the next look, allowed again at the one after" },
-  { path: "pluto.dailyLossBreakerPct", label: "Daily-loss breaker", unit: "percent", editable: true, note: "the account down this much from the previous close at a look: nothing more is done that day" },
-  { path: "pluto.spyStressBreakerPct", label: "Market stress", unit: "percent", editable: true, note: "SPY down this much on the day at a look: no new opens at that look; rolls and closes stay" },
 
   {
     path: "decisionMaker",
     label: "Decision maker",
     unit: "choice",
     editable: true,
-    note: "who makes the choices the AI model makes live. The rules: each pass looks at closes, then rolls, then opens, and an open is Pluto's own top pick. The AI model: Claude through the subscription, asked as live Pluto asks it, with the symbols and dates masked; the rules below do not apply. The Steady Stake, the Vol Farmer and Vol Farmer v2: only their own group's values, at the 10:00 look (Vol Farmer v2 also reads the Vol Farmer's Calls' |delta| and spread)",
+    note: "who decides the session's trades. The Steady Stake, the Vol Farmer and Vol Farmer v2: only their own group's values, at the 10:00 look (Vol Farmer v2 also reads the Vol Farmer's Calls' |delta| and spread)",
     choices: [
-      { value: "rules", label: "Rules (below)" },
-      { value: "llm", label: "The AI model" },
       { value: "baseline", label: "Baseline wheel (no Pluto rules, no Signals)" },
       { value: "steady_stake", label: "Steady Stake (a steady share stake, Calls and Puts on expiry days)" },
       { value: "vol_farmer", label: "Vol Farmer (shares, a Covered Call and a long Put hedge)" },
@@ -243,65 +203,6 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
   { path: "steadyStake.putAbsDelta", label: "Puts' |delta|", unit: "number", editable: true, note: "the target; from each quote's own implied volatility" },
   { path: "steadyStake.deltaTolerance", label: "|delta| tolerance", unit: "number", editable: true, note: "how far a contract's |delta| may be from its target; when no contract is that close, nothing is sold that day" },
   { path: "steadyStake.maxSpreadPctOfMid", label: "Spread at most", unit: "percent", editable: true, note: "(ask − bid) ÷ mid; a bid of at least $0.05 and at most 20% of the contract's previous-session volume, as for the ladder" },
-  {
-    path: "policy.roll",
-    label: "Roll or hold",
-    unit: "choice",
-    editable: true,
-    note: "the best eligible roll by net roll $; never while the ticker cools down after a fill",
-    choices: [
-      { value: "flagged_legs", label: "Roll a leg near expiry, at assignment risk or decayed" },
-      { value: "any_eligible", label: "Roll whenever a roll is eligible" },
-      { value: "never", label: "Never roll" },
-    ],
-  },
-  {
-    path: "policy.buyback",
-    label: "Buyback when holding no longer pays",
-    unit: "choice",
-    editable: true,
-    note: "Pluto offers it only at a profit, when the put's hold value is below its closing cost",
-    choices: [
-      { value: "when_offered", label: "Buy back" },
-      { value: "never", label: "Never" },
-    ],
-  },
-  {
-    path: "policy.sharesInProfit",
-    label: "Shares in profit above the floor",
-    unit: "choice",
-    editable: true,
-    note: "round lots, when no call on them clears Pluto's rules (code sells such a call first, as live)",
-    choices: [
-      { value: "call_else_sell", label: "Sell the shares when no call can be sent now" },
-      { value: "always_sell", label: "Always sell the shares" },
-      { value: "always_keep", label: "Keep them" },
-    ],
-  },
-  {
-    path: "policy.eventClose",
-    label: "Close before a macro event",
-    unit: "choice",
-    editable: true,
-    note: "Pluto offers it from 5 sessions before a Fed decision, CPI, the jobs report, GDP or a federal election, only at a profit",
-    choices: [
-      { value: "stress_vs_remaining", label: "When the event's stress loss is at least what is left to earn" },
-      { value: "never", label: "Never" },
-      { value: "always", label: "Always" },
-    ],
-  },
-  {
-    path: "policy.afterBlockedChoice",
-    label: "After a choice Pluto's checks refuse",
-    unit: "choice",
-    editable: true,
-    note: "choosing again tries the next candidate at the same look; a refusal for lack of room ends the opens for that look where there is none: on the ticker (its exposure limits, its cooldown) or on every ticker (budget, cash reserve, open-positions cap); rolls and closes are still tried. Every refused choice is kept in the session's actions with the check that refused it",
-    choices: [
-      { value: "try_next", label: "Choose again, but no more opens where the account has no room" },
-      { value: "stop", label: "Stop for this look" },
-    ],
-  },
-
   {
     path: "baseline.entry",
     label: "Entry with free cash",
@@ -830,28 +731,12 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
       appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v2"] }], explanation: "Applies only with Vol Farmer v2 as decision maker." },
     })),
   },
-  {
-    group: "Capital and sizing",
-    section: "pluto_rules",
-    rows: ["pluto.capitalBudgetPct", "pluto.orderSizePctOfBudget", "pluto.maxTickerPctOfBudget", "pluto.maxSectorPctOfBudget", "pluto.maxOpenPositions", "pluto.minCashReservePct", "trading.maxOrderPctOfPortfolio", "trading.maxConcentrationPerTickerPct", "trading.minCashReservePct", "pluto.stressRiskBudgetPct", "pluto.stressSigmas", "kellyFraction"].map((path) => ({ path })),
-  },
-  {
-    group: "Candidate quality",
-    section: "pluto_rules",
-    rows: ["pluto.minGrade", "pluto.minEdgeYieldPct", "pluto.maxAbsDelta", "trading.deltaTargetMin", "trading.deltaTargetMax", "pluto.minDte", "pluto.maxDte", "pluto.minAnnualizedYieldPct", "trading.minAnnualizedYieldPct", "pluto.maxSpreadPct", "pluto.minOpenInterest", "pluto.minSessionVolume", "pluto.maxContractsVolumeSharePct", "pluto.maxDayMoveMultiple"].map((path) => ({ path })),
-  },
-  { group: "Model", section: "pluto_rules", rows: ["pluto.maxSliceRmseVp", "pluto.minSlicePointCount", "pluto.maxMidVsSurfaceIvVp", "pluto.maxIvShiftVp", "fixed.forecastWindowDays", "fixed.gradeCutPoints"].map((path) => ({ path })) },
-  { group: "System checks", section: "pluto_rules", rows: ["pluto.maxActionsPerSession", "pluto.tickerCooldownMinutes", "pluto.dailyLossBreakerPct", "pluto.spyStressBreakerPct"].map((path) => ({ path })) },
-  { group: "Rules' choices", section: "pluto_rules", rows: ["policy.roll", "policy.buyback", "policy.sharesInProfit", "policy.eventClose", "policy.afterBlockedChoice"].map((path) => ({ path })) },
 ];
 
-/** Pluto behaviour a session does not replay, for the note under the table. */
+/** What a session does not replay, for the note under the table. */
 export const backtestNotReplayed: readonly string[] = [
-  "With the rules as decision maker, the AI model's own choice. With the AI model: the quote burst before a call, an order kept working while the round goes on, and the rounds a settings change or a person starts.",
-  "What happens between two looks: Pluto looks every 30 minutes, on the quotes of that instant, not at every Day Signals update.",
-  "The edge-margin drift check and the live-quote check before an order: a look re-scores on its own quotes.",
+  "What happens between two looks: a session looks every 30 minutes, on the quotes of that instant.",
   "Orders in flight: a session's order fills when it is placed.",
-  "A human's hand: the daily-loss breaker is taken as reset before the next open, and the market-stress override is never used.",
   "A symbol's looks after 10:00 on the days its data file has no intraday quotes.",
   "Early assignment and dividends.",
 ];
@@ -859,27 +744,18 @@ export const backtestNotReplayed: readonly string[] = [
 /** Paths a session may override. */
 export const editableBacktestSettingPaths: ReadonlySet<string> = new Set(backtestSettingRowDefinitions.filter((row) => row.editable).map((row) => row.path));
 
-/** The value a row's path addresses inside the settings ("pluto.minDte", "trading.deltaTargetMin", "kellyFraction", "policy.roll", "decisionMaker"). */
+/** The value a row's path addresses inside the settings ("pluto.windowStartEt", "trading.spreadCostChargedPct", "baseline.ladderRungs", "decisionMaker"). */
 export function readBacktestSettingValue(settings: BacktestSettings, settingPath: string): number | string {
-  if (settingPath === "kellyFraction") return settings.kellyFraction;
   if (settingPath === "decisionMaker") return settings.decisionMaker ?? "rules";
   const [section, field] = settingPath.split(".") as [string, string];
-  if (section === "policy") return ({ ...defaultBacktestPolicySettings, ...settings.policy } as unknown as Record<string, string>)[field]!;
   if (section === "baseline") return ({ ...defaultBacktestBaselineSettings, ...settings.baseline } as unknown as Record<string, number | string>)[field]!;
   if (section === "steadyStake") return ({ ...defaultBacktestSteadyStakeSettings, ...settings.steadyStake } as unknown as Record<string, number | string>)[field]!;
   if (section === "volFarmer") return ({ ...defaultBacktestVolFarmerSettings, ...settings.volFarmer } as unknown as Record<string, number | string>)[field]!;
   if (section === "volFarmerV2") return ({ ...defaultBacktestVolFarmerV2Settings, ...settings.volFarmerV2 } as unknown as Record<string, number | string>)[field]!;
-  if (section === "model") {
-    const model = { ...defaultBacktestModelSettings, ...settings.model };
-    return field === "spreadCostChargedPct" ? (model.spreadCostChargedPct ?? settings.trading.spreadCostChargedPct) : (model as unknown as Record<string, number | string>)[field]!;
-  }
   if (section === "pluto") return (settings.pluto as unknown as Record<string, number | string>)[field]!;
   if (section === "trading") return (settings.trading as unknown as Record<string, number | string>)[field]!;
   throw new Error(`Not a settings path: ${settingPath}`);
 }
-
-/** The AI model as decision maker cannot be picked while BACKTEST_CLAUDE_CLI_PATH is unset. */
-export const claudeCliUnavailableReason = "BACKTEST_CLAUDE_CLI_PATH is not set in the API's .env";
 
 const tickerBaselinePaths = new Set(backtestTickerBaselineKeys.map((key) => `baseline.${key}`));
 /** A baseline value that can differ by ticker in a session of per-ticker pots. */
@@ -890,7 +766,7 @@ const placedPaths = backtestSettingLayout.flatMap((group) => group.rows.map((row
 const misplacedPaths = [...backtestSettingRowDefinitions.map((row) => row.path).filter((path) => placedPaths.filter((placed) => placed === path).length !== 1), ...placedPaths.filter((path) => !rowDefinitionByPath.has(path))];
 if (misplacedPaths.length > 0) throw new Error(`backtestSettingLayout must place every setting row once: ${misplacedPaths.join(", ")}`);
 
-export function buildBacktestSettingRows(settings: BacktestSettings, decisionMakers: { claudeCliAvailable: boolean }): BacktestSettingRow[] {
+export function buildBacktestSettingRows(settings: BacktestSettings): BacktestSettingRow[] {
   const placed = backtestSettingLayout.flatMap(({ group, section, rows }) => rows.map(({ path, appliesWhen }) => ({ definition: rowDefinitionByPath.get(path)!, group, section, appliesWhen })));
   return placed.map(({ definition: { fixedValue, ...row }, group, section, appliesWhen }) => ({
     group,
@@ -898,14 +774,11 @@ export function buildBacktestSettingRows(settings: BacktestSettings, decisionMak
     ...(appliesWhen ? { appliesWhen } : {}),
     ...row,
     ...(isTickerBaselinePath(row.path) ? { perTicker: true as const } : {}),
-    ...(row.path === "decisionMaker" && row.choices && !decisionMakers.claudeCliAvailable
-      ? { choices: row.choices.map((choice) => (choice.value === "llm" ? { ...choice, unavailableReason: claudeCliUnavailableReason } : choice)) }
-      : {}),
     now: fixedValue ?? readBacktestSettingValue(settings, row.path),
   }));
 }
 
 export async function loadBacktestSettingsTemplate(connection: Knex = db): Promise<BacktestSettingsTemplate> {
   const settings = await loadCurrentBacktestSettings(connection);
-  return { settings, rows: buildBacktestSettingRows(settings, { claudeCliAvailable: readBacktestClaudeCliPath() !== null }), notReplayed: [...backtestNotReplayed] };
+  return { settings, rows: buildBacktestSettingRows(settings), notReplayed: [...backtestNotReplayed] };
 }

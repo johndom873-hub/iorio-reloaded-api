@@ -4,7 +4,7 @@ import { blackScholesDelta, blackScholesPriceOnForward } from "../../lib/implied
 import { contractKey } from "../../lib/signalsLiveScoring.js";
 import { defaultBacktestSteadyStakeSettings, type BacktestSteadyStakeSettings, type EffectiveBacktestSettings } from "../backtestTypes.js";
 import { validateSteadyStakeSettings } from "../jobs/backtestSessionRequest.js";
-import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLook.js";
+import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import { runSteadyStakeLook } from "./backtestSteadyStakeLook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { buyShares } from "./ledger/ledgerEvents.js";

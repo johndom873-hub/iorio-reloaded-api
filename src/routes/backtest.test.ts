@@ -80,6 +80,12 @@ const jobListingSymbol = `BT${runTag}L`;
 const deletedFileSymbol = `BT${runTag}D`;
 const sessionNamePrefix = `backtest-route-${runTag}`;
 let tickerId: string;
+/**
+ * The lab's decision maker while these tests run: sessions without one of their own run on the shared account with their
+ * starting value. The lab row the shared test database held is put back afterwards.
+ */
+const labDecisionMaker = "steady_stake";
+let savedLabRow: Record<string, unknown> | undefined;
 
 let server: Server;
 let baseUrl: string;
@@ -105,19 +111,6 @@ function writeSymbolFile(symbol: string, days: { tradingDate: string; status: "c
   database.close();
 }
 
-/** Runs `run` with BACKTEST_CLAUDE_CLI_PATH set to `value` (unset when undefined), then puts back what .env gave. */
-async function withClaudeCliPath<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
-  const before = process.env.BACKTEST_CLAUDE_CLI_PATH;
-  if (value === undefined) delete process.env.BACKTEST_CLAUDE_CLI_PATH;
-  else process.env.BACKTEST_CLAUDE_CLI_PATH = value;
-  try {
-    return await run();
-  } finally {
-    if (before === undefined) delete process.env.BACKTEST_CLAUDE_CLI_PATH;
-    else process.env.BACKTEST_CLAUDE_CLI_PATH = before;
-  }
-}
-
 async function request(method: string, route: string, body?: unknown, authenticated = true): Promise<{ status: number; body: unknown }> {
   const response = await fetch(`${baseUrl}${route}`, {
     method,
@@ -129,6 +122,10 @@ async function request(method: string, route: string, body?: unknown, authentica
 }
 
 beforeAll(async () => {
+  savedLabRow = await testDb("backtest_lab_settings").where({ id: 1 }).first();
+  // The lab is seeded on the first read when the row is missing.
+  if (!savedLabRow) await (await import("../backtest/labSettingsStore.js")).loadBacktestLabSettings();
+  await testDb("backtest_lab_settings").where({ id: 1 }).update({ settings: testDb.raw(`jsonb_set(settings, '{decisionMaker}', '"${labDecisionMaker}"')`) });
   // 2026-09-01..11: Labor Day stored as no_data; the 9th could not be retrieved (no row, recorded as unavailable).
   writeSymbolFile(
     fileSymbol,
@@ -194,6 +191,8 @@ beforeEach(() => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  await testDb("backtest_lab_settings").where({ id: 1 }).delete();
+  if (savedLabRow) await testDb("backtest_lab_settings").insert({ ...savedLabRow, settings: JSON.stringify(savedLabRow.settings) });
   await testDb("backtest_sessions").where("name", "like", `${sessionNamePrefix}%`).del();
   await testDb("backtest_batches").where("name", "like", `${sessionNamePrefix}%`).del();
   await testDb("backtest_jobs").whereIn("symbol", [fileSymbol, downloadSymbolA, downloadSymbolB, downloadSymbolC, jobListingSymbol, deletedFileSymbol]).del();
@@ -213,10 +212,11 @@ describe("backtest routes", () => {
     expect(status).toBe(200);
     const template = body as BacktestSettingsTemplate;
     const plutoRow = await testDb("pluto_settings").where({ id: 1 }).first();
+    // The policy, model, Pluto and Kelly values are still snapshotted; no row shows them.
     expect(template.settings.kellyFraction).toBe(kellyFraction);
     expect(template.settings.pluto.minEdgeYieldPct).toBe(Number(plutoRow.min_edge_yield_pct));
     expect(template.settings.trading).not.toHaveProperty("commissionEstimator");
-    expect(template.settings).toMatchObject({ decisionMaker: "rules", policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
+    expect(template.settings).toMatchObject({ decisionMaker: labDecisionMaker, policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
     expect(template.rows.map((row) => `${row.section} · ${row.group}`)).toEqual([
       ...Array(9).fill("baseline_wheel · How the session runs"),
       ...Array(14).fill("baseline_wheel · Put ladder"),
@@ -228,20 +228,16 @@ describe("backtest routes", () => {
       ...Array(8).fill("steady_stake · Steady Stake"),
       ...Array(25).fill("vol_farmer · Vol Farmer"),
       ...Array(5).fill("vol_farmer_v2 · Vol Farmer v2"),
-      ...Array(12).fill("pluto_rules · Capital and sizing"),
-      ...Array(14).fill("pluto_rules · Candidate quality"),
-      ...Array(6).fill("pluto_rules · Model"),
-      ...Array(4).fill("pluto_rules · System checks"),
-      ...Array(5).fill("pluto_rules · Rules' choices"),
     ]);
     // Every row once, and every condition on a row that is there.
     const paths = template.rows.map((row) => row.path);
-    expect(new Set(paths).size).toBe(146);
-    expect(paths.length).toBe(146);
+    expect(new Set(paths).size).toBe(105);
+    expect(paths.length).toBe(105);
+    expect(paths.filter((path) => path.startsWith("pluto.") || path.startsWith("policy.") || path === "kellyFraction")).toEqual(["pluto.windowStartEt", "pluto.windowEndEt"]);
     const conditionPaths = template.rows.flatMap((row) => [...(row.appliesWhen?.allOf ?? []), ...(row.appliesWhen?.anyOf ?? [])].map((condition) => condition.path));
     expect(conditionPaths.filter((path) => !paths.includes(path))).toEqual([]);
     expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", hedgePutTenorDays: 0, hedgePutExpiry: "nearest", hedgePutStrikeFrom: "stock_price", hedgePutBelowPricePct: 0, hedgePutSize: "share_level", hedgePutCoveragePct: 100, hedgePutRollDaysLeft: 7, hedgePutCovers: "entries", hedgePutStaggeredExpiries: 3, hedgePutStrikeBy: "price", hedgePutAbsDelta: 0.25, hedgePutPriceGate: "off", hedgePutCostFallShare: 0.3, hedgePutIvMultiple: 1.3, hedgeInBreakEven: "excluded", hedgePutTurnover: "sell_when_shares_leave", hedgePutTurnoverDays: 30, hedgePutFarBelowPct: 10 });
-    expect(template.rows.find((row) => row.path === "decisionMaker")?.choices?.map((choice) => choice.value)).toEqual(["rules", "llm", "baseline", "steady_stake", "vol_farmer", "vol_farmer_v2"]);
+    expect(template.rows.find((row) => row.path === "decisionMaker")?.choices?.map((choice) => choice.value)).toEqual(["baseline", "steady_stake", "vol_farmer", "vol_farmer_v2"]);
     // Vol Farmer v2 reads the Vol Farmer's Calls' |delta| range and spread limit; its own rows apply to it alone.
     expect(template.settings.volFarmerV2).toEqual({ putTriggerCallYieldPct: 5, putMaxAbsDelta: 0.2, putStrikeBelowFirstBreakEvenPct: 15, leapsMinDte: 365, leapsAbsDelta: 0.7 });
     expect(template.rows.find((row) => row.path === "volFarmer.callMaxAbsDelta")?.appliesWhen?.allOf).toEqual([{ path: "decisionMaker", oneOf: ["vol_farmer", "vol_farmer_v2"] }]);
@@ -249,50 +245,15 @@ describe("backtest routes", () => {
     expect(template.rows.find((row) => row.path === "volFarmerV2.leapsAbsDelta")?.appliesWhen?.allOf).toEqual([{ path: "decisionMaker", oneOf: ["vol_farmer_v2"] }]);
     expect(template.settings.volFarmer).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, callMinDte: 1, callMaxDte: 45, callExpiry: "in_range", putMinDte: 0, putMaxDte: 360, putMaxStrikeAbovePricePct: 0, protectionFallPct: 20, maxSpreadPctOfMid: 50, putCashReservePct: 10, crossing: "unwind", putExpiry: "in_range", hedgeRuleCallPremiums: "excluded", minPutProtectionPct: 0, hedgeWithoutCall: "none", putChoice: "most_protection", maxPutCostPctOfCallPremium: 0, putRoll: "none", hedgeAfterExpiry: "keep", afterAssignment: "end", hedgeRuleStockPnl: "excluded", putCashIn: "none", cashInPutMinProtectionPct: 0, hedge: "put" });
     expect(template.rows.filter((row) => row.perTicker).map((row) => row.path)).toEqual(["baseline.ladderSharesPct", "baseline.ladderRungs", "baseline.ladderShock", "baseline.ladderShockPct", "baseline.ladderShockMinPct", "baseline.ladderShockMaxPct", "baseline.minAbsDelta", "baseline.maxAbsDelta"]);
-    expect(template.rows.find((row) => row.path === "pluto.capitalBudgetPct")).toEqual({ path: "pluto.capitalBudgetPct", group: "Capital and sizing", section: "pluto_rules", label: "Capital budget", unit: "percent", now: Number(plutoRow.capital_budget_pct), editable: true, note: "% of the account" });
     // A row the CC + Put Ladder reads only under a condition says so.
     expect(template.rows.find((row) => row.path === "baseline.ladderShockPct")?.appliesWhen).toEqual({ allOf: [{ path: "baseline.putsWhenNoCall", oneOf: ["reserve_ladder"] }, { path: "baseline.ladderShock", oneOf: ["fixed"] }], explanation: "Applies only with the ladder's Stock shock set to Fixed." });
-    // The looks inside Pluto's window are shown in How the session runs; the system checks replayed at each can be changed.
+    // The looks inside Pluto's window are shown in How the session runs.
     expect(template.rows.filter((row) => row.path === "pluto.windowStartEt" || row.path === "pluto.windowEndEt").map((row) => [row.path, row.group, row.unit, row.now, row.editable])).toEqual([
       ["pluto.windowStartEt", "How the session runs", "time", plutoRow.window_start_et, false],
       ["pluto.windowEndEt", "How the session runs", "time", plutoRow.window_end_et, false],
     ]);
-    expect(template.rows.filter((row) => row.group === "System checks").map((row) => [row.path, row.unit, row.now, row.editable])).toEqual([
-      ["pluto.maxActionsPerSession", "integer", Number(plutoRow.max_actions_per_session), true],
-      ["pluto.tickerCooldownMinutes", "integer", Number(plutoRow.ticker_cooldown_minutes), true],
-      ["pluto.dailyLossBreakerPct", "percent", Number(plutoRow.daily_loss_breaker_pct), true],
-      ["pluto.spyStressBreakerPct", "percent", Number(plutoRow.spy_stress_breaker_pct), true],
-    ]);
-    expect(template.rows.find((row) => row.path === "pluto.maxActionsPerSession")).toMatchObject({ label: "Max orders per day", note: "across every symbol and every look of the day, automatic closes included" });
-    // The sector cap binds once a session runs several symbols on one book.
-    expect(template.rows.find((row) => row.path === "pluto.maxSectorPctOfBudget")).toMatchObject({ group: "Capital and sizing", label: "Max per sector", unit: "percent", editable: true, now: Number(plutoRow.max_sector_pct_of_budget) });
-    expect(template.rows.find((row) => row.path === "pluto.minGrade")?.now).toBe(plutoRow.min_grade);
     expect(template.rows.find((row) => row.path === "fixed.earningsDateKnownCalendarDaysAhead")).toMatchObject({ group: "How the session runs", label: "Earnings dates known 30 days ahead", unit: "days", now: 30, editable: false });
-    const tradingRow = await testDb("trading_settings").first("max_order_pct_of_portfolio");
-    const capitalRows = template.rows.filter((row) => row.group === "Capital and sizing");
-    expect(capitalRows.slice(5, 9).map((row) => [row.path, row.label])).toEqual([
-      ["pluto.minCashReservePct", "Min cash reserve"],
-      ["trading.maxOrderPctOfPortfolio", "Max order size (order gate)"],
-      ["trading.maxConcentrationPerTickerPct", "Max per ticker (order gate)"],
-      ["trading.minCashReservePct", "Min cash reserve (order gate)"],
-    ]);
-    expect(capitalRows[6]).toMatchObject({ now: Number(tradingRow.max_order_pct_of_portfolio), editable: true, note: "% of the account" });
-    // A look after 10:00 measures how far each expiry's quotes moved from the 10:00 surface: the limit binds again.
-    expect(template.rows.find((row) => row.path === "pluto.maxIvShiftVp")).toMatchObject({ editable: true, now: Number(plutoRow.max_iv_shift_vp) });
-    const forecastRowIndex = template.rows.findIndex((row) => row.path === "fixed.forecastWindowDays");
-    expect(template.rows.slice(forecastRowIndex, forecastRowIndex + 2).map((row) => [row.path, row.now, row.editable])).toEqual([
-      ["fixed.forecastWindowDays", 21, false],
-      ["fixed.gradeCutPoints", "20 / 10 / 0%", false],
-    ]);
-    // The decisions the AI model makes live, as choices: who decides, and the rules that stand in for it.
-    expect(template.rows.find((row) => row.path === "decisionMaker")).toMatchObject({ group: "How the session runs", unit: "choice", now: "rules", editable: true });
-    expect(template.rows.filter((row) => row.group === "Rules' choices").map((row) => [row.path, row.unit, row.now, row.editable, row.choices?.map((choice) => choice.value)])).toEqual([
-      ["policy.roll", "choice", "flagged_legs", true, ["flagged_legs", "any_eligible", "never"]],
-      ["policy.buyback", "choice", "when_offered", true, ["when_offered", "never"]],
-      ["policy.sharesInProfit", "choice", "call_else_sell", true, ["call_else_sell", "always_sell", "always_keep"]],
-      ["policy.eventClose", "choice", "stress_vs_remaining", true, ["stress_vs_remaining", "never", "always"]],
-      ["policy.afterBlockedChoice", "choice", "try_next", true, ["try_next", "stop"]],
-    ]);
+    expect(template.rows.find((row) => row.path === "decisionMaker")).toMatchObject({ group: "How the session runs", unit: "choice", now: labDecisionMaker, editable: true });
     // The baseline wheel's own rows, in their groups' order.
     expect(template.rows.filter((row) => row.path.startsWith("baseline.")).map((row) => [row.path, row.now, row.editable])).toEqual([
       ["baseline.looks", "every_look", true],
@@ -358,30 +319,13 @@ describe("backtest routes", () => {
       ["baseline.hedgePutTurnoverDays", 30, true],
       ["baseline.hedgePutFarBelowPct", 10, true],
     ]);
-    expect(template.rows.find((row) => row.path === "policy.afterBlockedChoice")).toMatchObject({ label: "After a choice Pluto's checks refuse", choices: [{ value: "try_next", label: "Choose again, but no more opens where the account has no room" }, { value: "stop", label: "Stop for this look" }] });
-    // The AI model can be picked once the Claude Code CLI is configured.
-    const decisionMakerChoices = async () => ((await request("GET", "/backtest/settings-template")).body as BacktestSettingsTemplate).rows.find((row) => row.path === "decisionMaker")?.choices;
-    const baselineChoice = { value: "baseline", label: "Baseline wheel (no Pluto rules, no Signals)" };
-    const steadyStakeChoice = { value: "steady_stake", label: "Steady Stake (a steady share stake, Calls and Puts on expiry days)" };
-    const volFarmerChoice = { value: "vol_farmer", label: "Vol Farmer (shares, a Covered Call and a long Put hedge)" };
-    const volFarmerV2Choice = { value: "vol_farmer_v2", label: "Vol Farmer v2 (two Covered Calls at different levels, a LEAPS Call; research)" };
-    expect(await withClaudeCliPath(undefined, decisionMakerChoices)).toEqual([
-      { value: "rules", label: "Rules (below)" },
-      { value: "llm", label: "The AI model", unavailableReason: "BACKTEST_CLAUDE_CLI_PATH is not set in the API's .env" },
-      baselineChoice,
-      steadyStakeChoice,
-      volFarmerChoice,
-      volFarmerV2Choice,
+    expect(template.rows.find((row) => row.path === "decisionMaker")?.choices).toEqual([
+      { value: "baseline", label: "Baseline wheel (no Pluto rules, no Signals)" },
+      { value: "steady_stake", label: "Steady Stake (a steady share stake, Calls and Puts on expiry days)" },
+      { value: "vol_farmer", label: "Vol Farmer (shares, a Covered Call and a long Put hedge)" },
+      { value: "vol_farmer_v2", label: "Vol Farmer v2 (two Covered Calls at different levels, a LEAPS Call; research)" },
     ]);
-    expect(await withClaudeCliPath("/usr/local/bin/claude", decisionMakerChoices)).toEqual([
-      { value: "rules", label: "Rules (below)" },
-      { value: "llm", label: "The AI model" },
-      baselineChoice,
-      steadyStakeChoice,
-      volFarmerChoice,
-      volFarmerV2Choice,
-    ]);
-    expect(template.notReplayed).toHaveLength(7);
+    expect(template.notReplayed).toHaveLength(4);
     expect(template.notReplayed.join(" ")).not.toMatch(/macro|daily-loss breaker and market stress|one look a day/i);
   });
 
@@ -833,40 +777,36 @@ describe("backtest routes", () => {
       expect((await request("POST", "/backtest/sessions", { ...sessionRequest("x"), endDate: "2026-09-14" })).body).toEqual({ error: `The ${fileSymbol} data file covers 2026-09-01 to 2026-09-11: the dates must be inside it.` });
       expect((await request("POST", "/backtest/sessions", { ...sessionRequest("x"), symbol: downloadSymbolA })).status).toBe(400);
       expect((await request("POST", "/backtest/sessions", sessionRequest("x", { pluto: { windowStartEt: "11:00" } }))).body).toEqual({ error: "pluto.windowStartEt cannot be changed for a session." });
-      expect(await withClaudeCliPath(undefined, () => request("POST", "/backtest/sessions", sessionRequest("x", { decisionMaker: "llm" })))).toEqual({
-        status: 400,
-        body: { error: "The AI model as decision maker needs BACKTEST_CLAUDE_CLI_PATH in the API's .env (the Claude Code CLI to call): set it and restart the API." },
-      });
-      expect((await request("POST", "/backtest/sessions", sessionRequest("x", { policy: { roll: "sometimes" } }))).status).toBe(400);
-      expect((await request("POST", "/backtest/sessions", sessionRequest("x", { policy: { eventClose: "sometimes" } }))).status).toBe(400);
+      expect((await request("POST", "/backtest/sessions", sessionRequest("x", { policy: { roll: "never" } }))).body).toEqual({ error: "overrides.policy is not a setting a session can change." });
     });
 
-    it("take the AI model as decision maker once the CLI is configured, with the calls and model time it may take", async () => {
-      const { status, body } = await withClaudeCliPath("/usr/local/bin/claude", () => request("POST", "/backtest/sessions", sessionRequest("llm", { decisionMaker: "llm" })));
-      expect(status).toBe(201);
-      const created = body as CreateBacktestSessionResponse;
-      // 2026-09-01 to 2026-09-11: 9 weekdays; the looks of a full day in Pluto's window, 1 to 2 calls each, 4.8 seconds a call.
-      const window = await testDb("pluto_settings").where({ id: 1 }).first("window_start_et", "window_end_et");
-      const looksPerDay = lookTimesInWindow(window.window_start_et, window.window_end_et, 16 * 60).length;
-      expect(looksPerDay).toBeGreaterThan(0);
-      expect(created.llmEstimate).toEqual({ tradingDays: 9, callsLow: 9 * looksPerDay, callsHigh: 18 * looksPerDay, modelHoursLow: Math.round(((9 * looksPerDay * 4.8) / 3600) * 10) / 10, modelHoursHigh: Math.round(((18 * looksPerDay * 4.8) / 3600) * 10) / 10 });
-      expect(created.session.overrideCount).toBe(1);
-      expect((await testDb("backtest_sessions").where({ id: created.session.id }).first("overrides")).overrides).toEqual({ decisionMaker: "llm" });
-      expect((await request("DELETE", `/backtest/sessions/${created.session.id}`)).status).toBe(204);
-    });
-
-    it("estimate a session before it starts: the AI model's calls and model time, nothing created, the same checks as creating it", async () => {
+    it("refuse a new rules or AI model session or batch, and the estimate of one, with nothing created", async () => {
       const sessionsBefore = await testDb("backtest_sessions").count({ total: "*" }).first();
-      const llm = await withClaudeCliPath("/usr/local/bin/claude", () => request("POST", "/backtest/sessions/estimate", sessionRequest("estimate", { decisionMaker: "llm" })));
-      expect(llm.status).toBe(200);
-      const window = await testDb("pluto_settings").where({ id: 1 }).first("window_start_et", "window_end_et");
-      const looksPerDay = lookTimesInWindow(window.window_start_et, window.window_end_et, 16 * 60).length;
-      expect((llm.body as { llmEstimate: unknown }).llmEstimate).toMatchObject({ tradingDays: 9, callsLow: 9 * looksPerDay, callsHigh: 18 * looksPerDay });
-      expect((llm.body as { warnings: string[] }).warnings).toEqual([`${fileSymbol}: 7 of its 7 days in the period have no intraday quotes: on those days it gets one look, at 10:00.`]);
-      expect((await request("POST", "/backtest/sessions/estimate", sessionRequest("estimate"))).body).toMatchObject({ llmEstimate: null });
+      const retired = { status: 400, body: { error: "The rules and llm backtests were retired with Signals; their past sessions stay readable." } };
+      for (const decisionMaker of ["rules", "llm"]) {
+        expect(await request("POST", "/backtest/sessions", sessionRequest("retired", { decisionMaker }))).toEqual(retired);
+        expect(await request("POST", "/backtest/sessions/estimate", sessionRequest("retired", { decisionMaker }))).toEqual(retired);
+        const { name: _name, symbol, ...shared } = sessionRequest("retired", { decisionMaker });
+        expect(await request("POST", "/backtest/batches", { ...shared, name: `${sessionNamePrefix} retired batch`, runs: [{ symbols: [symbol] }] })).toEqual(retired);
+      }
+      // A lab still set to the rules starts nothing until the request names another decision maker.
+      await testDb("backtest_lab_settings").where({ id: 1 }).update({ settings: testDb.raw(`jsonb_set(settings, '{decisionMaker}', '"rules"')`) });
+      try {
+        expect(await request("POST", "/backtest/sessions/estimate", sessionRequest("retired"))).toEqual(retired);
+        expect((await request("POST", "/backtest/sessions/estimate", sessionRequest("retired", { decisionMaker: "steady_stake" }))).status).toBe(200);
+      } finally {
+        await testDb("backtest_lab_settings").where({ id: 1 }).update({ settings: testDb.raw(`jsonb_set(settings, '{decisionMaker}', '"${labDecisionMaker}"')`) });
+      }
+      expect(await testDb("backtest_sessions").count({ total: "*" }).first()).toEqual(sessionsBefore);
+    });
+
+    it("estimate a session before it starts: nothing created, the same checks as creating it", async () => {
+      const sessionsBefore = await testDb("backtest_sessions").count({ total: "*" }).first();
+      const estimate = await request("POST", "/backtest/sessions/estimate", sessionRequest("estimate"));
+      expect(estimate.status).toBe(200);
+      expect(estimate.body).toEqual({ warnings: [`${fileSymbol}: 7 of its 7 days in the period have no intraday quotes: on those days it gets one look, at 10:00.`], capital: 1_000_000, bookMode: "shared_account", resolvedBySymbol: null });
       const { name: _unnamed, ...withoutName } = sessionRequest("estimate");
       expect((await request("POST", "/backtest/sessions/estimate", withoutName)).status).toBe(200);
-      expect((await withClaudeCliPath(undefined, () => request("POST", "/backtest/sessions/estimate", sessionRequest("estimate", { decisionMaker: "llm" })))).status).toBe(400);
       expect((await request("POST", "/backtest/sessions/estimate", { ...sessionRequest("estimate"), endDate: "2026-09-14" })).status).toBe(400);
       // With the baseline: a ticker whose values cannot run still answers 200, with its problems; creating it is refused.
       const badDeltaRange = { ...sessionRequest("estimate", { decisionMaker: "baseline" }), symbolSettings: { [fileSymbol]: { baseline: { minAbsDelta: 0.9 } } } };
@@ -893,20 +833,20 @@ describe("backtest routes", () => {
     });
 
     it("store the settings snapshot and only the changed values, and start the backtest job", async () => {
-      const currentMinEdgeYield = Number((await testDb("pluto_settings").where({ id: 1 }).first("min_edge_yield_pct")).min_edge_yield_pct);
-      const { status, body } = await request("POST", "/backtest/sessions", sessionRequest("edge", { pluto: { minEdgeYieldPct: currentMinEdgeYield + 5, maxAbsDelta: undefined }, kellyFraction }));
+      const labSpreadCost = ((await request("GET", "/backtest/settings-template")).body as BacktestSettingsTemplate).settings.trading.spreadCostChargedPct;
+      const { status, body } = await request("POST", "/backtest/sessions", sessionRequest("edge", { trading: { spreadCostChargedPct: labSpreadCost === 40 ? 45 : 40 }, steadyStake: { stakePct: 80 } }));
       expect(status).toBe(201);
       ({ session, job: sessionJob } = body as CreateBacktestSessionResponse);
       expect((body as CreateBacktestSessionResponse).warnings).toEqual([`${fileSymbol}: 7 of its 7 days in the period have no intraday quotes: on those days it gets one look, at 10:00.`]);
-      expect((body as CreateBacktestSessionResponse).llmEstimate).toBeNull();
+      expect(body).not.toHaveProperty("llmEstimate");
       expect(session).toMatchObject({ symbol: fileSymbol, startDate: "2026-09-01", endDate: "2026-09-11", startingValue: 1_000_000, tablesMode: "walk_forward", status: "queued", overrideCount: 1, metrics: null });
       expect(sessionJob).toMatchObject({ kind: "backtest", sessionId: session.id, sessionName: session.name, displayStatus: "running" });
       expect(spawnBacktestJobProcessMock).toHaveBeenCalledWith(sessionJob.id);
       const row = await testDb("backtest_sessions").where({ id: session.id }).first("settings_snapshot", "overrides");
-      expect(row.overrides).toEqual({ pluto: { minEdgeYieldPct: currentMinEdgeYield + 5 } });
+      expect(row.overrides).toEqual({ trading: { spreadCostChargedPct: labSpreadCost === 40 ? 45 : 40 } });
       expect(Object.keys(row.settings_snapshot).sort()).toEqual(["baseline", "decisionMaker", "kellyFraction", "model", "pluto", "policy", "steadyStake", "trading", "volFarmer", "volFarmerV2"]);
-      expect(row.settings_snapshot).toMatchObject({ decisionMaker: "rules", policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
-      expect(row.settings_snapshot.pluto.minEdgeYieldPct).toBe(currentMinEdgeYield);
+      expect(row.settings_snapshot).toMatchObject({ decisionMaker: labDecisionMaker, policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
+      expect(row.settings_snapshot.trading.spreadCostChargedPct).toBe(labSpreadCost);
     });
 
     it("return a session's days with drawdowns, monthly returns, trades and model accuracy", async () => {
@@ -944,7 +884,7 @@ describe("backtest routes", () => {
       const { status, body } = await request("GET", `/backtest/sessions/${session.id}`);
       expect(status).toBe(200);
       const detail = body as BacktestSessionDetail;
-      expect(detail.session).toMatchObject({ id: session.id, overrides: { pluto: expect.any(Object) }, baselineMetrics: null, dataLastDate: null, error: null, finishedAt: null });
+      expect(detail.session).toMatchObject({ id: session.id, overrides: { trading: expect.any(Object) }, baselineMetrics: null, dataLastDate: null, error: null, finishedAt: null });
       // Only the split inside 2026-09-01..11 (the cached schedule written above also has one ending on the 1st).
       expect(detail.session.detectedSplits).toEqual([{ symbol: fileSymbol, lastDayBefore: "2026-09-04", firstDayAfter: "2026-09-08", ratio: 2 }]);
       expect(detail.job?.id).toBe(sessionJob.id);
@@ -1217,6 +1157,35 @@ describe("backtest routes", () => {
       expect((await request("GET", `/backtest/sessions/00000000-0000-4000-8000-000000000000/stock-prices?symbol=${fileSymbol}`)).status).toBe(404);
     });
 
+    it("keep a past rules or AI model session readable, and never run it again", async () => {
+      // The session above as a rules session stored it: no decision maker in its snapshot (the rules' then) and a policy override.
+      const stored = await testDb("backtest_sessions").where({ id: session.id }).first("settings_snapshot", "overrides");
+      const storedJob = await testDb("backtest_jobs").where({ id: sessionJob.id }).first("status");
+      const { decisionMaker: _labDecisionMaker, ...snapshotWithoutDecisionMaker } = stored.settings_snapshot;
+      await testDb("backtest_sessions").where({ id: session.id }).update({ settings_snapshot: JSON.stringify(snapshotWithoutDecisionMaker), overrides: JSON.stringify({ policy: { roll: "never" } }) });
+      try {
+        for (const overrides of [{ policy: { roll: "never" } }, { decisionMaker: "llm" }]) {
+          await testDb("backtest_sessions").where({ id: session.id }).update({ overrides: JSON.stringify(overrides) });
+          const detail = await request("GET", `/backtest/sessions/${session.id}`);
+          expect(detail.status).toBe(200);
+          expect((detail.body as BacktestSessionDetail).session).toMatchObject({ id: session.id, overrides, overrideCount: 1 });
+          expect((detail.body as BacktestSessionDetail).days).toHaveLength(3);
+          expect((detail.body as BacktestSessionDetail).trades[0]).toMatchObject({ grade: "good", edgeMargin: 0.15 });
+          expect((detail.body as BacktestSessionDetail).positions.length).toBeGreaterThan(0);
+          expect((await request("GET", `/backtest/sessions/${session.id}/actions`)).status).toBe(200);
+          expect((await request("GET", `/backtest/sessions/${session.id}/fills`)).status).toBe(200);
+          expect((await listSessions()).sessions.map((entry) => entry.id)).toContain(session.id);
+          // Its stopped job is not resumed: the engine no longer runs it.
+          await testDb("backtest_jobs").where({ id: sessionJob.id }).update({ status: "failed" });
+          expect(await request("POST", `/backtest/jobs/${sessionJob.id}/resume`)).toEqual({ status: 409, body: { error: "The rules and llm backtests were retired with Signals; their past sessions stay readable." } });
+          expect((await testDb("backtest_jobs").where({ id: sessionJob.id }).first("status")).status).toBe("failed");
+        }
+      } finally {
+        await testDb("backtest_sessions").where({ id: session.id }).update({ settings_snapshot: JSON.stringify(stored.settings_snapshot), overrides: JSON.stringify(stored.overrides) });
+        await testDb("backtest_jobs").where({ id: sessionJob.id }).update({ status: storedJob.status });
+      }
+    });
+
     it("compare sessions with one buy-and-hold curve per symbol, period and starting value", async () => {
       ({ session: secondSession } = (await request("POST", "/backtest/sessions", sessionRequest("plain"))).body as { session: BacktestSessionListItem });
       const { status, body } = await request("GET", `/backtest/compare?ids=${session.id},${secondSession.id}`);
@@ -1356,7 +1325,7 @@ describe("backtest routes", () => {
         expect(spawnBacktestJobProcessMock.mock.calls.map(([jobId]) => jobId)).toEqual([created.runs[0]!.job.id, created.runs[1]!.job.id]);
         expect(created.warnings.length).toBeGreaterThan(0);
         expect(created.warnings.every((warning) => /^Run [123]: /.test(warning))).toBe(true);
-        expect(created.llmEstimate).toBeNull();
+        expect(created).not.toHaveProperty("llmEstimate");
         const batchId = created.batch.id;
         const [runOne, runTwo, runThree] = created.runs.map(({ session }) => session);
 

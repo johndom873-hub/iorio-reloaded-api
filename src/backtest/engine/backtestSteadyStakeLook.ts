@@ -1,10 +1,10 @@
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib/commissionEstimate.js";
 import { describeOptionContract, describeOrderSize } from "../../lib/optionContractLabel.js";
 import { regularCloseMinutesEt } from "../../lib/varianceClock.js";
-import { openCandidateId } from "../../pluto/candidateFilters.js";
+import { openCandidateId } from "./candidateIds.js";
 import type { BacktestAction } from "../backtestTypes.js";
 import { sharesPerContract } from "./backtestBook.js";
-import type { BacktestLookContext, BacktestLookResult, BacktestOptionSale } from "./backtestLook.js";
+import type { BacktestLookContext, BacktestLookResult, BacktestOptionSale } from "./backtestLookTypes.js";
 import { captureLookTimeEt, lookInstantMs } from "./backtestTickerInputs.js";
 import { baselineContractsForCash, noteBaselineForwardAnchors, selectBaselineCandidates, type BaselineCandidate, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
 import { buyShares, openCashSecuredPut, openCoveredCall, sellShares } from "./ledger/ledgerEvents.js";
@@ -225,7 +225,7 @@ export async function runSteadyStakeLook(context: BacktestLookContext): Promise<
   }
 
   const summary = summaries.length === 0 ? "No action: the stake is within its band" : summaries.join(" · ");
-  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [], fitIssueBySymbol: new Map(), scoredBySymbol: new Map(), llmCalls: { asked: 0, fromCache: 0 } };
+  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [] };
 }
 
 const formatDollars = (value: number) => `$${Math.round(value).toLocaleString("en-US")}`;

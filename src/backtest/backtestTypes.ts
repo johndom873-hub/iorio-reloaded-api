@@ -1,6 +1,5 @@
 import type { PlutoSettings } from "../pluto/settingsStore.js";
 import type { TradingSettings } from "../lib/tradingSettingsStore.js";
-import type { LlmSessionEstimate } from "./llm/estimateLlmSession.js";
 import type { OpenCandidateRanking } from "../lib/signalCandidates.js";
 import type { KellyEdgeBasis } from "../pluto/postModelGates.js";
 import type { ModelForecastMethod } from "../lib/volatilityEdge.js";
@@ -15,13 +14,22 @@ export type BacktestJobDisplayStatus = BacktestJobStatus | "stopped";
 export type BacktestTablesMode = "walk_forward" | "current";
 
 /**
- * Who makes the choices the AI model makes live: the stand-in rules (BacktestPolicySettings), or the model itself (Claude
- * through the subscription, src/backtest/llm/). "baseline": none of Pluto or Signals, the naive wheel of
- * BacktestBaselineSettings (Marcelo 2026-10-13), to measure what each rule adds. "steady_stake": the Steady Stake of
- * BacktestSteadyStakeSettings, also without Pluto or Signals. "vol_farmer": the Vol Farmer of BacktestVolFarmerSettings, also
- * without Pluto or Signals; "vol_farmer_v2": Vol Farmer v2 of BacktestVolFarmerV2Settings (research).
+ * Who decides a session's trades. "baseline": the naive wheel of BacktestBaselineSettings (Marcelo 2026-10-13), the CC +
+ * Put Ladder. "steady_stake": the Steady Stake of BacktestSteadyStakeSettings. "vol_farmer": the Vol Farmer of
+ * BacktestVolFarmerSettings; "vol_farmer_v2": Vol Farmer v2 of BacktestVolFarmerV2Settings (research). "rules" (Pluto's
+ * stand-in rules on the Signals model, BacktestPolicySettings) and "llm" (the AI model through the subscription) were
+ * retired with Signals (Marcelo 2026-10-27): their past sessions stay readable, none is created or run again.
  */
 export type BacktestDecisionMaker = "rules" | "llm" | "baseline" | "steady_stake" | "vol_farmer" | "vol_farmer_v2";
+
+/** The decision makers a session can still be created and run with. */
+export const activeBacktestDecisionMakers = ["baseline", "steady_stake", "vol_farmer", "vol_farmer_v2"] as const satisfies readonly BacktestDecisionMaker[];
+
+export const retiredBacktestDecisionMakerMessage = "The rules and llm backtests were retired with Signals; their past sessions stay readable.";
+
+export function isRetiredBacktestDecisionMaker(decisionMaker: BacktestDecisionMaker): boolean {
+  return decisionMaker === "rules" || decisionMaker === "llm";
+}
 
 /**
  * The naive wheel (approved by Marcelo 2026-10-13; the research log has the full rules). At every look: free round lots of
@@ -357,9 +365,9 @@ export interface BacktestVolFarmerV2Settings {
 export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putTriggerCallYieldPct: 5, putMaxAbsDelta: 0.2, putStrikeBelowFirstBreakEvenPct: 15, leapsMinDte: 365, leapsAbsDelta: 0.7 };
 
 /**
- * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5). Everything else in a pass is
- * Pluto's own code. A pass considers closes first, then rolls, then opens, and takes at most one action; an open is
- * always Pluto's own top pick (Edge Yield, then Edge $).
+ * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5), read by the retired rules
+ * sessions only: kept for their stored settings. A pass considered closes first, then rolls, then opens, and took at most
+ * one action; an open was always Pluto's own top pick (Edge Yield, then Edge $).
  */
 export interface BacktestPolicySettings {
   /** Roll or hold: only legs flagged near expiry, assignment risk or decayed; any eligible roll; never. The best by net roll $. */
@@ -382,8 +390,9 @@ export interface BacktestPolicySettings {
 export const defaultBacktestPolicySettings: BacktestPolicySettings = { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" };
 
 /**
- * The Signals model's parameters a session may change (Marcelo 2026-10-13); live always runs on the defaults. They change
- * the model's figures and Pluto's use of them, never the fills (trading.spreadCostChargedPct prices every fill).
+ * The Signals model's parameters a rules session could change (Marcelo 2026-10-13), kept for the retired rules sessions'
+ * stored settings. They changed the model's figures and Pluto's use of them, never the fills
+ * (trading.spreadCostChargedPct prices every fill).
  */
 export interface BacktestModelSettings {
   /** The Yang-Zhang window of the valuation forecast, in sessions; the walk-forward tables are built on the same window. */
@@ -797,28 +806,13 @@ export interface BacktestSettingChoice {
   unavailableReason?: string;
 }
 
-/** One row of the New session settings table. `path` addresses the value inside BacktestSettings, e.g. "pluto.minEdgeYieldPct" or "policy.roll". */
-export type BacktestSettingGroup =
-  | "How the session runs"
-  | "Put ladder"
-  | "Calls and Covered Calls"
-  | "Contract choice"
-  | "Entry filters"
-  | "Exits"
-  | "Hedge"
-  | "Steady Stake"
-  | "Vol Farmer"
-  | "Vol Farmer v2"
-  | "Capital and sizing"
-  | "Candidate quality"
-  | "Model"
-  | "System checks"
-  | "Rules' choices";
+/** One row of the New session settings table. `path` addresses the value inside BacktestSettings, e.g. "baseline.ladderRungs" or "trading.spreadCostChargedPct". */
+export type BacktestSettingGroup = "How the session runs" | "Put ladder" | "Calls and Covered Calls" | "Contract choice" | "Entry filters" | "Exits" | "Hedge" | "Steady Stake" | "Vol Farmer" | "Vol Farmer v2";
 
-/** "baseline_wheel": rows a Baseline wheel session (the CC + Put Ladder) reads, some shared with the rules and the AI model;
+/** "baseline_wheel": rows a Baseline wheel session (the CC + Put Ladder) reads, a few shared with the others;
  *  "steady_stake": rows only the Steady Stake reads; "vol_farmer": rows the Vol Farmer reads (a few Vol Farmer v2 too);
- *  "vol_farmer_v2": rows only Vol Farmer v2 reads; "pluto_rules": rows only the rules and the AI model read. */
-export type BacktestSettingSection = "baseline_wheel" | "steady_stake" | "vol_farmer" | "vol_farmer_v2" | "pluto_rules";
+ *  "vol_farmer_v2": rows only Vol Farmer v2 reads. */
+export type BacktestSettingSection = "baseline_wheel" | "steady_stake" | "vol_farmer" | "vol_farmer_v2";
 
 /** A row's value against another row's: `oneOf` / `noneOf` its choice values, or a number `above`. */
 export interface BacktestSettingCondition {
@@ -842,7 +836,7 @@ export interface BacktestSettingRow {
   section: BacktestSettingSection;
   /** Absent: always read (in its section's sessions). */
   appliesWhen?: BacktestSettingApplicability;
-  /** `path` addresses e.g. "pluto.minEdgeYieldPct", "policy.roll" or "model.forecastWindowDays". */
+  /** `path` addresses e.g. "baseline.ladderRungs", "trading.spreadCostChargedPct" or "decisionMaker". */
   label: string;
   /** "time" is a clock time, "HH:MM" Eastern. */
   unit: "percent" | "number" | "integer" | "dollars" | "grade" | "days" | "time" | "choice";
@@ -910,8 +904,6 @@ export interface CreateBacktestSessionResponse {
   session: BacktestSessionListItem;
   job: BacktestJobView;
   warnings: string[];
-  /** With the AI model as decision maker: how many calls and how many hours of model time the session may take (an upper bound); null with the rules. */
-  llmEstimate: LlmSessionEstimate | null;
   /** Each ticker's pot, weight and values with where each came from ("pots"); null when the tickers share the session's settings. */
   resolvedBySymbol: Record<string, BacktestSymbolSettings> | null;
 }
@@ -922,7 +914,6 @@ export interface CreateBacktestSessionResponse {
  */
 export interface BacktestSessionEstimateResponse {
   warnings: string[];
-  llmEstimate: LlmSessionEstimate | null;
   /** The session's capital: the starting value given, else Σ the pots; null while a ticker has no pot. */
   capital: number | null;
   bookMode: BacktestBookMode;
@@ -940,7 +931,7 @@ export interface CreateBacktestSessionRequest {
   /**
    * The session's capital. With the baseline deciding, it is split equally into the tickers' pots and can be left out:
    * each ticker's pot is then its symbolSettings pot, else its lab pot (settingsSource "per_ticker"), else the lab's
-   * default pot. Required with the rules or the AI model.
+   * default pot. Required with the Steady Stake and the Vol Farmers.
    */
   startingValue?: number;
   tablesMode: BacktestTablesMode;
@@ -984,8 +975,6 @@ export interface CreateBacktestBatchResponse {
   batch: BacktestBatchSummary;
   runs: { session: BacktestSessionListItem; job: BacktestJobView }[];
   warnings: string[];
-  /** One run with the AI model deciding: its estimate; null otherwise. */
-  llmEstimate: LlmSessionEstimate | null;
 }
 
 /** An account value series point: the run (or the combined portfolio), buy and hold of its tickers, buy and hold of SPY (null when not kept). */
@@ -1071,7 +1060,7 @@ export interface BacktestRunStatistics {
   marketStressDates: string[];
   /** Session days with no SPY 30-minute bars: the market-stress check could not run on them. */
   daysWithoutMarketStressBars: number;
-  /** LLM mode only: the decisions asked of the model, and how many the cache answered. */
+  /** Sessions the AI model decided (retired): the decisions asked of the model, and how many the cache answered. */
   llmCalls?: { asked: number; fromCache: number };
   /** The baseline wheel's hedge, when it is on: its long Puts over the session. */
   hedge?: BacktestHedgeTotals;

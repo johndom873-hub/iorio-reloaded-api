@@ -3,19 +3,13 @@ import { runningAverageShareCost } from "../../../lib/shareAverageCost.js";
 import { buildCycleInputFromRows, summarizeOpenCycleFromRows, type CycleInputRows, type CycleOptionLegRow, type CycleStockTradeRow } from "../../../lib/cycleInputRows.js";
 import { stockAcquisitionByPositionIdFromRecords } from "../../../lib/stockAcquisitionTracing.js";
 import { deriveCycles, type Cycle, type CycleInput } from "../../../lib/cycles.js";
-import { daysToExpiry, describeOptionContract } from "../../../lib/optionContractLabel.js";
-import { computeExposureRows, type PositionExposureRow } from "../../../lib/positionExposure.js";
 import { computeUnrealizedPnlByPosition, type UnrealizedPnlByPosition } from "../../../lib/positionOrderRules.js";
 import { availableUncoveredShares, cashLockedInCashSecuredPuts, positionCapitalAtRisk, positionCapitalDeployed, positionRealizedPnl, type PositionFigures, type PositionRealizedPnl } from "../../../lib/positionSelectors.js";
-import type { OpenShortLeg } from "../../../lib/rollSignalCandidates.js";
-import { findSameContractConflict, type OccupiedContract } from "../../../pluto/candidateFilters.js";
-import type { PostModelBookInput } from "../../../pluto/postModelGates.js";
-import { findLeg, findPosition, ledgerRevision, legsOfPosition, rememberedForRevision, positionsOfSymbol, requirePosition, type LedgerLeg, type LedgerPosition, type LedgerTrade, type SimulatedLedger } from "./simulatedLedger.js";
+import { findLeg, findPosition, ledgerRevision, legsOfPosition, rememberedForRevision, positionsOfSymbol, requirePosition, type LedgerLeg, type LedgerPosition, type SimulatedLedger } from "./simulatedLedger.js";
 
-// Pluto's view of the simulated book. The figures come from the functions the platform itself uses, fed with the
-// ledger's rows: position figures from positionSelectors.ts (tested against the positions SQL), cycles and the
-// break-even through the loaders' own row mapping (cycleInputRows.ts), exposure and unrealized P&L from the live
-// functions. Only the account value is summed here (live reads it from IBKR). Prices, strikes and share counts are on
+// The simulated book's figures. They come from the functions the platform itself uses, fed with the ledger's rows:
+// position figures from positionSelectors.ts (tested against the positions SQL), cycles and the break-even through the
+// loaders' own row mapping (cycleInputRows.ts), unrealized P&L from the live function. Only the account value is summed here (live reads it from IBKR). Prices, strikes and share counts are on
 // the scale the ledger holds them (the symbol's cycle scale, simulatedLedger.ts); marks passed in must be on it too.
 
 const isOpen = (leg: LedgerLeg) => leg.exitAt === null;
@@ -90,29 +84,6 @@ export function ledgerTotalRealizedPnl(ledger: SimulatedLedger): number {
 export function ledgerUnrealizedPnl(ledger: SimulatedLedger, priceByLegId: ReadonlyMap<string, number>): UnrealizedPnlByPosition {
   const legs = openLegs(ledger).map(({ leg }) => leg);
   return computeUnrealizedPnlByPosition(openPositions(ledger).map((position) => position.id), legs, Object.fromEntries(legs.map((leg) => [leg.id, priceByLegId.get(leg.id) ?? null])));
-}
-
-/**
- * Each open position's exposure at the given prices (computeExposureRows): its legs at market, a short option as a
- * liability, a cash-secured put plus its strike collateral. A leg with no price counts at its entry price, as live does.
- */
-export function ledgerExposureRows(ledger: SimulatedLedger, priceByLegId: ReadonlyMap<string, number>, sectorBySymbol: ReadonlyMap<string, string | null>): PositionExposureRow[] {
-  const legs = openLegs(ledger);
-  const positionRows = openPositions(ledger).map((position) => ({ positionId: position.id, strategyKey: position.strategyKey, symbol: position.symbol, sector: sectorBySymbol.get(position.symbol) || "Unknown" }));
-  const legRows = legs.map(({ leg, position }) => ({
-    positionId: position.id,
-    strategyKey: position.strategyKey,
-    legType: leg.legType,
-    side: leg.side,
-    quantity: leg.quantity,
-    multiplier: leg.multiplier,
-    entryPrice: String(leg.entryPrice),
-    optionType: leg.optionType,
-    strikePrice: leg.strikePrice === null ? null : String(leg.strikePrice),
-    expiryDate: leg.expiryDate === null ? null : leg.expiryDate.replaceAll("-", ""),
-    symbol: position.symbol,
-  }));
-  return computeExposureRows(positionRows, legRows, Object.fromEntries(legs.map(({ leg }, index) => [String(index), priceByLegId.get(leg.id) ?? null])));
 }
 
 /** The shares held, long less short, at the marks given (each leg's entry price where none). */
@@ -330,30 +301,6 @@ export function ledgerBreakEvenForPosition(ledger: SimulatedLedger, positionId: 
   return summary === null ? { breakEven: null, reason: "no open cycle on the symbol" } : breakEvenForPosition(summary, positionId);
 }
 
-function openOptionLegsOfSymbol(ledger: SimulatedLedger, symbol: string): { leg: LedgerLeg; position: LedgerPosition }[] {
-  return openLegs(ledger).filter(({ leg, position }) => position.symbol === symbol && leg.legType === "option");
-}
-
-/** Every contract on the symbol already held (loadOccupiedContracts; a simulated order fills at once, so none is ever working). */
-export function ledgerOccupiedContracts(ledger: SimulatedLedger, symbol: string, todayIso: string): OccupiedContract[] {
-  return openOptionLegsOfSymbol(ledger, symbol).flatMap(({ leg }) =>
-    leg.expiryDate === null || leg.strikePrice === null || leg.optionType === null
-      ? []
-      : [{ expiry: leg.expiryDate, strike: leg.strikePrice, detail: `open position on ${describeOptionContract({ symbol, strike: leg.strikePrice, right: leg.optionType === "call" ? "C" : "P", expiry: leg.expiryDate, dte: daysToExpiry(leg.expiryDate, todayIso) })}` }],
-  );
-}
-
-/** The symbol's open short option legs as scoring reads them (loadOpenShortLegs), by expiry then strike. */
-export function ledgerOpenShortLegs(ledger: SimulatedLedger, symbol: string): OpenShortLeg[] {
-  const legs: OpenShortLeg[] = [];
-  for (const { leg, position } of openOptionLegsOfSymbol(ledger, symbol)) {
-    if (leg.side !== "short" || leg.expiryDate === null || leg.strikePrice === null || leg.optionType === null) continue;
-    if (position.strategyKey !== "covered_call" && position.strategyKey !== "cash_secured_put") continue;
-    legs.push({ legId: leg.id, positionId: position.id, strategyKey: position.strategyKey, expiry: leg.expiryDate, strike: leg.strikePrice, right: leg.optionType === "call" ? "C" : "P", quantity: leg.quantity, entryPrice: leg.entryPrice, entryAtIso: leg.entryAt.toISOString() });
-  }
-  return legs.sort((a, b) => a.expiry.localeCompare(b.expiry) || a.strike - b.strike);
-}
-
 /** Open short option legs whose expiry date is on or before `dateIso`: what the day's settlement has to settle. */
 export function ledgerLegsDueForSettlement(ledger: SimulatedLedger, dateIso: string): LedgerLeg[] {
   return openLegs(ledger).flatMap(({ leg }) => (leg.legType === "option" && leg.side === "short" && leg.expiryDate !== null && leg.expiryDate <= dateIso ? [leg] : []));
@@ -388,59 +335,4 @@ export function ledgerKeptHedgeLegs(ledger: SimulatedLedger, symbol: string): { 
 /** The symbol's positions the wheel's cycles are made of: every one but the Puts kept between cycles. */
 function cyclePositionsOfSymbol(ledger: SimulatedLedger, symbol: string): LedgerPosition[] {
   return positionsOfSymbol(ledger, symbol).filter((position) => position.keptSince === undefined);
-}
-
-/**
- * Per ledger: the latest action trade of each symbol over the trades read so far. Trades are only appended (and never
- * changed), and a trade's leg and its position's symbol are fixed, so each read takes in only the trades added since.
- */
-const lastFilledActionAtByLedger = new WeakMap<SimulatedLedger, { trades: LedgerTrade[]; readCount: number; latestBySymbol: Map<string, Date> }>();
-
-/** When a simulated Pluto action last filled on the symbol (the ticker cooldown's clock); null if never. The first of equally late trades, in ledger order. */
-export function ledgerLastFilledActionAt(ledger: SimulatedLedger, symbol: string): Date | null {
-  let read = lastFilledActionAtByLedger.get(ledger);
-  if (!read || read.trades !== ledger.trades) lastFilledActionAtByLedger.set(ledger, (read = { trades: ledger.trades, readCount: 0, latestBySymbol: new Map() }));
-  for (; read.readCount < ledger.trades.length; read.readCount++) {
-    const trade = ledger.trades[read.readCount]!;
-    if (trade.actionId === null) continue;
-    const position = (leg => leg && findPosition(ledger, leg.positionId))(findLeg(ledger, trade.legId));
-    if (!position) continue;
-    const tradeSymbol = position.symbol;
-    const latest = read.latestBySymbol.get(tradeSymbol);
-    if (latest === undefined || trade.executedAt.getTime() > latest.getTime()) read.latestBySymbol.set(tradeSymbol, trade.executedAt);
-  }
-  return read.latestBySymbol.get(symbol) ?? null;
-}
-
-export interface LedgerPostModelBookRequest {
-  symbol: string;
-  sector: string | null;
-  /** The contract about to be ordered, for the one-position-per-contract check. */
-  contract: { expiry: string; strike: number };
-  /** Mark per share of every open leg, by leg id (ledgerExposureRows, ledgerNetLiquidationValue). */
-  priceByLegId: ReadonlyMap<string, number>;
-  sectorBySymbol: ReadonlyMap<string, string | null>;
-  spotPrice: number | null;
-  todayIso: string;
-  nowMs: number;
-}
-
-/** The book figures Pluto's post-model gates size against (runPostModelGates), as passRunner assembles them. A simulated order fills at once, so nothing is ever in flight. */
-export function ledgerPostModelBook(ledger: SimulatedLedger, request: LedgerPostModelBookRequest): PostModelBookInput {
-  const exposures = ledgerExposureRows(ledger, request.priceByLegId, request.sectorBySymbol);
-  return {
-    netLiquidationValue: ledgerNetLiquidationValue(ledger, request.priceByLegId),
-    freeCash: ledgerFreeCash(ledger),
-    committedDollars: ledgerCommittedDollars(ledger),
-    inFlight: { totalNotional: 0, tickerNotional: 0, managedNotional: 0 },
-    openPositionCount: openPositions(ledger).length,
-    existingTickerExposure: exposures.filter((row) => row.symbol === request.symbol).reduce((sum, row) => sum + row.exposure, 0),
-    existingSectorExposure: request.sector === null ? 0 : exposures.filter((row) => row.sector === request.sector).reduce((sum, row) => sum + row.exposure, 0),
-    freeShares: ledgerFreeShares(ledger, request.symbol),
-    spotPrice: request.spotPrice,
-    workingOrderOnSymbol: false,
-    lastFilledActionAt: ledgerLastFilledActionAt(ledger, request.symbol),
-    nowMs: request.nowMs,
-    sameContractConflict: findSameContractConflict(ledgerOccupiedContracts(ledger, request.symbol, request.todayIso), request.contract.expiry, request.contract.strike),
-  };
 }

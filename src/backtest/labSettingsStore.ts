@@ -2,7 +2,6 @@ import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { normalizeBacktestSymbol } from "./backtestDataDirectory.js";
 import { applyBacktestOverrides } from "./backtestSettingsOverrides.js";
-import { readBacktestClaudeCliPath } from "./backtestClaudeCli.js";
 import { editableBacktestSettingPaths, loadCurrentBacktestSettings, readBacktestSettingValue } from "./settingsTemplate.js";
 import { validateBacktestSettingsOverrides, validateBaselineSettings } from "./jobs/backtestSessionRequest.js";
 import {
@@ -71,7 +70,7 @@ async function completeSettings(stored: BacktestSettings, connection: Knex): Pro
     trading: withCodeKeys(live.trading, stored.trading),
     kellyFraction: stored.kellyFraction ?? live.kellyFraction,
     policy: withCodeKeys(defaultBacktestPolicySettings, stored.policy),
-    decisionMaker: stored.decisionMaker ?? "rules",
+    decisionMaker: stored.decisionMaker ?? "baseline",
     model: withCodeKeys(defaultBacktestModelSettings, stored.model),
     baseline: withCodeKeys(defaultBacktestBaselineSettings, stored.baseline),
     steadyStake: withCodeKeys(defaultBacktestSteadyStakeSettings, stored.steadyStake),
@@ -97,15 +96,15 @@ export async function loadBacktestLabSettings(connection: Knex = db): Promise<Ba
 }
 
 /**
- * Saves changes to the global lab values: `overrides` in the New session's shape (pluto, trading, kellyFraction,
- * policy, decisionMaker, baseline), checked as a session's overrides are, and `defaultPotDollars`. One audit row per
+ * Saves changes to the global lab values: `overrides` in the New session's shape (trading, decisionMaker, baseline,
+ * steadyStake, volFarmer, volFarmerV2), checked as a session's overrides are, and `defaultPotDollars`. One audit row per
  * value that changed; an empty list when nothing did.
  */
 /** Saves the global lab values; `dryRun` validates and answers the changes without writing (the save's confirmation). */
 export async function updateBacktestLabSettings(input: { overrides?: unknown; defaultPotDollars?: unknown }, userId: string | null, connection: Knex = db, options: { dryRun?: boolean } = {}): Promise<{ lab: BacktestLabSettings; changes: BacktestLabChange[]; auditIds: number[] }> {
   return connection.transaction(async (trx) => {
     const current = await loadBacktestLabSettings(trx);
-    const validation = validateBacktestSettingsOverrides(input.overrides, current.settings, editableBacktestSettingPaths, { claudeCliAvailable: readBacktestClaudeCliPath() !== null });
+    const validation = validateBacktestSettingsOverrides(input.overrides, current.settings, editableBacktestSettingPaths);
     if (!validation.ok) throw new BacktestLabSettingsValidationError(validation.error);
     let defaultPotDollars = current.defaultPotDollars;
     if (input.defaultPotDollars !== undefined) {

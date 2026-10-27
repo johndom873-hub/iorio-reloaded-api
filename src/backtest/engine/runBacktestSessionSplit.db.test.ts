@@ -6,7 +6,7 @@ import knexLibrary, { type Knex } from "knex";
 import { environment } from "../../config/env.js";
 import { runBacktestSession, type BacktestRunHooks } from "./runBacktestSession.js";
 import { readSplitScheduleCache } from "./splitFactors.js";
-import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile, writeSyntheticMacroEventHistory } from "./testSupport/syntheticBacktestData.js";
+import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile } from "./testSupport/syntheticBacktestData.js";
 
 if (!environment.testDatabaseUrl) {
   throw new Error("TEST_DATABASE_URL must be set to run the backtest engine tests.");
@@ -16,7 +16,7 @@ if (!environment.testDatabaseUrl) {
 // split-adjusted (≈ $50 throughout). The engine must infer F = 2 before the split and 1 after, put every bar price on the
 // day's traded scale, keep the wheel cycle that began before the split on its own scale (its options become twice the
 // contracts on half the shares each, its later sales are today's contracts put on that scale), and value buy and hold
-// continuously. Rolls are off so the options sold before the split are held to their expiry.
+// continuously. The baseline wheel decides: the options sold before the split are held to their expiry.
 
 const db: Knex = knexLibrary({ client: "pg", connection: environment.testDatabaseUrl });
 const symbol = `BTS${Date.now() % 100000}`;
@@ -43,7 +43,6 @@ beforeAll(async () => {
     sessionDates.map((tradingDate, index) => ({ tradingDate, quotes: syntheticOptionQuotes(tradingDate, tradedPrices[index]!, ["2026-03-13", "2026-03-20"].filter((expiry) => expiry >= tradingDate), 0.6, 0.04, tradingDate < firstDayAfterSplit ? 1 : 0.5, 15), endOfDayVolume: 1_000, openInterest: 2_000 })),
   );
   writeFileSync(path.join(dataDirectory, "fred-DTB3.json"), JSON.stringify({ seriesId: "DTB3", fetchedAtIso: "2026-10-12T00:00:00.000Z", observations: weekdaysBetween("2025-12-01", "2026-04-30").map((dateIso) => ({ dateIso, ratePercent: 4 })) }));
-  writeSyntheticMacroEventHistory(dataDirectory);
 
   const [ticker] = await db("tickers").insert({ symbol, company_name: "Backtest Split Test Co", sector: "Technology", tradingview_ticker: `NASDAQ:${symbol}` }).returning("id");
   tickerId = ticker.id;
@@ -56,7 +55,7 @@ beforeAll(async () => {
   await db("daily_price_bars").insert([...history, ...sessionBars].map((bar) => ({ ticker_id: tickerId, trading_date: bar.tradingDate, open_price: bar.open, high_price: bar.high, low_price: bar.low, close_price: bar.close, volume: bar.volume, implied_volatility: bar.impliedVolatility })));
   writeSyntheticIbkrBarsFromQuotes(path.join(dataDirectory, `${symbol}.sqlite`), [...history, ...sessionBars], 4, splitFactorOf);
   const [session] = await db("backtest_sessions")
-    .insert({ name: "engine split test", symbol, start_date: sessionDates[0], end_date: sessionDates.at(-1), starting_value: 1_000_000, tables_mode: "current", settings_snapshot: JSON.stringify(fixtureBacktestSettings({ maxTickerPctOfBudget: 60 })), overrides: JSON.stringify({ policy: { roll: "never" } }) })
+    .insert({ name: "engine split test", symbol, start_date: sessionDates[0], end_date: sessionDates.at(-1), starting_value: 1_000_000, tables_mode: "current", settings_snapshot: JSON.stringify(fixtureBacktestSettings({ maxTickerPctOfBudget: 60 })), overrides: JSON.stringify({ decisionMaker: "baseline" }) })
     .returning("id");
   sessionId = session.id;
 });
@@ -98,7 +97,7 @@ describe("runBacktestSession across a split", () => {
     const fills = await db("backtest_fills").where({ session_id: sessionId }).orderBy("sequence");
     const legOf = (trade: { leg_id: string }) => legs.find((leg) => leg.leg_id === trade.leg_id)!;
     const heldAcross = trades.filter((trade) => trade.openedOn < firstDayAfterSplit && trade.expiryIso === "2026-03-13");
-    expect(heldAcross.length).toBeGreaterThanOrEqual(2);
+    expect(heldAcross.length).toBeGreaterThanOrEqual(1);
     const settlementClose = adjustedClose(sessionDates.indexOf("2026-03-13")) * 2;
     for (const trade of heldAcross) {
       // Strike on the old scale (≈ $100), settled at IBKR's adjusted close of 13 March × F(cycle) = 48 × 2.

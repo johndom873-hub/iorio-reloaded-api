@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 import { callClaudeSubscriptionModel, claudeCliArguments, type SpawnClaudeCli } from "./claudeSubscriptionModelClient.js";
 
-// The envelope shape the CLI printed in the 2026-10-12 probe (Sonnet 5.5, medium effort, one stored BMNR decision).
+// The envelope shape the CLI printed in the 2026-10-12 probe (Sonnet 5.5, medium effort, one structured answer).
 const successEnvelope = {
   type: "result",
   subtype: "success",
@@ -53,18 +53,19 @@ function fakeSpawn(run: FakeRun, seen: { args?: string[]; stdin?: string; cwd?: 
   };
 }
 
-const input = { cliPath: "/opt/homebrew/bin/claude", workingDirectory: "/tmp/empty", timeoutSeconds: 90, systemPrompt: "You are Pluto.", userPayload: '{"tickers":[]}' };
+const answerSchema = { type: "object", properties: { decision: { type: "string" } }, required: ["decision"] };
+const input = { cliPath: "/opt/homebrew/bin/claude", workingDirectory: "/tmp/empty", timeoutSeconds: 90, systemPrompt: "You summarise.", userPayload: '{"tickers":[]}', jsonSchema: answerSchema, model: "sonnet", effort: "medium" as const };
 
-describe("Pluto's decision through the Claude subscription CLI", () => {
-  it("asks Sonnet at medium effort with Pluto's prompt and schema, no tools and nothing of Claude Code's own", () => {
-    const args = claudeCliArguments("You are Pluto.");
+describe("a call through the Claude subscription CLI", () => {
+  it("asks the model at the effort named, with the call's prompt and schema, no tools and nothing of Claude Code's own", () => {
+    const args = claudeCliArguments("You summarise.", answerSchema, "sonnet", "medium");
     const valueOf = (flag: string) => args[args.indexOf(flag) + 1];
     expect(valueOf("--model")).toBe("sonnet");
     expect(valueOf("--effort")).toBe("medium");
-    expect(valueOf("--system-prompt")).toBe("You are Pluto.");
+    expect(valueOf("--system-prompt")).toBe("You summarise.");
     expect(valueOf("--tools")).toBe("");
     expect(valueOf("--output-format")).toBe("json");
-    expect(JSON.parse(valueOf("--json-schema")!)).toHaveProperty("properties.decision");
+    expect(JSON.parse(valueOf("--json-schema")!)).toEqual(answerSchema);
     expect(args).toEqual(expect.arrayContaining(["-p", "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands", "--exclude-dynamic-system-prompt-sections"]));
     expect(args).not.toContain("--bare");
   });
@@ -118,7 +119,7 @@ describe("Pluto's decision through the Claude subscription CLI", () => {
     }
   });
 
-  it("an answer without structured output is a failed call of the model's own, as live counts one", async () => {
+  it("an answer without structured output is a failed call of the model's own", async () => {
     const { structured_output: _dropped, ...envelope } = successEnvelope;
     const result = await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: JSON.stringify(envelope) }));
     expect(result).toMatchObject({ ok: false, usageLimitReached: false, failureKind: "answer", error: "Claude CLI returned no structured output" });

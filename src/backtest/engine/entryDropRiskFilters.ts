@@ -1,6 +1,5 @@
 import type { BacktestBaselineSettings } from "../backtestTypes.js";
 import type { BacktestBarHistory } from "./backtestBarHistory.js";
-import { ivRankFromHistory } from "./backtestLlmDecider.js";
 
 // The drop-risk filters on new entries (approved by Marcelo 2026-10-19; research: Ladder Drop-Risk Filters). A 30% fall
 // within three months came after run-ups far more often than after other days of the same stock, and fast falls after
@@ -34,6 +33,16 @@ export function extensionZ(closesOldestFirst: readonly { close: number }[]): num
   const volatility = Math.sqrt(variance * 252);
   if (!(volatility > 0) || !(average > 0)) return null;
   return (lastCloses.at(-1)! / average - 1) / volatility;
+}
+
+/** IV Rank as Price Performance reads it (ivMetrics.ts): (latest − min) ÷ (max − min) × 100 over the last 252 days with an implied volatility; null below 2 days or a flat range. */
+export function ivRankFromHistory(impliedVolatilitiesOldestFirst: readonly number[]): number | null {
+  const window = impliedVolatilitiesOldestFirst.slice(-ivRankWindowDays);
+  if (window.length < 2) return null;
+  const latest = window.at(-1)!;
+  const minimum = Math.min(...window);
+  const maximum = Math.max(...window);
+  return maximum > minimum ? ((latest - minimum) / (maximum - minimum)) * 100 : null;
 }
 
 /** IV Rank from the last 252 daily bars with an implied volatility before `dateIso`. */
