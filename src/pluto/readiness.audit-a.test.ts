@@ -8,7 +8,6 @@ const today = "2026-10-07";
 const probesOk: PlutoReadinessResult[] = [
   { name: "IBKR", ok: true, status: "ok", detail: "ok" },
   { name: "API sign-in", ok: true, status: "ok", detail: "ok" },
-  { name: "OpenRouter", ok: true, status: "ok", detail: "ok" },
 ];
 
 describe("Pluto running test in the readiness cycle (audit A)", () => {

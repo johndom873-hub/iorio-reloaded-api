@@ -9,11 +9,11 @@ import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 // small one-shot lookups (single pricing snapshots, the health check's SPY
 // probe) that aren't worth coordinating here — see PROGRESS.md.
 //
-// Priority reservations (approved 2026-09-24): the 10:00 ET chain capture
-// and the Day Signals loop reserve their lines with `priority: true`. A priority reservation only has
+// Priority reservations (approved 2026-09-24): the market quote loop and
+// Pluto's agent reserve their lines with `priority: true`. A priority reservation only has
 // to fit alongside other priority reservations, and its lines are subtracted
 // from what every non-priority holder may take — so live screens can never
-// starve the capture; they get whatever is left ("Fit" variant) and the live
+// starve the loop; they get whatever is left ("Fit" variant) and the live
 // pool sheds subscriptions to match (marketDataPool.ts).
 export const totalMarketDataLineBudget = 90;
 
@@ -101,37 +101,13 @@ export async function releaseMarketDataLines(holder: string): Promise<void> {
   await db("ibkr_market_data_line_reservations").where({ holder }).del();
 }
 
-export interface MarketDataLineRestriction {
-  /** Lines held by active priority reservations right now. */
-  priorityLines: number;
-  holders: string[];
-}
-
-/**
- * Non-null while a priority holder is active. `excludeHolders` leaves out holders whose priority
- * reservation is normal operation rather than a restriction worth surfacing (the Day Signals loop
- * holds its lines for the whole session — see routes/environment.ts).
- */
-export async function loadMarketDataLineRestriction(options: { excludeHolders?: string[] } = {}): Promise<MarketDataLineRestriction | null> {
-  const excludeHolders = options.excludeHolders ?? [];
-  const rows: { holder: string; lines: number }[] = await db("ibkr_market_data_line_reservations")
-    .where("priority", true)
-    .where("expires_at", ">", db.fn.now())
-    .modify((query) => {
-      if (excludeHolders.length > 0) query.whereNotIn("holder", excludeHolders);
-    })
-    .select("holder", "lines");
-  if (rows.length === 0) return null;
-  return { priorityLines: rows.reduce((sum, row) => sum + row.lines, 0), holders: rows.map((row) => row.holder) };
-}
-
 /** One sentence for a failed reservation, naming the scheduled scan (chain capture) when it's the reason. */
 export function describeMarketDataLineShortage(result: LineReservationResult, what: string, linesNeeded: number): string {
   if (result.disabled) {
     return `IBKR market-data lines are disabled in this environment (IBKR_MARKET_DATA_LINES_ENABLED=false) — ${what} needs ${linesNeeded} lines.`;
   }
   if (result.priorityLinesHeld > 0) {
-    return `IBKR market data is restricted while a scheduled scan runs (the 10:00 ET chain capture; ${result.priorityLinesHeld} lines reserved for it) — ${what} needs ${linesNeeded} lines, ${result.availableLines} available. Try again after.`;
+    return `IBKR market data is restricted while the market quote loop and Pluto hold their reserved lines (${result.priorityLinesHeld}) — ${what} needs ${linesNeeded} lines, ${result.availableLines} available. Try again shortly.`;
   }
   return `IBKR market data is busy (another live view) — ${what} needs ${linesNeeded} lines, only ${result.availableLines} available. Try again shortly.`;
 }
@@ -145,8 +121,8 @@ export interface MarketDataLineUsage {
 // Holder name prefix (before the first ":") → what the lines are for, as shown on Pulse.
 const lineHolderLabels: Record<string, string> = {
   marketDataPool: "Screens",
-  optionChainCapture: "Chain capture",
-  daySignalsLoop: "Day Signals",
+  marketQuoteLoop: "Market quote loop",
+  optionSessionVolumeCapture: "Option volume capture",
   optionQuote: "Option quotes",
   snapshot: "Snapshots",
   pluto_agent: "Pluto",
@@ -155,7 +131,7 @@ const lineHolderLabels: Record<string, string> = {
 /**
  * Pure: lines in use across every process sharing the IBKR login. The live pool counts the lines it
  * really has open (it can hold fewer than it reserved); every other holder fills its reservation for
- * as long as it holds it (the capture keeps its window full, snapshots reserve exactly their size).
+ * as long as it holds it (the market quote loop keeps its window full, snapshots reserve exactly their size).
  */
 export function summarizeMarketDataLineUsage(reservations: { holder: string; lines: number }[], poolOpenLines: number): MarketDataLineUsage {
   const linesByLabel = new Map<string, number>([["Screens", poolOpenLines]]);

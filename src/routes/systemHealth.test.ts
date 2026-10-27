@@ -46,23 +46,18 @@ vi.mock("../lib/preOpenReadinessCollectors.js", () => ({
   createDefaultReadinessDependencies: (...args: unknown[]) => createDefaultReadinessDependenciesMock(...args),
 }));
 
-const daySignalsLoopStatusMock = vi.fn();
-vi.mock("../lib/daySignalsLoop.js", () => ({ daySignalsLoopStatus: () => daySignalsLoopStatusMock() }));
-
-const loadDayQuotesStatusMock = vi.fn();
-vi.mock("../lib/daySignalsStore.js", () => ({ loadDayQuotesStatus: () => loadDayQuotesStatusMock() }));
+const marketQuoteLoopStatusMock = vi.fn();
+vi.mock("../lib/marketQuoteLoop.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("../lib/marketQuoteLoop.js")>()), marketQuoteLoopStatus: () => marketQuoteLoopStatusMock() }));
 
 const marketDataPoolSnapshotMock = vi.fn();
 vi.mock("../ibkr/marketDataPool.js", () => ({ marketDataPoolSnapshot: () => marketDataPoolSnapshotMock() }));
 
 const loadActiveMarketDataLineReservationsMock = vi.fn();
-const loadMarketDataLineRestrictionMock = vi.fn();
 vi.mock("../ibkr/marketDataLineBudget.js", async () => {
   const actual = await vi.importActual<typeof import("../ibkr/marketDataLineBudget.js")>("../ibkr/marketDataLineBudget.js");
   return {
     ...actual,
     loadActiveMarketDataLineReservations: () => loadActiveMarketDataLineReservationsMock(),
-    loadMarketDataLineRestriction: (...args: unknown[]) => loadMarketDataLineRestrictionMock(...args),
   };
 });
 
@@ -116,11 +111,9 @@ beforeEach(async () => {
   computeMarketSessionStatusMock.mockReset().mockResolvedValue({ state: "closed", label: "opens in 3h", nextChangeAt: "2030-01-02T14:30:00.000Z" });
   collectReadinessChecksMock.mockReset().mockResolvedValue([]);
   createDefaultReadinessDependenciesMock.mockReset().mockReturnValue({ marker: "default-dependencies" });
-  daySignalsLoopStatusMock.mockReset().mockReturnValue(null);
-  loadDayQuotesStatusMock.mockReset().mockResolvedValue({ tradingDateIso: null, quoteCount: 0, oldestQuotedAt: null, newestQuotedAt: null, expiryCount: 0, tickerCount: 0 });
+  marketQuoteLoopStatusMock.mockReset().mockReturnValue(null);
   marketDataPoolSnapshotMock.mockReset().mockReturnValue({ contractCount: 0, subscriberCount: 0, pausedCount: 0, openLineCount: 0, restricted: false });
   loadActiveMarketDataLineReservationsMock.mockReset().mockResolvedValue([]);
-  loadMarketDataLineRestrictionMock.mockReset().mockResolvedValue(null);
   await testDb("platform_controls").insert({ key: "trading_halt", enabled: false, reason: null, set_by_user_id: null }).onConflict("key").merge({ enabled: false, reason: null, set_by_user_id: null });
   await testDb("worker_health").where({ process_name: gatewayProcessName }).del();
 });
@@ -205,7 +198,7 @@ const protectedRoutes: [string, string][] = [
   ["GET", "/presence"],
   ["GET", "/db"],
   ["GET", "/market-status"],
-  ["GET", "/day-signals"],
+  ["GET", "/market-quote-loop"],
   ["GET", "/genosuke"],
   ["GET", "/web-dyno"],
   ["GET", "/gateway"],
@@ -515,25 +508,17 @@ describe("GET /system-health/market-status", () => {
   });
 });
 
-describe("GET /system-health/day-signals", () => {
-  it("combines the loop state, the day tables' contents, the pool snapshot and the line restriction", async () => {
-    const loop = { state: "running", reason: "market open", stateSince: "2030-01-02T14:30:00.000Z", tradingDateIso: "2030-01-02", cycleNumber: 4, cycleStartedAt: null, lastCycleDurationMs: 1200, contractsInPool: 80, lastError: null };
-    const quotes = { tradingDateIso: "2030-01-02", quoteCount: 80, oldestQuotedAt: "2030-01-02T14:31:00.000Z", newestQuotedAt: "2030-01-02T14:32:00.000Z", expiryCount: 12, tickerCount: 6 };
+describe("GET /system-health/market-quote-loop", () => {
+  it("combines the loop state and the pool snapshot", async () => {
+    const loop = { state: "running", reason: "quoting 2 consumers", cycleNumber: 4 };
     const pool = { contractCount: 3, subscriberCount: 4, pausedCount: 1, openLineCount: 2, restricted: true };
-    const restriction = { priorityLines: 60, holders: ["optionChainCapture"] };
-    daySignalsLoopStatusMock.mockReturnValue(loop);
-    loadDayQuotesStatusMock.mockResolvedValue(quotes);
+    marketQuoteLoopStatusMock.mockReturnValue(loop);
     marketDataPoolSnapshotMock.mockReturnValue(pool);
-    loadMarketDataLineRestrictionMock.mockResolvedValue(restriction);
-
-    expect(await callJson("/day-signals")).toEqual({ status: 200, json: { loop, quotes, marketDataPool: pool, marketDataRestriction: restriction } });
-    expect(loadMarketDataLineRestrictionMock).toHaveBeenCalledWith();
+    expect(await callJson("/market-quote-loop")).toEqual({ status: 200, json: { loop, marketDataPool: pool } });
   });
 
   it("reports a null loop when this process is not running it", async () => {
-    const { json } = await callJson("/day-signals");
-    expect(json.loop).toBeNull();
-    expect(json.marketDataRestriction).toBeNull();
+    expect((await callJson("/market-quote-loop")).json.loop).toBeNull();
   });
 });
 
@@ -684,8 +669,8 @@ describe("GET /system-health/gateway", () => {
     await insertWorkerRow();
     loadActiveMarketDataLineReservationsMock.mockResolvedValue([
       { holder: "marketDataPool:abc", lines: 5 },
-      { holder: "optionChainCapture", lines: 40 },
-      { holder: "daySignalsLoop", lines: 10 },
+      { holder: "marketQuoteLoop", lines: 40 },
+      { holder: "pluto_agent", lines: 10 },
       { holder: "snapshot:AAPL", lines: 2 },
       { holder: "somethingElse", lines: 3 },
     ]);
@@ -697,8 +682,8 @@ describe("GET /system-health/gateway", () => {
       budget: 90,
       byUse: [
         { label: "Screens", lines: 7 },
-        { label: "Chain capture", lines: 40 },
-        { label: "Day Signals", lines: 10 },
+        { label: "Market quote loop", lines: 40 },
+        { label: "Pluto", lines: 10 },
         { label: "Snapshots", lines: 2 },
         { label: "somethingElse", lines: 3 },
       ],

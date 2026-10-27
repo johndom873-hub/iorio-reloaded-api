@@ -94,7 +94,7 @@ const { PlutoAgent } = await import("./agent.js");
 type AgentInternals = any;
 
 function makeAgent(): AgentInternals {
-  const agent: AgentInternals = new PlutoAgent({ apiBaseUrl: "http://x", serviceUsername: "u", serviceUserPassword: "p", serviceLoginSecret: "s", openRouterApiKey: "k", telegramBotToken: "t" });
+  const agent: AgentInternals = new PlutoAgent({ apiBaseUrl: "http://x", serviceUsername: "u", serviceUserPassword: "p", serviceLoginSecret: "s", telegramBotToken: "t" });
   agent.settings = { daySignalsPollSeconds: 1, tickerCooldownMinutes: 0 };
   return agent;
 }
@@ -260,7 +260,7 @@ describe("PlutoAgent forced-round retry and failure alert (audit A)", () => {
     const agent = makeAgent();
     agent.watching = true;
     harness.passScript.push(new Error("a"), new Error("b"), new Error("c"), new Error("d"), "nothing eligible", null);
-    for (let round = 0; round < 6; round += 1) await agent.runRoundSafely({ trigger: "day_signals_update", triggerDetail: {}, symbols: ["AAA"], force: false });
+    for (let round = 0; round < 6; round += 1) await agent.runRoundSafely({ trigger: "band_quotes_update", triggerDetail: {}, symbols: ["AAA"], force: false });
     expect(harness.telegrams.filter((message) => message.includes("analysis rounds in a row have failed"))).toHaveLength(1);
     expect(harness.telegrams.filter((message) => message.includes("completing again"))).toHaveLength(1);
   });
@@ -280,7 +280,7 @@ describe("PlutoAgent forced-round retry and failure alert (audit A)", () => {
     agent.watching = true;
     harness.quoteStamps = [{ symbol: "AAA", expiry: "2026-10-16", strike: 30, right: "C", quotedAtMs: etInstant("10:05").getTime() }];
     await agent.loopIteration();
-    expect(harness.passRequests[0]).toMatchObject({ trigger: "day_signals_update", force: false });
+    expect(harness.passRequests[0]).toMatchObject({ trigger: "band_quotes_update", force: false });
     expect(harness.passRequests[0]!.heldPositionsOnly).toBeUndefined();
   });
 });
@@ -352,9 +352,9 @@ describe("PlutoAgent agent lease", () => {
   it("runs a round only once the agent lease is renewed: a refused check never reaches the pass runner", async () => {
     let leaseHeld = false;
     const lease = { holderId: "agent.1:audit-a", confirmHeld: vi.fn(async () => leaseHeld) };
-    const agent: AgentInternals = new PlutoAgent({ apiBaseUrl: "http://x", serviceUsername: "u", serviceUserPassword: "p", serviceLoginSecret: "s", openRouterApiKey: "k", telegramBotToken: "t" }, lease);
+    const agent: AgentInternals = new PlutoAgent({ apiBaseUrl: "http://x", serviceUsername: "u", serviceUserPassword: "p", serviceLoginSecret: "s", telegramBotToken: "t" }, lease);
     agent.settings = { daySignalsPollSeconds: 1, tickerCooldownMinutes: 0 };
-    const request = { trigger: "day_signals_update", triggerDetail: {}, symbols: ["AAA"], force: false };
+    const request = { trigger: "band_quotes_update", triggerDetail: {}, symbols: ["AAA"], force: false };
     expect(await agent.runRoundSafely(request)).toBe("failed");
     expect(harness.passRequests).toHaveLength(0);
     leaseHeld = true;

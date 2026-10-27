@@ -3,15 +3,15 @@ import { readinessSchedule } from "../lib/preOpenReadiness.js";
 
 // Pluto's pre-open readiness check (Marcelo, 2026-10-06), on the platform readiness timetable: first run at 6:00 ET (a
 // failure alerts at once), re-run every 10 minutes while anything fails (announced only when the set of failures changes),
-// and a final run at 9:20 ET that pauses Pluto if anything still fails. It proves the three things only Pluto's own process
-// can: its IBKR connection, its sign-in to the API, and its OpenRouter key with enough credit. A fourth test, "Pluto running"
+// and a final run at 9:20 ET that pauses Pluto if anything still fails. It proves the two things only Pluto's own process
+// can: its IBKR connection and its sign-in to the API. A third test, "Pluto running"
 // (Marcelo, 2026-10-07), is not a probe: a Pluto that will not act today is announced at 6:00 and 9:20 ET instead of being
 // reported "ready". The check runs whether Pluto is on, paused or off. A failure is an error only when Pluto is meant to trade
 // today (Marcelo, 2026-10-12): switched off, Pluto itself and any failed probe are warnings; on but paused is an error.
 
-export type PlutoProbeTestName = "IBKR" | "API sign-in" | "OpenRouter";
+export type PlutoProbeTestName = "IBKR" | "API sign-in";
 export type PlutoReadinessTestName = PlutoProbeTestName | "Pluto running";
-export const plutoReadinessTestNames: PlutoReadinessTestName[] = ["IBKR", "API sign-in", "OpenRouter", "Pluto running"];
+export const plutoReadinessTestNames: PlutoReadinessTestName[] = ["IBKR", "API sign-in", "Pluto running"];
 const plutoRunningTestName: PlutoReadinessTestName = "Pluto running";
 
 export type PlutoReadinessStatus = "ok" | "warn" | "fail";
@@ -135,11 +135,10 @@ export type PlutoReadinessProbe = () => Promise<string>;
 export interface PlutoReadinessProbes {
   ibkr: PlutoReadinessProbe;
   apiSignIn: PlutoReadinessProbe;
-  openRouter: PlutoReadinessProbe;
 }
 
 /** Whole-test limits: each probe also has its own tighter limit on the request that matters. */
-export const plutoReadinessTestTimeoutMs: Record<PlutoProbeTestName, number> = { IBKR: 60_000, "API sign-in": 15_000, OpenRouter: 15_000 };
+export const plutoReadinessTestTimeoutMs: Record<PlutoProbeTestName, number> = { IBKR: 60_000, "API sign-in": 15_000 };
 
 async function runProbe(name: PlutoProbeTestName, probe: PlutoReadinessProbe): Promise<PlutoReadinessResult> {
   const timeoutMs = plutoReadinessTestTimeoutMs[name];
@@ -158,7 +157,7 @@ async function runProbe(name: PlutoProbeTestName, probe: PlutoReadinessProbe): P
   }
 }
 
-/** Runs the three tests side by side; never throws. */
+/** Runs the two tests side by side; never throws. */
 export async function runPlutoReadinessTests(probes: PlutoReadinessProbes): Promise<PlutoReadinessResult[]> {
-  return Promise.all([runProbe("IBKR", probes.ibkr), runProbe("API sign-in", probes.apiSignIn), runProbe("OpenRouter", probes.openRouter)]);
+  return Promise.all([runProbe("IBKR", probes.ibkr), runProbe("API sign-in", probes.apiSignIn)]);
 }

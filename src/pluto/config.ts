@@ -12,7 +12,6 @@ export interface PlutoConfig {
   serviceUsername: string;
   serviceUserPassword: string;
   serviceLoginSecret: string;
-  openRouterApiKey: string;
   /** Pluto's own Telegram bot (one per environment); messages go to the shared alerts group. */
   telegramBotToken: string;
 }
@@ -28,7 +27,6 @@ export function decidePlutoStart(env: NodeJS.ProcessEnv = process.env): PlutoSta
       serviceUsername: requireEnvironmentVariable("PLUTO_SERVICE_USERNAME"),
       serviceUserPassword: requireEnvironmentVariable("PLUTO_SERVICE_USER_PASSWORD"),
       serviceLoginSecret: requireEnvironmentVariable("SERVICE_LOGIN_SECRET"),
-      openRouterApiKey: requireEnvironmentVariable("OPENROUTER_API_KEY"),
       telegramBotToken: requireEnvironmentVariable("PLUTO_TELEGRAM_BOT_TOKEN"),
     },
   };

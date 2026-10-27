@@ -8,11 +8,11 @@ import { ensurePlutoSettingsVersion } from "./settingsVersions.js";
 // routes read.
 
 /**
- * What started an analysis round. day_signals_update is relabelled grade_crossing or held_leg when that is what
- * changed; the rest run without a new quote: the day's first analysis, a settings change, an order ending, a ticker's
- * cooldown ending, a position closing.
+ * What started an analysis round: new ladder band quotes (band_quotes_update), or, without a new quote, the day's first
+ * analysis, a settings change, an order ending, a ticker's cooldown ending, a position closing. Rounds stored before
+ * Signals was retired (2026-10-27) may carry day_signals_update, grade_crossing or held_leg.
  */
-export type PlutoTrigger = "opening_analysis" | "day_signals_update" | "grade_crossing" | "held_leg" | "settings_changed" | "order_ended" | "cooldown_ended" | "position_closed" | "manual";
+export type PlutoTrigger = "opening_analysis" | "band_quotes_update" | "settings_changed" | "order_ended" | "cooldown_ended" | "position_closed" | "manual";
 
 export interface PlutoSystemCheck {
   ok: boolean;

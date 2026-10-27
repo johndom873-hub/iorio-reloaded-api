@@ -53,7 +53,7 @@ const { runPlutoPass } = await import("./passRunner.js");
 const ledger = await import("./ledger.js");
 
 const context = { api: {} as never, marketWatch: { spyDayChangePct: () => harness.spyDayChangePct } as never, trackWatch: () => {} };
-const round = (symbols: string[], overrides: Record<string, unknown> = {}) => ({ trigger: "day_signals_update" as const, triggerDetail: {}, symbols, force: false, ...overrides });
+const round = (symbols: string[], overrides: Record<string, unknown> = {}) => ({ trigger: "band_quotes_update" as const, triggerDetail: {}, symbols, force: false, ...overrides });
 
 beforeEach(() => {
   harness.spyDayChangePct = 0.5;
@@ -79,7 +79,7 @@ describe("runPlutoPass", () => {
 
   it("names every enabled ticker on a round without symbols of its own", async () => {
     await runPlutoPass(round([]), context);
-    expect(ledger.recordPlutoEvent).toHaveBeenCalledWith("pass_started", { passId: "pass-1", trigger: "day_signals_update", symbols: ["AAA", "BBB"] });
+    expect(ledger.recordPlutoEvent).toHaveBeenCalledWith("pass_started", { passId: "pass-1", trigger: "band_quotes_update", symbols: ["AAA", "BBB"] });
     expect(harness.ladderRounds[0]).toMatchObject({ symbols: [] });
   });
 

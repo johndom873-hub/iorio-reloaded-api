@@ -4,10 +4,7 @@ import { environment } from "../config/env.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { classifyTradingStatus } from "../lib/tradingGate.js";
 import { fetchTradingHalt } from "../lib/platformControls.js";
-import { loadMarketDataLineRestriction } from "../ibkr/marketDataLineBudget.js";
 import { ibkrMarketDataLinesEnabled } from "../config/env.js";
-import { marketQuoteLoopLineHolder } from "../lib/marketQuoteLoop.js";
-import { plutoLineHolder } from "../pluto/marketWatch.js";
 import { marketDataFeedRefusal } from "../ibkr/marketDataPool.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { loadFrozenTickers } from "../lib/tickerFreeze.js";
@@ -24,11 +21,8 @@ environmentRouter.get("/", (_request, response) => {
 
 environmentRouter.get("/details", requireAuth, async (_request, response) => {
   const apiEnvironment = readAppEnvironment();
-  // The Day Signals loop and Pluto hold their priority lines for the whole session (Marcelo 2026-09-24): that is
-  // normal operation, not a restriction, so only the chain capture drives the banner.
-  const [workerRow, marketDataRestriction, tradingHalt, frozenTickers] = await Promise.all([
+  const [workerRow, tradingHalt, frozenTickers] = await Promise.all([
     db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
-    loadMarketDataLineRestriction({ excludeHolders: [marketQuoteLoopLineHolder, plutoLineHolder] }),
     fetchTradingHalt(),
     loadFrozenTickers(),
   ]);
@@ -44,8 +38,6 @@ environmentRouter.get("/details", requireAuth, async (_request, response) => {
       setByDisplayName: tradingHalt.setByDisplayName,
       setAt: tradingHalt.setAt ? tradingHalt.setAt.toISOString() : null,
     },
-    // Non-null while a scheduled scan holds its priority lines — the top bar's "Live data restricted" state.
-    marketDataRestriction,
     // False when IBKR_MARKET_DATA_LINES_ENABLED=false — the top bar's "Real-time data disabled" state.
     marketDataLinesEnabled: ibkrMarketDataLinesEnabled(),
     // Non-null while IBKR refuses the live pool's data (10197; see marketDataPool.ts) — the top bar's "Live prices stopped" state.

@@ -13,8 +13,6 @@ vi.mock("../db/connection.js", async () => {
   return { db: knexLibrary({ client: "pg", connection: process.env.TEST_DATABASE_URL, pool: { min: 0, max: 4 } }) };
 });
 
-const loadMarketDataLineRestrictionMock = vi.fn();
-vi.mock("../ibkr/marketDataLineBudget.js", () => ({ loadMarketDataLineRestriction: (...args: unknown[]) => loadMarketDataLineRestrictionMock(...args) }));
 const marketDataFeedRefusalMock = vi.fn();
 vi.mock("../ibkr/marketDataPool.js", () => ({ marketDataFeedRefusal: () => marketDataFeedRefusalMock() }));
 const loadFrozenTickersMock = vi.fn();
@@ -60,7 +58,6 @@ beforeAll(async () => {
 beforeEach(async () => {
   process.env.APP_ENVIRONMENT = "development";
   process.env.IBKR_MARKET_DATA_LINES_ENABLED = "true";
-  loadMarketDataLineRestrictionMock.mockReset().mockResolvedValue(null);
   marketDataFeedRefusalMock.mockReset().mockReturnValue(null);
   loadFrozenTickersMock.mockReset().mockResolvedValue([]);
   await testDb("platform_controls").insert({ key: "trading_halt", enabled: false, reason: null, set_by_user_id: null }).onConflict("key").merge({ enabled: false, reason: null, set_by_user_id: null });
@@ -140,7 +137,6 @@ describe("GET /environment/details", () => {
     const { status, json } = await call("/details", { asUser: null });
     expect(status).toBe(401);
     expect(json).toEqual({ error: "Not logged in." });
-    expect(loadMarketDataLineRestrictionMock).not.toHaveBeenCalled();
   });
 
   it("with a healthy worker reports trading ok and the worker's identity", async () => {
@@ -153,7 +149,6 @@ describe("GET /environment/details", () => {
       tradingMode: savedEnvironment.tradingMode,
       trading: { state: "ok", reason: null },
       tradingHalt: { enabled: false, reason: null, setByDisplayName: null, setAt: expect.any(String) },
-      marketDataRestriction: null,
       marketDataLinesEnabled: true,
       marketDataFeedRefusal: null,
       frozenTickers: [],
@@ -229,15 +224,6 @@ describe("GET /environment/details", () => {
     expect(json.trading.state).toBe("halted");
     expect(json.trading.reason).toContain("Environment Route Tester");
     expect(json.trading.reason).toContain("IBKR data looks wrong");
-  });
-
-  it("passes the market-data line restriction through and asks for it without the Day Signals loop's and Pluto's own holders", async () => {
-    const restriction = { priorityLines: 60, holders: ["optionChainCapture"] };
-    loadMarketDataLineRestrictionMock.mockResolvedValue(restriction);
-
-    const { json } = await call("/details");
-    expect(json.marketDataRestriction).toEqual(restriction);
-    expect(loadMarketDataLineRestrictionMock).toHaveBeenCalledWith({ excludeHolders: ["daySignalsLoop", "pluto_agent"] });
   });
 
   it("passes the market-data feed refusal through", async () => {

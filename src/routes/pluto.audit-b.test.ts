@@ -131,41 +131,20 @@ describe("GET /pluto/events — other filters", () => {
 });
 
 describe("GET /pluto/scoreboard", () => {
-  it("counts abstentions (old 'abstain' and v3 'abstain_system_concern') inside noTrade, call 1 only, and has no pessimistic figure", async () => {
-    const before = (await get("/scoreboard")).json;
-    const verdicts = ["abstain_system_concern", "abstain", "no_trade", "trade"];
-    for (const verdict of verdicts) {
-      const passId = await pass();
-      await testDb("pluto_decisions").insert({ pass_id: passId, call_index: 1, model_id: "m", input_payload: {}, schema_valid: true, parsed_output: { decision: verdict, candidate_id: verdict === "trade" ? "X:covered_call:2098-07-17:5" : null } });
-      if (verdict === "abstain") await testDb("pluto_decisions").insert({ pass_id: passId, call_index: 2, model_id: "m", input_payload: {}, schema_valid: true, parsed_output: { decision: "abstain_system_concern" } });
-    }
-    const after = (await get("/scoreboard")).json;
-    expect(after.modelVsTopPick.abstained - before.modelVsTopPick.abstained).toBe(2);
-    expect(after.modelVsTopPick.noTrade - before.modelVsTopPick.noTrade).toBe(3);
-    expect(after.modelVsTopPick.disagree - before.modelVsTopPick.disagree).toBe(1);
-    expect(after).not.toHaveProperty("pessimisticPnl");
+  it("has no model figures and no pessimistic figure", async () => {
+    const scoreboard = (await get("/scoreboard")).json;
+    expect(scoreboard).toHaveProperty("passes");
+    for (const retired of ["modelCalls", "costUsd", "modelVsTopPick", "pessimisticPnl"]) expect(scoreboard).not.toHaveProperty(retired);
   });
 });
 
-describe("GET /pluto/passes and /passes/:id — system concerns normalised", () => {
-  it("old plain-string concerns read as whole-message concerns, new ones keep their symbol, a missing list becomes []", async () => {
+describe("GET /passes/:id", () => {
+  it("gives the pass with its actions and none of its model calls", async () => {
     const passId = await pass();
-    await testDb("pluto_decisions").insert([
-      { pass_id: passId, call_index: 1, model_id: "m", input_payload: {}, schema_valid: true, parsed_output: { decision: "abstain_system_concern", system_concerns: ["old string concern", { symbol: "SMCI", concern: "new" }] } },
-      { pass_id: passId, call_index: 2, model_id: "m", input_payload: {}, schema_valid: true, parsed_output: { decision: "no_trade" } },
-      { pass_id: passId, call_index: 3, model_id: "m", input_payload: {}, schema_valid: false, parsed_output: null },
-    ]);
     await testDb("pluto_actions").insert({ pass_id: passId, kind: "no_trade", symbol: "—", outcome: "no_trade" });
     const detail = (await get(`/passes/${passId}`)).json;
-    expect(detail.decisions.map((decision: any) => decision.parsedOutput?.system_concerns ?? null)).toEqual([
-      [{ symbol: null, concern: "old string concern" }, { symbol: "SMCI", concern: "new" }],
-      [],
-      null,
-    ]);
+    expect(detail).not.toHaveProperty("decisions");
+    expect(detail.actions[0]).toMatchObject({ kind: "no_trade" });
     expect(detail.actions[0]).not.toHaveProperty("pessimisticPnl");
-    const list = (await get("/passes?limit=50")).json as any[];
-    const row = list.find((entry) => entry.id === passId);
-    expect(row.decisions[0].parsedOutput.system_concerns).toEqual([{ symbol: null, concern: "old string concern" }, { symbol: "SMCI", concern: "new" }]);
-    expect(row.decisions[2].parsedOutput).toBeNull();
   });
 });

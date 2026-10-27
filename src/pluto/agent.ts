@@ -323,11 +323,10 @@ export class PlutoAgent {
       if (!(await resolveIsOpenDay(dateIso))) return;
       const kind = decidePlutoReadinessRun(now, dateIso, state.readiness);
       if (kind === null) return;
-      const settings = this.settings ?? (await loadPlutoSettings());
       const todaysRecord = state.readiness?.dateIso === dateIso ? state.readiness : null;
       const probeResults =
         reusableProbeResults(kind, todaysRecord) ??
-        (await runPlutoReadinessTests(createPlutoReadinessProbes({ api: this.api, openRouterApiKey: this.config.openRouterApiKey, dailyCostCeilingUsd: settings.dailyCostCeilingUsd })));
+        (await runPlutoReadinessTests(createPlutoReadinessProbes({ api: this.api })));
       const results = assemblePlutoReadinessResults(probeResults, await loadPlutoState());
       const previousSignature = todaysRecord ? todaysRecord.signature : null;
       const outcome = describePlutoReadinessOutcome(kind, previousSignature, results);
@@ -506,7 +505,7 @@ export class PlutoAgent {
     }
     const newlyQuoted = findNewlyQuotedContracts(await loadTodaysBandQuoteStamps(), this.lastAnalysedQuotedAtMs);
     if (newlyQuoted.symbols.length === 0) return;
-    await this.runRoundSafely({ trigger: "day_signals_update", triggerDetail: { symbols: newlyQuoted.symbols, contracts: newlyQuoted.contractCount }, symbols: newlyQuoted.symbols, force: false });
+    await this.runRoundSafely({ trigger: "band_quotes_update", triggerDetail: { symbols: newlyQuoted.symbols, contracts: newlyQuoted.contractCount }, symbols: newlyQuoted.symbols, force: false });
     rememberAnalysed(newlyQuoted.stamps, this.lastAnalysedQuotedAtMs);
   }
 

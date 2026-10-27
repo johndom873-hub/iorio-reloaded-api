@@ -19,10 +19,10 @@ describe("computeAvailableLines", () => {
 });
 
 describe("describeMarketDataLineShortage", () => {
-  it("names the scheduled scan when a priority reservation is the reason", () => {
+  it("names the market quote loop and Pluto when a priority reservation is the reason", () => {
     const message = describeMarketDataLineShortage({ ok: false, availableLines: 12, priorityLinesHeld: 50 }, "AAOI", 40);
-    expect(message).toContain("scheduled scan");
-    expect(message).toContain("50 lines reserved");
+    expect(message).toContain("market quote loop and Pluto");
+    expect(message).toContain("reserved lines (50)");
     expect(message).toContain("AAOI needs 40 lines, 12 available");
   });
 

@@ -121,53 +121,15 @@ async function post(path: string, body: unknown) {
   return { status: response.status, json: (await response.json()) as any };
 }
 
-describe("POST /pluto/sizing-caps (the Signals order panel's Kelly and stress caps)", () => {
-  // A far-future snapshot is the newest whatever else the shared test database holds.
-  const snapshotDate = "2099-01-02";
-  beforeAll(async () => {
-    await testDb("account_pnl_snapshots").insert({ snapshot_date: snapshotDate, net_liquidation_value: 1_000_000 });
-  });
-  afterAll(async () => {
-    await testDb("account_pnl_snapshots").where({ snapshot_date: snapshotDate }).del();
-  });
-  const put100 = { strategyKey: "cash_secured_put", strike: 100, bid: 1.9, ask: 2.1, spotPrice: 102, model: { expectedPnlDollars: 5, pnlVarianceDollars: 150 ** 2, coveredPositionPnlVarianceDollars: null, varianceSessions: 5 }, ticker: { forecastVolatility: 0.5, elevatedVolatility: false, dayChangePercent: 0 } };
-
-  it("applies the sizing gate's Kelly and stress caps with Pluto's settings and the latest account value", async () => {
-    const { json: settings } = await get("/settings");
-    const { status, json } = await post("/sizing-caps", put100);
-    expect(status).toBe(200);
-    expect(json.netLiquidationValue).toBe(1_000_000);
-    expect(json.accountValueDateIso).toBe(snapshotDate);
-    // Kelly: 0.5 × the budget × Edge $5 ÷ $150².
-    expect(json.kelly.contracts).toBe(Math.floor((0.5 * 1_000_000 * (settings.capitalBudgetPct / 100) * 5) / 150 ** 2));
-    // Stress: the stock down stressSigmas × 50% × √(5/252) by expiry, less the $200 premium.
-    const stressedSpot = 102 * (1 - settings.stressSigmas * 0.5 * Math.sqrt(5 / 252));
-    const loss = Math.max(0, 100 - stressedSpot) * 100 - 200;
-    const expected = settings.stressRiskBudgetPct <= 0 || loss <= 0 ? null : Math.floor((1_000_000 * settings.stressRiskBudgetPct) / 100 / loss);
-    expect(json.stress.contracts).toBe(expected);
-  });
-
-  it("gives no Kelly contracts when the model expects a loss, and refuses a body missing a figure", async () => {
-    const losing = await post("/sizing-caps", { ...put100, model: { ...put100.model, expectedPnlDollars: -3 } });
-    expect(losing.json.kelly.contracts).toBe(0);
-    expect((await post("/sizing-caps", { ...put100, model: { ...put100.model, varianceSessions: undefined } })).status).toBe(400);
-    expect((await post("/sizing-caps", { ...put100, strategyKey: "hedge" })).status).toBe(400);
-    expect((await post("/sizing-caps", { ...put100, ticker: { forecastVolatility: 0.5 } })).status).toBe(400);
-  });
-});
-
 describe("GET /pluto/passes", () => {
-  it("returns the newest passes of any kind by default", async () => {
+  it("returns the newest passes first, each with its actions and no model fields", async () => {
     const { status, json } = await get("/passes?limit=3");
     expect(status).toBe(200);
-    expect(json.map((pass: any) => pass.modelCalled)).toEqual([false, false, true]);
-  });
-
-  it("skips passes that never asked the model when modelCalled=true, however many newer ones there are", async () => {
-    const { json } = await get("/passes?modelCalled=true&limit=1");
-    expect(json).toHaveLength(1);
-    expect(json[0].modelCalled).toBe(true);
-    expect(json[0].trigger).toBe(testTrigger);
+    expect(json.map((pass: any) => pass.trigger)).toEqual([testTrigger, testTrigger, testTrigger]);
+    expect(json.map((pass: any) => pass.startedAt)).toEqual([...json.map((pass: any) => pass.startedAt)].sort().reverse());
+    expect(json[0]).toHaveProperty("actions");
+    expect(json[0]).not.toHaveProperty("decisions");
+    expect(json[0]).not.toHaveProperty("modelCalled");
   });
 });
 
@@ -254,7 +216,7 @@ describe("GET /pluto/events", () => {
   });
 });
 
-describe("History pages: GET /pluto/model-decisions and GET /pluto/orders", () => {
+describe("History pages: GET /pluto/orders", () => {
   // Passes from 2099-02-01 on, so ?since isolates them from every other row; newest last.
   const historySince = "2099-02-01T00:00:00Z";
   const historyTrigger = "pluto_route_history_test";
@@ -285,34 +247,8 @@ describe("History pages: GET /pluto/model-decisions and GET /pluto/orders", () =
   const passNames = (json: any) => json.passes.map((pass: any) => Object.keys(passIds).find((name) => passIds[name] === pass.id));
   const orderSymbolsAndOutcomes = (json: any) => json.actions.map((action: any) => `${action.symbol} ${action.outcome}`);
 
-  it("model decisions: only passes that asked the model, newest first, with their calls and actions, paged with a full total", async () => {
-    const all = await get(`/model-decisions?since=${historySince}`);
-    expect(all.status).toBe(200);
-    expect(all.json.total).toBe(4);
-    expect(passNames(all.json)).toEqual(["retried", "failed", "noOrder", "ordered"]);
-    expect(all.json.passes[3].decisions[0].parsedOutput.decision).toBe("trade");
-    expect(all.json.passes[3].actions).toHaveLength(2);
-    const secondPage = await get(`/model-decisions?since=${historySince}&limit=2&offset=2`);
-    expect(passNames(secondPage.json)).toEqual(["noOrder", "ordered"]);
-    expect(secondPage.json.total).toBe(4);
-  });
-
-  it("model decisions: the verdict comes from the first answer that parsed, none parsed is failed", async () => {
-    expect(passNames((await get(`/model-decisions?since=${historySince}&verdict=order`)).json)).toEqual(["retried", "ordered"]);
-    expect(passNames((await get(`/model-decisions?since=${historySince}&verdict=no_order`)).json)).toEqual(["noOrder"]);
-    expect(passNames((await get(`/model-decisions?since=${historySince}&verdict=failed`)).json)).toEqual(["failed"]);
-  });
-
-  it("model decisions: the ticker matches part of a symbol the pass was asked about or ordered on, any case, never as a pattern", async () => {
-    expect(passNames((await get(`/model-decisions?since=${historySince}&ticker=zzdb`)).json)).toEqual(["failed", "noOrder"]);
-    expect(passNames((await get(`/model-decisions?since=${historySince}&ticker=ZZDC`)).json)).toEqual(["retried"]);
-    expect(passNames((await get(`/model-decisions?since=${historySince}&ticker=ZZD`)).json)).toEqual(["retried", "failed", "noOrder", "ordered"]);
-    expect((await get(`/model-decisions?since=${historySince}&ticker=%25`)).json.total).toBe(0);
-  });
-
-  it("model decisions: rejects an unreadable since or an unknown verdict", async () => {
-    expect((await get("/model-decisions?since=yesterday")).status).toBe(400);
-    expect((await get(`/model-decisions?since=${historySince}&verdict=maybe`)).status).toBe(400);
+  it("the model decisions route is gone", async () => {
+    expect((await fetch(`${baseUrl}/pluto/model-decisions?since=${historySince}`, { headers: { "x-test-user-id": userId } })).status).toBe(404);
   });
 
   it("orders: every action but the no-order rows, newest first, paged with a full total", async () => {

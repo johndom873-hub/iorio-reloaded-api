@@ -17,7 +17,7 @@ import { requireEnvironmentVariable } from "../config/env.js";
 import { marketQuoteLoopStatus } from "../lib/marketQuoteLoop.js";
 import { fetchTradingHalt } from "../lib/platformControls.js";
 import { marketDataPoolSnapshot } from "../ibkr/marketDataPool.js";
-import { loadActiveMarketDataLineReservations, loadMarketDataLineRestriction, summarizeMarketDataLineUsage } from "../ibkr/marketDataLineBudget.js";
+import { loadActiveMarketDataLineReservations, summarizeMarketDataLineUsage } from "../ibkr/marketDataLineBudget.js";
 
 export const systemHealthRouter = Router();
 systemHealthRouter.use(requireAuth);

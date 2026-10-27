@@ -19,8 +19,6 @@ import { loadPlutoOrdersTodayBreakdown, loadPlutoTodayCounters } from "../pluto/
 import { computePlutoActionExposure, loadPlutoOrderRequestsByActionId, type PlutoActionOrderRequest } from "../pluto/actionExposure.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
-import { normalizeSystemConcerns } from "../pluto/decisionSchema.js";
-import { computeKellyCap, computeStressCap, stressCapInputFromFigures } from "../pluto/postModelGates.js";
 
 // The Pluto screen's API. A trader can only stop Pluto (turn it off, pause it, drop today's stress override); starting it,
 // resuming it, resetting a breaker, allowing opens under stress and every setting are an admin's (Marcelo 2026-10-17).
@@ -70,7 +68,7 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
     ordersToday,
     workingOrders,
     unfilledCancelMinutes,
-    counters: { ...counters, maxActionsPerSession: settings.maxActionsPerSession, dailyCostCeilingUsd: settings.dailyCostCeilingUsd },
+    counters: { ...counters, maxActionsPerSession: settings.maxActionsPerSession },
     enabledTickers: { count: enabledCount, max: settings.maxEnabledTickers },
     session: {
       ...session,
@@ -78,7 +76,7 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
       windowEndAt: new Date(session.windowEndAtMs).toISOString(),
       closeAt: new Date(session.closeAtMs).toISOString(),
     },
-    // The newest analysis's pre-model checks: what currently holds Pluto back (worker offline, SPY stress…) between analyses.
+    // The newest round's system checks: what currently holds Pluto back (worker offline, SPY stress…) between analyses.
     lastChecks: lastCheckedPass ? { passId: lastCheckedPass.id, startedAt: new Date(lastCheckedPass.started_at).toISOString(), checks: lastCheckedPass.system_checks } : null,
     book: {
       committedDollars: book.committedDollars,
@@ -197,72 +195,10 @@ plutoRouter.put("/stress-override", async (request: Request, response: Response)
   response.json(state);
 });
 
-interface SizingCapsRequest {
-  strategyKey: "covered_call" | "cash_secured_put";
-  strike: number;
-  bid: number;
-  ask: number;
-  spotPrice: number | null;
-  model: { expectedPnlDollars: number; pnlVarianceDollars: number; coveredPositionPnlVarianceDollars: number | null; varianceSessions: number };
-  ticker: { forecastVolatility: number | null; elevatedVolatility: boolean; dayChangePercent: number | null };
-}
-
-/** The contract and ticker figures the caps need, as the Signals payload carries them; null with the first problem found. */
-function parseSizingCapsRequest(body: unknown): SizingCapsRequest | { error: string } {
-  const value = (body ?? {}) as Record<string, unknown>;
-  const model = (value.model ?? {}) as Record<string, unknown>;
-  const ticker = (value.ticker ?? {}) as Record<string, unknown>;
-  const finite = (input: unknown) => typeof input === "number" && Number.isFinite(input);
-  const finiteOrNull = (input: unknown) => input === null || finite(input);
-  if (value.strategyKey !== "covered_call" && value.strategyKey !== "cash_secured_put") return { error: "strategyKey must be covered_call or cash_secured_put." };
-  if (!finite(value.strike) || !finite(value.bid) || !finite(value.ask) || !finiteOrNull(value.spotPrice)) return { error: "strike, bid and ask must be numbers; spotPrice a number or null." };
-  if (!finite(model.expectedPnlDollars) || !finite(model.pnlVarianceDollars) || !finiteOrNull(model.coveredPositionPnlVarianceDollars) || !finite(model.varianceSessions)) return { error: "model must carry expectedPnlDollars, pnlVarianceDollars, coveredPositionPnlVarianceDollars and varianceSessions." };
-  if (!finiteOrNull(ticker.forecastVolatility) || typeof ticker.elevatedVolatility !== "boolean" || !finiteOrNull(ticker.dayChangePercent)) return { error: "ticker must carry forecastVolatility, elevatedVolatility and dayChangePercent." };
-  return {
-    strategyKey: value.strategyKey,
-    strike: value.strike as number,
-    bid: value.bid as number,
-    ask: value.ask as number,
-    spotPrice: value.spotPrice as number | null,
-    model: { expectedPnlDollars: model.expectedPnlDollars as number, pnlVarianceDollars: model.pnlVarianceDollars as number, coveredPositionPnlVarianceDollars: model.coveredPositionPnlVarianceDollars as number | null, varianceSessions: model.varianceSessions as number },
-    ticker: { forecastVolatility: ticker.forecastVolatility as number | null, elevatedVolatility: ticker.elevatedVolatility, dayChangePercent: ticker.dayChangePercent as number | null },
-  };
-}
-
-// Pluto's Kelly and stress caps for one contract, for the Signals order panel (mockup approved 2026-10-10). Display only: the
-// sizing gate's own functions with Pluto's settings, at last night's account value (no IBKR round trip; passes use the live one).
-plutoRouter.post("/sizing-caps", async (request: Request, response: Response) => {
-  const parsed = parseSizingCapsRequest(request.body);
-  if ("error" in parsed) {
-    response.status(400).json({ error: parsed.error });
-    return;
-  }
-  const [settings, lastSnapshot] = await Promise.all([
-    loadPlutoSettings(),
-    db("account_pnl_snapshots").whereNotNull("net_liquidation_value").orderBy("snapshot_date", "desc").first("net_liquidation_value", db.raw("snapshot_date::text as snapshot_date_iso")),
-  ]);
-  if (!lastSnapshot) {
-    response.status(503).json({ error: "No account value recorded yet." });
-    return;
-  }
-  const netLiquidationValue = Number(lastSnapshot.net_liquidation_value);
-  const stressInput = stressCapInputFromFigures(parsed.ticker.forecastVolatility, parsed.ticker.elevatedVolatility, parsed.ticker.dayChangePercent);
-  const kelly = computeKellyCap(settings, parsed, netLiquidationValue);
-  const stress = computeStressCap(settings, stressInput, parsed, parsed.spotPrice, netLiquidationValue);
-  response.json({
-    kelly: { contracts: kelly.contracts, detail: kelly.detail },
-    // Infinity (the cap is off or never binds) does not survive JSON: null says "no limit".
-    stress: { contracts: Number.isFinite(stress.contracts) ? stress.contracts : null, detail: stress.detail },
-    netLiquidationValue,
-    accountValueDateIso: lastSnapshot.snapshot_date_iso as string,
-  });
-});
-
 plutoRouter.get("/scoreboard", async (_request: Request, response: Response) => {
-  const actions: { id: string; pass_id: string; kind: string; outcome: string; deterministic_top_pick: { id?: string } | null; order_request_id: string | null }[] = await db("pluto_actions").select("id", "pass_id", "kind", "outcome", "deterministic_top_pick", "order_request_id");
+  const actions: { id: string; outcome: string; order_request_id: string | null }[] = await db("pluto_actions").select("id", "outcome", "order_request_id");
   const realized = await loadRealizedPnlByActionId(actions.filter((action) => action.order_request_id).map((action) => action.id));
-  const decisions: { pass_id: string; parsed_output: { decision?: string; candidate_id?: string | null } | null }[] = await db("pluto_decisions").where("call_index", 1).whereNotNull("parsed_output").select("pass_id", "parsed_output");
-  const passes = await db("pluto_passes").select(db.raw("count(*)::int AS passes, count(*) FILTER (WHERE model_called)::int AS model_called, COALESCE(SUM(cost_usd), 0) AS cost_usd, MIN(started_at) AS since")).first();
+  const passes = await db("pluto_passes").select(db.raw("count(*)::int AS passes, MIN(started_at) AS since")).first();
 
   const outcomes: Record<string, number> = {};
   for (const action of actions) outcomes[action.outcome] = (outcomes[action.outcome] ?? 0) + 1;
@@ -280,36 +216,14 @@ plutoRouter.get("/scoreboard", async (_request: Request, response: Response) => 
       if ((figures.realizedPnl ?? 0) > 0) winningActions += 1;
     }
   }
-  // Model vs the deterministic Edge $ top pick, per pass that called the model.
-  const topPickByPass = new Map<string, string | null>();
-  for (const action of actions) if (action.deterministic_top_pick !== null) topPickByPass.set(action.pass_id, action.deterministic_top_pick?.id ?? null);
-  let agree = 0;
-  let disagree = 0;
-  let noTrade = 0;
-  let abstained = 0;
-  for (const decision of decisions) {
-    const verdict = decision.parsed_output?.decision;
-    if (verdict !== "trade") {
-      noTrade += 1;
-      // "abstain_system_concern" since prompt v3, "abstain" before it.
-      if (verdict?.startsWith("abstain")) abstained += 1;
-      continue;
-    }
-    const topPick = topPickByPass.get(decision.pass_id) ?? null;
-    if (topPick !== null && decision.parsed_output?.candidate_id === topPick) agree += 1;
-    else disagree += 1;
-  }
   response.json({
     since: passes?.since ? new Date(passes.since).toISOString() : null,
     passes: Number(passes?.passes ?? 0),
-    modelCalls: Number(passes?.model_called ?? 0),
-    costUsd: Math.round(Number(passes?.cost_usd ?? 0) * 10000) / 10000,
     outcomes,
     realizedPnl: Math.round(realizedPnl * 100) / 100,
     closedActions,
     winningActions,
     openActions,
-    modelVsTopPick: { agree, disagree, noTrade, abstained },
   });
 });
 
@@ -424,10 +338,8 @@ function limitFrom(request: Request, fallback: number): number {
   return Number.isFinite(requested) ? Math.max(1, Math.min(500, Math.floor(requested))) : fallback;
 }
 
-/** ?modelCalled=true keeps only passes that asked the model, so a screen wanting the latest decision is not buried under skipped passes. */
 plutoRouter.get("/passes", async (request: Request, response: Response) => {
   const passesQuery = withPassSettings(db("pluto_passes")).orderBy("started_at", "desc").limit(limitFrom(request, 50));
-  if (request.query.modelCalled === "true") passesQuery.where({ model_called: true });
   response.json(await serializePassesWithDetails(await passesQuery));
 });
 
@@ -436,17 +348,13 @@ function withPassSettings(passesQuery: Knex.QueryBuilder): Knex.QueryBuilder {
   return passesQuery.leftJoin("pluto_settings_versions", "pluto_settings_versions.id", "pluto_passes.settings_version_id").select("pluto_passes.*", "pluto_settings_versions.settings as version_settings");
 }
 
-/** Passes with each one's model calls (a compact summary; the full input payload stays on GET /passes/:id) and actions. */
+/** Passes with each one's actions. */
 async function serializePassesWithDetails(rows: Record<string, unknown>[]) {
   const passIds = rows.map((row) => row.id as string);
-  const [decisions, actions] = passIds.length === 0 ? [[], []] : await Promise.all([
-    db("pluto_decisions").whereIn("pass_id", passIds).orderBy("call_index"),
-    db("pluto_actions").whereIn("pass_id", passIds).orderBy("created_at"),
-  ]);
+  const actions = passIds.length === 0 ? [] : await db("pluto_actions").whereIn("pass_id", passIds).orderBy("created_at");
   const [realized, orderRequests] = await Promise.all([loadRealizedPnlByActionId(actions.map((action) => String(action.id))), loadPlutoOrderRequestsByActionId(actions.map((action) => String(action.id)))]);
   return rows.map((row) => ({
     ...serializePass(row),
-    decisions: decisions.filter((decision) => decision.pass_id === row.id).map((decision) => ({ callIndex: decision.call_index, servedModelId: decision.served_model_id ?? null, serviceTier: decision.service_tier ?? null, parsedOutput: serializeParsedOutput(decision.parsed_output), schemaValid: Boolean(decision.schema_valid), latencyMs: decision.latency_ms ?? null, tokensIn: decision.tokens_in ?? null, tokensOut: decision.tokens_out ?? null, costUsd: decision.cost_usd === null ? null : Number(decision.cost_usd), error: decision.error ?? null })),
     actions: actions.filter((action) => action.pass_id === row.id).map((action) => serializeAction(action, realized.get(String(action.id)), orderRequests.get(String(action.id)))),
   }));
 }
@@ -461,59 +369,16 @@ function sinceFrom(request: Request): Date | null | undefined {
 const pageOffsetFrom = (request: Request) => Math.max(0, Math.floor(Number(request.query.offset)) || 0);
 const tickerSearchFrom = (request: Request) => (typeof request.query.ticker === "string" ? request.query.ticker.trim().toUpperCase() : "");
 
-// The History verdicts, read from the first model answer that parsed (the screen's verdictKind): none parsed is "failed".
-const firstParsedVerdictSql = "(select d.parsed_output->>'decision' from pluto_decisions d where d.pass_id = pluto_passes.id and jsonb_typeof(d.parsed_output) = 'object' order by d.call_index limit 1)";
-const historyVerdicts = ["order", "no_order", "failed"] as const;
-
-/**
- * History's Model decisions, one page: passes that asked the model, newest first, as `{ passes, total }` with total counting
- * every match. Filters: ?since=<ISO time>, ?ticker=<text> (a symbol the pass was asked about or placed an order on contains
- * it), ?verdict=order|no_order|failed. ?limit and ?offset page it.
- */
-plutoRouter.get("/model-decisions", async (request: Request, response: Response) => {
-  const since = sinceFrom(request);
-  const verdict = typeof request.query.verdict === "string" && request.query.verdict !== "" ? request.query.verdict : null;
-  if (since === undefined || (verdict !== null && !historyVerdicts.includes(verdict as (typeof historyVerdicts)[number]))) {
-    response.status(400).json({ error: `since must be a time and verdict one of: ${historyVerdicts.join(", ")}.` });
-    return;
-  }
-  const ticker = tickerSearchFrom(request);
-  const filtered = db("pluto_passes").where({ model_called: true });
-  if (since !== null) filtered.where("started_at", ">=", since);
-  if (ticker !== "") {
-    filtered.where((builder) => {
-      builder
-        .whereRaw("jsonb_typeof(trigger_detail->'symbols') = 'array' and exists (select 1 from jsonb_array_elements_text(trigger_detail->'symbols') listed where strpos(upper(listed), ?) > 0)", [ticker])
-        .orWhereExists(db("pluto_actions as a").whereRaw("a.pass_id = pluto_passes.id and strpos(upper(a.symbol), ?) > 0", [ticker]));
-    });
-  }
-  if (verdict === "order") filtered.whereRaw(`${firstParsedVerdictSql} = 'trade'`);
-  if (verdict === "no_order") filtered.whereRaw(`${firstParsedVerdictSql} <> 'trade'`);
-  if (verdict === "failed") filtered.whereRaw(`${firstParsedVerdictSql} is null`);
-  const [rows, countRows] = await Promise.all([withPassSettings(filtered.clone()).orderBy("pluto_passes.started_at", "desc").orderBy("pluto_passes.id", "desc").limit(limitFrom(request, 50)).offset(pageOffsetFrom(request)), filtered.clone().count({ total: "*" })]);
-  response.json({ passes: await serializePassesWithDetails(rows), total: Number(countRows[0]?.total ?? 0) });
-});
-
 plutoRouter.get("/passes/:id", async (request: Request, response: Response) => {
   const pass = await withPassSettings(db("pluto_passes")).where("pluto_passes.id", request.params.id).first();
   if (!pass) {
     response.status(404).json({ error: "Pass not found." });
     return;
   }
-  const [decisions, actions] = await Promise.all([
-    db("pluto_decisions").where({ pass_id: pass.id }).orderBy("call_index"),
-    db("pluto_actions").where({ pass_id: pass.id }).orderBy("created_at"),
-  ]);
+  const actions = await db("pluto_actions").where({ pass_id: pass.id }).orderBy("created_at");
   const [realized, orderRequests] = await Promise.all([loadRealizedPnlByActionId(actions.map((action) => String(action.id))), loadPlutoOrderRequestsByActionId(actions.map((action) => String(action.id)))]);
-  response.json({ ...serializePass(pass), decisions: decisions.map(serializeDecision), actions: actions.map((action) => serializeAction(action, realized.get(String(action.id)), orderRequests.get(String(action.id)))) });
+  response.json({ ...serializePass(pass), actions: actions.map((action) => serializeAction(action, realized.get(String(action.id)), orderRequests.get(String(action.id)))) });
 });
-
-/** A stored decision for the screen: system concerns always as { symbol, concern } (stored before prompt v3.3 as plain strings). */
-function serializeParsedOutput(parsed: unknown): Record<string, unknown> | null {
-  if (typeof parsed !== "object" || parsed === null) return null;
-  const output = parsed as Record<string, unknown>;
-  return { ...output, system_concerns: normalizeSystemConcerns(output.system_concerns) };
-}
 
 plutoRouter.get("/actions", async (request: Request, response: Response) => {
   const rows = await db("pluto_actions").orderBy("created_at", "desc").limit(limitFrom(request, 100));
@@ -650,39 +515,10 @@ function serializePass(row: Record<string, unknown>) {
     finishedAt: row.finished_at ? new Date(row.finished_at as string).toISOString() : null,
     trigger: row.trigger,
     triggerDetail: row.trigger_detail,
-    inputHash: row.input_hash ?? null,
     candidateCount: row.candidate_count,
     systemChecks: row.system_checks,
-    modelCalled: Boolean(row.model_called),
     skippedReason: row.skipped_reason ?? null,
-    tokensIn: row.tokens_in ?? null,
-    tokensOut: row.tokens_out ?? null,
-    costUsd: row.cost_usd === null || row.cost_usd === undefined ? null : Number(row.cost_usd),
-    servedModelIds: row.served_model_ids ?? [],
     settingsSnapshot: settings,
-    promptVersion: (settings as { promptVersion?: string } | null)?.promptVersion ?? null,
-  };
-}
-
-function serializeDecision(row: Record<string, unknown>) {
-  return {
-    id: row.id,
-    passId: row.pass_id,
-    callIndex: row.call_index,
-    modelId: row.model_id,
-    servedModelId: row.served_model_id ?? null,
-    serviceTier: row.service_tier ?? null,
-    promptId: row.prompt_id ?? null,
-    inputPayload: row.input_payload,
-    rawOutput: row.raw_output ?? null,
-    parsedOutput: serializeParsedOutput(row.parsed_output),
-    schemaValid: Boolean(row.schema_valid),
-    latencyMs: row.latency_ms ?? null,
-    tokensIn: row.tokens_in ?? null,
-    tokensOut: row.tokens_out ?? null,
-    costUsd: row.cost_usd === null || row.cost_usd === undefined ? null : Number(row.cost_usd),
-    error: row.error ?? null,
-    createdAt: new Date(row.created_at as string).toISOString(),
   };
 }
 
