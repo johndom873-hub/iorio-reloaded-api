@@ -30,7 +30,7 @@ async function createTicker(entry: { botEnabled: boolean; removed?: boolean } | 
   const symbol = `AB${(counter += 1)}`;
   const [ticker] = await testDb("tickers").insert({ symbol, company_name: "Audit C Book Co", sector: "Technology" }).returning(["id"]);
   tickerIds.push(ticker.id);
-  if (entry) await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: entry.botEnabled, removed_at: entry.removed ? new Date() : null });
+  if (entry) await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, bot_enabled: entry.botEnabled, removed_at: entry.removed ? new Date() : null });
   return { id: ticker.id, symbol };
 }
 

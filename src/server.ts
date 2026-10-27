@@ -6,8 +6,10 @@ import { startGenosuke } from "./genosuke/bot.js";
 import { sharedLiveConnection, sharedReadConnection } from "./ibkr/sharedReadConnection.js";
 import { installShutdownHandler } from "./lib/installShutdownHandler.js";
 import { startNotificationBroadcaster } from "./lib/notificationBroadcaster.js";
-import { startDaySignalsLoop } from "./lib/daySignalsLoop.js";
-import { createDayLoopLadderBand } from "./pluto/ladderBandPlanLoader.js";
+import { startMarketQuoteLoop } from "./lib/marketQuoteLoop.js";
+import { createAssignmentRiskConsumer } from "./lib/assignmentRiskConsumer.js";
+import { createVolatilityConsumer } from "./lib/volatilityConsumer.js";
+import { createLadderQuoteConsumer } from "./pluto/ladderBandPlanLoader.js";
 import { startOpsMonitor } from "./lib/opsMonitor.js";
 import { startOrderTelegramNotices } from "./lib/orderTelegramNotices.js";
 import { announceWebDynoStart } from "./lib/webDynoStartNotice.js";
@@ -28,16 +30,16 @@ const port = Number(requireEnvironmentVariable("PORT"));
 
 // Explicit on/off, never defaulted: local dev and staging share one IBKR
 // login but not a line-reservation table, so an always-on loop would cost
-// 10 market-data lines per running environment (see daySignalsLoop.ts).
-const daySignalsLoopFlag = requireEnvironmentVariable("DAY_SIGNALS_LOOP_ENABLED");
-if (daySignalsLoopFlag !== "true" && daySignalsLoopFlag !== "false") {
-  throw new Error(`DAY_SIGNALS_LOOP_ENABLED must be "true" or "false", got: ${daySignalsLoopFlag}`);
+// 10 market-data lines per running environment (see marketQuoteLoop.ts).
+const marketQuoteLoopFlag = requireEnvironmentVariable("MARKET_QUOTE_LOOP_ENABLED");
+if (marketQuoteLoopFlag !== "true" && marketQuoteLoopFlag !== "false") {
+  throw new Error(`MARKET_QUOTE_LOOP_ENABLED must be "true" or "false", got: ${marketQuoteLoopFlag}`);
 }
 
 // Validated at boot so a deploy without it fails here, not silently at the
 // first reservation — see ibkrMarketDataLinesEnabled() in config/env.ts.
 const marketDataLinesEnabled = ibkrMarketDataLinesEnabled();
-if (!marketDataLinesEnabled) console.log("IBKR market-data lines disabled in this environment (IBKR_MARKET_DATA_LINES_ENABLED=false): live quotes, option chains and the Day Signals loop will not open lines.");
+if (!marketDataLinesEnabled) console.log("IBKR market-data lines disabled in this environment (IBKR_MARKET_DATA_LINES_ENABLED=false): live quotes, option chains and the market quote loop will not open lines.");
 
 // Validated at boot like the flags above: a missing PASSKEY_LOGIN would otherwise surface as a 500 on the first request.
 validatePasskeyConfiguration();
@@ -79,8 +81,9 @@ app.listen(port, () => {
   startOpsMonitor();
   startOrderTelegramNotices();
   startProcessMemoryMonitor({ processName: "web", label: "The API web dyno", counts: () => ({ poolContracts: marketDataPoolSnapshot().contractCount, liveListeners: sharedLiveConnection.listenerCount(), readListeners: sharedReadConnection.listenerCount() }) });
-  if (daySignalsLoopFlag === "true") startDaySignalsLoop({ ladderBand: createDayLoopLadderBand() });
-  else console.log("Day Signals loop disabled (DAY_SIGNALS_LOOP_ENABLED=false).");
+  // The ladder first: its band is quoted first in every cycle.
+  if (marketQuoteLoopFlag === "true") startMarketQuoteLoop([createLadderQuoteConsumer(), createAssignmentRiskConsumer(), createVolatilityConsumer()]);
+  else console.log("Market quote loop disabled (MARKET_QUOTE_LOOP_ENABLED=false).");
   // Backtests queued before a restart start again, as many as BACKTEST_MAX_PARALLEL_SESSIONS allows (local only).
   if (readBacktestDataDirectory()) {
     import("./backtest/jobs/backtestJobStore.js")

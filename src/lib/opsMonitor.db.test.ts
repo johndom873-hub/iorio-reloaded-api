@@ -92,12 +92,7 @@ describe("loadLatestRunPerExpectedJob", () => {
     expect(pnl).toMatchObject({ status: "success", errorMessage: null });
     expect(pnl.lastStartedAt?.toISOString()).toBe("2031-03-03T22:30:07.000Z");
     expect(pnl.scheduledTodayAt?.toISOString()).toBe("2031-03-04T22:30:00.000Z");
-    expect(lines.map((line) => line.jobName)).toContain("option_chain_capture");
-  });
-
-  it("puts an Eastern-zone job's slot at 10:00 ET of the Eastern day (15:00 UTC in standard time)", async () => {
-    const lines = await loadLatestRunPerExpectedJob(utc("2031-03-04T14:45:00Z"));
-    expect(lines.find((line) => line.jobName === "option_chain_capture")!.scheduledTodayAt?.toISOString()).toBe("2031-03-04T15:00:00.000Z");
+    expect(lines.map((line) => line.jobName)).toContain("option_session_volume_capture");
   });
 
   it("carries a failed run's message", async () => {

@@ -1,6 +1,5 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
-import { clearLadderCycleMemories } from "./ladderCycleMemory.js";
 
 // Pluto's parameters: one typed row (pluto_settings) plus an audit trail of every
 // change (pluto_settings_audit). Every reader goes through loadPlutoSettings; every
@@ -10,12 +9,8 @@ import { clearLadderCycleMemories } from "./ladderCycleMemory.js";
 export type PlutoGrade = "strong" | "good" | "weak";
 export type PlutoReasoningEffort = "low" | "medium" | "high";
 export type PlutoTelegramVerbosity = "actions" | "off";
-/** One strategy runs at a time (Marcelo 2026-10-15): the model-driven Edge Margin or the rules-only CC + Put Ladder. */
-export type PlutoExecutionStrategy = "edge_margin" | "cc_put_ladder";
 
 export interface PlutoSettings {
-  /** Changed only while Pluto is off or paused; the active strategy takes over every open position. */
-  executionStrategy: PlutoExecutionStrategy;
   // Capital
   capitalBudgetPct: number;
   maxTickerPctOfBudget: number;
@@ -169,7 +164,6 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   unstructuredCloseMinPct: { column: "unstructured_close_min_pct", kind: "number", min: 0 },
   unstructuredCloseMinDollars: { column: "unstructured_close_min_dollars", kind: "number", min: 0 },
   buybackMinDte: { column: "buyback_min_dte", kind: "integer", min: 0 },
-  executionStrategy: { column: "execution_strategy", kind: "text", oneOf: ["edge_margin", "cc_put_ladder"] },
   // The ladder's bounds are the backtest's (validateBaselineSettings), so every live value can be backtested.
   ladderMinAbsDelta: { column: "ladder_min_abs_delta", kind: "number", min: 0, max: 1 },
   ladderMaxAbsDelta: { column: "ladder_max_abs_delta", kind: "number", min: 0, max: 1 },
@@ -190,9 +184,6 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   ladderMaxOpenPositions: { column: "ladder_max_open_positions", kind: "integer", min: 1, max: 10000 },
   ladderMaxOrdersPerDay: { column: "ladder_max_orders_per_day", kind: "integer", min: 1, max: 10000 },
 };
-
-/** Settings only the CC + Put Ladder reads: changing them changes no Edge Margin decision, and the reverse. */
-export const ladderOnlySettingsFields: ReadonlySet<string> = new Set(Object.keys(plutoSettingsColumns).filter((field) => field.startsWith("ladder")));
 
 export type PlutoSettingsField = keyof typeof plutoSettingsColumns;
 export type PlutoSettingsInput = Partial<Pick<PlutoSettings, PlutoSettingsField>>;
@@ -253,11 +244,6 @@ export async function updatePlutoSettings(input: PlutoSettingsInput, userId: str
       const broken = await tickersWithBrokenDeltaRange({ ...current, ...input } as PlutoSettings, trx);
       if (broken.length > 0) throw new PlutoSettingsValidationError(`${broken.map((entry) => `${entry.symbol}'s |delta| range would be ${entry.from.toFixed(2)}–${entry.to.toFixed(2)} (it sets its own ${entry.ownLimits}).`).join(" ")} Change ${broken.length === 1 ? "that ticker's override" : "those tickers' overrides"} in the ticker window first.`);
     }
-    if (input.executionStrategy !== undefined && input.executionStrategy !== current.executionStrategy) {
-      // Locked so a Resume cannot land between this check and the commit.
-      const state = await trx("pluto_state").where({ id: 1 }).forUpdate().first("mode", "paused");
-      if (state && state.mode === "on" && !state.paused) throw new PlutoSettingsValidationError("Pause Pluto (or turn it off) before switching its strategy.");
-    }
     const update: Record<string, unknown> = {};
     const audit: { user_id: string; field: string; old_value: string; new_value: string }[] = [];
     for (const [field, value] of Object.entries(input)) {
@@ -270,8 +256,6 @@ export async function updatePlutoSettings(input: PlutoSettingsInput, userId: str
     if (audit.length === 0) return current;
     await trx("pluto_settings").where({ id: 1 }).update({ ...update, updated_at: trx.fn.now(), updated_by_user_id: userId });
     await trx("pluto_settings_audit").insert(audit);
-    // A cycle open when the ladder takes over starts its memory at the switch (ladderCycleMemory.ts).
-    if (update.execution_strategy === "cc_put_ladder") await clearLadderCycleMemories(trx);
     return loadPlutoSettings(trx);
   });
 }

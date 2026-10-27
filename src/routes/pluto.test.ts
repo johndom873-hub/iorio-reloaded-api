@@ -338,15 +338,15 @@ describe("History pages: GET /pluto/model-decisions and GET /pluto/orders", () =
 });
 
 describe("GET /pluto/tickers", () => {
-  it("lists only Signals tickers: a Signals-off shortlist ticker is hidden", async () => {
+  it("lists the active Shortlist tickers, not a removed one", async () => {
     const suffix = String(Date.now() % 1_000_000);
     const tickers = await testDb("tickers")
       .insert([{ symbol: `PTON${suffix}` }, { symbol: `PTOF${suffix}` }])
       .returning(["id", "symbol"]);
     try {
       await testDb("shortlist_entries").insert([
-        { ticker_id: tickers[0].id, added_by_user_id: userId, signals_enabled: true },
-        { ticker_id: tickers[1].id, added_by_user_id: userId, signals_enabled: false },
+        { ticker_id: tickers[0].id, added_by_user_id: userId },
+        { ticker_id: tickers[1].id, added_by_user_id: userId, removed_at: new Date() },
       ]);
       const { status, json } = await get("/tickers");
       expect(status).toBe(200);

@@ -34,7 +34,7 @@ beforeAll(async () => {
   await testDb("pluto_settings").insert({ id: 1, execution_strategy: "cc_put_ladder" });
   await testDb("users").insert({ id: userId, username: "ladder-look", display_name: "Ladder Look", password_hash: "x" });
   await testDb("tickers").insert({ id: tickerId, symbol: "LOOK", company_name: "Look Co" });
-  await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: userId, signals_enabled: true, bot_enabled: true });
+  await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: userId, bot_enabled: true });
   await testDb("market_calendar").insert(["2026-10-19", "2026-10-20"].map((calendar_date) => ({ calendar_date, is_open: true })));
   await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: "2026-10-19", open_price: 49, high_price: 50.5, low_price: 48.8, close_price: 50, volume: 1_000_000 });
   await testDb("pluto_ticker_settings").insert({ ticker_id: tickerId, ladder_shock_override_pct: 65 });

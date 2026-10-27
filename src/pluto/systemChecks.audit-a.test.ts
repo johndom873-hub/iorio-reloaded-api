@@ -39,23 +39,20 @@ vi.mock("../lib/marketSessionStatus.js", async () => {
 });
 vi.mock("../lib/platformControls.js", () => ({ fetchTradingHalt: async () => ({ enabled: false }) }));
 vi.mock("../lib/tradingGate.js", () => ({ classifyTradingStatus: () => ({ state: "ok", reason: null }) }));
-const aiUsage = { costTodayUsd: 0, trailingFailures: 0 };
-vi.mock("./counters.js", () => ({ loadPlutoTodayCounters: async () => ({ actionsToday: 0, modelCallsToday: 0, costTodayUsd: aiUsage.costTodayUsd }), countTrailingModelFailures: async () => aiUsage.trailingFailures }));
+vi.mock("./counters.js", () => ({ loadPlutoTodayCounters: async () => ({ actionsToday: 0 }) }));
 vi.mock("./sessionSchedule.js", () => ({ resolvePlutoSession: async () => ({ windowStartEt: "09:45", windowEndEt: "15:30", closeTimeEt: "16:00", closeSource: "ibkr_liquid_hours", closeReadAt: "x", cancelByMs: 0 }) }));
 vi.mock("./stateStore.js", () => ({ loadPlutoState: async () => ({ mode: "on", paused: false, breakers: {} }), describePlutoBlock: () => null }));
 vi.mock("../lib/notifyTelegram.js", () => ({ notifyPlutoTelegram: vi.fn(), notifyTelegram: vi.fn() }));
 
 const { runPlutoSystemChecks } = await import("./systemChecks.js");
 
-const settings = { dailyLossBreakerPct: 3, dailyCostCeilingUsd: 5, maxActionsPerSession: 10, consecutiveModelFailuresBreaker: 3, windowEndEt: "15:30" } as never;
+const settings = { dailyLossBreakerPct: 3, maxActionsPerSession: 10, windowEndEt: "15:30" } as never;
 const at = new Date("2026-10-07T15:00:00Z"); // 11:00 ET
 
 beforeEach(() => {
   harness.account = { netLiquidationValue: 990_000, totalCashValue: 400_000, buyingPower: null, grossPositionValue: null, excessLiquidity: null };
   harness.previousSnapshot = { net_liquidation_value: "1000000", snapshot_date_iso: "2026-10-06" };
   harness.firstArgs.length = 0;
-  aiUsage.costTodayUsd = 0;
-  aiUsage.trailingFailures = 0;
 });
 
 describe("runPlutoSystemChecks (audit A)", () => {
@@ -95,14 +92,9 @@ describe("runPlutoSystemChecks (audit A)", () => {
     expect(result.context.todayEasternIso).toBe("2026-10-07");
   });
 
-  it("stops Edge Margin's rounds at the AI cost ceiling and the AI failure breaker, but not the ladder's, which calls no model", async () => {
-    aiUsage.costTodayUsd = 6;
-    aiUsage.trailingFailures = 3;
-    const edgeMargin = await runPlutoSystemChecks({ ...(settings as object), executionStrategy: "edge_margin" } as never, at);
-    expect([edgeMargin.checks.cost_ceiling?.ok, edgeMargin.checks.model_failures?.ok]).toEqual([false, false]);
-    const ladder = await runPlutoSystemChecks({ ...(settings as object), executionStrategy: "cc_put_ladder" } as never, at);
-    expect(ladder.checks.cost_ceiling).toEqual({ ok: true, detail: "not checked: the CC + Put Ladder calls no model ($6.000 spent today)" });
-    expect(ladder.checks.model_failures).toEqual({ ok: true, detail: "not checked: the CC + Put Ladder calls no model (3 consecutive model failure(s))" });
-    expect(ladder.failures.some((failure) => failure.startsWith("cost_ceiling") || failure.startsWith("model_failures"))).toBe(false);
+  it("has no AI cost or model-failure check: Pluto calls no model", async () => {
+    const result = await runPlutoSystemChecks(settings as never, at);
+    expect(result.checks.cost_ceiling).toBeUndefined();
+    expect(result.checks.model_failures).toBeUndefined();
   });
 });

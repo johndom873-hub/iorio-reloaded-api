@@ -3,16 +3,18 @@ import { loadStoredOptionChain, type StoredOptionChain } from "../ibkr/fetchOpti
 import { loadOpenDaysBetween, loadTradingSessionsBetween } from "../lib/marketSessionStatus.js";
 import { loadLastSeenImpliedVolatilityByContract, loadSessionVolumeByContract } from "../lib/optionSessionVolumeStore.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
-import { addCalendarDays } from "../lib/signalsRoadmap.js";
-import { loadLatestSnapshot, loadSlices } from "../lib/signalsStore.js";
-import type { DayLoopLadderBand } from "../lib/daySignalsLoop.js";
-import { loadLadderBandQuotes, upsertLadderBandQuotes, type LadderBandQuote } from "./ladderBandQuotes.js";
+import { addCalendarDays } from "../lib/calendarDays.js";
+import type { MarketQuoteConsumer } from "../lib/marketQuoteLoop.js";
+import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
+import { loadLadderBandQuotes, upsertLadderBandQuotes, type LadderBandQuote, type LadderBandQuoteWrite } from "./ladderBandQuotes.js";
 import { ladderDayUniverse, planLadderBand, type LadderBandPlan, type LadderClock, type LadderUniverseContract } from "./ladderBandPlan.js";
+import { forwardAnchorsFromBandQuotes } from "./ladderForwardAnchors.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
+import { loadPlutoState } from "./stateStore.js";
 import { loadEnabledPlutoTickerSettings, type PlutoTickerSettings } from "./tickerSettingsStore.js";
 
-// The ladder band's inputs for the Day Signals loop (ladderBandPlan.ts). The day's part (universe, last night's IVs,
-// Pluto's 10:00 forwards, the clock) is read once per trading day and ticker; the band quotes and the price per cycle.
+// The ladder band's inputs for the market quote loop (ladderBandPlan.ts). The day's part (universe, last night's IVs, the
+// clock) is read once per trading day and ticker; the forwards once the band has quotes; the band quotes and the price per cycle.
 
 export interface LadderBandTicker {
   tickerId: string;
@@ -20,7 +22,7 @@ export interface LadderBandTicker {
 }
 
 export interface LadderBandPlanner {
-  /** The tickers whose band the loop quotes today: Pluto's enabled tickers while the CC + Put Ladder is the active strategy. */
+  /** The tickers whose band the loop quotes today: Pluto's enabled tickers while the CC + Put Ladder is the active strategy and Pluto is not paused. */
   tickers(tradingDateIso: string): Promise<LadderBandTicker[]>;
   /** Each ladder ticker's contracts for this cycle, at its live price; a ticker without a price is left out. */
   plan(tradingDateIso: string, spotByTicker: ReadonlyMap<string, number | null>, now: Date): Promise<Map<string, LadderBandTicker & { plan: LadderBandPlan }>>;
@@ -29,18 +31,20 @@ export interface LadderBandPlanner {
 interface TickerDay {
   universe: LadderUniverseContract[];
   overnightImpliedVolatilityByContract: Map<string, number>;
-  /** Empty until today's fit exists (read again each cycle until then). */
+  /** Empty until the band has quotes today (read again each cycle until then). */
   anchors: Map<string, BaselineForwardAnchor>;
   deltaRange: Pick<PlutoSettings, "ladderMinAbsDelta" | "ladderMaxAbsDelta">;
 }
 
 export interface LadderBandPlannerDependencies {
   loadSettings(): Promise<PlutoSettings>;
+  /** True while Pluto is paused: the band is not quoted then. */
+  loadPaused(): Promise<boolean>;
   loadEnabledTickers(): Promise<PlutoTickerSettings[]>;
   loadChain(tickerId: string): Promise<StoredOptionChain>;
   loadPreviousSessionVolume(tickerId: string, tradingDateIso: string): Promise<Map<string, number> | null>;
   loadOvernightImpliedVolatility(tickerId: string, tradingDateIso: string): Promise<Map<string, number>>;
-  /** Today's 10:00 forwards by expiry (forward and the stock price it was fitted at); empty before today's fit. */
+  /** Today's forwards by expiry from the band's own quotes (forward and the stock price at the quote); empty before the band has quotes. */
   loadForwardAnchors(tickerId: string, tradingDateIso: string): Promise<Map<string, BaselineForwardAnchor>>;
   loadClock(tradingDateIso: string): Promise<LadderClock>;
   loadBandQuotes(tickerId: string, tradingDateIso: string): Promise<LadderBandQuote[]>;
@@ -48,6 +52,7 @@ export interface LadderBandPlannerDependencies {
 
 export const defaultLadderBandPlannerDependencies: LadderBandPlannerDependencies = {
   loadSettings: () => loadPlutoSettings(),
+  loadPaused: async () => (await loadPlutoState()).paused,
   loadEnabledTickers: () => loadEnabledPlutoTickerSettings(),
   loadChain: loadStoredOptionChain,
   loadPreviousSessionVolume: async (tickerId, tradingDateIso) => {
@@ -57,14 +62,9 @@ export const defaultLadderBandPlannerDependencies: LadderBandPlannerDependencies
   },
   loadOvernightImpliedVolatility: (tickerId, tradingDateIso) => loadLastSeenImpliedVolatilityByContract(tickerId, tradingDateIso),
   loadForwardAnchors: async (tickerId, tradingDateIso) => {
-    const snapshot = await loadLatestSnapshot(tickerId);
-    if (!snapshot || snapshot.tradingDateIso !== tradingDateIso || snapshot.fitCompletedAt === null) return new Map();
-    const anchors = new Map<string, BaselineForwardAnchor>();
-    for (const slice of await loadSlices(snapshot.snapshotId)) {
-      const spotPrice = slice.fitUnderlyingPrice ?? snapshot.underlyingPrice;
-      if (spotPrice !== null && spotPrice > 0 && slice.forwardPrice > 0) anchors.set(slice.expiry, { forward: slice.forwardPrice, spotPrice });
-    }
-    return anchors;
+    const [quotes, sessions, riskFreeRate] = await Promise.all([loadLadderBandQuotes(tickerId, tradingDateIso), loadTradingSessionsBetween(tradingDateIso, tradingDateIso), getRiskFreeRate()]);
+    if (quotes.length === 0 || riskFreeRate === null) return new Map();
+    return forwardAnchorsFromBandQuotes(quotes, { todayIso: tradingDateIso, yearsToTodaysClose: yearsToSessionClose(new Date(), sessions[0]?.closeMinutesEt ?? 16 * 60), riskFreeRate });
   },
   loadClock: async (tradingDateIso) => {
     const [session] = await loadTradingSessionsBetween(tradingDateIso, tradingDateIso);
@@ -81,7 +81,8 @@ export function createLadderBandPlanner(dependencies: LadderBandPlannerDependenc
 
   const ladderTickers = async (): Promise<{ settings: PlutoSettings; tickers: PlutoTickerSettings[] }> => {
     const settings = await dependencies.loadSettings();
-    return { settings, tickers: settings.executionStrategy === "cc_put_ladder" ? await dependencies.loadEnabledTickers() : [] };
+    const active = !(await dependencies.loadPaused());
+    return { settings, tickers: active ? await dependencies.loadEnabledTickers() : [] };
   };
 
   const tickerDay = async (ticker: PlutoTickerSettings, settings: PlutoSettings, tradingDateIso: string): Promise<TickerDay> => {
@@ -129,11 +130,29 @@ export function createLadderBandPlanner(dependencies: LadderBandPlannerDependenc
   };
 }
 
-/** The ladder's band as the Day Signals loop takes it (server.ts wires it in). */
-export function createDayLoopLadderBand(planner: LadderBandPlanner = createLadderBandPlanner()): DayLoopLadderBand {
+/** Band quotes are written in batches of this many as they settle, and the rest at the end of the cycle. */
+const bandQuoteWriteBatchSize = 20;
+
+/** The ladder as a user of the market quote loop (server.ts wires it in first, so its band is quoted first). */
+export function createLadderQuoteConsumer(planner: LadderBandPlanner = createLadderBandPlanner(), store: (writes: LadderBandQuoteWrite[]) => Promise<void> = upsertLadderBandQuotes): MarketQuoteConsumer {
+  let buffer: LadderBandQuoteWrite[] = [];
+  const flush = async () => {
+    if (buffer.length === 0) return;
+    const batch = buffer;
+    buffer = [];
+    await store(batch);
+  };
   return {
+    name: "CC + Put Ladder",
     tickers: (tradingDateIso) => planner.tickers(tradingDateIso),
-    contractsFor: async (tradingDateIso, spotByTicker, now) => new Map([...(await planner.plan(tradingDateIso, spotByTicker, now))].map(([tickerId, entry]) => [tickerId, { symbol: entry.symbol, contracts: entry.plan.contracts }])),
-    store: (writes) => upsertLadderBandQuotes(writes),
+    async contracts(cycle) {
+      const plans = await planner.plan(cycle.tradingDateIso, cycle.spotByTicker, cycle.now);
+      return [...plans.values()].flatMap((entry) => entry.plan.contracts.map((contract) => ({ tickerId: entry.tickerId, symbol: entry.symbol, expiry: contract.expiry, strike: contract.strike, right: contract.right })));
+    },
+    onQuote(quote, cycle) {
+      buffer.push({ tickerId: quote.contract.tickerId, tradingDateIso: cycle.tradingDateIso, expiry: quote.contract.expiry, strike: quote.contract.strike, right: quote.contract.right, bid: quote.bid, ask: quote.ask, stockPrice: cycle.spotByTicker.get(quote.contract.tickerId) ?? null, errorCode: quote.errorCode, quotedAt: quote.quotedAt, cycleNumber: cycle.cycleNumber });
+      if (buffer.length >= bandQuoteWriteBatchSize) void flush().catch((error) => console.error(`ladder band quote write failed — ${error instanceof Error ? error.message : error}`));
+    },
+    onCycleComplete: () => flush(),
   };
 }

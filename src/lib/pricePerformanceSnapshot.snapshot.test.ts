@@ -77,7 +77,6 @@ const rawRowFor = (overrides: Record<string, unknown> = {}) => ({
   liveClose1mAgo: "88.00",
   liveClose3mAgo: null,
   liveClose1yAgo: "50.00",
-  signalsEnabled: true,
   weeklyLow: "98.00",
   weeklyHigh: "112.00",
   monthlyLow: "80.00",
@@ -134,7 +133,6 @@ describe("getPricePerformanceSnapshot", () => {
       liveReferenceCloses: { close1dAgo: 110, close2dAgo: 100, close3dAgo: 125, close1wAgo: 90, close1mAgo: 88, close3mAgo: null, close1yAgo: 50 },
       macdTrend: "Bullish",
       maTrend: "uptrend",
-      signalsEnabled: true,
       impliedVolatility: "0.31",
       avgOptionVolume: "12000",
       ivRank: 55,
@@ -144,11 +142,6 @@ describe("getPricePerformanceSnapshot", () => {
     });
   });
 
-  it("a Signals-off ticker has no IV or option volume (its nightly IV snapshot is skipped, so the stored one would be stale)", async () => {
-    mocks.state.rawRows = [rawRowFor({ signalsEnabled: false })];
-    const { tickers } = await snapshotModule.getPricePerformanceSnapshot(now);
-    expect(tickers[0]).toMatchObject({ signalsEnabled: false, impliedVolatility: null, avgOptionVolume: null, change1y: 100 });
-  });
 
   it("binds the completed-session date to the latest-bar lookup, then today's Eastern date (the live 1W/1M/3M/1Y anchor), and asks for the completed session twice (now, and now minus 150 minutes)", async () => {
     await snapshotModule.getPricePerformanceSnapshot(now);

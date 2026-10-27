@@ -39,7 +39,6 @@ vi.mock("../lib/notifyTelegram.js", () => ({
   notifyTelegram: vi.fn(async () => true),
 }));
 vi.mock("../lib/readGitSha.js", () => ({ readGitSha: () => "abc1234" }));
-vi.mock("./candidateOutcomes.js", () => ({ labelExpiredCandidateOutcomes: async () => ({ labelled: 0, pending: 0, missingBars: [] }) }));
 vi.mock("./executor.js", () => ({ loadWorkingPlutoOrders: async () => [], watchPlutoOrder: vi.fn() }));
 vi.mock("./ledger.js", () => ({
   closeAbandonedPlutoPasses: vi.fn(async () => 0),
@@ -72,9 +71,8 @@ vi.mock("./stateStore.js", () => ({
     harness.saved.push(record);
   }),
 }));
-vi.mock("./daySignalsWatermark.js", () => ({ findNewlyQuotedContracts: vi.fn(), loadTodaysDaySignalQuoteStamps: vi.fn(), rememberAnalysed: vi.fn() }));
+vi.mock("./bandQuoteWatermark.js", () => ({ findNewlyQuotedContracts: vi.fn(), loadTodaysBandQuoteStamps: vi.fn(), hasTodaysBandQuotes: vi.fn(async () => true), rememberAnalysed: vi.fn() }));
 vi.mock("./systemChecks.js", () => ({ isInsideTradingWindow: () => true }));
-vi.mock("../lib/daySignalsStore.js", () => ({ hasDaySignalsSeedFinished: async () => true }));
 
 const { PlutoAgent } = await import("./agent.js");
 

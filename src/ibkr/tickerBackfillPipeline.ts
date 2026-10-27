@@ -1,7 +1,7 @@
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { fetchDailyHistoryFromIbkr, storeFreshDailyBars } from "./priceBarCache.js";
-import { prepareTicker, type PreparedTicker, type UniverseTicker } from "./runOptionChainCapture.js";
+import { refreshStoredOptionChain, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import { captureTickerCalendarEvents } from "../lib/tradingviewCalendarService.js";
 import { captureHistoricalEarnings } from "../lib/apiNinjasEarningsService.js";
 import { summarizeBackfillBars } from "../lib/backfillBarSummary.js";
@@ -12,11 +12,9 @@ import {
   computeProgressPercent,
   deriveFinalRunStatus,
   markUnfinishedStepsInterrupted,
-  scopeOfSteps,
   staleBackfillRunMinutes,
   updateStep,
   type BackfillRunStatus,
-  type BackfillScope,
   type BackfillStep,
   type BackfillStepKey,
   type BackfillStepStatus,
@@ -50,7 +48,7 @@ export interface RunningBackfillRun extends TickerBackfillRun {
   onShortlist: boolean;
 }
 
-// --- shared history step (also used by scripts/backfillSignalEngineHistory.ts, one code path) ---
+// --- history step ---
 
 export interface HistoryStepResult {
   barCount: number;
@@ -117,10 +115,10 @@ export interface BackfillStepWorkers {
     tickerId: string,
     symbol: string,
   ) => Promise<{ resolved: boolean; earningsWritten: number; dividendsWritten: number; historicalEarningsWritten: number; historicalEarningsSkippedEtf: boolean; historicalEarningsError: string | null }>;
-  loadUniverseTicker: (tickerId: string, symbol: string) => Promise<UniverseTicker>;
-  /** Read right before the option-chain step, so Signals turned on mid-run still gets its strikes. Null: no longer on the Shortlist. */
-  loadSignalsEnabled: (tickerId: string) => Promise<boolean | null>;
-  prepareChain: (ib: IbkrConnection["ib"], ticker: UniverseTicker, todayIso: string) => Promise<PreparedTicker>;
+  loadContractId: (tickerId: string) => Promise<number | null>;
+  /** Read right before the option-chain step: a ticker removed from the Shortlist mid-run gets no strikes. */
+  isOnShortlist: (tickerId: string) => Promise<boolean>;
+  refreshChain: (ib: IbkrConnection["ib"], ticker: { tickerId: string; symbol: string; contractId: number }, todayIso: string) => Promise<StoredOptionChainRefresh>;
   now: () => Date;
 }
 
@@ -182,15 +180,12 @@ const defaultStepWorkers: BackfillStepWorkers = {
       historicalEarningsError: historical.error,
     };
   },
-  loadUniverseTicker: async (tickerId, symbol) => {
-    const row = await db("tickers").where({ id: tickerId }).first();
-    return { tickerId, symbol, contractId: (row?.ibkr_contract_id as number | null | undefined) ?? null };
+  loadContractId: async (tickerId) => {
+    const row = await db("tickers").where({ id: tickerId }).first("ibkr_contract_id");
+    return row?.ibkr_contract_id === null || row?.ibkr_contract_id === undefined ? null : Number(row.ibkr_contract_id);
   },
-  loadSignalsEnabled: async (tickerId) => {
-    const entry = await db("shortlist_entries").where({ ticker_id: tickerId }).whereNull("removed_at").first("signals_enabled");
-    return entry ? Boolean(entry.signals_enabled) : null;
-  },
-  prepareChain: (ib, ticker, todayIso) => prepareTicker(ib, ticker, todayIso),
+  isOnShortlist: async (tickerId) => (await db("shortlist_entries").where({ ticker_id: tickerId }).whereNull("removed_at").first("id")) !== undefined,
+  refreshChain: (ib, ticker, todayIso) => refreshStoredOptionChain(ib, ticker, todayIso),
   now: () => new Date(),
 };
 
@@ -209,18 +204,18 @@ let pipelineQueue: Promise<void> = Promise.resolve();
  * the work continues in the background. If a fresh run is already in
  * progress for the ticker, that run is returned instead of starting another.
  */
-export async function startTickerBackfill(tickerId: string, symbol: string, dependencies: TickerBackfillDependencies = defaultDependencies, scope: BackfillScope = "full"): Promise<TickerBackfillRun> {
+export async function startTickerBackfill(tickerId: string, symbol: string, dependencies: TickerBackfillDependencies = defaultDependencies): Promise<TickerBackfillRun> {
   const current = await dependencies.store.getLatest(tickerId);
   if (current && current.status === "running") return current;
 
   await dependencies.store.closeRunning(tickerId);
-  const { joinedExisting, ...run } = await dependencies.store.create(tickerId, buildInitialBackfillSteps(scope));
-  if (!joinedExisting) enqueueBackfillRun(run, symbol, dependencies, scope);
+  const { joinedExisting, ...run } = await dependencies.store.create(tickerId, buildInitialBackfillSteps());
+  if (!joinedExisting) enqueueBackfillRun(run, symbol, dependencies);
   return run;
 }
 
-function enqueueBackfillRun(run: TickerBackfillRun, symbol: string, dependencies: TickerBackfillDependencies, scope: BackfillScope): void {
-  pipelineQueue = pipelineQueue.then(() => executeBackfillRun(run.id, run.tickerId, symbol, dependencies, scope)).catch((error) => console.error(`ticker backfill for ${symbol} crashed`, error));
+function enqueueBackfillRun(run: TickerBackfillRun, symbol: string, dependencies: TickerBackfillDependencies): void {
+  pipelineQueue = pipelineQueue.then(() => executeBackfillRun(run.id, run.tickerId, symbol, dependencies)).catch((error) => console.error(`ticker backfill for ${symbol} crashed`, error));
 }
 
 export interface ResumeInterruptedBackfillsResult {
@@ -232,7 +227,7 @@ export interface ResumeInterruptedBackfillsResult {
 /**
  * Called once when the web process starts. The queue lives in memory, so every 'running' run at boot was cut off
  * by the restart (deploy or crash) and nothing is working on it. Each one is closed as partial, its unfinished
- * steps marked interrupted, and started again with the same scope, in the order they were first queued. A run
+ * steps marked interrupted, and started again, in the order they were first queued. A run
  * that was itself a restart is only closed, so a run that keeps getting cut off is not restarted on every boot.
  *
  * Only safe while there is a single web dyno and preboot is off: a second web process starting up would close
@@ -252,14 +247,13 @@ export async function resumeInterruptedBackfillRuns(dependencies: TickerBackfill
         result.notResumed.push({ symbol: interrupted.symbol, reason: "not_on_shortlist" });
         continue;
       }
-      const scope = scopeOfSteps(interrupted.steps);
-      const { joinedExisting, ...run } = await dependencies.store.create(interrupted.tickerId, buildInitialBackfillSteps(scope), interrupted.id);
-      // A Retry (or the Signals switch) started the ticker's setup between the close and here: that one is already queued.
+      const { joinedExisting, ...run } = await dependencies.store.create(interrupted.tickerId, buildInitialBackfillSteps(), interrupted.id);
+      // A Retry started the ticker's setup between the close and here: that one is already queued.
       if (joinedExisting) {
         result.notResumed.push({ symbol: interrupted.symbol, reason: "started_again_meanwhile" });
         continue;
       }
-      enqueueBackfillRun(run, interrupted.symbol, dependencies, scope);
+      enqueueBackfillRun(run, interrupted.symbol, dependencies);
       result.resumed.push(interrupted.symbol);
     } catch (error) {
       console.error(`Ticker setup for ${interrupted.symbol}: could not close or restart the interrupted run ${interrupted.id}`, error);
@@ -274,9 +268,9 @@ export function waitForBackfillQueue(): Promise<void> {
   return pipelineQueue;
 }
 
-export async function executeBackfillRun(runId: string, tickerId: string, symbol: string, dependencies: TickerBackfillDependencies = defaultDependencies, scope: BackfillScope = "full"): Promise<void> {
+export async function executeBackfillRun(runId: string, tickerId: string, symbol: string, dependencies: TickerBackfillDependencies = defaultDependencies): Promise<void> {
   const { store, workers } = dependencies;
-  let steps = buildInitialBackfillSteps(scope);
+  let steps = buildInitialBackfillSteps();
   const report = async (key: BackfillStepKey, status: BackfillStepStatus, message: string | null) => {
     steps = updateStep(steps, key, status, message);
     await store.saveProgress(runId, steps);
@@ -297,47 +291,30 @@ export async function executeBackfillRun(runId: string, tickerId: string, symbol
   const todayIso = easternIsoDate(workers.now());
 
   try {
-    if (scope === "full") {
-      await runStep("history", async () => {
-        const result = await workers.fetchHistory(await getConnection(), tickerId, symbol);
-        return { status: "done", message: `${result.barCount} daily bars (${result.firstTradingDate} to ${result.lastTradingDate}), ${result.ivPointCount} implied-volatility points.` };
-      });
-
-      await runStep("calendar", async () => {
-        const result = await workers.captureCalendar(tickerId, symbol);
-        const historicalNote = result.historicalEarningsError
-          ? ` Historical earnings backfill failed: ${result.historicalEarningsError}.`
-          : result.historicalEarningsSkippedEtf
-            ? " ETF: no earnings to backfill."
-            : ` ${result.historicalEarningsWritten} historical earnings dates.`;
-        if (!result.resolved) return { status: "skipped", message: `Ticker not found on TradingView; forward calendar unavailable.${historicalNote}` };
-        return { status: "done", message: `${result.earningsWritten} earnings and ${result.dividendsWritten} dividend events.${historicalNote}` };
-      });
-    }
-
-    const signalsEnabled = await workers.loadSignalsEnabled(tickerId);
-    let prepared: PreparedTicker | null = null;
-    await runStep("chain_warmup", async () => {
-      if (signalsEnabled === null) return { status: "skipped", message: "Removed from the Shortlist: no strikes set up." };
-      if (!signalsEnabled) return { status: "skipped", message: "Signals is off: the strikes are set up when Signals is turned on." };
-      prepared = await workers.prepareChain((await getConnection()).ib, await workers.loadUniverseTicker(tickerId, symbol), todayIso);
-      const gridCount = prepared.chainRefresh.expiries.length;
-      const strikeCount = prepared.chainRefresh.expiries.reduce((sum, expiry) => sum + expiry.strikeCount, 0);
-      return { status: "done", message: `Strike grids stored for ${gridCount} expiries (${strikeCount} strikes) in ${(prepared.chainRefresh.totalMs / 1000).toFixed(0)}s; ${prepared.contracts.length} contracts selected for capture.` };
+    await runStep("history", async () => {
+      const result = await workers.fetchHistory(await getConnection(), tickerId, symbol);
+      return { status: "done", message: `${result.barCount} daily bars (${result.firstTradingDate} to ${result.lastTradingDate}), ${result.ivPointCount} implied-volatility points.` };
     });
 
-    await runStep("first_snapshot", async () => {
-      // Always skipped, never captured immediately on add -- deliberately, not just "not built yet"
-      // (Marcelo, 2026-09-23). Every other night's capture runs inside the fixed 10:00-10:30 ET clock
-      // window (optionChainCaptureClock.ts), so every ticker's snapshot history lines up on the same
-      // reference time day to day. Capturing immediately whenever a ticker happened to be added --
-      // anywhere from 9:30am to 4pm ET -- gave that one ticker's first data point a different time-of-day
-      // basis than everything else, the same class of inconsistency already flagged once before (see the
-      // 2026-09-11 capture-timing finding in PROGRESS.md).
-      if (signalsEnabled === null) return { status: "skipped", message: "Removed from the Shortlist: no option chain is captured for this ticker." };
-      if (!signalsEnabled) return { status: "skipped", message: "Signals is off: no option chain is captured for this ticker." };
-      if (!prepared) return { status: "skipped", message: "Skipped because the strike step did not finish." };
-      return { status: "skipped", message: "Captured by tonight's job in the normal 10:00 ET window, same as every other ticker." };
+    await runStep("calendar", async () => {
+      const result = await workers.captureCalendar(tickerId, symbol);
+      const historicalNote = result.historicalEarningsError
+        ? ` Historical earnings backfill failed: ${result.historicalEarningsError}.`
+        : result.historicalEarningsSkippedEtf
+          ? " ETF: no earnings to backfill."
+          : ` ${result.historicalEarningsWritten} historical earnings dates.`;
+      if (!result.resolved) return { status: "skipped", message: `Ticker not found on TradingView; forward calendar unavailable.${historicalNote}` };
+      return { status: "done", message: `${result.earningsWritten} earnings and ${result.dividendsWritten} dividend events.${historicalNote}` };
+    });
+
+    const onShortlist = await workers.isOnShortlist(tickerId);
+    await runStep("chain_warmup", async () => {
+      if (!onShortlist) return { status: "skipped", message: "Removed from the Shortlist: no strikes set up." };
+      const contractId = await workers.loadContractId(tickerId);
+      if (contractId === null) return { status: "skipped", message: "No IBKR contract id stored for this ticker: the strikes cannot be looked up." };
+      const refresh = await workers.refreshChain((await getConnection()).ib, { tickerId, symbol, contractId }, todayIso);
+      const strikeCount = refresh.timings.expiries.reduce((sum, expiry) => sum + expiry.strikeCount, 0);
+      return { status: "done", message: `Strike grids stored for ${refresh.timings.expiries.length} expiries (${strikeCount} strikes) in ${(refresh.timings.totalMs / 1000).toFixed(0)}s.` };
     });
   } finally {
     (connection as IbkrConnection | null)?.disconnect();

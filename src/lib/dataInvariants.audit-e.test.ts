@@ -4,7 +4,7 @@ import type { DataInvariantInputs } from "./dataInvariants.js";
 
 // Audit E (2026-10-07): the new "Earnings dates" invariant (pure edges) and its loader, plus the major-macro-events
 // staleness figure, against the real test database inside one transaction rolled back at the end.
-const holder = vi.hoisted(() => ({ root: null as unknown as Knex, current: null as unknown as Knex, universe: [] as { tickerId: string; symbol: string; contractId: number | null }[] }));
+const holder = vi.hoisted(() => ({ root: null as unknown as Knex, current: null as unknown as Knex, universe: [] as { tickerId: string; symbol: string; companyName: string | null; contractId: number | null }[] }));
 vi.mock("../db/connection.js", async () => {
   const { config } = await import("dotenv");
   config();
@@ -19,7 +19,7 @@ vi.mock("../db/connection.js", async () => {
   };
 });
 vi.mock("./notifyTelegram.js", () => ({ notifyTelegram: vi.fn(async () => true) }));
-vi.mock("../ibkr/runOptionChainCapture.js", () => ({ loadCaptureUniverse: async () => holder.universe }));
+vi.mock("./optionDataUniverse.js", () => ({ loadOptionDataUniverse: async () => holder.universe }));
 
 const { evaluateDataInvariants, loadDataInvariantInputs, earningsDatesMinGapDays, earningsDatesLookbackDays } = await import("./dataInvariants.js");
 
@@ -27,7 +27,6 @@ const now = new Date("2026-10-07T13:30:00Z");
 const base = (earningsDatesBySymbol: Record<string, string[]>): DataInvariantInputs => ({
   now,
   universeSymbols: [],
-  snapshots: [],
   lastCompletedSession: "2026-10-06",
   latestBarDateBySymbol: {},
   riskFreeRateFetchedAt: new Date("2026-10-01T12:00:00Z"),
@@ -73,7 +72,7 @@ describe("loadDataInvariantInputs earnings and macro figures (real DB, rolled ba
     holder.current = transaction;
     const [inUniverse] = await transaction("tickers").insert({ symbol: symbols.inUniverse, company_name: "Audit E" }).returning(["id"]);
     const [outside] = await transaction("tickers").insert({ symbol: symbols.outside, company_name: "Audit E" }).returning(["id"]);
-    holder.universe = [{ tickerId: inUniverse.id, symbol: symbols.inUniverse, contractId: null }];
+    holder.universe = [{ tickerId: inUniverse.id, symbol: symbols.inUniverse, companyName: null, contractId: null }];
     const row = (tickerId: string, eventDate: string) => ({ ticker_id: tickerId, event_type: "earnings", event_date: eventDate, raw: "{}" });
     await transaction("ticker_calendar_events").insert([
       row(inUniverse.id, "2026-09-05"), // 31 days before 10-06: outside the lookback

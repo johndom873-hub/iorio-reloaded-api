@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // driven through its private housekeeping()/loopIteration() with every import mocked. Wall clock is faked (2026-10-07 is EDT).
 
 const harness = vi.hoisted(() => ({
-  seedFinished: false,
+  bandQuotesIn: false,
   passRequests: [] as Record<string, unknown>[],
   /** One entry per runPlutoPass call: an Error throws, a string is the skipped reason, null a model-call round. */
   passScript: [] as (Error | string | null)[],
@@ -46,7 +46,6 @@ vi.mock("../lib/notifyTelegram.js", () => ({
   notifyTelegram: vi.fn(async () => true),
 }));
 vi.mock("../lib/readGitSha.js", () => ({ readGitSha: () => "abc1234" }));
-vi.mock("./candidateOutcomes.js", () => ({ labelExpiredCandidateOutcomes: async () => ({ labelled: 0, pending: 0, missingBars: [] }) }));
 vi.mock("./executor.js", () => ({ loadWorkingPlutoOrders: async () => [], watchPlutoOrder: vi.fn() }));
 vi.mock("./ledger.js", () => ({
   closeAbandonedPlutoPasses: vi.fn(async () => 0),
@@ -83,12 +82,11 @@ vi.mock("./stateStore.js", () => ({
   recordPlutoRelease: vi.fn(),
   savePlutoReadiness: vi.fn(),
 }));
-vi.mock("./daySignalsWatermark.js", async () => {
-  const actual = await vi.importActual<typeof import("./daySignalsWatermark.js")>("./daySignalsWatermark.js");
-  return { ...actual, loadTodaysDaySignalQuoteStamps: async () => harness.quoteStamps };
+vi.mock("./bandQuoteWatermark.js", async () => {
+  const actual = await vi.importActual<typeof import("./bandQuoteWatermark.js")>("./bandQuoteWatermark.js");
+  return { ...actual, loadTodaysBandQuoteStamps: async () => harness.quoteStamps, hasTodaysBandQuotes: async () => harness.bandQuotesIn };
 });
 vi.mock("./systemChecks.js", () => ({ isInsideTradingWindow: () => harness.insideWindow }));
-vi.mock("../lib/daySignalsStore.js", () => ({ hasDaySignalsSeedFinished: async () => harness.seedFinished }));
 
 const { PlutoAgent } = await import("./agent.js");
 
@@ -105,7 +103,7 @@ const etInstant = (hhmm: string) => new Date(`2026-10-07T${String(Number(hhmm.sl
 
 beforeEach(() => {
   vi.useFakeTimers({ now: etInstant("10:10") });
-  harness.seedFinished = false;
+  harness.bandQuotesIn = false;
   harness.passRequests.length = 0;
   harness.passScript.length = 0;
   harness.events.length = 0;
@@ -127,7 +125,7 @@ describe("PlutoAgent opening look (audit A)", () => {
     expect(agent.forcedRounds).toEqual([]);
     agent.queueForcedRound("settings_changed", {}, null);
     agent.queueForcedRound("cooldown_ended", { symbol: "AAA" }, ["AAA"]);
-    harness.seedFinished = true;
+    harness.bandQuotesIn = true;
     await agent.housekeeping();
     expect(agent.forcedRounds.map((round: { trigger: string }) => round.trigger)).toEqual(["opening_analysis", "cooldown_ended"]);
     await agent.loopIteration();
@@ -148,7 +146,7 @@ describe("PlutoAgent opening look (audit A)", () => {
   });
 
   it("a failed look is not done: no retry timer, forced rounds stay held-positions-only, housekeeping re-queues it", async () => {
-    harness.seedFinished = true;
+    harness.bandQuotesIn = true;
     const agent = makeAgent();
     await agent.housekeeping();
     harness.passScript.push(new Error("db down"));
@@ -169,26 +167,26 @@ describe("PlutoAgent opening look (audit A)", () => {
     expect(agent.forcedRounds[0]).toMatchObject({ trigger: "opening_analysis", detail: { dataIncomplete: true } });
     await agent.loopIteration();
     expect(harness.events.some((event) => event.type === "warning" && String(event.payload.message).startsWith("opening look on incomplete data"))).toBe(true);
-    expect(harness.telegrams.filter((message) => message.startsWith("⚠️ Pluto: today's Day Signals data was not ready"))).toHaveLength(1);
+    expect(harness.telegrams.filter((message) => message.startsWith("⚠️ Pluto: today's ladder quotes were not in"))).toHaveLength(1);
     // Opens are allowed once the incomplete look has run.
     agent.queueForcedRound("settings_changed", {}, null);
     await agent.loopIteration();
     expect(harness.passRequests[1]).toMatchObject({ heldPositionsOnly: false });
-    // Still not seeded: nothing more.
+    // Still no band quotes: nothing more.
     await agent.housekeeping();
     expect(agent.forcedRounds).toEqual([]);
-    harness.seedFinished = true;
+    harness.bandQuotesIn = true;
     vi.setSystemTime(etInstant("10:50"));
     await agent.housekeeping();
     expect(agent.forcedRounds[0]).toMatchObject({ trigger: "opening_analysis", detail: { afterLateSeed: true } });
     await agent.loopIteration();
-    expect(harness.telegrams.filter((message) => message.startsWith("✅ Pluto: today's Day Signals data is ready now"))).toHaveLength(1);
+    expect(harness.telegrams.filter((message) => message.startsWith("✅ Pluto: today's ladder quotes are in now"))).toHaveLength(1);
     await agent.housekeeping();
     expect(agent.forcedRounds).toEqual([]);
   });
 
   it("not watching drops queued rounds and the pending look; the look is queued again once watching", async () => {
-    harness.seedFinished = true;
+    harness.bandQuotesIn = true;
     const agent = makeAgent();
     await agent.housekeeping();
     agent.watching = false;
@@ -206,7 +204,7 @@ describe("PlutoAgent opening look (audit A)", () => {
     harness.passScript.push("account_data: account summary failed: timeout");
     await agent.loopIteration();
     expect(agent.openingLook.doneFor).toBe("2026-10-07");
-    harness.seedFinished = true;
+    harness.bandQuotesIn = true;
     await agent.housekeeping();
     harness.passScript.push("trading_window: outside 09:45–15:30 ET");
     await agent.loopIteration();
@@ -216,7 +214,7 @@ describe("PlutoAgent opening look (audit A)", () => {
   });
 
   it("documents: a look that fails deterministically is re-queued on every housekeeping tick without a cap", async () => {
-    harness.seedFinished = true;
+    harness.bandQuotesIn = true;
     const agent = makeAgent();
     for (let tick = 0; tick < 5; tick += 1) {
       harness.passScript.push(new Error("TypeError: cannot read properties of undefined"));
@@ -297,7 +295,7 @@ describe("PlutoAgent window, analysis and connection events", () => {
     expect(eventTypes().filter((type) => type === "window_opened")).toHaveLength(1);
     expect(harness.events.find((event) => event.type === "window_opened")!.payload).toMatchObject({ date: "2026-10-07", windowEndEt: "15:30", windowEndAt: "2026-10-07T19:30:00.000Z" });
     expect(eventTypes()).not.toContain("analysis_started");
-    harness.seedFinished = true;
+    harness.bandQuotesIn = true;
     await agent.housekeeping();
     harness.passScript.push("trading_window: outside");
     await agent.loopIteration();
@@ -357,7 +355,7 @@ describe("PlutoAgent agent lease", () => {
     const agent: AgentInternals = new PlutoAgent({ apiBaseUrl: "http://x", serviceUsername: "u", serviceUserPassword: "p", serviceLoginSecret: "s", openRouterApiKey: "k", telegramBotToken: "t" }, lease);
     agent.settings = { daySignalsPollSeconds: 1, tickerCooldownMinutes: 0 };
     const request = { trigger: "day_signals_update", triggerDetail: {}, symbols: ["AAA"], force: false };
-    expect(await agent.runRoundSafely(request)).toBe("failed_before_model_call");
+    expect(await agent.runRoundSafely(request)).toBe("failed");
     expect(harness.passRequests).toHaveLength(0);
     leaseHeld = true;
     expect(await agent.runRoundSafely(request)).toBe("completed");

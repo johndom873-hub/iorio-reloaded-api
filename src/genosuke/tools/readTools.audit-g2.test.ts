@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { GenosukeApiClient } from "../apiClient.js";
 import { readTools } from "./readTools.js";
 
-// Audit (G2, 2026-10-07): list_shortlist after the shortlist lost its per-strategy meaning (Signals switch, notes removed).
+// Audit (G2, 2026-10-07): list_shortlist after the shortlist lost its per-strategy meaning (notes removed).
 // GET /shortlist ignores any strategy query (routes/shortlist.ts reads no query parameter), so the tool must not make the model pick one.
 function listShortlistTool() {
   const tool = readTools.find((candidate) => candidate.name === "list_shortlist");
@@ -11,8 +11,7 @@ function listShortlistTool() {
 }
 
 describe("list_shortlist", () => {
-  it("describes the Signals and Pluto flags it returns", () => {
-    expect(listShortlistTool().description).toMatch(/signalsEnabled/);
+  it("describes the Pluto flag it returns", () => {
     expect(listShortlistTool().description).toMatch(/botEnabled/);
   });
 

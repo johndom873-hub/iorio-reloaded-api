@@ -1237,7 +1237,7 @@ describe("access levels: a trader's roll", () => {
 
   it("refuses a trader's roll on a ticker Pluto trades and builds nothing, while an admin may roll it", async () => {
     const { positionId, legIds, symbol, tickerId } = await createPosition("cash_secured_put", [shortPut(2)]);
-    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: userId, bot_enabled: true }).returning("id");
     try {
       const refused = await asTrader(() => call("POST", `/positions/${positionId}/roll`, rollBody(legIds[0])));
       expect(refused).toMatchObject({ status: 403, json: { error: `Pluto trades ${symbol}, so only an admin can open or roll on it.` } });

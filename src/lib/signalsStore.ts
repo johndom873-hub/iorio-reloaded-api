@@ -16,10 +16,14 @@ import type { OpenShortLeg } from "./rollSignalCandidates.js";
 import { computeElevatedVolatilityFlag, computeMomentum, computeSkew } from "./tiltMeasures.js";
 import { computeIvMetrics } from "./ivMetrics.js";
 import type { DailyOhlcvBar } from "./realizedVolatility.js";
-import { signalsEnabledShortlistTickerIdsQuery } from "./shortlistQueries.js";
+import { activeShortlistTickerIdsQuery } from "./shortlistQueries.js";
 import { easternIsoDate } from "./easternIsoDate.js";
 import { earningsNextDateDoubt, isEtfSector, tickerCalendarProfile } from "./tickerCalendarRelevance.js";
 import { loadLastEarningsReportDate } from "../ibkr/calendarConflict.js";
+import { loadOpenShortLegs, openShortLegPositionsQuery } from "./openShortLegs.js";
+export { loadOpenShortLegs };
+import { loadDividendCadenceUnknown, loadEarningsDatesForForecastWindow, loadEarningsDatesNotYetReported, loadNextEarningsDate, loadPreviousClose } from "./tickerCalendarQueries.js";
+export { loadDividendCadenceUnknown, loadEarningsDatesForForecastWindow, loadEarningsDatesNotYetReported, loadNextEarningsDate, loadPreviousClose };
 
 // DB side of the Signals screen (mockup approved 2026-09-22). Loads one ticker's
 // inputs once (loadTickerSignalsInputs); scoring itself is the pure scoreTicker in
@@ -27,20 +31,8 @@ import { loadLastEarningsReportDate } from "../ibkr/calendarConflict.js";
 // same way. Shares out for a covered call, and cash out for a cash-secured put, use
 // the same live account/position queries the order-limit checks use.
 
-/** `fetchSummary` lets a caller reuse a cached summary (Pluto's agent, accountSummaryCache.ts). */
-export async function loadAccountContext(fetchSummary: () => Promise<AccountSummary> = fetchAccountSummary): Promise<AccountContext> {
-  const [account, cashLockedInCsps] = await Promise.all([fetchSummary(), computeCashLockedInCsps()]);
-  return accountContextFromCash(account.totalCashValue, cashLockedInCsps);
-}
-
-/** The same account context from a cash figure already fetched (Pluto's system checks read the summary once per round). */
-export async function accountContextFromTotalCash(totalCashValue: number | null): Promise<AccountContext> {
-  return accountContextFromCash(totalCashValue, await computeCashLockedInCsps());
-}
-
-function accountContextFromCash(totalCashValue: number | null, cashLockedInCsps: number): AccountContext {
-  return { freeCash: Math.max(0, (totalCashValue ?? 0) - cashLockedInCsps) };
-}
+export { accountContextFromTotalCash, loadAccountContext } from "./accountContext.js";
+import { loadAccountContext } from "./accountContext.js";
 
 /** Stored daily bars up to and including `asOfDateIso`, oldest first (the tilt measures and Pluto's move context). */
 export async function loadBarsForTilt(tickerId: string, asOfDateIso: string): Promise<DailyOhlcvBar[]> {
@@ -56,68 +48,10 @@ export async function loadBarsForTilt(tickerId: string, asOfDateIso: string): Pr
     .map((row) => ({ tradingDate: row.tradingDate, open: Number(row.open), high: Number(row.high), low: Number(row.low), close: Number(row.close), volume: Number(row.volume ?? 0) }));
 }
 
-/** The last stored close strictly before today's Eastern session date (decided 2026-09-22: bars, not IBKR's tick 9). */
-export async function loadPreviousClose(tickerId: string, todayEasternIso: string): Promise<PreviousClose | null> {
-  const row = await db("daily_price_bars")
-    .where({ ticker_id: tickerId })
-    .whereRaw("trading_date::text < ?", [todayEasternIso])
-    .whereNotNull("close_price")
-    .orderBy("trading_date", "desc")
-    .select(db.raw('trading_date::text as "dateIso"'), "close_price as close")
-    .first();
-  return row ? { close: Number(row.close), dateIso: row.dateIso } : null;
-}
 
-/** The next earnings report still to come: today's counts unless it was before the open (as loadEarningsDatesNotYetReported). */
-export async function loadNextEarningsDate(tickerId: string, todayIso: string): Promise<string | null> {
-  const row = await db("ticker_calendar_events")
-    .where({ ticker_id: tickerId, event_type: "earnings" })
-    .where("event_date", ">=", todayIso)
-    .whereRaw("not (event_date = ?::date and event_time is not distinct from '-1')", [todayIso])
-    .orderBy("event_date")
-    .select(db.raw('event_date::text as "eventDate"'))
-    .first();
-  return row?.eventDate ?? null;
-}
 
-/** True when there is an upcoming ex-dividend but no regular cadence could be inferred to project later ones into the forward (Formula: see impliedVolatilitySurface.ts projectDividendSchedule, approved 2026-09-23). */
-export async function loadDividendCadenceUnknown(tickerId: string, todayIso: string): Promise<boolean> {
-  const [next, past] = await Promise.all([
-    db("ticker_calendar_events")
-      .where({ ticker_id: tickerId, event_type: "ex_dividend" })
-      .where("event_date", ">=", todayIso)
-      .orderBy("event_date")
-      .select(db.raw('event_date::text as "date"'), "amount")
-      .first(),
-    db("ticker_calendar_events")
-      .where({ ticker_id: tickerId, event_type: "ex_dividend" })
-      .where("event_date", "<", todayIso)
-      .orderBy("event_date", "desc")
-      .select(db.raw('event_date::text as "date"'), "amount")
-      .first(),
-  ]);
-  if (!next) return false;
-  return !isRegularDividendCadence({ date: next.date, amount: Number(next.amount) }, past ? { date: past.date, amount: Number(past.amount) } : null);
-}
 
-export async function loadEarningsDatesForForecastWindow(tickerId: string): Promise<string[]> {
-  // Every stored earnings row (the Shortlist readiness count); the Signals exclusion uses loadEarningsDatesNotYetReported.
-  const rows: { eventDate: string }[] = await db("ticker_calendar_events").where({ ticker_id: tickerId, event_type: "earnings" }).select(db.raw('event_date::text as "eventDate"'));
-  return rows.map((row) => row.eventDate);
-}
 
-/**
- * The earnings dates the Signals exclusion checks: today's only when not reported before the open (TradingView's event_time
- * "-1" = before the open, "1" = after the close, "0" or none = unknown time, which still counts).
- */
-export async function loadEarningsDatesNotYetReported(tickerId: string, todayIso: string): Promise<string[]> {
-  const rows: { eventDate: string }[] = await db("ticker_calendar_events")
-    .where({ ticker_id: tickerId, event_type: "earnings" })
-    .where("event_date", ">=", todayIso)
-    .whereRaw("not (event_date = ?::date and event_time is not distinct from '-1')", [todayIso])
-    .select(db.raw('event_date::text as "eventDate"'));
-  return rows.map((row) => row.eventDate);
-}
 
 export async function loadLatestSnapshot(tickerId: string): Promise<SnapshotHeader | null> {
   const row = await db("option_chain_snapshots")
@@ -227,18 +161,10 @@ function signalsUniverseQuery() {
   return db("tickers as t")
     .where((builder) =>
       builder
-        .whereIn("t.id", signalsEnabledShortlistTickerIdsQuery())
+        .whereIn("t.id", activeShortlistTickerIdsQuery())
         .orWhereIn("t.id", openShortLegPositionsQuery().select("p.ticker_id")),
     )
     .select("t.id as tickerId", "t.symbol", "t.company_name as companyName", db.raw("NULLIF(t.sector, '') as sector"));
-}
-
-function openShortLegPositionsQuery() {
-  return db("position_legs as pl")
-    .join("positions as p", "p.id", "pl.position_id")
-    .where({ "p.status": "open", "pl.leg_type": "option", "pl.side": "short" })
-    .whereIn("p.strategy_key", ["covered_call", "cash_secured_put"])
-    .whereNull("pl.exit_at");
 }
 
 export async function loadSignalsUniverseTickers(): Promise<SignalsTickerRow[]> {
@@ -250,24 +176,6 @@ export async function loadSignalsUniverseTicker(symbol: string): Promise<Signals
   return row ?? null;
 }
 
-/** Every open short option leg on a covered-call or cash-secured-put position of this ticker (Roll Signals' A side). */
-export async function loadOpenShortLegs(tickerId: string): Promise<OpenShortLeg[]> {
-  const rows: { legId: string; positionId: string; strategyKey: string; expiry: string; strike: string; optionType: "call" | "put"; quantity: number; entryPrice: string; entryAt: Date }[] = await openShortLegPositionsQuery()
-    .where("p.ticker_id", tickerId)
-    .select("pl.id as legId", "p.id as positionId", "p.strategy_key as strategyKey", db.raw('pl.expiry_date::text as expiry'), "pl.strike_price as strike", "pl.option_type as optionType", "pl.quantity", "pl.entry_price as entryPrice", "pl.entry_at as entryAt")
-    .orderBy(["pl.expiry_date", "pl.strike_price"]);
-  return rows.map((row) => ({
-    legId: row.legId,
-    positionId: row.positionId,
-    strategyKey: row.strategyKey as OpenShortLeg["strategyKey"],
-    expiry: row.expiry,
-    strike: Number(row.strike),
-    right: row.optionType === "call" ? "C" : "P",
-    quantity: Number(row.quantity),
-    entryPrice: Number(row.entryPrice),
-    entryAtIso: new Date(row.entryAt).toISOString(),
-  }));
-}
 
 /** Everything scoring needs for one ticker, from the DB only (no IBKR). Loaded once per REST call or stream start. */
 export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Date = new Date()): Promise<TickerSignalsInputs> {

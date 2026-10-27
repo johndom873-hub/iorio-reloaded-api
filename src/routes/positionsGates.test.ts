@@ -385,7 +385,7 @@ describe("POST /positions/orders/:id/confirm", () => {
 
   it("refuses a Pluto order whose ticker's Pluto switch went off after it was built, and confirms it while the switch is on", async () => {
     const ticker = await createTicker();
-    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, bot_enabled: true }).returning("id");
     const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates" }), model_called: false }).returning("id");
     const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built" }).returning("id");
     try {
@@ -412,7 +412,7 @@ describe("POST /positions/orders/:id/confirm", () => {
 
   it("confirms a Pluto order only for the agent holding Pluto's lease: another agent or a person gets a 409 before any gate, the order stays pending", async () => {
     const ticker = await createTicker();
-    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, bot_enabled: true }).returning("id");
     const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates" }), model_called: false }).returning("id");
     const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built" }).returning("id");
     try {
@@ -442,7 +442,7 @@ describe("POST /positions/orders/:id/confirm", () => {
 
   it("judges a CC + Put Ladder order by the ladder's delta range and its pot; an Edge Margin order by the platform's rules", async () => {
     const ticker = await createTicker();
-    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, bot_enabled: true }).returning("id");
     const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates-ladder" }), model_called: false }).returning("id");
     const [ladderAction] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built", execution_strategy: "cc_put_ladder" }).returning("id");
     const [edgeAction] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built" }).returning("id");
@@ -480,7 +480,7 @@ describe("POST /positions/orders/:id/confirm", () => {
 
   it("locks a person's orders on a ticker Pluto trades while the CC + Put Ladder is the active strategy", async () => {
     const ticker = await createTicker();
-    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, bot_enabled: true }).returning("id");
     const before = await testDb("pluto_settings").where({ id: 1 }).first("execution_strategy");
     try {
       await testDb("pluto_settings").where({ id: 1 }).update({ execution_strategy: "cc_put_ladder" });
@@ -847,7 +847,7 @@ describe("access levels: a trader's orders", () => {
 
   async function withPlutoTicker<T>(body: (ticker: { id: string; symbol: string }, plutoActionId: string) => Promise<T>): Promise<T> {
     const ticker = await createTicker();
-    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, bot_enabled: true }).returning("id");
     const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates-access" }), model_called: false }).returning("id");
     const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built" }).returning("id");
     try {

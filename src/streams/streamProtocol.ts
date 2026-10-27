@@ -16,9 +16,7 @@ export const streamKinds = [
   "exposure",
   "pricePerformancePrices",
   "stockPrices",
-  "signalsScreen",
-  "signalsTicker",
-  "signalsQuotes",
+  "optionQuotes",
   "notifications",
   "pulses",
 ] as const;

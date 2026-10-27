@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { IbkrLookupTimeoutError, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import { buildStructureJobOutcome, runOptionChainStructureRefresh, structureGridMaxAgeDays, type OptionChainStructureDependencies, type OptionChainStructureEvent } from "./runOptionChainStructureRefresh.js";
-import type { UniverseTicker } from "./runOptionChainCapture.js";
+import type { OptionDataTicker } from "../lib/optionDataUniverse.js";
 
 const fakeIb = {} as never;
-const ticker = (symbol: string, contractId: number | null = 1): UniverseTicker => ({ tickerId: `id-${symbol}`, symbol, contractId });
+const ticker = (symbol: string, contractId: number | null = 1): OptionDataTicker => ({ tickerId: `id-${symbol}`, symbol, companyName: null, contractId });
 
 const emptyTotals = { failedSymbols: [], skippedSymbols: [], gridLookups: 0, gridsReused: 0 };
 
@@ -163,13 +163,13 @@ describe("buildStructureJobOutcome", () => {
 
   it("completes with errors when some tickers failed or were skipped, one error each", () => {
     expect(buildStructureJobOutcome({ ...cleanResult, tickersComplete: 2, tickersFailed: 1, failedSymbols: ["AAA"], skippedSymbols: ["BBB"] })).toEqual({
-      completedWithErrors: { errorCount: 2, message: "2 of 4 tickers have no structure today, so the capture skips them: AAA, BBB" },
+      completedWithErrors: { errorCount: 2, message: "2 of 4 tickers have no structure today, so nothing quotes their options from it: AAA, BBB" },
     });
   });
 
   it("fails when no ticker got its structure, or there was none to refresh", () => {
     expect(buildStructureJobOutcome({ ...cleanResult, tickersComplete: 0, tickersFailed: 1, failedSymbols: ["AAA"], skippedSymbols: ["BBB", "CCC", "DDD"] })).toEqual({
-      failureMessage: "4 of 4 tickers have no structure today, so the capture skips them: AAA, BBB, CCC, DDD",
+      failureMessage: "4 of 4 tickers have no structure today, so nothing quotes their options from it: AAA, BBB, CCC, DDD",
     });
     expect(buildStructureJobOutcome({ ...cleanResult, tickersAttempted: 0, tickersComplete: 0 })).toEqual({ failureMessage: "no tickers to refresh (shortlist and open positions are both empty)" });
   });

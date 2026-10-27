@@ -9,11 +9,11 @@ export const lowStakesWriteTools: GenosukeTool[] = [
   {
     name: "add_shortlist_ticker",
     description:
-      "Add a ticker to the monitored shortlist. Fetches live market data from IBKR if the ticker isn't already tracked. Signals is off unless signalsEnabled is true: an off ticker only shows on Price Performance and is not scored on Signals or tradable by Pluto. Only set it when the user asks for Signals on.",
+      "Add a ticker to the monitored shortlist. Fetches live market data from IBKR if the ticker isn't already tracked. A shortlisted ticker shows on the Volatility screen and Price Performance, and an admin can enable it for Pluto.",
     tier: "low-stakes-write",
     parameters: {
       type: "object",
-      properties: { symbol: { type: "string" }, signalsEnabled: { type: "boolean" } },
+      properties: { symbol: { type: "string" } },
       required: ["symbol"],
     },
     execute: (input, api) => api.post("/shortlist", input),

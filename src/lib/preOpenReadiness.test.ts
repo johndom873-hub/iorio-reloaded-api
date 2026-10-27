@@ -37,7 +37,7 @@ const goodProductionEnvironment: Record<string, string | undefined> = {
   IBKR_TRADING_MODE: "live",
   IBKR_EXPECTED_ACCOUNT_ID: "U21518308",
   IBKR_MARKET_DATA_LINES_ENABLED: "true",
-  DAY_SIGNALS_LOOP_ENABLED: "true",
+  MARKET_QUOTE_LOOP_ENABLED: "true",
   EXPIRY_SETTLEMENT_MODE: "apply",
   GENOSUKE_ENABLED: "true",
 };
@@ -48,11 +48,11 @@ describe("evaluateConfiguration", () => {
   });
 
   it("names every wrong value: wrong mode, a paper account id in production, a feature off", () => {
-    const result = evaluateConfiguration({ ...goodProductionEnvironment, IBKR_TRADING_MODE: "paper", IBKR_EXPECTED_ACCOUNT_ID: "DUR854038", DAY_SIGNALS_LOOP_ENABLED: "false" }, productionConfigurationExpectations);
+    const result = evaluateConfiguration({ ...goodProductionEnvironment, IBKR_TRADING_MODE: "paper", IBKR_EXPECTED_ACCOUNT_ID: "DUR854038", MARKET_QUOTE_LOOP_ENABLED: "false" }, productionConfigurationExpectations);
     expect(result.status).toBe("fail");
     expect(result.detail).toContain('IBKR_TRADING_MODE is "paper" (expected "live")');
     expect(result.detail).toContain('IBKR_EXPECTED_ACCOUNT_ID is "DUR854038"');
-    expect(result.detail).toContain('DAY_SIGNALS_LOOP_ENABLED is "false" (expected "true")');
+    expect(result.detail).toContain('MARKET_QUOTE_LOOP_ENABLED is "false" (expected "true")');
   });
 
   it("fails on a missing blocking secret, lists a missing side-feature secret beside it, and never prints a secret's value", () => {
@@ -255,30 +255,30 @@ describe("evaluateJobs and evaluateHealthCheck", () => {
 
 describe("evaluateDataChecks", () => {
   const invariants: InvariantResult[] = [
-    { name: "Today's option-chain snapshots", ok: true, detail: "9 complete" },
-    { name: "Surface fits", ok: false, detail: "no fitted expiry for AAOI" },
+    { name: "Risk-free rate", ok: true, detail: "fetched 3 day(s) ago" },
+    { name: "Daily price bars", ok: false, detail: "behind 2026-10-02: AAOI (2026-10-01)" },
     { name: "Major macro events", ok: false, detail: "captured 40 h ago" },
-    { name: "Capture universe", ok: false, detail: "no tickers to capture" },
+    { name: "Option-data universe", ok: false, detail: "no tickers to track (shortlist and open positions are both empty)" },
   ];
-  it("names the session being judged, fails only an empty capture universe and warns for every other data problem", () => {
+  it("names the session being judged, fails only an empty option-data universe and warns for every other data problem", () => {
     const checks = evaluateDataChecks(invariants, "2026-10-02");
     expect(checks.map((entry) => entry.status)).toEqual(["ok", "warn", "warn", "fail"]);
-    expect(checks[1]!.name).toBe("Data: Surface fits (2026-10-02)");
+    expect(checks[1]!.name).toBe("Data: Daily price bars (2026-10-02)");
   });
 });
 
 describe("evaluateTodaysChainStructure", () => {
   const universeSymbols = ["AAOI", "COIN", "TLT"];
-  it("passes when every capture ticker has today's structure", () => {
+  it("passes when every ticker has today's structure", () => {
     expect(evaluateTodaysChainStructure({ todayIso: "2026-10-12", universeSymbols, symbolsWithTodaysStructure: universeSymbols })).toEqual({ name: "Data: Today's chain structure (2026-10-12)", status: "ok", detail: "3 of 3 tickers have today's structure" });
   });
-  it("warns naming the tickers today's capture will skip", () => {
-    expect(evaluateTodaysChainStructure({ todayIso: "2026-10-12", universeSymbols, symbolsWithTodaysStructure: ["COIN"] })).toMatchObject({ status: "warn", detail: "today's 10:00 ET capture will skip AAOI, TLT: no chain structure stored today" });
+  it("warns naming the tickers without today's structure", () => {
+    expect(evaluateTodaysChainStructure({ todayIso: "2026-10-12", universeSymbols, symbolsWithTodaysStructure: ["COIN"] })).toMatchObject({ status: "warn", detail: "no chain structure stored today for AAOI, TLT: their contracts are listed from the last stored structure" });
   });
-  it("fails when no ticker has today's structure: today's capture would capture nothing", () => {
-    expect(evaluateTodaysChainStructure({ todayIso: "2026-10-12", universeSymbols, symbolsWithTodaysStructure: [] })).toMatchObject({ status: "fail", detail: expect.stringContaining("would capture nothing") });
+  it("only warns when no ticker has today's structure: the last stored structure still lists contracts", () => {
+    expect(evaluateTodaysChainStructure({ todayIso: "2026-10-12", universeSymbols, symbolsWithTodaysStructure: [] })).toMatchObject({ status: "warn", detail: expect.stringContaining("the 09:00 UTC structure job failed or did not run") });
   });
-  it("leaves an empty universe to the capture-universe check", () => {
+  it("leaves an empty universe to the option-data universe check", () => {
     expect(evaluateTodaysChainStructure({ todayIso: "2026-10-12", universeSymbols: [], symbolsWithTodaysStructure: [] }).status).toBe("ok");
   });
 });

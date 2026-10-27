@@ -22,7 +22,6 @@ import type { JobRunStatus } from "./jobRunStatus.js";
 const tickIntervalMs = 60_000;
 const deadlineReminderIntervalMs = 6 * 60 * 60_000;
 const monitorErrorReminderIntervalMs = 60 * 60_000;
-// 45 minutes after the capture chain starts (10:00 ET), so it has finished; kept in step with chainCaptureSlotEastern.
 const digestTime = { hour: 10, minute: 45 };
 const digestLatestTime = { hour: 16, minute: 0 };
 const runHistoryWindowMs = 36 * 60 * 60_000;

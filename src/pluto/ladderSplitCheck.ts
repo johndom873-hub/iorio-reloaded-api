@@ -1,7 +1,6 @@
 import { connectToIbkrGateway, type IbkrConnection } from "../ibkr/connectIbkr.js";
 import { topUpDailyBars } from "../ibkr/priceBarCache.js";
 import { loadPendingStockSplits, type StockSplit } from "../lib/stockSplits.js";
-import { loadPlutoSettings } from "./settingsStore.js";
 import { loadEnabledPlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // The CC + Put Ladder's split check before the open (Marcelo 2026-10-15), run by the 09:00 UTC structure job: each ladder
@@ -27,7 +26,7 @@ export interface LadderSplitCheckDependencies {
 }
 
 export const defaultLadderSplitCheckDependencies: LadderSplitCheckDependencies = {
-  loadLadderTickers: async () => ((await loadPlutoSettings()).executionStrategy === "cc_put_ladder" ? (await loadEnabledPlutoTickerSettings()).map((ticker) => ({ tickerId: ticker.tickerId, symbol: ticker.symbol })) : []),
+  loadLadderTickers: async () => (await loadEnabledPlutoTickerSettings()).map((ticker) => ({ tickerId: ticker.tickerId, symbol: ticker.symbol })),
   connect: connectToIbkrGateway,
   topUp: topUpDailyBars,
   loadPendingSplits: (tickerIds) => loadPendingStockSplits(tickerIds),

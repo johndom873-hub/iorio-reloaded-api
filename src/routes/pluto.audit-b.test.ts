@@ -12,13 +12,6 @@ vi.mock("../db/connection.js", async () => {
   return { db: knexLibrary({ client: "pg", connection: process.env.TEST_DATABASE_URL, pool: { min: 0, max: 4 } }) };
 });
 vi.mock("../lib/notifyTelegram.js", () => ({ notifyTelegram: async () => true, notifyPlutoTelegram: async () => true }));
-const watch = vi.hoisted(() => ({ calls: [] as string[][] }));
-vi.mock("../lib/daySignalsWatchStatus.js", () => ({
-  loadDaySignalsWatchStatuses: async (tickerIds: string[]) => {
-    watch.calls.push(tickerIds);
-    return { tradingDateIso: "2098-07-14", sessionOpen: true, statuses: new Map(tickerIds.map((id) => [id, { kind: "watched", pooledExpiries: ["2098-07-17"] }])) };
-  },
-}));
 
 const { db } = await import("../db/connection.js");
 const { plutoRouter } = await import("./pluto.js");
@@ -174,26 +167,5 @@ describe("GET /pluto/passes and /passes/:id — system concerns normalised", () 
     const row = list.find((entry) => entry.id === passId);
     expect(row.decisions[0].parsedOutput.system_concerns).toEqual([{ symbol: null, concern: "old string concern" }, { symbol: "SMCI", concern: "new" }]);
     expect(row.decisions[2].parsedOutput).toBeNull();
-  });
-});
-
-describe("GET /pluto/day-signals-watch", () => {
-  it("asks for every Pluto-enabled ticker on the shortlist and returns statuses keyed by ticker id", async () => {
-    const tickers = await testDb("tickers").insert([{ symbol: `AWON${suffix}` }, { symbol: `AWOF${suffix}` }, { symbol: `AWRM${suffix}` }]).returning(["id", "symbol"]);
-    tickerIds.push(...tickers.map((ticker) => ticker.id));
-    await testDb("shortlist_entries").insert([
-      { ticker_id: tickers[0].id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true },
-      { ticker_id: tickers[1].id, added_by_user_id: userId, signals_enabled: true, bot_enabled: false },
-      { ticker_id: tickers[2].id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true, removed_at: new Date() },
-    ]);
-    const { status, json } = await get("/day-signals-watch");
-    expect(status).toBe(200);
-    const asked = watch.calls.at(-1)!;
-    expect(asked).toContain(tickers[0].id);
-    expect(asked).not.toContain(tickers[1].id);
-    expect(asked).not.toContain(tickers[2].id);
-    expect(json.tradingDateIso).toBe("2098-07-14");
-    expect(json.sessionOpen).toBe(true);
-    expect(json.tickers[tickers[0].id]).toEqual({ kind: "watched", pooledExpiries: ["2098-07-17"] });
   });
 });

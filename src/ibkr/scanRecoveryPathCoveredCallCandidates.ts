@@ -1,11 +1,12 @@
 import { OptionType } from "@stoqey/ib";
 import type { IBApi } from "@stoqey/ib";
-import { db } from "../db/connection.js";
+import { blackScholesDelta } from "../lib/impliedVolatilitySurface.js";
 import type { RecoveryTargetWindow } from "../lib/recoveryTargetWindow.js";
+import { getRiskFreeRate } from "../lib/riskFreeRate.js";
+import { loadCloseImpliedVolatilities } from "../lib/volatilityScreen.js";
 import { fetchCalendarConflictContext, findCalendarConflict } from "./calendarConflict.js";
 import { daysBetween, loadStoredOptionChain, parseExpiry, type ExpiryStrikes, type OptionQuote } from "./fetchOptionChain.js";
 import { quoteContracts } from "./quoteContracts.js";
-import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 export interface CoveredCallCandidate {
   expiry: string; // YYYY-MM-DD
@@ -37,9 +38,9 @@ const maxExpiriesToScan = 2;
 const otmBandFraction = 0.4;
 const maxStrikeCandidatesPerExpiry = 50;
 
-// How far outside the delta band an archived delta may sit and the strike
-// still be quoted live — covers the intraday drift since the 10:00 ET capture.
-export const archivedDeltaMargin = 0.1;
+// How far outside the delta band an estimated delta may sit and the strike
+// still be quoted live: the estimate uses one 30-day IV for every strike and expiry.
+export const estimatedDeltaMargin = 0.1;
 
 function pickExpiriesInWindow(expirations: string[], dteMin: number, dteMax: number): string[] {
   const today = new Date();
@@ -64,39 +65,42 @@ function toIsoDate(expiryYyyymmdd: string): string {
   return `${expiryYyyymmdd.slice(0, 4)}-${expiryYyyymmdd.slice(4, 6)}-${expiryYyyymmdd.slice(6, 8)}`;
 }
 
-/** `${expiryYyyymmdd}|${strike}` → the call delta the 10:00 ET chain capture archived today. Empty when there is no capture for today. */
-export type ArchivedCallDeltas = Map<string, number>;
+/** `${expiryYyyymmdd}|${strike}` → the call delta estimated before quoting. Empty when no estimate could be made. */
+export type EstimatedCallDeltas = Map<string, number>;
 
-export function archivedCallDeltaKey(expiryYyyymmdd: string, strike: number): string {
+export function estimatedCallDeltaKey(expiryYyyymmdd: string, strike: number): string {
   return `${expiryYyyymmdd}|${strike}`;
 }
 
-async function loadArchivedCallDeltasForToday(tickerId: string): Promise<ArchivedCallDeltas> {
-  const rows: { expiry: string; strike: string; delta: string }[] = await db("option_quote_snapshots as q")
-    .join("option_chain_snapshots as s", "s.id", "q.snapshot_id")
-    .where({ "s.ticker_id": tickerId, "s.trading_date": easternIsoDate(new Date()), "q.option_right": "C" })
-    .whereIn("s.status", ["complete", "partial"])
-    .whereNotNull("q.delta")
-    .select(db.raw("to_char(q.expiry, 'YYYYMMDD') as expiry"), "q.strike", "q.delta");
-  return new Map(rows.map((row) => [archivedCallDeltaKey(row.expiry, Number(row.strike)), Number(row.delta)]));
+/**
+ * Black-Scholes call deltas at IBKR's latest 30-day implied volatility, on the forward spot × e^(rT) (Marcelo 2026-10-27,
+ * replacing the 10:00 ET capture's archived deltas). Empty without a stored IV.
+ */
+export function estimateCallDeltas(expiryStrikes: ExpiryStrikes[], input: { spotPrice: number; impliedVolatility: number | null; riskFreeRate: number; today: Date }): EstimatedCallDeltas {
+  const estimates: EstimatedCallDeltas = new Map();
+  if (input.impliedVolatility === null || !(input.impliedVolatility > 0)) return estimates;
+  for (const { expiry, strikes } of expiryStrikes) {
+    const yearsToExpiry = Math.max(daysBetween(input.today, parseExpiry(expiry)), 1) / 365;
+    const forward = input.spotPrice * Math.exp(input.riskFreeRate * yearsToExpiry);
+    for (const strike of strikes) estimates.set(estimatedCallDeltaKey(expiry, strike), blackScholesDelta(forward, strike, yearsToExpiry, input.riskFreeRate, input.impliedVolatility, true));
+  }
+  return estimates;
 }
 
 /**
- * Trims the strike band to the strikes whose delta, as archived by today's
- * chain capture, can plausibly land in the target band now (approved
- * 2026-09-24) — the far wings were pure line cost. A strike with no archived
- * delta is kept (absence is not evidence); with no archive for today at all,
- * the band is quoted in full.
+ * Trims the strike band to the strikes whose estimated delta can plausibly land in the target band (approved
+ * 2026-09-24, on the capture's deltas then) — the far wings were pure line cost. A strike with no estimate is kept
+ * (absence is not evidence); with no estimate at all, the band is quoted in full.
  */
-export function filterStrikesByArchivedCallDelta(expiryStrikes: ExpiryStrikes[], targetWindow: { deltaTargetMin: number; deltaTargetMax: number }, archived: ArchivedCallDeltas): ExpiryStrikes[] {
-  if (archived.size === 0) return expiryStrikes;
-  const lower = targetWindow.deltaTargetMin - archivedDeltaMargin;
-  const upper = targetWindow.deltaTargetMax + archivedDeltaMargin;
+export function filterStrikesByEstimatedCallDelta(expiryStrikes: ExpiryStrikes[], targetWindow: { deltaTargetMin: number; deltaTargetMax: number }, estimated: EstimatedCallDeltas): ExpiryStrikes[] {
+  if (estimated.size === 0) return expiryStrikes;
+  const lower = targetWindow.deltaTargetMin - estimatedDeltaMargin;
+  const upper = targetWindow.deltaTargetMax + estimatedDeltaMargin;
   return expiryStrikes
     .map(({ expiry, strikes }) => ({
       expiry,
       strikes: strikes.filter((strike) => {
-        const delta = archived.get(archivedCallDeltaKey(expiry, strike));
+        const delta = estimated.get(estimatedCallDeltaKey(expiry, strike));
         if (delta === undefined) return true;
         const magnitude = Math.abs(delta);
         return magnitude >= lower && magnitude <= upper;
@@ -111,7 +115,7 @@ export function filterStrikesByArchivedCallDelta(expiryStrikes: ExpiryStrikes[],
  * premium (Marcelo 2026-10-12): annualizedYield = premium / (spot − premium) × (365 / dte). Drops any
  * expiry that would leave the call open across a known earnings or
  * ex-dividend date (calendarConflict.ts). Strike grids come from the stored
- * chain (the nightly capture), quotes from quoteContracts (pool first).
+ * chain (the 09:00 UTC structure refresh), quotes from quoteContracts (pool first).
  * Used by the recovery-path projection, which only needs the top candidate.
  */
 export async function scanRecoveryPathCoveredCallCandidates(ib: IBApi, symbol: string, tickerId: string, spotPrice: number, targetWindow: RecoveryTargetWindow): Promise<CoveredCallCandidate[]> {
@@ -123,7 +127,9 @@ export async function scanRecoveryPathCoveredCallCandidates(ib: IBApi, symbol: s
   const inWindow: ExpiryStrikes[] = pickExpiriesInWindow(chain.expirations, targetWindow.dteTargetMin, targetWindow.dteTargetMax)
     .map((expiry) => ({ expiry, strikes: pickOutOfTheMoneyCallStrikes(chain.strikesByExpiry.get(expiry) ?? [], spotPrice) }))
     .filter(({ strikes }) => strikes.length > 0);
-  const expiryStrikes = filterStrikesByArchivedCallDelta(inWindow, targetWindow, await loadArchivedCallDeltasForToday(tickerId));
+  const [closeImpliedVolatilities, riskFreeRate] = await Promise.all([loadCloseImpliedVolatilities([tickerId]), getRiskFreeRate()]);
+  const estimated = estimateCallDeltas(inWindow, { spotPrice, impliedVolatility: closeImpliedVolatilities.get(tickerId) ?? null, riskFreeRate: riskFreeRate ?? 0, today: new Date() });
+  const expiryStrikes = filterStrikesByEstimatedCallDelta(inWindow, targetWindow, estimated);
   if (expiryStrikes.length === 0) return [];
 
   const [quotes, calendarContext] = await Promise.all([

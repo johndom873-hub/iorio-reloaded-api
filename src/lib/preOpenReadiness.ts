@@ -69,7 +69,7 @@ export const productionConfigurationExpectations: ConfigurationExpectation[] = [
   { name: "IBKR_TRADING_MODE", expected: "live" },
   { name: "IBKR_EXPECTED_ACCOUNT_ID", pattern: /^U\d+$/ },
   { name: "IBKR_MARKET_DATA_LINES_ENABLED", expected: "true" },
-  { name: "DAY_SIGNALS_LOOP_ENABLED", expected: "true" },
+  { name: "MARKET_QUOTE_LOOP_ENABLED", expected: "true" },
   { name: "EXPIRY_SETTLEMENT_MODE", expected: "apply", warnOnly: true },
   { name: "GENOSUKE_ENABLED", expected: "true", warnOnly: true },
   { name: "TELEGRAM_NOTIFICATIONS_DISABLED", mustBeOff: true },
@@ -252,8 +252,8 @@ export interface LatestJobRun {
   errorMessage: string | null;
 }
 
-// A job's status never blocks on its own: before the open, the latest run of most jobs is the previous day's, and today's
-// capture redoes it. What a job feeds into today's open is judged on that output instead: today's chain structure (the one
+// A job's status never blocks on its own: before the open, the latest run of most jobs is the previous day's, and that
+// day's run will redo it. What a job feeds into today's open is judged on that output instead: today's chain structure (the one
 // job that must have run today) and the live probes.
 export function evaluateJobs(latestRuns: LatestJobRun[], dueButMissing: string[]): ReadinessCheck {
   const failedRuns = latestRuns.filter((run) => run.status === "failure");
@@ -283,38 +283,38 @@ export function evaluateHealthCheck(latest: { startedAt: Date; status: JobRunSta
 
 // --- Data produced by the jobs, for the previous session ---
 
-// The only data check that stops the open: with no ticker to capture there are no Signals at all. Every other one describes a
-// past session's data (today's capture rebuilds it) or a stale input that degrades, but does not stop, today's run.
-const blockingInvariantNames = new Set(["Capture universe"]);
+// The only data check that stops the open: with no ticker on the Shortlist and no open position there is nothing to trade or
+// watch. Every other one describes a past session's data or a stale input that degrades, but does not stop, today's run.
+const blockingInvariantNames = new Set(["Option-data universe"]);
 
-/** The data checks of the morning digest, run against the session named in each check (the previous one until today's 10:00 ET capture has finished, then today). */
+/** The data checks of the morning digest, run against the last completed session. */
 export function evaluateDataChecks(invariants: InvariantResult[], dataSessionIso: string): ReadinessCheck[] {
   return invariants.map((invariant) =>
     check(`Data: ${invariant.name} (${dataSessionIso})`, invariant.ok ? "ok" : blockingInvariantNames.has(invariant.name) ? "fail" : "warn", invariant.detail),
   );
 }
 
-// --- Today's chain structure: the one input of today's 10:00 ET capture made before the open ---
+// --- Today's chain structure: the stored expiries and strike grids everything that lists contracts reads ---
 
 /**
- * The capture refuses a ticker whose stored chain structure (expiries and strike grids) is not from today, so the 09:00 UTC
- * structure job decides which tickers today's capture can take. None: no snapshot, fit, Signals or Day Signals today.
+ * The 09:00 UTC structure job stores each ticker's expiries and strike grids: the CC + Put Ladder's band, the Volatility
+ * screen's Calls and the Recovery Path list their contracts from it. A ticker without today's structure uses its last one.
  */
 export function evaluateTodaysChainStructure(input: { todayIso: string; universeSymbols: string[]; symbolsWithTodaysStructure: string[] }): ReadinessCheck {
   const name = `Data: Today's chain structure (${input.todayIso})`;
-  // An empty universe is the "Capture universe" check's failure; repeating it here would say the same thing twice.
-  if (input.universeSymbols.length === 0) return check(name, "ok", "no tickers to capture");
+  // An empty universe is the "Option-data universe" check's failure; repeating it here would say the same thing twice.
+  if (input.universeSymbols.length === 0) return check(name, "ok", "no tickers to track");
   const missing = input.universeSymbols.filter((symbol) => !input.symbolsWithTodaysStructure.includes(symbol));
   if (missing.length === input.universeSymbols.length) {
-    return check(name, "fail", `no ticker has today's chain structure, so today's 10:00 ET capture would capture nothing (the 09:00 UTC structure job failed or did not run)`);
+    return check(name, "warn", `no ticker has today's chain structure (the 09:00 UTC structure job failed or did not run): contracts are listed from the last stored structure, so new expiries are missing`);
   }
-  if (missing.length > 0) return check(name, "warn", `today's 10:00 ET capture will skip ${missing.join(", ")}: no chain structure stored today`);
+  if (missing.length > 0) return check(name, "warn", `no chain structure stored today for ${missing.join(", ")}: their contracts are listed from the last stored structure`);
   return check(name, "ok", `${input.universeSymbols.length} of ${input.universeSymbols.length} tickers have today's structure`);
 }
 
 // --- Market data ---
 
-/** How long a readiness probe waits for a fresh line's full quote: above the option-chain capture's 8 s per-contract cutoff, since delta arrives last. */
+/** How long a readiness probe waits for a fresh line's full quote; delta arrives last. */
 export const readinessQuoteWaitMs = 10_000;
 
 export interface QuoteProbe {
@@ -354,7 +354,7 @@ export function evaluateMarketData(figures: MarketDataFigures, stage: ReadinessS
     else if (hasTwoSidedQuote(option) && option.delta !== null) checks.push(check("Live option quote", "ok", `${option.symbol} option bid ${option.bid} / ask ${option.ask}, delta ${option.delta.toFixed(2)}`));
     // Only an answer from IBKR can blame the account's option data; a quote that is merely slow or shed says nothing about it.
     else if (option.ibkrError) checks.push(check("Live option quote", "fail", `IBKR refused the ${option.symbol} option quote (code ${option.ibkrError.code}: ${option.ibkrError.message})`));
-    else if (option.paused) checks.push(check("Live option quote", "warn", `not tested: the ${option.symbol} option probe was paused because the market-data line budget was full (the option-chain capture holds most lines while it runs)`));
+    else if (option.paused) checks.push(check("Live option quote", "warn", `not tested: the ${option.symbol} option probe was paused because the market-data line budget was full`));
     else if (!hasTwoSidedQuote(option)) checks.push(check("Live option quote", "fail", `no two-sided ${option.symbol} option quote within ${readinessQuoteWaitMs / 1000} s (IBKR returned no error)`));
     else checks.push(check("Live option quote", "fail", `the ${option.symbol} option quotes but has no live delta: the delta band cannot be checked, so opening orders would be blocked`));
   }

@@ -1,6 +1,6 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
-import { formatExpiryAsIsoDate } from "./optionChainSnapshotStore.js";
+import { formatExpiryAsIsoDate } from "./expiryFormat.js";
 import { isOptionPastExpiry } from "./optionExpiryClock.js";
 
 // IBKR's portfolio mark exists only for an option that still has value at expiry; one that expires worthless comes

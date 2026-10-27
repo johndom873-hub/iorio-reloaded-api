@@ -2,8 +2,6 @@ import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { isoDateFromDbDate } from "../lib/dbDate.js";
 import type { PlutoReadinessRecord } from "./readiness.js";
-import { describeExecutionStrategyBlock } from "./executionStrategies.js";
-import type { PlutoExecutionStrategy } from "./settingsStore.js";
 
 // Pluto's runtime state: one row (pluto_state). Mode is off/on (Marcelo, 2026-09-28: no
 // other modes). Pause is a separate flag that overrides everything: manual (either user),
@@ -67,10 +65,8 @@ export async function loadPlutoState(connection: Knex = db): Promise<PlutoState>
   return rowToState(row);
 }
 
-/** Pure: may Pluto act right now? The single answer every gate and the screen agree on. The strategy, when given, must be built. */
-export function describePlutoBlock(state: PlutoState, executionStrategy?: PlutoExecutionStrategy): string | null {
-  const strategyBlock = executionStrategy === undefined ? null : describeExecutionStrategyBlock(executionStrategy);
-  if (strategyBlock) return strategyBlock;
+/** Pure: may Pluto act right now? The single answer every gate and the screen agree on. */
+export function describePlutoBlock(state: PlutoState): string | null {
   if (state.mode !== "on") return "Pluto is off.";
   const tripped = Object.entries(state.breakers);
   if (tripped.length > 0) return `Circuit breaker tripped: ${tripped.map(([name, trip]) => `${name} (${trip.detail})`).join("; ")}. Needs a human reset.`;
@@ -84,21 +80,9 @@ export async function setPlutoStressOverride(dateIso: string | null, userId: str
   return loadPlutoState();
 }
 
-/** Switching on is refused while the selected strategy is not built. */
 export async function setPlutoMode(mode: PlutoMode): Promise<PlutoState> {
-  return db.transaction(async (trx) => {
-    if (mode === "on") await refuseUnbuiltStrategy(trx);
-    await trx("pluto_state").where({ id: 1 }).update({ mode, updated_at: trx.fn.now() });
-    return loadPlutoState(trx);
-  });
-}
-
-/** Locks the state row first, as a strategy switch does (updatePlutoSettings), so a switch and a Resume or switch-on cannot cross. */
-async function refuseUnbuiltStrategy(trx: Knex.Transaction): Promise<void> {
-  await trx("pluto_state").where({ id: 1 }).forUpdate().first("id");
-  const settings = await trx("pluto_settings").where({ id: 1 }).first("execution_strategy");
-  const block = settings ? describeExecutionStrategyBlock(settings.execution_strategy as PlutoExecutionStrategy) : null;
-  if (block) throw new PlutoStateError(block);
+  await db("pluto_state").where({ id: 1 }).update({ mode, updated_at: db.fn.now() });
+  return loadPlutoState();
 }
 
 export async function pausePluto(kind: PlutoPauseKind, options: { userId?: string; breakerName?: string } = {}): Promise<PlutoState> {
@@ -110,7 +94,6 @@ export async function pausePluto(kind: PlutoPauseKind, options: { userId?: strin
 /** Lifts a manual / deploy / crash-loop / readiness pause. Refuses while a breaker is tripped: reset the breaker first. */
 export async function resumePluto(userId: string): Promise<PlutoState> {
   return db.transaction(async (trx) => {
-    await refuseUnbuiltStrategy(trx);
     const current = await loadPlutoState(trx);
     if (Object.keys(current.breakers).length > 0) throw new PlutoStateError("A circuit breaker is tripped — reset it before resuming.");
     await trx("pluto_state").where({ id: 1 }).update({ paused: false, pause_reason: null, paused_by_user_id: userId, paused_at: trx.fn.now(), updated_at: trx.fn.now() });

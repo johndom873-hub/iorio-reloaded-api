@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chainCaptureSlotEastern, evaluateJobDeadlines, evaluatePendingJobs, expectedScheduledJobs, runFallsInSlot, type JobRunSummary } from "./jobDeadlines.js";
-import { isWithinChainCaptureClockWindow } from "./optionChainCaptureClock.js";
-import { easternInstant } from "./marketSessionStatus.js";
+import { evaluateJobDeadlines, evaluatePendingJobs, expectedScheduledJobs, runFallsInSlot, type JobRunSummary } from "./jobDeadlines.js";
 import { easternIsoDate } from "./easternIsoDate.js";
 
 const utc = (iso: string) => new Date(iso);
@@ -37,23 +35,6 @@ describe("evaluateJobDeadlines", () => {
     expect(problems).toContain("deadline:expiry_settlement_audit:2026-10-03");
     expect(problems).toContain("deadline:daily_calendar_capture:2026-10-03");
     expect(problems.some((key) => key.includes("daily_market_data_capture"))).toBe(false);
-  });
-
-  it("judges the option-chain chain at 10:35 ET in summer time (14:35 UTC)", () => {
-    expect(keys(evaluate("2026-10-01T14:34:00Z", [recentHealthCheck("2026-10-01T14:34:00Z")])).filter((key) => key.includes("option_chain_capture"))).toEqual([]);
-    expect(keys(evaluate("2026-10-01T14:36:00Z", [recentHealthCheck("2026-10-01T14:36:00Z")]))).toContain("deadline:option_chain_capture:2026-10-01");
-  });
-
-  it("judges the option-chain chain at 10:35 ET in winter time (15:35 UTC)", () => {
-    expect(keys(evaluate("2026-12-01T15:34:00Z", [recentHealthCheck("2026-12-01T15:34:00Z")])).filter((key) => key.includes("option_chain_capture"))).toEqual([]);
-    expect(keys(evaluate("2026-12-01T15:36:00Z", [recentHealthCheck("2026-12-01T15:36:00Z")]))).toContain("deadline:option_chain_capture:2026-12-01");
-  });
-
-  it("does not require the fit and seed until 11:00 ET (they follow the capture and its retry rounds)", () => {
-    const now = "2026-10-01T14:42:00Z";
-    const problems = keys(evaluate(now, [recentHealthCheck(now), run("option_chain_capture", "2026-10-01T14:00:10Z")]));
-    expect(problems.filter((key) => key.includes("option_chain_capture") || key.includes("option_surface_fit") || key.includes("day_signals_seed"))).toEqual([]);
-    expect(keys(evaluate("2026-10-01T15:01:00Z", [recentHealthCheck("2026-10-01T15:01:00Z"), run("option_chain_capture", "2026-10-01T14:00:10Z")]))).toEqual(expect.arrayContaining(["deadline:option_surface_fit:2026-10-01", "deadline:day_signals_seed:2026-10-01"]));
   });
 
   it("reports a run stuck in running past its normal duration", () => {
@@ -104,35 +85,19 @@ describe("stuck runs and slot windows", () => {
     expect(runFallsInSlot(job, "2026-10-01", new Date("2026-10-01T22:04:00Z"))).toBe(true);
     expect(runFallsInSlot(job, "2026-10-01", new Date("2026-10-02T22:00:05Z"))).toBe(false);
     expect(runFallsInSlot(job, "2026-10-01", new Date("2026-10-01T10:00:00Z"))).toBe(false);
-    const capture = expectedScheduledJobs.find((candidate) => candidate.jobName === "option_chain_capture")!;
-    expect(runFallsInSlot(capture, "2026-10-01", new Date("2026-10-01T14:00:10Z"))).toBe(true);
-    expect(runFallsInSlot(capture, "2026-10-01", new Date("2026-10-02T14:00:10Z"))).toBe(false);
-  });
-});
-
-describe("the monitor's capture slot follows the clock guard", () => {
-  // jobDeadlines.ts and optionChainCaptureClock.ts each hold the capture time. If one is changed alone the monitor
-  // would alert about a slot the capture no longer runs in (or stay silent about the real one): fail loudly instead.
-  it("the guard's window opens exactly at the monitor's slot, in summer and in winter time", () => {
-    for (const dateIso of ["2026-07-15", "2026-12-15", "2026-03-09", "2026-11-02"]) {
-      const slot = easternInstant(dateIso, chainCaptureSlotEastern.hour, chainCaptureSlotEastern.minute);
-      expect(isWithinChainCaptureClockWindow(new Date(slot.getTime() - 60_000))).toBe(false);
-      expect(isWithinChainCaptureClockWindow(new Date(slot.getTime() + 60_000))).toBe(true);
-    }
   });
 });
 
 describe("evaluatePendingJobs", () => {
   const pending = (now: string, runs: JobRunSummary[], isOpenDay = true) => evaluatePendingJobs({ now: utc(now), runs, isOpenDay: () => isOpenDay, easternDateIsoOf: easternIsoDate });
 
-  it("lists the capture chain between its slot and its deadline when it has not started, and nothing once it has", () => {
-    // 10:45 ET summer = 14:45 UTC: capture slot 10:00 (deadline 10:35 passed -> a problem, not pending); fit/seed deadline 11:00 -> pending
-    expect(pending("2026-10-01T14:45:00Z", [run("option_chain_capture", "2026-10-01T14:00:10Z")])).toEqual(["option_surface_fit", "day_signals_seed"]);
-    expect(pending("2026-10-01T14:45:00Z", [run("option_chain_capture", "2026-10-01T14:00:10Z"), run("option_surface_fit", "2026-10-01T14:10:00Z"), run("day_signals_seed", "2026-10-01T14:10:30Z")])).toEqual([]);
+  it("lists the 9:00 UTC jobs between their slot and their deadline when they have not started, and nothing once they have", () => {
+    expect(pending("2026-10-01T09:05:00Z", [])).toEqual(["option_chain_structure_refresh", "session_close_read", "ladder_split_check"]);
+    expect(pending("2026-10-01T09:05:00Z", [run("option_chain_structure_refresh", "2026-10-01T09:00:04Z"), run("session_close_read", "2026-10-01T09:00:02Z"), run("ladder_split_check", "2026-10-01T09:03:00Z")])).toEqual([]);
   });
 
   it("lists nothing before the slot has begun, on closed days, or for evening jobs at 10:45 ET", () => {
-    expect(pending("2026-10-01T13:50:00Z", [])).not.toContain("option_chain_capture");
+    expect(pending("2026-10-01T08:50:00Z", [])).not.toContain("option_chain_structure_refresh");
     // On a closed day no market-days-only job is expected, so none can be pending (every-day jobs are not due yet at 14:45 UTC either).
     expect(pending("2026-10-03T14:45:00Z", [], false)).toEqual([]);
     expect(pending("2026-10-01T14:45:00Z", [])).not.toContain("daily_pnl_snapshot");

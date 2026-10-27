@@ -10,30 +10,27 @@ import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { readGitSha } from "../lib/readGitSha.js";
 import { plutoAgentHolderHeader, type PlutoAgentLease } from "./agentLease.js";
 import type { PlutoConfig } from "./config.js";
-import { labelExpiredCandidateOutcomes } from "./candidateOutcomes.js";
 import { loadWorkingPlutoOrders, watchPlutoOrder } from "./executor.js";
 import { closeAbandonedPlutoPasses, recordPlutoEvent, type PlutoTrigger } from "./ledger.js";
 import { PlutoMarketWatch } from "./marketWatch.js";
-import { PlutoRoundFailedAfterModelCallError, runPlutoPass, type PassRequest, type PassRunnerContext } from "./passRunner.js";
+import { runPlutoPass, type PassRequest, type PassRunnerContext } from "./passRunner.js";
 import { advanceOpeningLook, decideOpeningLook, type OpeningLookDecision, type OpeningLookProgress } from "./openingLook.js";
 import { forcedRoundRetryDelayMs, recordRoundOutcome, roundFailureAlertText, roundFailureRecoveryText, shouldRetryForcedRound, type RoundFailureState } from "./roundFailures.js";
 import { resolvePlutoSession } from "./sessionSchedule.js";
-import { ladderOnlySettingsFields, loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
-import { plutoTickerSettingsColumns } from "./tickerSettingsStore.js";
+import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { assemblePlutoReadinessResults, decidePlutoReadinessRun, describePlutoReadinessOutcome, reusableProbeResults, runPlutoReadinessTests } from "./readiness.js";
 import { createPlutoReadinessProbes } from "./readinessProbes.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, recordPlutoRelease, savePlutoReadiness } from "./stateStore.js";
-import { findNewlyQuotedContracts, loadTodaysDaySignalQuoteStamps, rememberAnalysed } from "./daySignalsWatermark.js";
+import { findNewlyQuotedContracts, hasTodaysBandQuotes, loadTodaysBandQuoteStamps, rememberAnalysed } from "./bandQuoteWatermark.js";
 import { isInsideTradingWindow } from "./systemChecks.js";
 import { easternIsoDate, easternMinutesOfDay } from "../lib/easternIsoDate.js";
-import { hasDaySignalsSeedFinished } from "../lib/daySignalsStore.js";
 
 // The Pluto agent process (design round 4, 2026-09-28; loop redesigned 2026-10-06):
 //   - boot: crash-loop and deploy detection pause the agent before it can act;
 //   - a 45 s heartbeat row (worker_health, process_name "pluto_agent") for the screen;
 //   - a 60 s housekeeping tick: settings, state, the watched stock lines, the opening analysis;
 //   - a 60 s readiness tick: the pre-open check (readiness.ts) on the platform readiness timetable;
-//   - one continuous loop: every daySignalsPollSeconds it reads the Day Signals table and analyses the tickers whose
+//   - one continuous loop: every daySignalsPollSeconds it reads the ladder band quotes and analyses the tickers whose
 //     contracts carry a quote newer than the one Pluto last analysed; events that change a decision without a new
 //     quote (an order ending, a cooldown ending, a position closing, a settings change) queue a forced round;
 //   - rounds run one at a time, never overlapping; order watches outlive their round.
@@ -46,7 +43,7 @@ const connectionGraceMs = 2 * 60_000;
 export const plutoProcessName = "pluto_agent";
 
 // Settings that shape how Pluto operates but never what it would decide: changing only these does
-// not warrant a forced pass (and its model call).
+// not warrant a forced round.
 export const settingsFieldsThatNeverChangeADecision = new Set([
   "telegramVerbosity", "crashLoopRestartsPerHour", "messageRateLimitPerSecond", "burstLines", "burstSettleSeconds",
   "daySignalsPollSeconds", "callTimeoutSeconds", "maxEnabledTickers", "promptVersion",
@@ -61,7 +58,7 @@ export class PlutoAgent {
   private timers: ReturnType<typeof setInterval>[] = [];
   private unsubscribeNotifications: (() => void) | null = null;
   private stopMemoryMonitor: (() => void) | null = null;
-  /** quoted_at last analysed, per Day Signals contract. */
+  /** quoted_at last analysed, per band contract. */
   private readonly lastAnalysedQuotedAtMs = new Map<string, number>();
   /** Forced rounds waiting for the loop, in arrival order; null symbols = every allowed ticker. */
   private readonly forcedRounds: { trigger: PlutoTrigger; detail: Record<string, unknown>; symbols: string[] | null; retried?: boolean }[] = [];
@@ -106,11 +103,7 @@ export class PlutoAgent {
     this.marketWatch = new PlutoMarketWatch({} as PlutoSettings);
     this.context = {
       api: this.api,
-      openRouterApiKey: config.openRouterApiKey,
       marketWatch: this.marketWatch,
-      lastFingerprintBySymbol: new Map(),
-      lastModelEvaluationAtBySymbol: new Map(),
-      lastHeldShareCallAttemptAtBySymbol: new Map(),
       trackWatch: (promise, orderId, symbol) => {
         this.watches.add(promise);
         this.watchedOrderIds.add(orderId);
@@ -153,8 +146,7 @@ export class PlutoAgent {
       }
       if (notification.type !== "pluto_event" || notification.eventType !== "settings_changed") return;
       const fields = ((notification.payload.fields as { field: string }[] | undefined) ?? []).map((change) => change.field);
-      const ladderFieldsChangeNothing = (this.settings?.executionStrategy ?? "edge_margin") === "edge_margin";
-      if (fields.length > 0 && fields.every((field) => settingsFieldsThatNeverChangeADecision.has(field) || (ladderFieldsChangeNothing && (ladderOnlySettingsFields.has(field) || field in plutoTickerSettingsColumns)))) return;
+      if (fields.length > 0 && fields.every((field) => settingsFieldsThatNeverChangeADecision.has(field))) return;
       this.queueForcedRound("settings_changed", { fields, by: notification.payload.by ?? null }, null);
     });
     await this.housekeeping();
@@ -229,7 +221,7 @@ export class PlutoAgent {
 
   private async isAllowedToAct(): Promise<{ allowed: boolean; reason: string | null; window: TradingWindowClock }> {
     const window = await this.readTradingWindow();
-    const block = describePlutoBlock(await loadPlutoState(), this.settings?.executionStrategy);
+    const block = describePlutoBlock(await loadPlutoState());
     if (block) return { allowed: false, reason: block, window };
     return { allowed: true, reason: null, window };
   }
@@ -288,7 +280,6 @@ export class PlutoAgent {
       this.settings = await loadPlutoSettings();
       this.marketWatch.updateSettings(this.settings);
       await this.adoptWorkingOrders();
-      await this.labelCandidateOutcomesOncePerDay();
       const { allowed, window } = await this.isAllowedToAct();
       const insideWindow = window.insideWindow;
       this.tradingWindow = window;
@@ -358,20 +349,6 @@ export class PlutoAgent {
     }
   }
 
-  private outcomesLabelledFor: string | null = null;
-  /** Hold-to-expiry labels for every candidate offered in past passes, once the expiry has settled (backtest data). */
-  private async labelCandidateOutcomesOncePerDay(): Promise<void> {
-    const todayIso = easternIsoDate(new Date());
-    if (this.outcomesLabelledFor === todayIso) return;
-    this.outcomesLabelledFor = todayIso;
-    try {
-      const result = await labelExpiredCandidateOutcomes();
-      if (result.labelled > 0 || result.missingBars.length > 0) console.log(`Pluto: labelled ${result.labelled} candidate outcome(s), ${result.pending} pending expiry${result.missingBars.length > 0 ? `, no bar for ${result.missingBars.join(", ")}` : ""}.`);
-    } catch (error) {
-      console.warn(`Pluto: candidate outcome labelling failed — ${error instanceof Error ? error.message : error}`);
-    }
-  }
-
   /**
    * Orders IBKR may still be working that no watch in this process covers — after a restart, or a
    * deploy mid-session. Each gets a watch with its original clock, so the unfilled-cancel timeout and
@@ -399,7 +376,7 @@ export class PlutoAgent {
   }
 
   /**
-   * The opening look, once today's Day Signals seed has finished (openingLook.ts). The progress is in memory on purpose: after
+   * The opening look, once today's band quotes are in (openingLook.ts). The progress is in memory on purpose: after
    * a restart or a deploy the look runs once more, which is what a new process wants (it has seen nothing yet today).
    */
   private async queueOpeningLookIfDue(): Promise<void> {
@@ -407,9 +384,9 @@ export class PlutoAgent {
     const now = new Date();
     const todayIso = easternIsoDate(now);
     if (this.openingLook.doneFor === todayIso && this.openingLook.incompleteFor !== todayIso) return;
-    const decision = decideOpeningLook({ todayIso, nowEtMinutes: easternMinutesOfDay(now), seedFinished: await hasDaySignalsSeedFinished(todayIso), progress: this.openingLook });
+    const decision = decideOpeningLook({ todayIso, nowEtMinutes: easternMinutesOfDay(now), dataReady: await hasTodaysBandQuotes(now), progress: this.openingLook });
     if (decision === "wait" || decision === "done") return;
-    const detail = decision === "run_after_late_seed" ? { date: todayIso, afterLateSeed: true } : decision === "run_incomplete" ? { date: todayIso, dataIncomplete: true, reason: "today's Day Signals seed had not finished by 10:30 ET" } : { date: todayIso };
+    const detail = decision === "run_after_late_seed" ? { date: todayIso, afterLateSeed: true } : decision === "run_incomplete" ? { date: todayIso, dataIncomplete: true, reason: "the market quote loop had not quoted today's band by 10:30 ET" } : { date: todayIso };
     const announcement = `${todayIso}:${decision}`;
     if (this.analysisStartedAnnouncedFor !== announcement) {
       await recordPlutoEvent("analysis_started", { date: todayIso, data: decision === "run_incomplete" ? "incomplete" : decision === "run_after_late_seed" ? "complete_after_early_start" : "complete" });
@@ -426,10 +403,10 @@ export class PlutoAgent {
   private async completeOpeningLook(pending: { todayIso: string; decision: OpeningLookDecision }): Promise<void> {
     this.openingLook = advanceOpeningLook(this.openingLook, pending.todayIso, pending.decision);
     const quietly = (step: Promise<unknown>) => step.catch((error) => console.warn(`Pluto: opening-look message failed — ${error instanceof Error ? error.message : error}`));
-    if (pending.decision === "run_after_late_seed") await quietly(notifyPlutoTelegram("✅ Pluto: today's Day Signals data is ready now, and Pluto has run its full opening analysis."));
+    if (pending.decision === "run_after_late_seed") await quietly(notifyPlutoTelegram("✅ Pluto: today's ladder quotes are in now, and Pluto has run its full opening analysis."));
     if (pending.decision === "run_incomplete") {
-      await quietly(recordPlutoEvent("warning", { message: "opening look on incomplete data: today's Day Signals seed had not finished by 10:30 ET; one more full round follows once it finishes" }));
-      await quietly(notifyPlutoTelegram("⚠️ Pluto: today's Day Signals data was not ready by 10:30 ET (it is normally ready by about 10:07), so Pluto's opening analysis ran on incomplete data. Check the 10:00 option-chain capture. Pluto runs a full analysis once the data is ready."));
+      await quietly(recordPlutoEvent("warning", { message: "opening look on incomplete data: the market quote loop had not quoted today's band by 10:30 ET; one more full round follows once it does" }));
+      await quietly(notifyPlutoTelegram("⚠️ Pluto: today's ladder quotes were not in by 10:30 ET, so Pluto's opening analysis ran on incomplete data. Check the market quote loop on System Health. Pluto runs a full analysis once the quotes are in."));
     }
   }
 
@@ -443,7 +420,7 @@ export class PlutoAgent {
     }
   }
 
-  /** Queues a round that runs even without a new Day Signals quote, and wakes the loop. */
+  /** Queues a round that runs even without a new band quote, and wakes the loop. */
   private queueForcedRound(trigger: PlutoTrigger, detail: Record<string, unknown>, symbols: string[] | null, retried = false): void {
     if (this.stopped) return;
     // One pending "every ticker" round already covers any later one.
@@ -510,11 +487,11 @@ export class PlutoAgent {
       if (forced.trigger === "opening_analysis" && this.pendingOpeningLook) {
         const pending = this.pendingOpeningLook;
         this.pendingOpeningLook = null;
-        // Done only if the look really looked: a round stopped at the system checks analysed nothing (housekeeping
-        // re-queues it); one that failed after its model call did look, and its call must not be paid twice.
-        if ((result === "completed") || result === "failed_after_model_call") await this.completeOpeningLook(pending);
+        // Done only if the look really looked: a round stopped at the system checks, or one that failed, analysed nothing
+        // (housekeeping re-queues it).
+        if (result === "completed") await this.completeOpeningLook(pending);
       }
-      if (result !== "failed_before_model_call") return;
+      if (result !== "failed") return;
       if (shouldRetryForcedRound(forced)) {
         const timer = setTimeout(() => {
           this.retryTimers.delete(timer);
@@ -527,29 +504,29 @@ export class PlutoAgent {
       }
       return;
     }
-    const newlyQuoted = findNewlyQuotedContracts(await loadTodaysDaySignalQuoteStamps(), this.lastAnalysedQuotedAtMs);
+    const newlyQuoted = findNewlyQuotedContracts(await loadTodaysBandQuoteStamps(), this.lastAnalysedQuotedAtMs);
     if (newlyQuoted.symbols.length === 0) return;
     await this.runRoundSafely({ trigger: "day_signals_update", triggerDetail: { symbols: newlyQuoted.symbols, contracts: newlyQuoted.contractCount }, symbols: newlyQuoted.symbols, force: false });
     rememberAnalysed(newlyQuoted.stamps, this.lastAnalysedQuotedAtMs);
   }
 
   /**
-   * Runs one round. "completed" covers skipped rounds, except one stopped at the system checks; a failure is "before" or
-   * "after" the model call (only the first may be retried). Three failures in a row alert once (roundFailures.ts).
+   * Runs one round. "completed" covers skipped rounds, except one stopped at the system checks. Three failures in a row
+   * alert once (roundFailures.ts).
    */
-  private async runRoundSafely(request: PassRequest): Promise<"completed" | "skipped_on_system_checks" | "failed_before_model_call" | "failed_after_model_call"> {
+  private async runRoundSafely(request: PassRequest): Promise<"completed" | "skipped_on_system_checks" | "failed"> {
     if (this.stopped) return "completed";
     // Not while another agent holds the lease (this process stops when it learns that), nor while the renewal cannot reach the database.
-    if (this.lease && !(await this.lease.confirmHeld())) return "failed_before_model_call";
-    let result: "completed" | "skipped_on_system_checks" | "failed_before_model_call" | "failed_after_model_call" = "completed";
+    if (this.lease && !(await this.lease.confirmHeld())) return "failed";
+    let result: "completed" | "skipped_on_system_checks" | "failed" = "completed";
     try {
       const summary = await runPlutoPass(request, this.context);
       if (summary.skippedOnSystemChecks) result = "skipped_on_system_checks";
-      console.log(`Pluto round ${summary.passId} (${request.trigger}): ${summary.modelCalled ? `model called → ${summary.outcome}` : `no model call — ${summary.skippedReason}`}`);
+      console.log(`Pluto round ${summary.passId} (${request.trigger}): ${summary.outcome ?? `nothing sent — ${summary.skippedReason}`}`);
     } catch (error) {
-      result = error instanceof PlutoRoundFailedAfterModelCallError ? "failed_after_model_call" : "failed_before_model_call";
+      result = "failed";
       console.error(`Pluto round failed: ${error instanceof Error ? error.stack ?? error.message : error}`);
-      await recordPlutoEvent("warning", { message: `analysis round failed${result === "failed_after_model_call" ? " after its model call" : ""}: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
+      await recordPlutoEvent("warning", { message: `analysis round failed: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
     }
     const completed = result === "completed" || result === "skipped_on_system_checks";
     const outcome = recordRoundOutcome(this.roundFailures, completed);

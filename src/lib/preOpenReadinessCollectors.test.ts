@@ -50,6 +50,8 @@ const mocks = vi.hoisted(() => {
     fetchTradingHalt: vi.fn(),
     loadLatestRunPerExpectedJob: vi.fn(),
     findDeadlineProblems: vi.fn(),
+    loadOptionDataUniverse: vi.fn(),
+    loadStoredOptionChain: vi.fn(),
   };
 });
 
@@ -71,6 +73,8 @@ vi.mock("./undeliveredAlerts.js", () => ({ loadUndeliveredAlerts: mocks.loadUnde
 vi.mock("./tradingSettingsStore.js", () => ({ loadTradingSettingsForEditing: mocks.loadTradingSettingsForEditing }));
 vi.mock("./platformControls.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("./platformControls.js")>()), fetchTradingHalt: mocks.fetchTradingHalt }));
 vi.mock("./opsMonitor.js", () => ({ loadLatestRunPerExpectedJob: mocks.loadLatestRunPerExpectedJob, findDeadlineProblems: mocks.findDeadlineProblems }));
+vi.mock("./optionDataUniverse.js", () => ({ loadOptionDataUniverse: mocks.loadOptionDataUniverse }));
+vi.mock("../ibkr/fetchOptionChain.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("../ibkr/fetchOptionChain.js")>()), loadStoredOptionChain: mocks.loadStoredOptionChain }));
 
 const now = new Date("2026-10-05T10:00:00Z");
 const probeContract: ProbeContract = { symbol: "SPY", expiryYyyymmdd: "20261120", strike: 500, right: "P", bid: 1.234 };
@@ -82,7 +86,7 @@ function healthyDependencies(overrides: Partial<ReadinessDependencies> = {}): Re
   return {
     calls,
     appEnvironment: "production",
-    readEnvironment: () => ({ ...secrets, APP_ENVIRONMENT: "production", IBKR_TRADING_MODE: "live", IBKR_EXPECTED_ACCOUNT_ID: "U21518308", IBKR_MARKET_DATA_LINES_ENABLED: "true", DAY_SIGNALS_LOOP_ENABLED: "true", EXPIRY_SETTLEMENT_MODE: "apply", GENOSUKE_ENABLED: "true" }),
+    readEnvironment: () => ({ ...secrets, APP_ENVIRONMENT: "production", IBKR_TRADING_MODE: "live", IBKR_EXPECTED_ACCOUNT_ID: "U21518308", IBKR_MARKET_DATA_LINES_ENABLED: "true", MARKET_QUOTE_LOOP_ENABLED: "true", EXPIRY_SETTLEMENT_MODE: "apply", GENOSUKE_ENABLED: "true" }),
     loadWorkerRow: async () => ({ updatedAt: new Date(now.getTime() - 20_000), connected: true, appEnvironment: "production", accountBindingStatus: "ok", accountBindingReason: null, ibkrAccountIds: ["U21518308"], detectedTradingMode: "live", configuredTradingMode: "live", gitSha: "abc1234" }),
     loadSettings: async () => ({ maxOrderPctOfPortfolio: 15, maxConcentrationPerTickerPct: 20, minCashReservePct: 5, deltaTargetMin: 0.2, deltaTargetMax: 0.4, recoveryDteMin: 1, recoveryDteMax: 14, minAnnualizedYieldPct: 50, commissionWarnSharePctOfPremium: 5 }),
     loadTradingHalt: async () => ({ enabled: false, reason: null, setByUserId: null, setByDisplayName: null, setAt: null }),
@@ -216,9 +220,9 @@ describe("collectReadinessChecks", () => {
   });
 
   it("passes the data session to the data checks and names it", async () => {
-    const dependencies = healthyDependencies({ dataSessionIso: async () => "2026-10-02", loadDataInvariants: async (_now, previousSession) => [{ name: "Surface fits", ok: previousSession === "2026-10-02", detail: `for ${previousSession}` }] });
+    const dependencies = healthyDependencies({ dataSessionIso: async () => "2026-10-02", loadDataInvariants: async (_now, previousSession) => [{ name: "Daily price bars", ok: previousSession === "2026-10-02", detail: `for ${previousSession}` }] });
     const checks = await collectReadinessChecks("pre_open", now, dependencies);
-    expect(checks.find((entry) => entry.name.startsWith("Data:"))).toMatchObject({ name: "Data: Surface fits (2026-10-02)", status: "ok", detail: "for 2026-10-02" });
+    expect(checks.find((entry) => entry.name.startsWith("Data:"))).toMatchObject({ name: "Data: Daily price bars (2026-10-02)", status: "ok", detail: "for 2026-10-02" });
   });
 });
 
@@ -348,22 +352,29 @@ describe("createDefaultReadinessDependencies", () => {
   });
 
   describe("loadProbeContract", () => {
-    it("is null when no stored chain has a put expiring more than 5 days out with a bid", async () => {
-      mocks.state.resultsByTable["option_quote_snapshots as q"] = undefined;
+    const ticker = (symbol: string) => ({ tickerId: `id-${symbol}`, symbol, companyName: null, contractId: 1 });
+    const chain = (strikesByExpiry: Record<string, number[]>) => ({ expirations: Object.keys(strikesByExpiry), strikesByExpiry: new Map(Object.entries(strikesByExpiry)) });
+
+    it("is null when no ticker has a stored expiry more than 5 days out", async () => {
+      mocks.loadOptionDataUniverse.mockResolvedValue([ticker("COIN")]);
+      mocks.loadStoredOptionChain.mockResolvedValue(chain({ "20200117": [90, 95, 100] }));
+      mocks.state.resultsByTable.daily_price_bars = { close: "100" };
       expect(await createDefaultReadinessDependencies().loadProbeContract()).toBeNull();
     });
 
-    it("maps the stored put to a probe contract with numeric strike and bid", async () => {
-      mocks.state.resultsByTable["option_quote_snapshots as q"] = { symbol: "SPY", strike: "500.00", bid: "1.2300", expiryYyyymmdd: "20261120" };
-      expect(await createDefaultReadinessDependencies().loadProbeContract()).toEqual({ symbol: "SPY", expiryYyyymmdd: "20261120", strike: 500, right: "P", bid: 1.23 });
+    it("is null when the ticker has no daily close", async () => {
+      mocks.loadOptionDataUniverse.mockResolvedValue([ticker("COIN")]);
+      mocks.loadStoredOptionChain.mockResolvedValue(chain({ "20991120": [90, 95, 100] }));
+      mocks.state.resultsByTable.daily_price_bars = undefined;
+      expect(await createDefaultReadinessDependencies().loadProbeContract()).toBeNull();
     });
 
-    it("looks for puts expiring more than 5 days out that have a bid, newest snapshot day first and highest open interest first", async () => {
-      await createDefaultReadinessDependencies().loadProbeContract();
-      const [query] = queriesOn("option_quote_snapshots as q");
-      expect(operationArgs(query!, "where")).toEqual([["q.option_right", "P"], ["q.bid", ">", 0]]);
-      expect(operationArgs(query!, "whereRaw")).toEqual([["q.expiry > current_date + 5"]]);
-      expect(operationArgs(query!, "orderBy")).toEqual([[[{ column: "s.trading_date", order: "desc" }, { column: "q.open_interest", order: "desc", nulls: "last" }]]]);
+    it("takes SPY first, its earliest expiry more than 5 days out and the strike nearest 95% of the last close", async () => {
+      mocks.loadOptionDataUniverse.mockResolvedValue([ticker("COIN"), ticker("SPY")]);
+      mocks.loadStoredOptionChain.mockResolvedValue(chain({ "20200117": [480], "20991218": [470, 475, 480], "20991120": [470, 476, 480] }));
+      mocks.state.resultsByTable.daily_price_bars = { close: "500" };
+      expect(await createDefaultReadinessDependencies().loadProbeContract()).toEqual({ symbol: "SPY", expiryYyyymmdd: "20991120", strike: 476, right: "P", bid: 4.76 });
+      expect(mocks.loadStoredOptionChain).toHaveBeenCalledWith("id-SPY");
     });
   });
 
@@ -371,7 +382,7 @@ describe("createDefaultReadinessDependencies", () => {
     const contract: ProbeContract = { symbol: "SPY", expiryYyyymmdd: "20261120", strike: 500, right: "P", bid: 1.234 };
 
     it("fails without asking IBKR when there is no stored contract to probe with", async () => {
-      expect(await createDefaultReadinessDependencies().probeOrderPath(null)).toEqual({ ok: false, reason: "no stored option contract to probe with (no option chain snapshot yet)" });
+      expect(await createDefaultReadinessDependencies().probeOrderPath(null)).toEqual({ ok: false, reason: "no stored option contract to probe with (no chain structure or daily close yet)" });
       expect(mocks.fetchWhatIfCommissionRange).not.toHaveBeenCalled();
     });
 
@@ -473,20 +484,10 @@ describe("createDefaultReadinessDependencies", () => {
   });
 
   describe("dataSessionIso", () => {
-    it("is the previous session until today's Day Signals seed (the last morning job) has finished", async () => {
+    it("is the last completed session", async () => {
       mocks.lastCompletedSessionDate.mockResolvedValue("2026-10-02");
-      mocks.state.resultsByTable.job_runs = undefined;
       expect(await createDefaultReadinessDependencies().dataSessionIso(now)).toBe("2026-10-02");
       expect(mocks.lastCompletedSessionDate).toHaveBeenCalledWith(now);
-      const [query] = queriesOn("job_runs");
-      expect(operationArgs(query!, "where")).toEqual([[{ job_name: "day_signals_seed" }]]);
-      expect(operationArgs(query!, "whereRaw")).toEqual([[expect.stringContaining("America/New_York"), ["2026-10-05"]]]);
-    });
-
-    it("is today once today's seed has finished, even if it failed", async () => {
-      mocks.lastCompletedSessionDate.mockResolvedValue("2026-10-02");
-      mocks.state.resultsByTable.job_runs = { id: "seed-run" };
-      expect(await createDefaultReadinessDependencies().dataSessionIso(now)).toBe("2026-10-05");
     });
   });
 

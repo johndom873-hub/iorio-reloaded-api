@@ -1,5 +1,4 @@
 import { OrderAction, OptionType } from "@stoqey/ib";
-import { hasDaySignalsSeedFinished } from "./daySignalsStore.js";
 import { db } from "../db/connection.js";
 import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
@@ -8,7 +7,8 @@ import { marketDataFeedRefusal, pooledLineError, pooledLineState, subscribeToPoo
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import type { OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { evaluateDataInvariants, loadDataInvariantInputs, type InvariantResult } from "./dataInvariants.js";
-import { loadCaptureUniverse } from "../ibkr/runOptionChainCapture.js";
+import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
+import { loadOptionDataUniverse } from "./optionDataUniverse.js";
 import { readAppEnvironment } from "./appEnvironment.js";
 import { lastCompletedSessionDate } from "./marketSessionStatus.js";
 import { loadUndeliveredAlerts } from "./undeliveredAlerts.js";
@@ -77,7 +77,7 @@ export interface ReadinessDependencies {
   loadLatestJobRuns(): Promise<LatestJobRun[]>;
   loadJobsDueButNotStarted(now: Date): Promise<string[]>;
   loadLatestHealthCheck(): Promise<{ startedAt: Date; status: JobRunStatus } | null>;
-  /** The trading date the data checks describe: today once today's chain capture has finished, otherwise the last completed session. */
+  /** The trading date the data checks describe: the last completed session. */
   dataSessionIso(now: Date): Promise<string>;
   loadDataInvariants(now: Date, dataSessionIso: string): Promise<InvariantResult[]>;
   /** The capture universe and which of its tickers have chain structure stored today (Eastern). */
@@ -177,6 +177,30 @@ async function probeQuote(contract: PriceContract, symbol: string, needsDelta: b
   return { symbol, bid: quote?.bid ?? null, ask: quote?.ask ?? null, delta: quote?.delta ?? null, paused, ibkrError };
 }
 
+/**
+ * The contract the order-path and live-quote checks probe with, from the stored chain structure (2026-10-27, replacing the
+ * morning capture's quotes): SPY when it is tracked, else the first tracked ticker with a structure; its first expiry more
+ * than 5 days out; the Put strike nearest 95% of the last close. The bid is nominal (1% of the strike): the what-if
+ * order only reads IBKR's commission for it.
+ */
+async function loadProbeContractFromStoredChain(): Promise<ProbeContract | null> {
+  const universe = await loadOptionDataUniverse();
+  const ordered = [...universe.filter((ticker) => ticker.symbol === "SPY"), ...universe.filter((ticker) => ticker.symbol !== "SPY")];
+  const earliestExpiry = new Date(Date.now() + 6 * 86_400_000).toISOString().slice(0, 10).replaceAll("-", "");
+  for (const ticker of ordered) {
+    const [chain, close] = await Promise.all([
+      loadStoredOptionChain(ticker.tickerId),
+      db("daily_price_bars").where({ ticker_id: ticker.tickerId }).whereNotNull("close_price").orderBy("trading_date", "desc").first("close_price as close"),
+    ]);
+    const expiry = [...chain.strikesByExpiry.keys()].filter((candidate) => candidate >= earliestExpiry).sort()[0];
+    if (!expiry || !close) continue;
+    const target = Number(close.close) * 0.95;
+    const strike = chain.strikesByExpiry.get(expiry)!.reduce((best, candidate) => (Math.abs(candidate - target) < Math.abs(best - target) ? candidate : best));
+    return { symbol: ticker.symbol, expiryYyyymmdd: expiry, strike, right: "P", bid: Math.max(0.01, Math.round(strike) / 100) };
+  }
+  return null;
+}
+
 function probeOptionLeg(contract: ProbeContract): OrderLegPayload {
   return { role: "option", action: OrderAction.SELL, symbol: contract.symbol, quantity: 1, unitPrice: Math.max(0.01, Math.round(contract.bid * 100) / 100), strike: contract.strike, expiry: contract.expiryYyyymmdd, right: contract.right };
 }
@@ -206,19 +230,9 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
       const summary = await fetchAccountSummary();
       return { netLiquidationValue: summary.netLiquidationValue, totalCashValue: summary.totalCashValue, buyingPower: summary.buyingPower, excessLiquidity: summary.excessLiquidity };
     },
-    loadProbeContract: async () => {
-      const row = await db("option_quote_snapshots as q")
-        .join("option_chain_snapshots as s", "s.id", "q.snapshot_id")
-        .join("tickers as t", "t.id", "s.ticker_id")
-        .where("q.option_right", "P")
-        .whereRaw("q.expiry > current_date + 5")
-        .where("q.bid", ">", 0)
-        .orderBy([{ column: "s.trading_date", order: "desc" }, { column: "q.open_interest", order: "desc", nulls: "last" }])
-        .first("t.symbol as symbol", "q.strike as strike", "q.bid as bid", db.raw("to_char(q.expiry, 'YYYYMMDD') as \"expiryYyyymmdd\""));
-      return row ? { symbol: row.symbol, expiryYyyymmdd: row.expiryYyyymmdd, strike: Number(row.strike), right: "P", bid: Number(row.bid) } : null;
-    },
+    loadProbeContract: () => loadProbeContractFromStoredChain(),
     probeOrderPath: async (contract) => {
-      if (!contract) return { ok: false, reason: "no stored option contract to probe with (no option chain snapshot yet)" };
+      if (!contract) return { ok: false, reason: "no stored option contract to probe with (no chain structure or daily close yet)" };
       await fetchWhatIfCommissionRange([probeOptionLeg(contract)]);
       return { ok: true, probe: `${contract.symbol} $${contract.strike} put ${contract.expiryYyyymmdd}` };
     },
@@ -241,17 +255,13 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
       const row = await db("job_runs").where({ job_name: "ibkr_health_check" }).orderBy("started_at", "desc").first("started_at", "status");
       return row ? { startedAt: new Date(row.started_at), status: row.status } : null;
     },
-    // Today once the morning chain is done: the Day Signals seed runs last (after the capture, the fit and the retries, even
-    // when the capture failed), so the snapshot and surface checks never describe a today that is still being built.
-    dataSessionIso: async (now) => {
-      const todayIso = easternIsoDate(now);
-      return (await hasDaySignalsSeedFinished(todayIso)) ? todayIso : lastCompletedSessionDate(now);
-    },
+    // The data checks describe the last completed session: nothing they read is written during the session.
+    dataSessionIso: async (now) => lastCompletedSessionDate(now),
     loadDataInvariants: async (now, dataSessionIso) => evaluateDataInvariants(await loadDataInvariantInputs(now, dataSessionIso)),
-    // The capture's own rule (ticksOnlyPrepareDependencies): option_chain_params.fetched_at on today's Eastern date.
+    // option_chain_params.fetched_at on today's Eastern date, for the tickers the 09:00 UTC structure refresh covers.
     loadTodaysChainStructure: async (now) => {
       const todayIso = easternIsoDate(now);
-      const universe = await loadCaptureUniverse();
+      const universe = await loadOptionDataUniverse({ excludeBeingPrepared: true });
       const rows: { ticker_id: string; fetched_at: Date }[] = await db("option_chain_params").whereIn("ticker_id", universe.map((ticker) => ticker.tickerId)).select("ticker_id", "fetched_at");
       const tickerIdsWithTodaysStructure = new Set(rows.filter((row) => easternIsoDate(new Date(row.fetched_at)) === todayIso).map((row) => row.ticker_id));
       return {

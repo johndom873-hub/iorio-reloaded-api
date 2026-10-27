@@ -6,7 +6,7 @@ import { classifyTradingStatus } from "../lib/tradingGate.js";
 import { fetchTradingHalt } from "../lib/platformControls.js";
 import { loadMarketDataLineRestriction } from "../ibkr/marketDataLineBudget.js";
 import { ibkrMarketDataLinesEnabled } from "../config/env.js";
-import { daySignalsLoopLineHolder } from "../lib/daySignalsLoop.js";
+import { marketQuoteLoopLineHolder } from "../lib/marketQuoteLoop.js";
 import { plutoLineHolder } from "../pluto/marketWatch.js";
 import { marketDataFeedRefusal } from "../ibkr/marketDataPool.js";
 import { requireAuth } from "../middleware/requireAuth.js";
@@ -28,7 +28,7 @@ environmentRouter.get("/details", requireAuth, async (_request, response) => {
   // normal operation, not a restriction, so only the chain capture drives the banner.
   const [workerRow, marketDataRestriction, tradingHalt, frozenTickers] = await Promise.all([
     db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
-    loadMarketDataLineRestriction({ excludeHolders: [daySignalsLoopLineHolder, plutoLineHolder] }),
+    loadMarketDataLineRestriction({ excludeHolders: [marketQuoteLoopLineHolder, plutoLineHolder] }),
     fetchTradingHalt(),
     loadFrozenTickers(),
   ]);

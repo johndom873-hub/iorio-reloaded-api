@@ -20,7 +20,6 @@ import { computePlutoActionExposure, loadPlutoOrderRequestsByActionId, type Plut
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { normalizeSystemConcerns } from "../pluto/decisionSchema.js";
-import { loadDaySignalsWatchStatuses } from "../lib/daySignalsWatchStatus.js";
 import { computeKellyCap, computeStressCap, stressCapInputFromFigures } from "../pluto/postModelGates.js";
 
 // The Pluto screen's API. A trader can only stop Pluto (turn it off, pause it, drop today's stress override); starting it,
@@ -64,7 +63,7 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
   for (const order of workingOrders) workingOrdersBySymbol[order.symbol] = (workingOrdersBySymbol[order.symbol] ?? 0) + 1;
   response.json({
     ...state,
-    blockReason: describePlutoBlock(state, settings.executionStrategy),
+    blockReason: describePlutoBlock(state),
     modeChangedAt: lastModeChange ? new Date(lastModeChange.occurred_at).toISOString() : null,
     modeChangedBy: (lastModeChange?.payload as { by?: string } | undefined)?.by ?? null,
     orders: working,
@@ -618,24 +617,12 @@ plutoRouter.get("/events", async (request: Request, response: Response) => {
   });
 });
 
-/**
- * Whether Day Signals is watching each Pluto-enabled ticker today, and when it looks again (daySignalsWatchStatus.ts):
- * `{ tradingDateIso, sessionOpen, tickers: { [tickerId]: status } }`.
- */
-plutoRouter.get("/day-signals-watch", async (_request: Request, response: Response) => {
-  const enabled: { tickerId: string }[] = await db("shortlist_entries").whereNull("removed_at").where({ bot_enabled: true }).select("ticker_id as tickerId");
-  const { tradingDateIso, sessionOpen, statuses } = await loadDaySignalsWatchStatuses(enabled.map((row) => row.tickerId));
-  response.json({ tradingDateIso, sessionOpen, tickers: Object.fromEntries(statuses) });
-});
-
 plutoRouter.get("/tickers", async (_request: Request, response: Response) => {
   const [rows, settings] = await Promise.all([
     db("shortlist_entries as se")
       .join("tickers as t", "t.id", "se.ticker_id")
       .leftJoin("users as u", "u.id", "se.bot_enabled_changed_by_user_id")
       .whereNull("se.removed_at")
-      // Pluto only trades Signals tickers; a Signals-off ticker is not listed here at all.
-      .where("se.signals_enabled", true)
       .select("se.id as entryId", "t.id as tickerId", "t.symbol", "t.company_name as companyName", "t.sector", "se.bot_enabled as botEnabled", "se.bot_enabled_changed_at as botEnabledChangedAt", "u.display_name as botEnabledChangedBy")
       .orderBy("t.symbol"),
     loadPlutoSettings(),

@@ -39,9 +39,7 @@ describe("validatePlutoSettingsInput", () => {
     expect(validatePlutoSettingsInput({ windowStartEt: "15:30" }, current)).toMatch(/before windowEndEt/);
     expect(validatePlutoSettingsInput({ minDte: 50, maxDte: 60 }, current)).toBeNull();
   });
-  it("checks the strategy switch and the ladder's values with the backtest's bounds", () => {
-    expect(validatePlutoSettingsInput({ executionStrategy: "cc_put_ladder" }, current)).toBeNull();
-    expect(validatePlutoSettingsInput({ executionStrategy: "wheel" as never }, current)).toMatch(/must be one of/);
+  it("checks the ladder's values with the backtest's bounds", () => {
     expect(validatePlutoSettingsInput({ ladderMinAbsDelta: 0 }, current)).toMatch(/above 0/);
     expect(validatePlutoSettingsInput({ ladderMinAbsDelta: 0.35 }, current)).toMatch(/cannot exceed ladderMaxAbsDelta/);
     expect(validatePlutoSettingsInput({ ladderMinDte: 0 }, current)).toBeNull();

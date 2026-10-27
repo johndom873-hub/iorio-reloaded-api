@@ -32,7 +32,6 @@ interface RawRow {
   liveClose1mAgo: string | null;
   liveClose3mAgo: string | null;
   liveClose1yAgo: string | null;
-  signalsEnabled: boolean;
   weeklyLow: string;
   weeklyHigh: string;
   monthlyLow: string;
@@ -79,8 +78,6 @@ export interface PricePerformanceRow extends PriceTrend {
    * 1W / 1M / 3M / 1Y: the last close on or before 7 / 30 / 91 / 365 days before today's Eastern date (meta.liveReferenceDate).
    */
   liveReferenceCloses: ReferenceCloses;
-  /** Off: the nightly IV snapshot is skipped, so impliedVolatility and avgOptionVolume are null rather than stale. */
-  signalsEnabled: boolean;
   impliedVolatility: string | null;
   avgOptionVolume: string | null;
   ivRank: number | null;
@@ -191,7 +188,6 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
       live_mo.close_price AS "liveClose1mAgo",
       live_q.close_price AS "liveClose3mAgo",
       live_yr.close_price AS "liveClose1yAgo",
-      se.signals_enabled AS "signalsEnabled",
       wkrange.low AS "weeklyLow",
       wkrange.high AS "weeklyHigh",
       morange.low AS "monthlyLow",
@@ -209,7 +205,7 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
       SELECT MIN(low_price) AS low, MAX(high_price) AS high FROM daily_price_bars
       WHERE ticker_id = t.id AND trading_date <= latest.trading_date AND trading_date >= latest.trading_date - INTERVAL '30 days'
     ) morange ON true
-    -- The IV snapshot of the ticker's latest bar only: one left from before Signals was last switched off is weeks old.
+    -- The IV snapshot of the ticker's latest bar only: an older one would be stale.
     LEFT JOIN LATERAL (
       SELECT *
       FROM market_data_snapshots
@@ -290,9 +286,8 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
         referenceCloses,
         liveReferenceCloses,
         ...computePriceTrend(closesByTickerId.get(row.tickerId) ?? []),
-        signalsEnabled: row.signalsEnabled,
-        impliedVolatility: row.signalsEnabled ? row.impliedVolatility : null,
-        avgOptionVolume: row.signalsEnabled ? row.avgOptionVolume : null,
+        impliedVolatility: row.impliedVolatility,
+        avgOptionVolume: row.avgOptionVolume,
         ...(await computeIvMetrics(row.tickerId)),
         isBehind: freshness.behindSymbols.includes(row.symbol),
       };

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Knex } from "knex";
 
 // The ladder band's tables and the planner's database readers, on a private copy of the test tables: the band quotes
-// stored and read back, Pluto's 10:00 forwards from today's fit, and the previous session's volumes.
+// stored and read back, Pluto's forwards from today's band quotes, and the previous session's volumes.
 vi.mock("../db/connection.js", async () => {
   const { createIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
   return { db: await createIsolatedTestDatabase() };
@@ -40,23 +40,13 @@ describe("the ladder band's tables", () => {
     expect(await loadLadderBandQuotes(tickerId, "2026-10-19")).toEqual([]);
   });
 
-  it("reads Pluto's 10:00 forwards only from today's finished fit", async () => {
-    expect((await defaultLadderBandPlannerDependencies.loadForwardAnchors(tickerId, todayIso)).size).toBe(0);
-    const [snapshot] = await testDb("option_chain_snapshots").insert({ ticker_id: tickerId, trading_date: todayIso, captured_at: new Date("2026-10-20T14:00:00Z"), status: "complete", underlying_price: 100 }).returning("id");
-    await testDb("option_surface_fits").insert([
-      { snapshot_id: snapshot.id, expiry: "2026-11-20", years_to_expiry: 31 / 365, forward_price: 100.25, status: "ok", point_count: 20, dropped_counts: {}, underlying_price: 100.1 },
-      // A failed slice still has a forward (the parity one) and the snapshot's price stands in for a missing fit price.
-      { snapshot_id: snapshot.id, expiry: "2026-12-18", years_to_expiry: 59 / 365, forward_price: 100.6, status: "fit_failed", point_count: 3, dropped_counts: {}, underlying_price: null },
-    ]);
-    // The fit has not finished: no anchors yet.
-    expect((await defaultLadderBandPlannerDependencies.loadForwardAnchors(tickerId, todayIso)).size).toBe(0);
-    await testDb("option_chain_snapshots").where({ id: snapshot.id }).update({ fit_completed_at: new Date("2026-10-20T14:06:00Z") });
-    expect(await defaultLadderBandPlannerDependencies.loadForwardAnchors(tickerId, todayIso)).toEqual(
-      new Map([
-        ["2026-11-20", { forward: 100.25, spotPrice: 100.1 }],
-        ["2026-12-18", { forward: 100.6, spotPrice: 100 }],
-      ]),
-    );
+  it("derives Pluto's forwards from today's band quotes: Puts alone give the stock price grown at the risk-free rate", async () => {
+    await testDb("risk_free_rates").insert({ series_id: "TB3MS", rate_percent: 4, observation_date: "2026-09-01", fetched_at: new Date() });
+    const anchors = await defaultLadderBandPlannerDependencies.loadForwardAnchors(tickerId, todayIso);
+    // The expiry's latest quote (15:03) carries the stock price 101; 31 days to 2026-11-20.
+    expect([...anchors.keys()]).toEqual(["2026-11-20"]);
+    expect(anchors.get("2026-11-20")!.spotPrice).toBe(101);
+    expect(anchors.get("2026-11-20")!.forward).toBeCloseTo(101 * Math.exp(0.04 * (31 / 365)), 6);
     expect((await defaultLadderBandPlannerDependencies.loadForwardAnchors(tickerId, "2026-10-21")).size).toBe(0);
   });
 

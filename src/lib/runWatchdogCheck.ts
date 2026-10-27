@@ -17,9 +17,6 @@ const DAILY_JOB_NAMES = [
   "option_chain_structure_refresh",
   // 9:00 AM UTC on market days, after the structure refresh: the ladder's tickers checked for a split.
   "ladder_split_check",
-  "option_chain_capture",
-  "option_surface_fit",
-  "day_signals_seed",
   // 9:30 PM UTC on market days: the ladder's previous-session option volume.
   "option_session_volume_capture",
   // Scheduled for 7:00 PM UTC every day (weekends too).

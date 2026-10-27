@@ -11,7 +11,7 @@ import {
   type TickerBackfillDependencies,
   type TickerBackfillRun,
 } from "./tickerBackfillPipeline.js";
-import type { PreparedTicker } from "./runOptionChainCapture.js";
+import type { StoredOptionChainRefresh } from "./fetchOptionChain.js";
 
 // --- fakes -----------------------------------------------------------------
 
@@ -46,17 +46,10 @@ function inMemoryStore(tickers: Record<string, { symbol: string; onShortlist: bo
 }
 
 const history: HistoryStepResult = { barCount: 1253, ivPointCount: 1250, firstTradingDate: "2021-09-22", lastTradingDate: "2026-09-18", invalidBarDates: [] };
-const prepared = (): PreparedTicker => ({
-  ticker: { tickerId: "t1", symbol: "SMCI", contractId: 1 },
-  spotPrice: 40,
-  referenceVolatility: 0.6,
-  referenceVolatilitySource: "implied_volatility",
-  contracts: [
-    { expiry: "20261016", strike: 40, right: "P" },
-    { expiry: "20261016", strike: 42, right: "C" },
-    { expiry: "20261120", strike: 40, right: "P" },
-  ],
-  chainRefresh: {
+const chainRefresh = (): StoredOptionChainRefresh => ({
+  expirations: ["20261016", "20261120"],
+  strikesByExpiry: new Map(),
+  timings: {
     optionParamsMs: 900,
     expiries: [
       { expiry: "20261016", strikeCount: 120, elapsedMs: 4500 },
@@ -73,9 +66,9 @@ function workers(overrides: Partial<BackfillStepWorkers> = {}) {
     connect,
     fetchHistory: vi.fn(async () => history),
     captureCalendar: vi.fn(async () => ({ resolved: true, earningsWritten: 2, dividendsWritten: 0, historicalEarningsWritten: 5, historicalEarningsSkippedEtf: false, historicalEarningsError: null })),
-    loadUniverseTicker: vi.fn(async (tickerId: string, symbol: string) => ({ tickerId, symbol, contractId: 1 })),
-    loadSignalsEnabled: vi.fn(async () => true),
-    prepareChain: vi.fn(async () => prepared()),
+    loadContractId: vi.fn(async () => 1),
+    isOnShortlist: vi.fn(async () => true),
+    refreshChain: vi.fn(async () => chainRefresh()),
     now: () => new Date(Date.UTC(2026, 8, 21, 14, 30)),
     ...overrides,
   };
@@ -88,7 +81,7 @@ const silence = () => vi.spyOn(console, "error").mockImplementation(() => {});
 // --- executeBackfillRun ------------------------------------------------------
 
 describe("executeBackfillRun", () => {
-  it("runs all four steps on one connection; the snapshot step is always skipped, the run completes", async () => {
+  it("runs all three steps on one connection and the run completes", async () => {
     const { store, runs } = inMemoryStore();
     const { workers: w, connect, disconnect } = workers();
     const run = await store.create("t1", []);
@@ -96,11 +89,10 @@ describe("executeBackfillRun", () => {
     await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
     const finished = runs.get(run.id)!;
     expect(finished.status).toBe("complete");
-    expect(statusOf(finished.steps)).toEqual({ history: "done", calendar: "done", chain_warmup: "done", first_snapshot: "skipped" });
+    expect(statusOf(finished.steps)).toEqual({ history: "done", calendar: "done", chain_warmup: "done" });
     expect(finished.steps.find((step) => step.key === "history")!.message).toBe("1253 daily bars (2021-09-22 to 2026-09-18), 1250 implied-volatility points.");
     expect(finished.steps.find((step) => step.key === "calendar")!.message).toBe("2 earnings and 0 dividend events. 5 historical earnings dates.");
-    expect(finished.steps.find((step) => step.key === "chain_warmup")!.message).toBe("Strike grids stored for 2 expiries (208 strikes) in 10s; 3 contracts selected for capture.");
-    expect(finished.steps.find((step) => step.key === "first_snapshot")!.message).toBe("Captured by tonight's job in the normal 10:00 ET window, same as every other ticker.");
+    expect(finished.steps.find((step) => step.key === "chain_warmup")!.message).toBe("Strike grids stored for 2 expiries (208 strikes) in 10s.");
     expect(connect).toHaveBeenCalledTimes(1);
     expect(disconnect).toHaveBeenCalledTimes(1);
   });
@@ -113,7 +105,7 @@ describe("executeBackfillRun", () => {
     await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
     const finished = (await store.getLatest("t1"))!;
     expect(finished.status).toBe("partial");
-    expect(statusOf(finished.steps)).toEqual({ history: "failed", calendar: "done", chain_warmup: "done", first_snapshot: "skipped" });
+    expect(statusOf(finished.steps)).toEqual({ history: "failed", calendar: "done", chain_warmup: "done" });
     expect(finished.steps[0]!.message).toBe("pacing violation");
     error.mockRestore();
   });
@@ -128,17 +120,27 @@ describe("executeBackfillRun", () => {
     expect(finished.status).toBe("complete");
   });
 
-  it("if the strike step fails, the snapshot step is skipped with that specific reason", async () => {
+  it("a failing strike step is marked failed and the run ends partial", async () => {
     const error = silence();
     const { store } = inMemoryStore();
-    const { workers: w } = workers({ prepareChain: async () => { throw new Error("no usable spot price"); } });
+    const { workers: w } = workers({ refreshChain: async () => { throw new Error("no security definition"); } });
     const run = await store.create("t1", []);
     await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
     const finished = (await store.getLatest("t1"))!;
-    expect(statusOf(finished.steps)).toMatchObject({ chain_warmup: "failed", first_snapshot: "skipped" });
-    expect(finished.steps[3]!.message).toBe("Skipped because the strike step did not finish.");
+    expect(finished.steps[2]).toMatchObject({ status: "failed", message: "no security definition" });
     expect(finished.status).toBe("partial");
     error.mockRestore();
+  });
+
+  it("without a stored IBKR contract id the strike step is skipped and the chain is not looked up", async () => {
+    const { store } = inMemoryStore();
+    const { workers: w } = workers({ loadContractId: async () => null });
+    const run = await store.create("t1", []);
+    await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
+    const finished = (await store.getLatest("t1"))!;
+    expect(finished.steps[2]).toMatchObject({ status: "skipped", message: "No IBKR contract id stored for this ticker: the strikes cannot be looked up." });
+    expect(w.refreshChain).not.toHaveBeenCalled();
+    expect(finished.status).toBe("complete");
   });
 
   it("when IBKR cannot be reached, the IBKR steps fail, the calendar still runs, and nothing is left to disconnect", async () => {
@@ -149,7 +151,7 @@ describe("executeBackfillRun", () => {
     const run = await store.create("t1", []);
     await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
     const finished = (await store.getLatest("t1"))!;
-    expect(statusOf(finished.steps)).toEqual({ history: "failed", calendar: "done", chain_warmup: "failed", first_snapshot: "skipped" });
+    expect(statusOf(finished.steps)).toEqual({ history: "failed", calendar: "done", chain_warmup: "failed" });
     expect(finished.steps[0]!.message).toBe("Timed out connecting to IBKR Gateway.");
     expect(finished.status).toBe("partial");
     error.mockRestore();
@@ -163,47 +165,33 @@ describe("executeBackfillRun", () => {
     const percents = progressLog.map((entry) => entry.percent);
     expect(percents).toEqual([...percents].sort((a, b) => a - b));
     expect(percents.at(-1)).toBe(100);
-    expect(progressLog.length).toBe(8); // running + finished for each of 4 steps
+    expect(progressLog.length).toBe(6); // running + finished for each of 3 steps
   });
 
-  it("with Signals off, skips both option-chain steps without touching the chain, and the run still completes", async () => {
+  it("a ticker removed from the Shortlist before the strike step gets no strikes, and the run still completes", async () => {
     const { store } = inMemoryStore();
-    const { workers: w } = workers({ loadSignalsEnabled: async () => false });
+    const { workers: w } = workers({ isOnShortlist: async () => false });
     const run = await store.create("t1", []);
     await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
     const finished = (await store.getLatest("t1"))!;
-    expect(statusOf(finished.steps)).toEqual({ history: "done", calendar: "done", chain_warmup: "skipped", first_snapshot: "skipped" });
-    expect(finished.steps[2]!.message).toBe("Signals is off: the strikes are set up when Signals is turned on.");
-    expect(finished.steps[3]!.message).toBe("Signals is off: no option chain is captured for this ticker.");
-    expect(w.prepareChain).not.toHaveBeenCalled();
+    expect(finished.steps[2]).toMatchObject({ status: "skipped", message: "Removed from the Shortlist: no strikes set up." });
+    expect(w.refreshChain).not.toHaveBeenCalled();
     expect(finished.status).toBe("complete");
   });
 
-  it("reads Signals after the calendar step, so Signals turned on mid-run still gets its strikes", async () => {
+  it("reads the Shortlist after the calendar step, so a removal mid-run is seen", async () => {
     const { store } = inMemoryStore();
-    let signalsEnabled = false;
+    let onShortlist = true;
     const { workers: w } = workers({
       captureCalendar: async () => {
-        signalsEnabled = true;
+        onShortlist = false;
         return { resolved: true, earningsWritten: 0, dividendsWritten: 0, historicalEarningsWritten: 0, historicalEarningsSkippedEtf: false, historicalEarningsError: null };
       },
-      loadSignalsEnabled: async () => signalsEnabled,
+      isOnShortlist: async () => onShortlist,
     });
     const run = await store.create("t1", []);
     await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
-    expect(statusOf((await store.getLatest("t1"))!.steps)).toMatchObject({ chain_warmup: "done" });
-  });
-
-  it("the option-chain scope runs only the strike and snapshot steps, never history or calendar", async () => {
-    const { store } = inMemoryStore();
-    const { workers: w } = workers();
-    const run = await store.create("t1", []);
-    await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w }, "option_chain");
-    const finished = (await store.getLatest("t1"))!;
-    expect(statusOf(finished.steps)).toEqual({ chain_warmup: "done", first_snapshot: "skipped" });
-    expect(w.fetchHistory).not.toHaveBeenCalled();
-    expect(w.captureCalendar).not.toHaveBeenCalled();
-    expect(finished.status).toBe("complete");
+    expect(statusOf((await store.getLatest("t1"))!.steps)).toMatchObject({ chain_warmup: "skipped" });
   });
 
   it("still records the final state and disconnects when the store itself throws mid-run", async () => {
@@ -232,16 +220,6 @@ describe("startTickerBackfill", () => {
     await vi.waitFor(() => expect(w.fetchHistory).toHaveBeenCalled());
     releaseHistory();
     await waitForBackfillQueue();
-    expect((await store.getLatest("t1"))!.status).toBe("complete");
-  });
-
-  it("an option-chain run is created with only the strike and snapshot steps", async () => {
-    const { store } = inMemoryStore();
-    const create = vi.spyOn(store, "create");
-    const { workers: w } = workers();
-    await startTickerBackfill("t1", "SMCI", { store, workers: w }, "option_chain");
-    await waitForBackfillQueue();
-    expect(create.mock.calls[0]![1].map((step) => step.key)).toEqual(["chain_warmup", "first_snapshot"]);
     expect((await store.getLatest("t1"))!.status).toBe("complete");
   });
 
@@ -330,7 +308,7 @@ describe("resumeInterruptedBackfillRuns", () => {
     expect(result).toEqual({ resumed: ["TSLA"], notResumed: [] });
     const closed = runs.get(interrupted.id)!;
     expect(closed.status).toBe("partial");
-    expect(statusOf(closed.steps)).toEqual({ history: "done", calendar: "failed", chain_warmup: "failed", first_snapshot: "failed" });
+    expect(statusOf(closed.steps)).toEqual({ history: "done", calendar: "failed", chain_warmup: "failed" });
     const restarted = (await store.getLatest("t1"))!;
     expect(restarted.id).not.toBe(interrupted.id);
     expect(restarted).toMatchObject({ status: "complete", resumedFromRunId: interrupted.id });
@@ -351,18 +329,6 @@ describe("resumeInterruptedBackfillRuns", () => {
     expect((await resumeInterruptedBackfillRuns({ store, workers: w })).resumed).toEqual(["TSLA", "AAPL", "AMD"]);
     await waitForBackfillQueue();
     expect(order).toEqual(["TSLA", "AAPL", "AMD"]);
-  });
-
-  it("restarts an option-chain run with only the option-chain steps", async () => {
-    const { store } = inMemoryStore({ t1: { symbol: "NVDA", onShortlist: true } });
-    await store.create("t1", buildInitialBackfillSteps("option_chain"));
-    const { workers: w } = workers();
-
-    await resumeInterruptedBackfillRuns({ store, workers: w });
-    await waitForBackfillQueue();
-
-    expect(statusOf((await store.getLatest("t1"))!.steps)).toEqual({ chain_warmup: "done", first_snapshot: "skipped" });
-    expect(w.fetchHistory).not.toHaveBeenCalled();
   });
 
   it("closes but does not restart a run that was itself a restart, or one whose ticker left the shortlist", async () => {

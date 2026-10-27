@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("../lib/notifyTelegram.js", () => ({ notifyTelegram: vi.fn(async () => true) }));
 
 const { cancellationReasonForIbkrCancel } = await import("./ibkrGatewayOrderStatus.js");
-const { isWithinChainCaptureClockWindow } = await import("../lib/optionChainCaptureClock.js");
 const { daysBetween } = await import("./fetchOptionChain.js");
 const { easternDayStart, easternInstant: reExportedEasternInstant } = await import("../lib/marketSessionStatus.js");
 const { easternInstant } = await import("../lib/easternIsoDate.js");
@@ -32,22 +31,6 @@ describe("cancellationReasonForIbkrCancel", () => {
   it("uses a half-day close", () => {
     expect(cancellationReasonForIbkrCancel(utc("2026-11-27T15:00:00Z"), utc("2026-11-27T18:00:00Z"), "13:00")).toBe("expired_at_close");
     expect(cancellationReasonForIbkrCancel(utc("2026-11-27T15:00:00Z"), utc("2026-11-27T17:59:00Z"), "13:00")).toBe("cancelled_by_ibkr");
-  });
-});
-
-describe("isWithinChainCaptureClockWindow", () => {
-  it.each([
-    ["2026-03-06T14:59:59Z", false], // 09:59:59 EST
-    ["2026-03-06T15:00:00Z", true], // 10:00 EST
-    ["2026-03-06T15:29:59Z", true],
-    ["2026-03-06T15:30:00Z", false],
-    ["2026-03-09T13:59:59Z", false], // 09:59:59 EDT, first Monday of EDT
-    ["2026-03-09T14:00:00Z", true],
-    ["2026-03-09T15:00:00Z", false], // 11:00 EDT (the EST slot)
-    ["2026-11-02T14:00:00Z", false], // 09:00 EST, first Monday of EST
-    ["2026-11-02T15:00:00Z", true],
-  ])("%s -> %s", (iso, expected) => {
-    expect(isWithinChainCaptureClockWindow(utc(iso))).toBe(expected);
   });
 });
 

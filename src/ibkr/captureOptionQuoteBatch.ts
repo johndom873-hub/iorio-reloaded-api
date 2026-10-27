@@ -130,7 +130,7 @@ function normalizeModelPrice(value: number | undefined): number | null {
 // 3,217 contracts on 2026-09-23. This window keeps `concurrency` lines in
 // flight across ticker boundaries and hands each freed line to the next
 // queued contract the moment one settles (the Day Signals loop's
-// daySignalsQuoteWindow.ts shape, with this file's fuller tick capture and
+// rollingQuoteWindow.ts shape, with this file's fuller tick capture and
 // settle rule), so throughput is lines ÷ the average settle time rather than
 // lines ÷ the ceiling. Each contract still has its own timeout (the old
 // ceiling) as its safety net.

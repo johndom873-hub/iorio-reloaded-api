@@ -27,7 +27,7 @@ beforeAll(async () => {
   await testDb("pluto_settings").insert({ id: 1 });
   await testDb("users").insert({ id: userId, username: "volume-capture", display_name: "Volume Capture", password_hash: "x" });
   await testDb("tickers").insert({ id: tickerId, symbol: "VOL", company_name: "Volume Co" });
-  await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: userId, signals_enabled: true, bot_enabled: true });
+  await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: userId, bot_enabled: true });
   await testDb("market_calendar").insert(["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-19", "2026-10-20"].map((calendar_date) => ({ calendar_date, is_open: true })));
   await testDb("option_chain_params").insert({ ticker_id: tickerId, expirations: ["20261016", "20261120"], fetched_at: new Date("2026-10-14T09:00:00Z") });
   await testDb("option_chain_expiry_strikes").insert([
@@ -100,7 +100,7 @@ describe("the after-close option volume capture", () => {
   it("a ticker without a stored chain is an error of its own, the others still captured", async () => {
     const otherTickerId = randomUUID();
     await testDb("tickers").insert({ id: otherTickerId, symbol: "NOCH", company_name: "No Chain Co" });
-    await testDb("shortlist_entries").insert({ ticker_id: otherTickerId, added_by_user_id: userId, signals_enabled: true, bot_enabled: true });
+    await testDb("shortlist_entries").insert({ ticker_id: otherTickerId, added_by_user_id: userId, bot_enabled: true });
     const { dependencies } = fakeDependencies("2026-10-16T21:30:00Z", []);
     const result = await runOptionSessionVolumeCapture(dependencies);
     expect(result.tickers.map((ticker) => [ticker.symbol, ticker.error])).toEqual([["NOCH", "no stored option chain"], ["VOL", null]]);

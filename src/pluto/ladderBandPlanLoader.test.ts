@@ -9,7 +9,8 @@ const ticker: PlutoTickerSettings = { symbol: "LADR", tickerId: "t1", allocation
 
 function dependencies(overrides: Partial<LadderBandPlannerDependencies> = {}): LadderBandPlannerDependencies {
   return {
-    loadSettings: async () => ({ executionStrategy: "cc_put_ladder", ladderMinDte: 1, ladderMaxDte: 45, ladderMinAbsDelta: 0.05, ladderMaxAbsDelta: 0.3 }) as PlutoSettings,
+    loadSettings: async () => ({ ladderMinDte: 1, ladderMaxDte: 45, ladderMinAbsDelta: 0.05, ladderMaxAbsDelta: 0.3 }) as PlutoSettings,
+    loadPaused: async () => false,
     loadEnabledTickers: async () => [ticker],
     // 20 Nov (31 DTE): the $80, $90 and $100 Puts and Calls.
     loadChain: async () => ({ expirations: ["20261120"], strikesByExpiry: new Map([["20261120", [80, 90, 100]]]), fetchedAt: null }),
@@ -23,8 +24,8 @@ function dependencies(overrides: Partial<LadderBandPlannerDependencies> = {}): L
 }
 
 describe("createLadderBandPlanner", () => {
-  it("plans nothing while another strategy is active", async () => {
-    const planner = createLadderBandPlanner(dependencies({ loadSettings: async () => ({ executionStrategy: "edge_margin" }) as PlutoSettings }));
+  it("plans nothing while Pluto is paused", async () => {
+    const planner = createLadderBandPlanner(dependencies({ loadPaused: async () => true }));
     expect(await planner.tickers(todayIso)).toEqual([]);
     expect((await planner.plan(todayIso, new Map([["t1", 100]]), now)).size).toBe(0);
   });
@@ -44,7 +45,7 @@ describe("createLadderBandPlanner", () => {
     expect((await planner.plan(todayIso, new Map([["t1", null]]), now)).size).toBe(0);
   });
 
-  it("reads the day's inputs once per trading day and ticker, Pluto's forwards again until today's fit exists", async () => {
+  it("reads the day's inputs once per trading day and ticker, the forwards again until the band has quotes", async () => {
     const loadChain = vi.fn(dependencies().loadChain);
     let fitDone = false;
     const loadForwardAnchors = vi.fn(async () => (fitDone ? new Map([["2026-11-20", { forward: 100.3, spotPrice: 100 }]]) : new Map()));

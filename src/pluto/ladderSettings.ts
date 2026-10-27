@@ -138,7 +138,7 @@ function ladderTickerSettingsFrom(symbol: string, context: LadderSettingsContext
   return {
     symbol,
     source: "live",
-    enabled: enabledInPluto && settings.executionStrategy === "cc_put_ladder",
+    enabled: enabledInPluto,
     settingsVersionId: context.settingsVersionId,
     baseline: ladderBaselineFromPlutoSettings(settings, tickerOverrides),
     strategyBaseline: ladderBaselineFromPlutoSettings(settings),

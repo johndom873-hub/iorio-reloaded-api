@@ -125,9 +125,9 @@ beforeEach(() => {
     const [inserted] = await testDb("tickers").insert({ symbol }).returning("*");
     return { ticker: inserted, created: true };
   });
-  addTickerToShortlistMock.mockImplementation(async (tickerId: string, _symbol: string, addedByUserId: string | undefined, signalsEnabled = false) => {
-    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: addedByUserId, signals_enabled: signalsEnabled }).returning("*");
-    return { id: entry.id, addedAt: entry.added_at, signalsEnabled: entry.signals_enabled, backfillRun: null };
+  addTickerToShortlistMock.mockImplementation(async (tickerId: string, _symbol: string, addedByUserId: string | undefined) => {
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: addedByUserId }).returning("*");
+    return { id: entry.id, addedAt: entry.added_at, backfillRun: null };
   });
 });
 
@@ -381,14 +381,14 @@ describe("POST /screener/:symbol/shortlist", () => {
     return ticker ? testDb("shortlist_entries").where({ ticker_id: ticker.id, removed_at: null }) : [];
   };
 
-  it("adds a candidate with Signals off: creates the ticker, stores the entry with the user, answers 204 with no body", async () => {
+  it("adds a candidate: creates the ticker, stores the entry with the user, answers 204 with no body", async () => {
     const symbol = symbolOf("C");
     const response = await call("POST", `/screener/${symbol}/shortlist`, {});
     expect(response).toEqual({ status: 204, json: null });
     expect(findOrCreateTickerMock).toHaveBeenCalledWith(symbol);
     const tickerRow = await testDb("tickers").where({ symbol }).first();
     expect(addTickerToShortlistMock).toHaveBeenCalledWith(tickerRow.id, symbol, userId);
-    expect(await readEntries(symbol)).toEqual([expect.objectContaining({ added_by_user_id: userId, signals_enabled: false })]);
+    expect(await readEntries(symbol)).toEqual([expect.objectContaining({ added_by_user_id: userId })]);
     expect((await call("GET", `/screener?search=${symbol}`)).json[0].isShortlisted).toBe(true);
   });
 

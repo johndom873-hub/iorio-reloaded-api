@@ -48,7 +48,7 @@ describe("databaseRunStore", () => {
     const finished = await createTicker(true);
     const older = await databaseRunStore.create(removed.id, buildInitialBackfillSteps());
     await testDb("ticker_backfill_runs").where({ id: older.id }).update({ started_at: new Date(Date.now() - 60_000) });
-    const newer = await databaseRunStore.create(onShortlist.id, buildInitialBackfillSteps("option_chain"));
+    const newer = await databaseRunStore.create(onShortlist.id, buildInitialBackfillSteps());
     const done = await databaseRunStore.create(finished.id, buildInitialBackfillSteps());
     await databaseRunStore.finish(done.id, "complete", buildInitialBackfillSteps());
 
@@ -57,10 +57,10 @@ describe("databaseRunStore", () => {
       [older.id, removed.symbol, false, null],
       [newer.id, onShortlist.symbol, true, null],
     ]);
-    expect(running[1]!.steps.map((step) => step.key)).toEqual(["chain_warmup", "first_snapshot"]);
+    expect(running[1]!.steps.map((step) => step.key)).toEqual(["history", "calendar", "chain_warmup"]);
 
     await databaseRunStore.finish(newer.id, "partial", running[1]!.steps);
-    const restarted = await databaseRunStore.create(onShortlist.id, buildInitialBackfillSteps("option_chain"), newer.id);
+    const restarted = await databaseRunStore.create(onShortlist.id, buildInitialBackfillSteps(), newer.id);
     expect(restarted).toMatchObject({ status: "running", resumedFromRunId: newer.id });
     expect(await databaseRunStore.getLatest(onShortlist.id)).toMatchObject({ id: restarted.id, resumedFromRunId: newer.id });
   });

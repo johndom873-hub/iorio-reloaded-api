@@ -9,7 +9,7 @@ import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import knexLibrary, { type Knex } from "knex";
 
-// Audit (G2, 2026-10-07): the Shortlist Signals switch, the notes removal and the restart-aware Retry flag, through the real
+// Audit (G2, 2026-10-07): the notes removal and the restart-aware Retry flag, through the real
 // shortlistRouter on the test database. IBKR-facing modules and the backfill pipeline's start are mocked; rows are real.
 vi.mock("../db/connection.js", async () => {
   const { config } = await import("dotenv");
@@ -134,75 +134,23 @@ async function call(method: "GET" | "POST" | "PATCH", path: string, body?: unkno
 
 const rowFor = async (symbol: string) => ((await call("GET", "/")).json as any[]).find((row) => row.symbol === symbol);
 
-describe("PATCH /shortlist/:id/signals-enabled", () => {
-  it("drops the Price Performance cache, which shows signalsEnabled and hides IV for a Signals-off ticker", async () => {
-    const ticker = await insertTicker();
-    const entryId = await insertEntry(ticker.id, { signals_enabled: true });
-
-    expect((await call("PATCH", `/${entryId}/signals-enabled`, { enabled: false })).status).toBe(200);
-    expect(invalidatePricePerformanceSnapshotMock).toHaveBeenCalled();
-  });
-
-  it("Signals off racing Pluto on never breaks the Pluto-needs-Signals rule and never answers 500", async () => {
-    const outcomes: number[][] = [];
-    for (let round = 0; round < 6; round += 1) {
-      const ticker = await insertTicker();
-      const entryId = await insertEntry(ticker.id, { signals_enabled: true });
-      const [signalsOff, plutoOn] = await Promise.all([call("PATCH", `/${entryId}/signals-enabled`, { enabled: false }), call("PATCH", `/${entryId}/bot-enabled`, { enabled: true })]);
-      outcomes.push([signalsOff.status, plutoOn.status]);
-      const entry = await testDb("shortlist_entries").where({ id: entryId }).first("signals_enabled", "bot_enabled");
-      expect(entry.bot_enabled && !entry.signals_enabled).toBe(false);
-    }
-    for (const [signalsOffStatus, plutoOnStatus] of outcomes) {
-      expect(signalsOffStatus).toBe(200);
-      expect([200, 409]).toContain(plutoOnStatus);
-    }
-  });
-
-  it("Signals back on after being turned off leaves Pluto off (it is not restored)", async () => {
-    const ticker = await insertTicker();
-    const entryId = await insertEntry(ticker.id, { signals_enabled: true, bot_enabled: true });
-
-    await call("PATCH", `/${entryId}/signals-enabled`, { enabled: false });
-    expect((await call("PATCH", `/${entryId}/signals-enabled`, { enabled: true })).json).toMatchObject({ signalsEnabled: true, botEnabled: false });
-    expect(startTickerBackfillMock).toHaveBeenCalledWith(ticker.id, ticker.symbol, undefined, "option_chain");
-  });
-
-  it("Signals off is allowed on a ticker Pluto holds (bot on), and the GET row agrees", async () => {
-    const ticker = await insertTicker();
-    const entryId = await insertEntry(ticker.id, { signals_enabled: true, bot_enabled: true });
-
-    await call("PATCH", `/${entryId}/signals-enabled`, { enabled: false });
-    expect(await rowFor(ticker.symbol)).toMatchObject({ signalsEnabled: false, botEnabled: false });
-  });
-});
-
 describe("POST /shortlist", () => {
-  it.each([["a string", "true"], ["a number", 1], ["null", null]])("refuses signalsEnabled as %s before looking the symbol up, and stores nothing", async (_label, signalsEnabled) => {
-    const ticker = await insertTicker();
-
-    expect(await call("POST", "/", { symbol: ticker.symbol, signalsEnabled })).toMatchObject({ status: 400, json: { error: "signalsEnabled must be true or false." } });
-    expect(await testDb("shortlist_entries").where({ ticker_id: ticker.id })).toHaveLength(0);
-    expect(fetchNewTickerDataMock).not.toHaveBeenCalled();
-    expect(startTickerBackfillMock).not.toHaveBeenCalled();
-  });
-
-  it("an old client still sending notes adds the ticker with Signals off and stores no note", async () => {
+  it("an old client still sending notes adds the ticker and stores no note", async () => {
     const ticker = await insertTicker();
 
     const response = await call("POST", "/", { symbol: ticker.symbol, notes: "legacy note" });
-    expect(response).toMatchObject({ status: 201, json: { signalsEnabled: false, botEnabled: false } });
+    expect(response).toMatchObject({ status: 201, json: { botEnabled: false } });
     expect(response.json).not.toHaveProperty("notes");
   });
 });
 
 describe("GET /shortlist", () => {
-  it("has the Signals flag and no notes field", async () => {
+  it("has the Pluto flag and no notes field", async () => {
     const ticker = await insertTicker();
     await insertEntry(ticker.id);
 
     const row = await rowFor(ticker.symbol);
-    expect(row).toMatchObject({ signalsEnabled: false, botEnabled: false });
+    expect(row).toMatchObject({ botEnabled: false });
     expect(row).not.toHaveProperty("notes");
   });
 

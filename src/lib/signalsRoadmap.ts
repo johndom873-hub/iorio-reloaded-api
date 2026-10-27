@@ -36,11 +36,8 @@ export const tradingDaysForOwnVolatilityThreshold = 377;
 
 const calendarDaysPerTradingDay = 7 / 5;
 
-export function addCalendarDays(dateIso: string, days: number): string {
-  const date = new Date(`${dateIso}T00:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
+export { addCalendarDays } from "./calendarDays.js";
+import { addCalendarDays } from "./calendarDays.js";
 
 /** The calendar date by which `tradingDays` more captures will exist, starting tomorrow. */
 export function projectTradingDays(todayIso: string, tradingDays: number): string {

@@ -8,7 +8,7 @@ import { lookupLatestDailyBar } from "./fetchTickerOverview.js";
 import { runJob } from "../lib/runJob.js";
 import { environment } from "../config/env.js";
 import { db } from "../db/connection.js";
-import { reportDaySignalsLoopLiveness } from "../lib/daySignalsLiveness.js";
+import { reportMarketQuoteLoopLiveness } from "../lib/marketQuoteLoopLiveness.js";
 import { reportOpsMonitorLiveness } from "../lib/opsMonitorLiveness.js";
 import { reportWorkerHeartbeat } from "../lib/workerHeartbeatLiveness.js";
 import { liveDataProbeSymbol, probeCompetingLiveSession } from "./probeCompetingLiveSession.js";
@@ -238,7 +238,7 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
 
     // Independent checks (they only read the database), run FIRST: everything after this can throw during an IBKR
     // outage or a VPS problem, and these two must not go blind exactly then.
-    const daySignalsProblem = await reportDaySignalsLoopLiveness().catch((error) => `Day Signals liveness check itself failed: ${error instanceof Error ? error.message : error}`);
+    const marketQuoteLoopProblem = await reportMarketQuoteLoopLiveness().catch((error) => `Market quote loop liveness check itself failed: ${error instanceof Error ? error.message : error}`);
     const opsMonitorProblem = await reportOpsMonitorLiveness().catch((error) => `Ops monitor liveness check itself failed: ${error instanceof Error ? error.message : error}`);
 
     // The worker heartbeat needs the systemd probe below to tell "hung" from "stopped" (and to give a just-restarted worker
@@ -434,7 +434,7 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
         worker: { active: workerCheck.active, restarted: workerCheck.restarted },
         reconciliationProblems: problems,
         competingLiveSession,
-        daySignalsProblem,
+        marketQuoteLoopProblem,
         opsMonitorProblem,
         workerHeartbeatProblem,
         farmStatusMessages,

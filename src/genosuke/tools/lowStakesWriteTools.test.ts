@@ -52,18 +52,17 @@ describe("the low-stakes write tool set", () => {
 });
 
 describe("add_shortlist_ticker", () => {
-  it("posts the symbol and the Signals choice exactly as given and returns the response", async () => {
+  it("posts the symbol exactly as given and returns the response", async () => {
     const { api, post } = fakeApi();
-    const input = { symbol: "AAPL", signalsEnabled: true };
+    const input = { symbol: "AAPL" };
     expect(await toolNamed("add_shortlist_ticker").execute(input, api)).toEqual({ posted: true });
     expect(post).toHaveBeenCalledWith("/shortlist", input);
   });
 
-  it("requires only the symbol; Signals is an optional boolean", () => {
+  it("takes only the symbol", () => {
     const parameters = toolNamed("add_shortlist_ticker").parameters as { required: string[]; properties: Record<string, { type: string }> };
     expect(parameters.required).toEqual(["symbol"]);
-    expect(Object.keys(parameters.properties)).toEqual(["symbol", "signalsEnabled"]);
-    expect(parameters.properties.signalsEnabled!.type).toBe("boolean");
+    expect(Object.keys(parameters.properties)).toEqual(["symbol"]);
   });
 
   it("propagates the route's refusal", async () => {

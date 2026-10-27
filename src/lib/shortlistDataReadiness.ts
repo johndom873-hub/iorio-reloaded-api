@@ -1,25 +1,22 @@
 import { db } from "../db/connection.js";
-import { loadDividendCadenceUnknown, loadEarningsDatesForForecastWindow, loadNextEarningsDate } from "./signalsStore.js";
+import { loadEarningsDatesForForecastWindow, loadNextEarningsDate } from "./tickerCalendarQueries.js";
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { loadDailyBarsStatus, type DailyBarsStatus } from "./dailyBarsStatus.js";
 import { easternIsoDate } from "./easternIsoDate.js";
+import { computeIvMetrics } from "./ivMetrics.js";
 
-// Backs the Shortlist screen's data-sanity-check columns (redesigned 2026-09-23, replacing the old
-// IV/volume columns): per ticker, everything the Signals pipeline actually reads before it can score a
-// candidate, so a gap here explains directly why a ticker is thin or unscored on the Signals screen.
+// Backs the Shortlist screen's data-sanity-check columns (redesigned 2026-09-23, re-based on the Volatility screen
+// 2026-10-27): per ticker, what the Volatility screen and the order forms read, so a gap here explains a blank or
+// thin figure there (IV Rank and IV %ile from the implied-volatility days, FV21/FV63 from the daily bars and the
+// earnings dates, the chain from the stored strikes).
 
 export interface ShortlistDataReadiness extends DailyBarsStatus {
   dailyBarCount: number;
+  /** Days of implied-volatility history in the 252-day window IV Rank and IV %ile read (ivMetrics.ts). */
+  ivWindowDays: number;
   earningsCount: number;
   nextEarningsDateIso: string | null;
   isEtf: boolean;
-  /** Zero means no ex-dividend ever captured (not a payer, or not yet seen) -- distinct from "captured but irregular" (dividendCadenceUnknown). */
-  dividendHistoryCount: number;
-  dividendCadenceUnknown: boolean;
-  chainSnapshotCount: number;
-  /** Both null when there is no chain snapshot yet. */
-  latestFittedSliceCount: number | null;
-  latestTotalSliceCount: number | null;
   /** One entry per expiry stored in option_chain_expiry_strikes, each with its strike count. */
   optionChainExpiries: { expiry: string; strikeCount: number }[];
 }
@@ -27,15 +24,12 @@ export interface ShortlistDataReadiness extends DailyBarsStatus {
 export async function loadShortlistDataReadiness(tickerId: string, sector: string | null, now: Date = new Date()): Promise<ShortlistDataReadiness> {
   const todayIso = easternIsoDate(now);
 
-  const [dailyBarsStatus, barCountRow, earningsDatesIso, nextEarningsDateIso, dividendHistoryCountRow, dividendCadenceUnknown, chainCountRow, latestSnapshot, storedOptionChain] = await Promise.all([
+  const [dailyBarsStatus, barCountRow, ivMetrics, earningsDatesIso, nextEarningsDateIso, storedOptionChain] = await Promise.all([
     loadDailyBarsStatus(tickerId, now),
     db("daily_price_bars").where({ ticker_id: tickerId }).count<{ count: string }[]>("* as count"),
+    computeIvMetrics(tickerId),
     loadEarningsDatesForForecastWindow(tickerId),
     loadNextEarningsDate(tickerId, todayIso),
-    db("ticker_calendar_events").where({ ticker_id: tickerId, event_type: "ex_dividend" }).count<{ count: string }[]>("* as count"),
-    loadDividendCadenceUnknown(tickerId, todayIso),
-    db("option_chain_snapshots").where({ ticker_id: tickerId }).count<{ count: string }[]>("* as count"),
-    db("option_chain_snapshots").where({ ticker_id: tickerId }).orderBy("trading_date", "desc").first("id"),
     loadStoredOptionChain(tickerId),
   ]);
 
@@ -43,25 +37,13 @@ export async function loadShortlistDataReadiness(tickerId: string, sector: strin
     .map(([expiry, strikes]) => ({ expiry, strikeCount: strikes.length }))
     .sort((a, b) => a.expiry.localeCompare(b.expiry));
 
-  let latestFittedSliceCount: number | null = null;
-  let latestTotalSliceCount: number | null = null;
-  if (latestSnapshot) {
-    const fits = await db("option_surface_fits").where({ snapshot_id: latestSnapshot.id }).select("status");
-    latestTotalSliceCount = fits.length;
-    latestFittedSliceCount = fits.filter((fit) => fit.status === "ok").length;
-  }
-
   return {
     ...dailyBarsStatus,
     dailyBarCount: Number(barCountRow[0]?.count ?? 0),
+    ivWindowDays: ivMetrics.ivWindowDays,
     earningsCount: earningsDatesIso.length,
     nextEarningsDateIso,
     isEtf: sector === "ETF",
-    dividendHistoryCount: Number(dividendHistoryCountRow[0]?.count ?? 0),
-    dividendCadenceUnknown,
-    chainSnapshotCount: Number(chainCountRow[0]?.count ?? 0),
-    latestFittedSliceCount,
-    latestTotalSliceCount,
     optionChainExpiries,
   };
 }

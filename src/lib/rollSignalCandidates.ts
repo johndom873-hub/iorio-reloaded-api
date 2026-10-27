@@ -26,19 +26,8 @@ export type RollSignalFlag = "near_expiry" | "assignment_risk" | "decayed";
 export type RollSignalWarning = "debit" | "higher_delta";
 export type HeldLegUnscoredReason = "no_slice" | "no_quote" | "no_forecast";
 
-/** An open short option leg as the inputs loader reads it from position_legs. */
-export interface OpenShortLeg {
-  legId: string;
-  positionId: string;
-  strategyKey: SignalStrategyKey;
-  expiry: string; // ISO date
-  strike: number;
-  right: "C" | "P";
-  quantity: number;
-  /** Credit collected per share when the leg was opened. */
-  entryPrice: number;
-  entryAtIso: string;
-}
+import type { OpenShortLeg } from "./openShortLegs.js";
+export type { OpenShortLeg };
 
 /** One open short leg scored as a contract to keep: the roll's close side. */
 export interface HeldLegScore extends OpenShortLeg {

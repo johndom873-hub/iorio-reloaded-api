@@ -4,8 +4,8 @@ import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import knexLibrary, { type Knex } from "knex";
 
-// Pluto's per-ticker settings, the strategy switch and the ladder's settings reader against the real test database,
-// through the routes: stored, read back, audited, the 100% allocation rule and the paused-only switch.
+// Pluto's per-ticker settings and the ladder's settings reader against the real test database, through the routes:
+// stored, read back, audited, and the 100% allocation rule.
 vi.mock("../db/connection.js", async () => {
   const { config } = await import("dotenv");
   config();
@@ -16,7 +16,6 @@ vi.mock("../db/connection.js", async () => {
 const { db } = await import("../db/connection.js");
 const { plutoRouter } = await import("../routes/pluto.js");
 const { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings } = await import("./tickerSettingsStore.js");
-const { loadLadderCycleMemory, saveLadderCycleMemory } = await import("./ladderCycleMemory.js");
 
 const testDb: Knex = db;
 const suffix = `${Date.now() % 100000}`;
@@ -39,7 +38,7 @@ beforeAll(async () => {
   for (const [symbol, botEnabled] of [[enabledSymbol, true], [otherSymbol, false]] as const) {
     const [ticker] = await testDb("tickers").insert({ symbol, company_name: "Ticker Settings Co" }).returning("id");
     tickerIds.push(ticker.id);
-    await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: botEnabled });
+    await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, bot_enabled: botEnabled });
   }
   savedState = await testDb("pluto_state").where({ id: 1 }).first("mode", "paused");
   const app = express();
@@ -151,10 +150,9 @@ describe("ladder settings reader", () => {
     const read = await call("GET", `/ladder-settings/${enabledSymbol}`);
     expect(read.status).toBe(200);
     const settingsRow = await testDb("pluto_settings").where({ id: 1 }).first();
-    expect(read.json).toMatchObject({ symbol: enabledSymbol, source: "live", enabled: false, allocationPct: 12.5, overrideShockPct: null });
+    expect(read.json).toMatchObject({ symbol: enabledSymbol, source: "live", enabled: true, allocationPct: 12.5, overrideShockPct: null });
     expect(read.json.baseline).toMatchObject({ entry: "higher_yield", minCallYieldPct: 20, minCallYieldAppliesTo: "new_covered_calls", putsWhenNoCall: "reserve_ladder", ladderSharesPct: 30, maxAbsDelta: Number(settingsRow.ladder_max_abs_delta), ladderRungs: settingsRow.ladder_rungs });
-    const version = await testDb("pluto_settings_versions").where({ id: read.json.settingsVersionId as string }).first("settings");
-    expect(version.settings.executionStrategy).toBe(settingsRow.execution_strategy);
+    expect(await testDb("pluto_settings_versions").where({ id: read.json.settingsVersionId as string }).first("id")).toBeDefined();
 
     const snapshot = await testDb("account_pnl_snapshots").whereNotNull("net_liquidation_value").orderBy("snapshot_date", "desc").first("net_liquidation_value");
     const effective = effectiveAllocationPctBySymbol(await loadEnabledPlutoTickerSettings()).get(enabledSymbol)!;
@@ -172,31 +170,13 @@ describe("ladder settings reader", () => {
   });
 });
 
-describe("strategy switch", () => {
-  it("is refused while Pluto runs, allowed while paused; under the ladder Pluto resumes like under Edge Margin", async () => {
-    await testDb("pluto_state").where({ id: 1 }).update({ mode: "on", paused: false });
-    const refused = await call("PUT", "/settings", { executionStrategy: "cc_put_ladder" });
-    expect(refused.status).toBe(400);
-    expect(refused.json.error).toMatch(/Pause Pluto/);
-
-    await testDb("pluto_state").where({ id: 1 }).update({ paused: true });
-    // A memory from an earlier ladder period is stored and read back, then forgotten by the switch: a cycle open at the switch starts there.
-    const earlier = { startedOn: "2026-09-01", accountValueAtStart: 180_000, shock: 0.7 };
-    await saveLadderCycleMemory(tickerIds[0]!, { ...earlier, shock: 0.65 });
-    await saveLadderCycleMemory(tickerIds[0]!, earlier);
-    expect(await loadLadderCycleMemory(tickerIds[0]!)).toEqual(earlier);
-    const switched = await call("PUT", "/settings", { executionStrategy: "cc_put_ladder" });
-    expect(switched.status).toBe(200);
-    expect(await loadLadderCycleMemory(tickerIds[0]!)).toBeNull();
-    expect(switched.json.executionStrategy).toBe("cc_put_ladder");
-    expect((await call("GET", `/ladder-settings/${enabledSymbol}`)).json.enabled).toBe(true);
-
-    // Under the ladder (built), Pluto resumes and switches on like under Edge Margin; switching back needs a pause again.
+describe("Pluto's switch", () => {
+  it("resumes and switches on with no strategy to choose, and refuses a strategy setting", async () => {
+    await testDb("pluto_state").where({ id: 1 }).update({ mode: "on", paused: true });
+    expect((await call("PUT", "/settings", { executionStrategy: "cc_put_ladder" })).json.error).toBe("executionStrategy is not a Pluto setting.");
     expect((await call("POST", "/resume")).status).toBe(200);
     expect((await testDb("pluto_state").where({ id: 1 }).first("paused")).paused).toBe(false);
-    expect((await call("PUT", "/settings", { executionStrategy: "edge_margin" })).status).toBe(400);
     await testDb("pluto_state").where({ id: 1 }).update({ mode: "off", paused: true });
-    expect((await call("PUT", "/settings", { executionStrategy: "edge_margin" })).status).toBe(200);
     expect((await call("PUT", "/mode", { mode: "on" })).status).toBe(200);
     expect((await call("GET", "/state")).json.blockReason).toMatch(/paused/);
     if (savedState) await testDb("pluto_state").where({ id: 1 }).update(savedState);

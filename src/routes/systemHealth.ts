@@ -14,8 +14,7 @@ import { collectReadinessChecks, createDefaultReadinessDependencies } from "../l
 import { summarizeReadiness } from "../lib/preOpenReadiness.js";
 import { dbQueryTimingStats } from "../lib/dbQueryTimingTracker.js";
 import { requireEnvironmentVariable } from "../config/env.js";
-import { daySignalsLoopStatus } from "../lib/daySignalsLoop.js";
-import { loadDayQuotesStatus } from "../lib/daySignalsStore.js";
+import { marketQuoteLoopStatus } from "../lib/marketQuoteLoop.js";
 import { fetchTradingHalt } from "../lib/platformControls.js";
 import { marketDataPoolSnapshot } from "../ibkr/marketDataPool.js";
 import { loadActiveMarketDataLineReservations, loadMarketDataLineRestriction, summarizeMarketDataLineUsage } from "../ibkr/marketDataLineBudget.js";
@@ -154,11 +153,9 @@ systemHealthRouter.get("/market-status", async (_request, response) => {
   response.json({ exchanges: exchangeNames.length > 0 ? exchangeNames : ["US Markets"], state: status.state, label: status.label, nextChangeAt: status.nextChangeAt });
 });
 
-// Day Signals: the refresh loop's state (in-process; null when this process isn't running it),
-// the day tables' contents, and the live market-data pool's budget standing.
-systemHealthRouter.get("/day-signals", async (_request, response) => {
-  const [quotes, restriction] = await Promise.all([loadDayQuotesStatus(), loadMarketDataLineRestriction()]);
-  response.json({ loop: daySignalsLoopStatus(), quotes, marketDataPool: marketDataPoolSnapshot(), marketDataRestriction: restriction });
+// The market quote loop's state (in-process; null when this process isn't running it) and the live market-data pool's standing.
+systemHealthRouter.get("/market-quote-loop", async (_request, response) => {
+  response.json({ loop: marketQuoteLoopStatus(), marketDataPool: marketDataPoolSnapshot() });
 });
 
 // Genosuke + LLM node stats. activeSessions will almost always read 0/1 in

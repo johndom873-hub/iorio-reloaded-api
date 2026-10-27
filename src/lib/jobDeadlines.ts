@@ -8,10 +8,10 @@ import type { JobRunStatus } from "./jobRunStatus.js";
 // exists) leaves nothing to alert on. The old watchdog noticed at 11:30 PM UTC; this notices
 // minutes after the slot.
 //
-// Times are the Heroku Scheduler slots from PROGRESS.md's "Scheduled jobs" list; the option-chain
-// chain is judged in Eastern time because its two UTC entries (14:00/15:00) exist only to land on
-// 10:00 ET. `startByGraceMinutes` covers Scheduler start delay plus dyno boot; `maxRunMinutes` is
-// about twice the slowest run seen in job_runs history.
+// Times are the Heroku Scheduler slots from PROGRESS.md's "Scheduled jobs" list; a job whose Scheduler
+// entries exist only to land on an Eastern time is judged in Eastern time (zone "eastern").
+// `startByGraceMinutes` covers Scheduler start delay plus dyno boot; `maxRunMinutes` is about twice
+// the slowest run seen in job_runs history.
 
 export interface ExpectedJob {
   jobName: string;
@@ -24,21 +24,12 @@ export interface ExpectedJob {
   marketDaysOnly: boolean;
 }
 
-/**
- * When the option-chain capture chain starts, in Eastern time. Must equal the window start in
- * optionChainCaptureClock.ts: jobDeadlines.test.ts fails if the two drift apart.
- */
-export const chainCaptureSlotEastern = { hour: 10, minute: 0 };
-
 export const expectedScheduledJobs: ExpectedJob[] = [
   { jobName: "option_chain_structure_refresh", zone: "utc", hour: 9, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 30, marketDaysOnly: true },
   // Runs first inside the same Scheduler entry (run-option-chain-structure-job), so it shares its start time.
   { jobName: "session_close_read", zone: "utc", hour: 9, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 5, marketDaysOnly: true },
   // Runs after the structure refresh in the same script (up to its 30 minutes), so it may start that much later.
   { jobName: "ladder_split_check", zone: "utc", hour: 9, minute: 0, startByGraceMinutes: 40, maxRunMinutes: 15, marketDaysOnly: true },
-  { jobName: "option_chain_capture", zone: "eastern", hour: 10, minute: 0, startByGraceMinutes: 35, maxRunMinutes: 45, marketDaysOnly: true },
-  { jobName: "option_surface_fit", zone: "eastern", hour: 10, minute: 0, startByGraceMinutes: 60, maxRunMinutes: 15, marketDaysOnly: true },
-  { jobName: "day_signals_seed", zone: "eastern", hour: 10, minute: 0, startByGraceMinutes: 60, maxRunMinutes: 15, marketDaysOnly: true },
   { jobName: "market_calendar_sync", zone: "utc", hour: 19, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 15, marketDaysOnly: false },
   { jobName: "daily_screener_scan", zone: "utc", hour: 23, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 15, marketDaysOnly: true },
   { jobName: "daily_calendar_capture", zone: "utc", hour: 20, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 15, marketDaysOnly: false },

@@ -3,7 +3,7 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { isAdminRequest } from "../lib/sessionUser.js";
 import { loadTraderCapitalFigures } from "../lib/capitalOutsidePluto.js";
 import { evaluateOrderLimits } from "../lib/orderLimits.js";
-import { loadTickerBySymbol } from "../lib/signalsChainStore.js";
+import { loadTickerBySymbol } from "../lib/tickerLookup.js";
 import { OrderAction } from "@stoqey/ib";
 import { findMalformedOptionExpiry, type OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchWhatIfCommissionRange } from "../ibkr/ibkrWhatIfCommission.js";

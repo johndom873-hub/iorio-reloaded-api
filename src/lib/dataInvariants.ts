@@ -1,16 +1,14 @@
 import { db } from "../db/connection.js";
-import { loadCaptureUniverse } from "../ibkr/runOptionChainCapture.js";
+import { loadOptionDataUniverse } from "./optionDataUniverse.js";
 import { lastCompletedSessionDate } from "./marketSessionStatus.js";
 import { activeShortlistTickerIdsQuery } from "./shortlistQueries.js";
 import { excludeTickersBeingPrepared } from "./tickersBeingPrepared.js";
-import { impliedVolatilityMinPercent, twoSidedQuoteMinPercent } from "./optionChainCaptureCoverage.js";
 import { earningsNextDateDoubt, earningsNextDateMaxGapDays, earningsNextDateMissingAfterDays } from "./tickerCalendarRelevance.js";
 
 // Data invariants for the morning digest (opsMonitor.ts): checks on the DATA the nightly and
 // opening jobs produce, independent of whether the jobs themselves reported success. A job that
-// "succeeded" with a null risk-free rate, no fits or stale bars is exactly what runJob cannot see.
-// Thresholds approved 2026-09-30; the coverage floors sit below the worst complete real-time
-// snapshot seen in staging (two-sided 86.7%, implied volatility 84.8%).
+// "succeeded" with a null risk-free rate or stale bars is exactly what runJob cannot see.
+// Thresholds approved 2026-09-30.
 
 export const riskFreeRateMaxAgeDays = 25;
 export const marketCalendarCoverageDays = 14;
@@ -26,21 +24,9 @@ export interface InvariantResult {
   detail: string;
 }
 
-export interface SnapshotFacts {
-  symbol: string;
-  status: string;
-  riskFreeRatePercent: number | null;
-  contractsRequested: number;
-  contractsWithTwoSidedQuote: number;
-  contractsWithImpliedVolatility: number;
-  okFitCount: number;
-}
-
 export interface DataInvariantInputs {
   now: Date;
   universeSymbols: string[];
-  /** Today's (Eastern) snapshots, one per symbol. */
-  snapshots: SnapshotFacts[];
   lastCompletedSession: string;
   latestBarDateBySymbol: Record<string, string | null>;
   riskFreeRateFetchedAt: Date | null;
@@ -56,7 +42,6 @@ export interface DataInvariantInputs {
 }
 
 const list = (symbols: string[]): string => symbols.join(", ");
-const percent = (part: number, whole: number): number => (whole > 0 ? (100 * part) / whole : 0);
 const hoursSince = (now: Date, instant: Date): number => (now.getTime() - instant.getTime()) / 3_600_000;
 
 function result(name: string, problemSymbols: string[], okDetail: string, problemDetail: string): InvariantResult {
@@ -66,35 +51,9 @@ function result(name: string, problemSymbols: string[], okDetail: string, proble
 /** Pure: every invariant, in digest order. */
 export function evaluateDataInvariants(input: DataInvariantInputs): InvariantResult[] {
   const results: InvariantResult[] = [];
-  const snapshotBySymbol = new Map(input.snapshots.map((snapshot) => [snapshot.symbol, snapshot]));
-  // A failed snapshot is already reported as "not complete"; its zero coverage and null rate are not separate findings.
-  const usableSnapshots = input.snapshots.filter((snapshot) => snapshot.status !== "failed");
-
   if (input.universeSymbols.length === 0) {
-    results.push({ name: "Capture universe", ok: false, detail: "no tickers to capture (shortlist and open positions are both empty)" });
+    results.push({ name: "Option-data universe", ok: false, detail: "no tickers to track (shortlist and open positions are both empty)" });
   }
-  const missing = input.universeSymbols.filter((symbol) => !snapshotBySymbol.has(symbol));
-  const notComplete = input.snapshots.filter((snapshot) => snapshot.status !== "complete").map((snapshot) => `${snapshot.symbol} (${snapshot.status})`);
-  results.push(result("Today's option-chain snapshots", [...missing.map((symbol) => `${symbol} (missing)`), ...notComplete], `${input.snapshots.filter((snapshot) => snapshot.status === "complete" && input.universeSymbols.includes(snapshot.symbol)).length} of ${input.universeSymbols.length} complete`, "not complete"));
-
-  results.push(result("Risk-free rate on snapshots", usableSnapshots.filter((snapshot) => snapshot.riskFreeRatePercent === null).map((snapshot) => snapshot.symbol), "present on every snapshot", "missing on"));
-  results.push(
-    result(
-      "Two-sided quote coverage",
-      usableSnapshots.filter((snapshot) => percent(snapshot.contractsWithTwoSidedQuote, snapshot.contractsRequested) < twoSidedQuoteMinPercent).map((snapshot) => `${snapshot.symbol} ${Math.round(percent(snapshot.contractsWithTwoSidedQuote, snapshot.contractsRequested))}%`),
-      `at least ${twoSidedQuoteMinPercent}% on every snapshot`,
-      `below ${twoSidedQuoteMinPercent}%`,
-    ),
-  );
-  results.push(
-    result(
-      "Implied volatility coverage",
-      usableSnapshots.filter((snapshot) => percent(snapshot.contractsWithImpliedVolatility, snapshot.contractsRequested) < impliedVolatilityMinPercent).map((snapshot) => `${snapshot.symbol} ${Math.round(percent(snapshot.contractsWithImpliedVolatility, snapshot.contractsRequested))}%`),
-      `at least ${impliedVolatilityMinPercent}% on every snapshot`,
-      `below ${impliedVolatilityMinPercent}%`,
-    ),
-  );
-  results.push(result("Surface fits", input.snapshots.filter((snapshot) => snapshot.status !== "failed" && snapshot.okFitCount === 0).map((snapshot) => snapshot.symbol), "every snapshot has fitted expiries", "no fitted expiry for"));
 
   const staleBars = Object.entries(input.latestBarDateBySymbol)
     .filter(([, latest]) => latest === null || latest < input.lastCompletedSession)
@@ -136,40 +95,18 @@ export function evaluateDataInvariants(input: DataInvariantInputs): InvariantRes
       "Next earnings date",
       doubtfulNextDates,
       `every ticker's next earnings date is within ${earningsNextDateMaxGapDays} days of its last report`,
-      `doubtful (more than ${earningsNextDateMaxGapDays} days after the last report, or none ${earningsNextDateMissingAfterDays} days after it), so unresolved in Signals and Pluto won't open`,
+      `doubtful (more than ${earningsNextDateMaxGapDays} days after the last report, or none ${earningsNextDateMissingAfterDays} days after it), so left unresolved and Pluto won't open`,
     ),
   );
   return results;
 }
 
-/** Reads the real tables. `todayEasternIso` is the capture's trading date. */
+/** Reads the real tables. `todayEasternIso` is the trading date the checks describe. */
 export async function loadDataInvariantInputs(now: Date, todayEasternIso: string): Promise<DataInvariantInputs> {
-  const universe = await loadCaptureUniverse();
+  const universe = await loadOptionDataUniverse({ excludeBeingPrepared: true });
   const universeTickerIds = universe.map((ticker) => ticker.tickerId);
 
-  const snapshotRows: {
-    symbol: string;
-    status: string;
-    risk_free_rate_percent: string | null;
-    contracts_requested: number;
-    contracts_with_two_sided_quote: number;
-    contracts_with_implied_volatility: number;
-    ok_fit_count: string;
-  }[] = await db("option_chain_snapshots as s")
-    .join("tickers as t", "t.id", "s.ticker_id")
-    .whereRaw("s.trading_date::text = ?", [todayEasternIso])
-    .select(
-      "t.symbol",
-      "s.status",
-      "s.risk_free_rate_percent",
-      "s.contracts_requested",
-      "s.contracts_with_two_sided_quote",
-      "s.contracts_with_implied_volatility",
-      db.raw("(select count(*) from option_surface_fits f where f.snapshot_id = s.id and f.status = 'ok') as ok_fit_count"),
-    );
-
   const lastCompletedSession = await lastCompletedSessionDate(now);
-  // Price bars cover the Signals-off shortlist tickers too: Price Performance reads them.
   const barRows: { symbol: string; latest: string | null }[] = await excludeTickersBeingPrepared(
     db("tickers as t").where((builder) => builder.whereIn("t.id", universeTickerIds).orWhereIn("t.id", activeShortlistTickerIdsQuery())),
     "t.id",
@@ -190,7 +127,7 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
       .where("e.event_type", "earnings")
       .whereRaw("e.event_date >= ?::date - ?::int", [todayEasternIso, earningsDatesLookbackDays])
       .select("t.symbol", db.raw("e.event_date::text as date")) as Promise<{ symbol: string; date: string }[]>,
-    // Last report and next date, split at today as the Signals loaders split them (today's before-open report is the last).
+    // Last report and next date, split at today (today's before-open report is the last).
     db("ticker_calendar_events as e")
       .join("tickers as t", "t.id", "e.ticker_id")
       .whereIn("e.ticker_id", universeTickerIds)
@@ -208,15 +145,6 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
   return {
     now,
     universeSymbols: universe.map((ticker) => ticker.symbol),
-    snapshots: snapshotRows.map((row) => ({
-      symbol: row.symbol,
-      status: row.status,
-      riskFreeRatePercent: row.risk_free_rate_percent === null ? null : Number(row.risk_free_rate_percent),
-      contractsRequested: Number(row.contracts_requested),
-      contractsWithTwoSidedQuote: Number(row.contracts_with_two_sided_quote),
-      contractsWithImpliedVolatility: Number(row.contracts_with_implied_volatility),
-      okFitCount: Number(row.ok_fit_count),
-    })),
     lastCompletedSession,
     latestBarDateBySymbol: Object.fromEntries(barRows.map((row) => [row.symbol, row.latest])),
     riskFreeRateFetchedAt: rateRow?.fetched_at ? new Date(rateRow.fetched_at) : null,

@@ -1,8 +1,8 @@
 import knexLibrary, { type Knex } from "knex";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Audit (G2, 2026-10-07): setups restarted after a server restart (c557ee9) and the option-chain scope started by the Signals
-// switch (851800e), against the real run store on the test database. IBKR / network work is faked; every assertion is narrowed to
+// Audit (G2, 2026-10-07): setups restarted after a server restart (c557ee9) and concurrent starts, against the real run
+// store on the test database. IBKR / network work is faked; every assertion is narrowed to
 // the tickers this file creates (listRunning is filtered to them, so other files' rows are never closed or restarted).
 vi.mock("../db/connection.js", async () => {
   const { config } = await import("dotenv");
@@ -23,11 +23,11 @@ const createdTickerIds: string[] = [];
 let userId = "";
 let counter = Date.now() % 100_000;
 
-async function createTicker(options: { signalsEnabled?: boolean; onShortlist?: boolean } = {}): Promise<{ id: string; symbol: string }> {
+async function createTicker(options: { onShortlist?: boolean } = {}): Promise<{ id: string; symbol: string }> {
   const symbol = `AG2${(counter += 1)}`;
   const [ticker] = await testDb("tickers").insert({ symbol, company_name: "Backfill Audit Co", sector: "Technology", ibkr_contract_id: 31337 }).returning(["id"]);
   createdTickerIds.push(ticker.id);
-  await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: options.signalsEnabled ?? false, removed_at: options.onShortlist === false ? new Date() : null });
+  await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, removed_at: options.onShortlist === false ? new Date() : null });
   return { id: ticker.id, symbol };
 }
 
@@ -42,42 +42,29 @@ function scopedStore(overrides: Partial<Store> = {}): Store {
 
 function fakeWorkers(overrides: Partial<Workers> = {}) {
   const fetchHistory = vi.fn(async () => ({ barCount: 10, ivPointCount: 10, firstTradingDate: "2021-10-01", lastTradingDate: "2026-10-06", invalidBarDates: [] }));
-  const prepareChain = vi.fn(async () => ({
-    ticker: { tickerId: "x", symbol: "X", contractId: 1 },
-    spotPrice: 10,
-    referenceVolatility: 0.3,
-    referenceVolatilitySource: "implied_volatility",
-    contracts: [],
-    chainRefresh: { optionParamsMs: 1, expiries: [{ expiry: "20261120", strikeCount: 5, elapsedMs: 1 }], totalMs: 1 },
-  }));
+  const refreshChain = vi.fn(async () => ({ expirations: ["20261120"], strikesByExpiry: new Map(), timings: { optionParamsMs: 1, expiries: [{ expiry: "20261120", strikeCount: 5, elapsedMs: 1 }], totalMs: 1 } }));
   const workers = {
     connect: vi.fn(async () => ({ ib: {} as never, disconnect: vi.fn() })),
     fetchHistory,
     captureCalendar: vi.fn(async () => ({ resolved: true, earningsWritten: 1, dividendsWritten: 0, historicalEarningsWritten: 1, historicalEarningsSkippedEtf: false, historicalEarningsError: null })),
-    loadUniverseTicker: vi.fn(async (tickerId: string, symbol: string) => ({ tickerId, symbol, contractId: 1 })),
-    // The real worker's query, so a Signals-off or removed ticker is read from the database as in production.
-    loadSignalsEnabled: vi.fn(async (tickerId: string) => {
-      const entry = await testDb("shortlist_entries").where({ ticker_id: tickerId }).whereNull("removed_at").first("signals_enabled");
-      return entry ? Boolean(entry.signals_enabled) : null;
-    }),
-    prepareChain,
+    loadContractId: vi.fn(async () => 31337),
+    // The real worker's query, so a removed ticker is read from the database as in production.
+    isOnShortlist: vi.fn(async (tickerId: string) => (await testDb("shortlist_entries").where({ ticker_id: tickerId }).whereNull("removed_at").first("id")) !== undefined),
+    refreshChain,
     now: () => new Date("2026-10-07T14:00:00Z"),
     ...overrides,
   } as unknown as Workers;
-  return { workers, fetchHistory, prepareChain };
+  return { workers, fetchHistory, refreshChain };
 }
 
-async function insertInterruptedRun(tickerId: string, options: { scope?: "full" | "option_chain"; resumedFromRunId?: string; startedMinutesAgo?: number } = {}): Promise<string> {
-  const steps =
-    options.scope === "option_chain"
-      ? updateStep(buildInitialBackfillSteps("option_chain"), "chain_warmup", "running", null)
-      : updateStep(updateStep(buildInitialBackfillSteps(), "history", "done", "10 daily bars"), "calendar", "running", null);
+async function insertInterruptedRun(tickerId: string, options: { resumedFromRunId?: string; startedMinutesAgo?: number } = {}): Promise<string> {
+  const steps = updateStep(updateStep(buildInitialBackfillSteps(), "history", "done", "10 daily bars"), "calendar", "running", null);
   const [row] = await testDb("ticker_backfill_runs")
     .insert({
       ticker_id: tickerId,
       status: "running",
       steps: JSON.stringify(steps),
-      progress_percent: 25,
+      progress_percent: 33,
       started_at: new Date(Date.now() - (options.startedMinutesAgo ?? 2) * 60_000),
       resumed_from_run_id: options.resumedFromRunId ?? null,
     })
@@ -111,10 +98,10 @@ afterAll(async () => {
 });
 
 describe("resumeInterruptedBackfillRuns against the database", () => {
-  it("closes a run cut off during the calendar step, restarts it from scratch linked to it, and the Signals-off ticker skips the chain", async () => {
-    const ticker = await createTicker({ signalsEnabled: false });
+  it("closes a run cut off during the calendar step and restarts it from scratch, linked to it", async () => {
+    const ticker = await createTicker();
     const interruptedId = await insertInterruptedRun(ticker.id);
-    const { workers, fetchHistory, prepareChain } = fakeWorkers();
+    const { workers, fetchHistory, refreshChain } = fakeWorkers();
 
     const result = await resumeInterruptedBackfillRuns({ store: scopedStore(), workers });
     await waitForBackfillQueue();
@@ -123,16 +110,16 @@ describe("resumeInterruptedBackfillRuns against the database", () => {
     const [closed, restarted] = await runsOf(ticker.id);
     expect(closed).toMatchObject({ id: interruptedId, status: "partial", progress_percent: 100 });
     expect(closed.finished_at).not.toBeNull();
-    expect(statusOf(closed.steps)).toEqual({ history: "done", calendar: "failed", chain_warmup: "failed", first_snapshot: "failed" });
+    expect(statusOf(closed.steps)).toEqual({ history: "done", calendar: "failed", chain_warmup: "failed" });
     expect(closed.steps.find((step: { key: string }) => step.key === "calendar").message).toBe("Interrupted by a server restart.");
     expect(restarted).toMatchObject({ status: "complete", resumed_from_run_id: interruptedId });
-    expect(statusOf(restarted.steps)).toEqual({ history: "done", calendar: "done", chain_warmup: "skipped", first_snapshot: "skipped" });
+    expect(statusOf(restarted.steps)).toEqual({ history: "done", calendar: "done", chain_warmup: "done" });
     expect(fetchHistory).toHaveBeenCalledTimes(1);
-    expect(prepareChain).not.toHaveBeenCalled();
+    expect(refreshChain).toHaveBeenCalledTimes(1);
   });
 
   it("two restarts in a row: the resumed run is closed on the second boot, not restarted again; a Retry after that is resumable once more", async () => {
-    const ticker = await createTicker({ signalsEnabled: true });
+    const ticker = await createTicker();
     const originalId = await insertInterruptedRun(ticker.id, { startedMinutesAgo: 5 });
     // First boot: the queue never gets to run the restart before the second restart (the work hangs, then is abandoned).
     let releaseHang: () => void = () => {};
@@ -170,8 +157,8 @@ describe("resumeInterruptedBackfillRuns against the database", () => {
 
   it("a ticker removed from the shortlist mid-setup is closed and not restarted; removed and re-added is restarted", async () => {
     const removed = await createTicker({ onShortlist: false });
-    const readded = await createTicker({ onShortlist: false, signalsEnabled: false });
-    await testDb("shortlist_entries").insert({ ticker_id: readded.id, added_by_user_id: userId, signals_enabled: true });
+    const readded = await createTicker({ onShortlist: false });
+    await testDb("shortlist_entries").insert({ ticker_id: readded.id, added_by_user_id: userId });
     await insertInterruptedRun(removed.id);
     await insertInterruptedRun(readded.id);
     const { workers } = fakeWorkers();
@@ -188,7 +175,7 @@ describe("resumeInterruptedBackfillRuns against the database", () => {
 
 describe("one setup per ticker, whatever starts it", () => {
   it("a Retry that lands between the boot closing a run and restarting it does not make the setup run twice", async () => {
-    const ticker = await createTicker({ signalsEnabled: true });
+    const ticker = await createTicker();
     // Stale (past the 30-minute window), so the Retry does not join it.
     const interruptedId = await insertInterruptedRun(ticker.id, { startedMinutesAgo: 45 });
     const { workers, fetchHistory } = fakeWorkers();
@@ -207,9 +194,9 @@ describe("one setup per ticker, whatever starts it", () => {
     expect(fetchHistory).toHaveBeenCalledTimes(1);
   });
 
-  it("two starts for the same ticker at the same moment (Signals switched on in two tabs, or Signals on plus Retry) run the setup once", async () => {
-    const ticker = await createTicker({ signalsEnabled: true });
-    const { workers, prepareChain } = fakeWorkers();
+  it("two starts for the same ticker at the same moment (an add and a Retry, or two tabs) run the setup once", async () => {
+    const ticker = await createTicker();
+    const { workers, fetchHistory } = fakeWorkers();
     // Both requests read "nothing running" before either creates its run.
     let arrivals = 0;
     let releaseBoth: () => void = () => {};
@@ -225,20 +212,20 @@ describe("one setup per ticker, whatever starts it", () => {
     });
 
     const [first, second] = await Promise.all([
-      startTickerBackfill(ticker.id, ticker.symbol, { store, workers }, "option_chain"),
-      startTickerBackfill(ticker.id, ticker.symbol, { store, workers }, "option_chain"),
+      startTickerBackfill(ticker.id, ticker.symbol, { store, workers }),
+      startTickerBackfill(ticker.id, ticker.symbol, { store, workers }),
     ]);
     await waitForBackfillQueue();
 
-    expect(prepareChain).toHaveBeenCalledTimes(1);
+    expect(fetchHistory).toHaveBeenCalledTimes(1);
     expect(second.id).toBe(first.id);
   });
 });
 
 describe("closeRunning", () => {
   it("closes a stale running run but leaves a fresh one (a start racing this one) running", async () => {
-    const stale = await createTicker({ signalsEnabled: true });
-    const fresh = await createTicker({ signalsEnabled: true });
+    const stale = await createTicker();
+    const fresh = await createTicker();
     const staleId = await insertInterruptedRun(stale.id, { startedMinutesAgo: 45 });
     const freshId = await insertInterruptedRun(fresh.id, { startedMinutesAgo: 1 });
     await databaseRunStore.closeRunning(stale.id);
@@ -251,7 +238,7 @@ describe("closeRunning", () => {
 
 describe("progress writes only land on a running run", () => {
   it("a cut-off process finishing a run the new boot already closed changes nothing", async () => {
-    const ticker = await createTicker({ signalsEnabled: true });
+    const ticker = await createTicker();
     const runId = await insertInterruptedRun(ticker.id);
     await databaseRunStore.finish(runId, "partial", buildInitialBackfillSteps());
     const closed = await testDb("ticker_backfill_runs").where({ id: runId }).first();
@@ -262,22 +249,22 @@ describe("progress writes only land on a running run", () => {
     expect(after.steps).toEqual(closed.steps);
   });
 
-  it("a ticker removed from the Shortlist mid-setup has its chain steps skipped for that reason", async () => {
-    const ticker = await createTicker({ signalsEnabled: true });
-    const { workers, prepareChain } = fakeWorkers();
+  it("a ticker removed from the Shortlist mid-setup has its strike step skipped for that reason", async () => {
+    const ticker = await createTicker();
+    const { workers, refreshChain } = fakeWorkers();
     await testDb("shortlist_entries").where({ ticker_id: ticker.id }).update({ removed_at: new Date() });
-    const run = await startTickerBackfill(ticker.id, ticker.symbol, { store: scopedStore(), workers }, "option_chain");
+    const run = await startTickerBackfill(ticker.id, ticker.symbol, { store: scopedStore(), workers });
     await waitForBackfillQueue();
     const finished = await testDb("ticker_backfill_runs").where({ id: run.id }).first();
-    expect(prepareChain).not.toHaveBeenCalled();
+    expect(refreshChain).not.toHaveBeenCalled();
     expect(finished.steps.find((step: { key: string }) => step.key === "chain_warmup").message).toBe("Removed from the Shortlist: no strikes set up.");
   });
 });
 
 describe("resume keeps going past one bad row", () => {
   it("a failure closing one interrupted run does not leave the later runs unrestarted", async () => {
-    const first = await createTicker({ signalsEnabled: true });
-    const second = await createTicker({ signalsEnabled: true });
+    const first = await createTicker();
+    const second = await createTicker();
     const firstRunId = await insertInterruptedRun(first.id, { startedMinutesAgo: 3 });
     await insertInterruptedRun(second.id, { startedMinutesAgo: 2 });
     const { workers } = fakeWorkers();

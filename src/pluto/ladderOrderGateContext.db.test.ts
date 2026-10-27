@@ -39,7 +39,7 @@ beforeAll(async () => {
   await testDb("pluto_settings").insert({ id: 1, execution_strategy: "cc_put_ladder", capital_budget_pct: 40, ladder_min_abs_delta: 0.05, ladder_max_abs_delta: 0.3 });
   await testDb("users").insert({ id: userId, username: "ladder-gate", display_name: "Ladder Gate", password_hash: "x" });
   await testDb("tickers").insert([{ id: gateId, symbol: "GATE", company_name: "Gate Co" }, { id: otherId, symbol: "OTHR", company_name: "Other Co" }]);
-  await testDb("shortlist_entries").insert([gateId, otherId].map((ticker_id) => ({ ticker_id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true })));
+  await testDb("shortlist_entries").insert([gateId, otherId].map((ticker_id) => ({ ticker_id, added_by_user_id: userId, bot_enabled: true })));
   await testDb("pluto_ticker_settings").insert({ ticker_id: gateId, ladder_max_abs_delta: 0.25 });
 });
 

@@ -1,5 +1,5 @@
 // Line-usage measurement shared by the rolling quote windows (the chain capture's
-// captureOptionQuoteBatch.ts and the Day Signals loop's daySignalsQuoteWindow.ts).
+// captureOptionQuoteBatch.ts and the Day Signals loop's rollingQuoteWindow.ts).
 // Measurement only: nothing here changes what a window subscribes or when.
 //
 // A line counts as "subscribed" from our reqMktData call to our cancelMktData

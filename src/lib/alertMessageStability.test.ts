@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateDaySignalsLiveness } from "./daySignalsLiveness.js";
+import { evaluateMarketQuoteLoopLiveness } from "./marketQuoteLoopLiveness.js";
 import { evaluateJobDeadlines } from "./jobDeadlines.js";
 import { evaluateOpsMonitorLiveness } from "./opsMonitorLiveness.js";
 import { evaluateWorkerHeartbeat } from "./workerHeartbeatLiveness.js";
@@ -28,15 +28,13 @@ describe("state-based alert texts do not change while the condition persists", (
     for (const later of [1, 2, 7, 60]) expect(evaluate(at("2026-10-01T23:05:00Z", later)).filter((line) => line.includes("stuck") || line.includes("ibkr_health_check"))).toEqual(first.filter((line) => line.includes("stuck") || line.includes("ibkr_health_check")));
   });
 
-  it("ops monitor, worker and Day Signals liveness alerts", () => {
+  it("ops monitor, worker and market quote loop liveness alerts", () => {
     const now = new Date("2026-10-01T15:00:00Z");
     const staleFor = (minutes: number) => new Date(now.getTime() - minutes * minute);
     expect(evaluateOpsMonitorLiveness({ now, heartbeatAt: staleFor(8) })).toBe(evaluateOpsMonitorLiveness({ now, heartbeatAt: staleFor(90) }));
     expect(evaluateWorkerHeartbeat({ now, heartbeatAt: staleFor(8), serviceActive: true, restartedJustNow: false })).toBe(evaluateWorkerHeartbeat({ now, heartbeatAt: staleFor(90), serviceActive: true, restartedJustNow: false }));
-    const day = (heartbeatMinutes: number, quoteMinutes: number | null) =>
-      evaluateDaySignalsLiveness({ now, marketOpen: true, poolSeededToday: true, heartbeat: { updatedAt: staleFor(heartbeatMinutes), connected: true, uptimeMs: 3 * 60 * minute }, latestQuoteAt: quoteMinutes === null ? null : staleFor(quoteMinutes) });
-    expect(day(9, 1)).toBe(day(120, 1));
-    expect(day(1, 20)).toBe(day(1, 200));
-    expect(day(1, 20)).toBeTruthy();
+    const loop = (heartbeatMinutes: number) => evaluateMarketQuoteLoopLiveness({ now, marketOpen: true, loopEnabled: true, heartbeatUpdatedAt: staleFor(heartbeatMinutes) });
+    expect(loop(9)).toBe(loop(120));
+    expect(loop(9)).toBeTruthy();
   });
 });

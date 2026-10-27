@@ -22,7 +22,7 @@ const mocks = vi.hoisted(() => {
     competingLiveSessionSurvivedRestart: vi.fn(),
     reportCompetingLiveSession: vi.fn(),
     reportPositionReconciliation: vi.fn(),
-    reportDaySignalsLoopLiveness: vi.fn(),
+    reportMarketQuoteLoopLiveness: vi.fn(),
     reportOpsMonitorLiveness: vi.fn(),
     reportWorkerHeartbeat: vi.fn(),
     runJobCalls: [] as Array<{ jobName: string; options: unknown }>,
@@ -46,7 +46,7 @@ vi.mock("../lib/competingLiveSessionAlert.js", async () => {
   };
 });
 vi.mock("../lib/positionReconciliationAlert.js", () => ({ reportPositionReconciliation: mocks.reportPositionReconciliation }));
-vi.mock("../lib/daySignalsLiveness.js", () => ({ reportDaySignalsLoopLiveness: mocks.reportDaySignalsLoopLiveness }));
+vi.mock("../lib/marketQuoteLoopLiveness.js", () => ({ reportMarketQuoteLoopLiveness: mocks.reportMarketQuoteLoopLiveness }));
 vi.mock("../lib/opsMonitorLiveness.js", () => ({ reportOpsMonitorLiveness: mocks.reportOpsMonitorLiveness }));
 vi.mock("../lib/workerHeartbeatLiveness.js", () => ({ reportWorkerHeartbeat: mocks.reportWorkerHeartbeat }));
 vi.mock("../lib/runJob.js", () => ({
@@ -118,7 +118,7 @@ interface JobOutput {
     worker: { active: boolean; restarted: boolean };
     reconciliationProblems: string[];
     competingLiveSession: string;
-    daySignalsProblem: string | null;
+    marketQuoteLoopProblem: string | null;
     opsMonitorProblem: string | null;
     workerHeartbeatProblem: string | null;
     farmStatusMessages: Array<{ at: string; code: number; message: string }>;
@@ -163,7 +163,7 @@ beforeEach(() => {
   mocks.reportCompetingLiveSession.mockResolvedValue(false);
   mocks.reportPositionReconciliation.mockResolvedValue(undefined);
   mocks.checkPositionReconciliation.mockResolvedValue([]);
-  mocks.reportDaySignalsLoopLiveness.mockResolvedValue(null);
+  mocks.reportMarketQuoteLoopLiveness.mockResolvedValue(null);
   mocks.reportOpsMonitorLiveness.mockResolvedValue(null);
   mocks.reportWorkerHeartbeat.mockResolvedValue(null);
   mocks.restartIbkrGatewayOnVps.mockResolvedValue(successfulRestartResult());
@@ -341,7 +341,7 @@ describe("runIbkrHealthCheckJob: healthy path", () => {
       worker: { active: true, restarted: false },
       reconciliationProblems: [],
       competingLiveSession: "flowing",
-      daySignalsProblem: null,
+      marketQuoteLoopProblem: null,
       opsMonitorProblem: null,
       workerHeartbeatProblem: null,
       farmStatusMessages: [],
@@ -871,10 +871,10 @@ describe("runIbkrHealthCheckJob: reconciliation, liveness and notify assembly", 
   });
 
   it("reports liveness problems in the details without failing, and a throwing liveness check as its own finding", async () => {
-    mocks.reportDaySignalsLoopLiveness.mockResolvedValue("Day Signals loop stalled");
+    mocks.reportMarketQuoteLoopLiveness.mockResolvedValue("Market quote loop stalled");
     mocks.reportOpsMonitorLiveness.mockRejectedValue(new Error("worker_health unreadable"));
     await runIbkrHealthCheckJob();
-    expect(lastJobOutput().details.daySignalsProblem).toBe("Day Signals loop stalled");
+    expect(lastJobOutput().details.marketQuoteLoopProblem).toBe("Market quote loop stalled");
     expect(lastJobOutput().details.opsMonitorProblem).toBe("Ops monitor liveness check itself failed: worker_health unreadable");
     expect(lastJobOutput().notify).toBeUndefined();
   });
@@ -883,9 +883,9 @@ describe("runIbkrHealthCheckJob: reconciliation, liveness and notify assembly", 
     mocks.connectToIbkrGateway.mockRejectedValue(new Error("down"));
     mocks.restartIbkrGatewayOnVps.mockRejectedValue(new Error("vps unreachable"));
     await expect(runIbkrHealthCheckJobAdvancingTimers()).rejects.toThrow("vps unreachable");
-    expect(mocks.reportDaySignalsLoopLiveness).toHaveBeenCalledTimes(1);
+    expect(mocks.reportMarketQuoteLoopLiveness).toHaveBeenCalledTimes(1);
     expect(mocks.reportOpsMonitorLiveness).toHaveBeenCalledTimes(1);
-    expect(mocks.reportDaySignalsLoopLiveness.mock.invocationCallOrder[0]!).toBeLessThan(mocks.connectToIbkrGateway.mock.invocationCallOrder[0]!);
+    expect(mocks.reportMarketQuoteLoopLiveness.mock.invocationCallOrder[0]!).toBeLessThan(mocks.connectToIbkrGateway.mock.invocationCallOrder[0]!);
   });
 
   it("records a heartbeat problem and a throwing heartbeat check as details, not failures", async () => {

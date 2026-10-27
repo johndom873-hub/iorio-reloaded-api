@@ -26,12 +26,12 @@ const createdTickerIds: string[] = [];
 let userId: string;
 let symbolCounter = 0;
 
-async function shortlistedTicker(options: { signalsEnabled?: boolean } = {}): Promise<{ id: string; symbol: string }> {
+async function shortlistedTicker(): Promise<{ id: string; symbol: string }> {
   symbolCounter += 1;
   const symbol = `PP${symbolCounter}X${suffix}`;
   const [ticker] = await testDb("tickers").insert({ symbol, company_name: `${symbol} Co`, ibkr_contract_id: 888 }).returning("id");
   createdTickerIds.push(ticker.id);
-  await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: options.signalsEnabled ?? true });
+  await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId });
   return { id: ticker.id, symbol };
 }
 
@@ -138,15 +138,13 @@ describe("3M and 1Y reference closes", () => {
 });
 
 describe("shortlist membership", () => {
-  it("a ticker removed once and re-added appears exactly once, with the active entry's Signals flag", async () => {
-    const ticker = await shortlistedTicker({ signalsEnabled: false });
-    await testDb("shortlist_entries").where({ ticker_id: ticker.id }).update({ removed_at: new Date(), signals_enabled: true, bot_enabled: true });
-    await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: false });
+  it("a ticker removed once and re-added appears exactly once", async () => {
+    const ticker = await shortlistedTicker();
+    await testDb("shortlist_entries").where({ ticker_id: ticker.id }).update({ removed_at: new Date(), bot_enabled: true });
+    await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId });
     await bars(ticker.id, { "2026-10-05": 10 });
 
-    const rows = await rowFor(ticker.symbol, "2026-10-05");
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ signalsEnabled: false });
+    expect(await rowFor(ticker.symbol, "2026-10-05")).toHaveLength(1);
   });
 
   it("a removed-only ticker is not listed", async () => {
@@ -157,26 +155,20 @@ describe("shortlist membership", () => {
     expect(await rowFor(ticker.symbol, "2026-10-05")).toHaveLength(0);
   });
 
-  it("a Signals-on ticker keeps its IV and option volume; Signals-off hides them", async () => {
-    const on = await shortlistedTicker({ signalsEnabled: true });
-    const off = await shortlistedTicker({ signalsEnabled: false });
-    for (const ticker of [on, off]) {
-      await bars(ticker.id, { "2026-10-05": 10 });
-      await testDb("market_data_snapshots").insert({ ticker_id: ticker.id, snapshot_date: "2026-10-05", implied_volatility: 0.42, avg_option_volume: 1234 });
-    }
-
-    const [onRow] = await rowFor(on.symbol, "2026-10-05");
-    const [offRow] = await rowFor(off.symbol, "2026-10-05");
-    expect(onRow).toMatchObject({ signalsEnabled: true, impliedVolatility: expect.stringMatching(/^0\.42/), avgOptionVolume: expect.anything() });
-    expect(offRow).toMatchObject({ signalsEnabled: false, impliedVolatility: null, avgOptionVolume: null });
+  it("shows the IV and option volume of the ticker's latest bar's snapshot", async () => {
+    const ticker = await shortlistedTicker();
+    await bars(ticker.id, { "2026-10-05": 10 });
+    await testDb("market_data_snapshots").insert({ ticker_id: ticker.id, snapshot_date: "2026-10-05", implied_volatility: 0.42, avg_option_volume: 1234 });
+    const [row] = await rowFor(ticker.symbol, "2026-10-05");
+    expect(row).toMatchObject({ impliedVolatility: expect.stringMatching(/^0\.42/), avgOptionVolume: expect.anything() });
   });
 
-  it("switched back on: an IV snapshot older than the ticker's latest bar is not shown (dash until the next nightly run)", async () => {
-    const ticker = await shortlistedTicker({ signalsEnabled: true });
+  it("an IV snapshot older than the ticker's latest bar is not shown (dash until the next nightly run)", async () => {
+    const ticker = await shortlistedTicker();
     await bars(ticker.id, { "2026-09-01": 9, "2026-10-05": 10 });
     await testDb("market_data_snapshots").insert({ ticker_id: ticker.id, snapshot_date: "2026-09-01", implied_volatility: 0.9, avg_option_volume: 99 });
     const [row] = await rowFor(ticker.symbol, "2026-10-05");
-    expect(row).toMatchObject({ signalsEnabled: true, impliedVolatility: null, avgOptionVolume: null });
+    expect(row).toMatchObject({ impliedVolatility: null, avgOptionVolume: null });
   });
 });
 

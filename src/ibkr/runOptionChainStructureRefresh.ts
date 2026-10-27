@@ -1,17 +1,17 @@
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { IbkrLookupTimeoutError, refreshStoredOptionChain, type OptionChainRefreshTimings } from "./fetchOptionChain.js";
-import { loadCaptureUniverse, type UniverseTicker } from "./runOptionChainCapture.js";
+import { loadOptionDataUniverse, type OptionDataTicker } from "../lib/optionDataUniverse.js";
 import { loadFallbackStockPrices } from "../lib/priceService.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import type { JobResult } from "../lib/runJob.js";
 
-// Split off runOptionChainCapture.ts 2026-09-23: chain STRUCTURE (expiries +
-// each expiry's real strike grid) is plain IBKR contract-definition data,
-// not gated on the market being open, so it runs pre-market — see
-// scripts/run-option-chain-structure-job.ts. The nightly capture job
-// (option_chain_capture) now reads what this job wrote (fetchOptionChain.ts's
-// loadStoredOptionChain) instead of refreshing structure itself, and is
-// ticks-only, which does need the market open for real quotes.
+// Chain STRUCTURE (expiries + each expiry's real strike grid) is plain IBKR
+// contract-definition data, not gated on the market being open, so it runs
+// pre-market — see scripts/run-option-chain-structure-job.ts. Everything that
+// lists contracts reads what this job wrote (fetchOptionChain.ts's
+// loadStoredOptionChain): the CC + Put Ladder, the market quote loop's
+// Volatility Calls, the session-volume capture, the Recovery Path and the
+// Ticker modal's chain. Its tickers: optionDataUniverse.ts.
 
 type IbkrApi = Parameters<typeof refreshStoredOptionChain>[0];
 
@@ -47,7 +47,7 @@ export function buildStructureJobOutcome(result: OptionChainStructureResult): Pi
   if (result.tickersAttempted === 0) return { failureMessage: "no tickers to refresh (shortlist and open positions are both empty)" };
   const incomplete = [...result.failedSymbols, ...result.skippedSymbols];
   if (incomplete.length === 0) return {};
-  const message = `${incomplete.length} of ${result.tickersAttempted} tickers have no structure today, so the capture skips them: ${incomplete.join(", ")}`;
+  const message = `${incomplete.length} of ${result.tickersAttempted} tickers have no structure today, so nothing quotes their options from it: ${incomplete.join(", ")}`;
   if (incomplete.length >= result.tickersAttempted) return { failureMessage: message };
   return { completedWithErrors: { errorCount: incomplete.length, message } };
 }
@@ -55,7 +55,7 @@ export function buildStructureJobOutcome(result: OptionChainStructureResult): Pi
 /** Everything runOptionChainStructureRefresh touches outside itself; injectable so the run logic is testable offline. */
 export interface OptionChainStructureDependencies {
   now: () => Date;
-  loadUniverse: () => Promise<UniverseTicker[]>;
+  loadUniverse: () => Promise<Pick<OptionDataTicker, "tickerId" | "symbol" | "contractId">[]>;
   connect: () => Promise<{ ib: IbkrApi; disconnect: () => void }>;
   refreshStoredOptionChain: typeof refreshStoredOptionChain;
   loadSpotPrices: (symbols: string[]) => Promise<Map<string, number>>;
@@ -63,7 +63,7 @@ export interface OptionChainStructureDependencies {
 
 const defaultDependencies: OptionChainStructureDependencies = {
   now: () => new Date(),
-  loadUniverse: loadCaptureUniverse,
+  loadUniverse: () => loadOptionDataUniverse({ excludeBeingPrepared: true }),
   connect: connectToIbkrGateway,
   refreshStoredOptionChain,
   loadSpotPrices: async (symbols) => new Map([...(await loadFallbackStockPrices(symbols))].map(([symbol, known]) => [symbol, known.price])),
@@ -89,7 +89,7 @@ export async function runOptionChainStructureRefresh(
         });
         const strikeCount = [...chain.strikesByExpiry.values()].reduce((sum, strikes) => sum + strikes.length, 0);
         // An empty structure is stored as valid by the fetch (IBKR error 200 becomes zero strikes), so a
-        // ticker with nothing to capture would count as complete here and only fail a stage later in the capture.
+        // ticker with no contracts would count as complete here and only show up later as an empty chain.
         if (chain.expirations.length === 0) throw new Error("IBKR returned no option expirations");
         if (strikeCount === 0) throw new Error("IBKR returned no strikes for any expiry");
         const reused = chain.timings.expiries.filter((expiry) => expiry.reused).length;

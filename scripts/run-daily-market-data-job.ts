@@ -32,8 +32,6 @@ import { runJob } from "../src/lib/runJob.js";
 interface TickerRow {
   id: string;
   symbol: string;
-  /** Signals on, or an open position: a Signals-off shortlist ticker gets its price and IV history bars only. */
-  capturesIvSnapshot: boolean;
 }
 
 let nextReqId = 1;
@@ -69,23 +67,21 @@ type TickerCaptureOutcome = { kind: "ok"; softProblems: string[] } | { kind: "fa
 async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snapshotDate: string, expectedSessionDate: string): Promise<TickerCaptureOutcome> {
   try {
     const softProblems: string[] = [];
-    const snapshot = ticker.capturesIvSnapshot ? await captureMarketDataSnapshot(connection, nextReqId++, ticker.symbol) : null;
-    if (snapshot) {
-      if (snapshot.impliedVolatility === null) softProblems.push("no IV in the snapshot");
-      // A timed-out snapshot has null fields: keep whatever good value is already stored for the day.
-      await db("market_data_snapshots")
-        .insert({
-          ticker_id: ticker.id,
-          snapshot_date: snapshotDate,
-          implied_volatility: snapshot.impliedVolatility,
-          avg_option_volume: snapshot.avgOptionVolume,
-        })
-        .onConflict(["ticker_id", "snapshot_date"])
-        .merge({
-          implied_volatility: db.raw("COALESCE(excluded.implied_volatility, market_data_snapshots.implied_volatility)"),
-          avg_option_volume: db.raw("COALESCE(excluded.avg_option_volume, market_data_snapshots.avg_option_volume)"),
-        });
-    }
+    const snapshot = await captureMarketDataSnapshot(connection, nextReqId++, ticker.symbol);
+    if (snapshot.impliedVolatility === null) softProblems.push("no IV in the snapshot");
+    // A timed-out snapshot has null fields: keep whatever good value is already stored for the day.
+    await db("market_data_snapshots")
+      .insert({
+        ticker_id: ticker.id,
+        snapshot_date: snapshotDate,
+        implied_volatility: snapshot.impliedVolatility,
+        avg_option_volume: snapshot.avgOptionVolume,
+      })
+      .onConflict(["ticker_id", "snapshot_date"])
+      .merge({
+        implied_volatility: db.raw("COALESCE(excluded.implied_volatility, market_data_snapshots.implied_volatility)"),
+        avg_option_volume: db.raw("COALESCE(excluded.avg_option_volume, market_data_snapshots.avg_option_volume)"),
+      });
 
     // Both bars of the 2-day window: the earlier one is a day already stored, which the split check compares.
     const recentBars = await lookupRecentDailyBars(connection, ticker.symbol, nextReqId++);
@@ -104,7 +100,7 @@ async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snap
     }
 
     console.log(
-      `${ticker.symbol}: ${snapshot ? `IV=${snapshot.impliedVolatility ?? "n/a"} avgOptVolume=${snapshot.avgOptionVolume ?? "n/a"}` : "IV snapshot skipped (Signals off)"} bar=${bar ? `${bar.close}` : "n/a"}${barProblem ? ` (${barProblem})` : ""}`,
+      `${ticker.symbol}: IV=${snapshot.impliedVolatility ?? "n/a"} avgOptVolume=${snapshot.avgOptionVolume ?? "n/a"} bar=${bar ? `${bar.close}` : "n/a"}${barProblem ? ` (${barProblem})` : ""}`,
     );
     return barProblem ? { kind: "failed", problem: barProblem } : { kind: "ok", softProblems };
   } catch (error) {
@@ -122,12 +118,11 @@ async function main(): Promise<void> {
   await runJob("daily_market_data_capture", async () => {
     const tickers: TickerRow[] = await db.raw(
       `
-      SELECT t.id, t.symbol, (signals_on OR has_open_position) AS "capturesIvSnapshot"
+      SELECT t.id, t.symbol
       FROM (
         SELECT
           t.id,
           t.symbol,
-          EXISTS (SELECT 1 FROM shortlist_entries se WHERE se.ticker_id = t.id AND se.removed_at IS NULL AND se.signals_enabled) AS signals_on,
           EXISTS (SELECT 1 FROM shortlist_entries se WHERE se.ticker_id = t.id AND se.removed_at IS NULL) AS shortlisted,
           EXISTS (SELECT 1 FROM positions p WHERE p.ticker_id = t.id AND p.status = 'open') AS has_open_position
         FROM tickers t

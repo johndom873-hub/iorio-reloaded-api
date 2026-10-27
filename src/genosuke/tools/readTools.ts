@@ -123,7 +123,7 @@ export const readTools: GenosukeTool[] = [
   },
   {
     name: "list_shortlist",
-    description: "The monitored-ticker shortlist, with each ticker's Signals and Pluto flags (signalsEnabled, botEnabled) and its Signals data readiness (daily bars, earnings, option-chain snapshots, surface fits).",
+    description: "The monitored-ticker shortlist, with each ticker's Pluto flag (botEnabled) and its data readiness (daily bars, earnings, option chain strikes).",
     tier: "read",
     parameters: { type: "object", properties: {} },
     execute: (_input, api) => api.get("/shortlist"),

@@ -1169,7 +1169,7 @@ describe("option expiry clock", () => {
 
 describe("Pluto's book: every open position on an enabled ticker (Marcelo, 2026-10-07)", () => {
   async function enablePluto(tickerId: string): Promise<void> {
-    await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: await plutoTestUser(), signals_enabled: true, bot_enabled: true });
+    await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: await plutoTestUser(), bot_enabled: true });
   }
 
   /** Marks a leg as opened by a Pluto order: an action, an order carrying its id, and the opening fill. */

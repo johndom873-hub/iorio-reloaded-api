@@ -38,7 +38,6 @@ import { fetchOrderLegFillsByOrderId } from "../lib/orderFills.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
 import { getCycleMarksHandler } from "./positionCycleMarks.js";
 import { agentLeaseRefusal, plutoAgentHolderHeader } from "../pluto/agentLease.js";
-import { executionStrategyLabels } from "../pluto/executionStrategies.js";
 import { loadLadderOrderGateContext } from "../pluto/ladderOrderGateContext.js";
 import type { LadderOrderGateContext } from "../lib/ladderOrderGates.js";
 import { computeUnderlyingStockPriceByPosition, computeUnrealizedPnlByPosition, normalizeExpiryDate, roundToCents, sumSharesCommittedByCoveredCallPayloads, underlyingStockPriceKey, validateCoveredCallCoverage } from "../lib/positionOrderRules.js";
@@ -1476,7 +1475,7 @@ async function readLadderGateContext(orderRequest: { pluto_action_id?: string | 
   try {
     return { ladder: await loadLadderOrderGateContext(orderRequest), error: null };
   } catch (error) {
-    return { ladder: null, error: `The ${executionStrategyLabels.cc_put_ladder} order rules could not be read (${error instanceof Error ? error.message : String(error)}).` };
+    return { ladder: null, error: `The CC + Put Ladder order rules could not be read (${error instanceof Error ? error.message : String(error)}).` };
   }
 }
 
@@ -1546,7 +1545,7 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     }
   }
   if (!orderRequest.pluto_action_id && (await manualOrdersLockedOn(orderRequest.payload.symbol))) {
-    response.status(409).json({ error: `${orderRequest.payload.symbol} is traded by Pluto's ${executionStrategyLabels.cc_put_ladder} strategy, so orders by hand are locked. Switch the ticker off in Pluto to trade it by hand.` });
+    response.status(409).json({ error: `${orderRequest.payload.symbol} is traded by Pluto's CC + Put Ladder strategy, so orders by hand are locked. Switch the ticker off in Pluto to trade it by hand.` });
     return;
   }
 
