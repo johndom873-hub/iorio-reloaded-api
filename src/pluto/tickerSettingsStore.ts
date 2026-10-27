@@ -3,11 +3,24 @@ import { db } from "../db/connection.js";
 
 // Pluto's per-ticker settings (Marcelo 2026-10-15): one row per ticker in pluto_ticker_settings, null meaning "the
 // default", with a field-level audit trail (pluto_ticker_settings_audit). Read by the CC + Put Ladder through
-// loadLadderSettingsForTicker (ladderSettings.ts).
+// loadLadderSettingsForTicker (ladderSettings.ts). Each ticker runs one strategy (Marcelo 2026-10-27): Vol Farmer v2
+// unless it is set to the CC + Put Ladder.
+
+export const plutoStrategies = ["vol_farmer_v2", "cc_put_ladder"] as const;
+export type PlutoStrategy = (typeof plutoStrategies)[number];
+/** The strategy of a ticker with none set. */
+export const defaultPlutoStrategy: PlutoStrategy = "vol_farmer_v2";
+
+/** The strategy Pluto runs on the ticker: its own, else the default. */
+export function effectivePlutoStrategy(ticker: Pick<PlutoTickerSettings, "strategy">): PlutoStrategy {
+  return ticker.strategy ?? defaultPlutoStrategy;
+}
 
 export interface PlutoTickerSettings {
   symbol: string;
   tickerId: string;
+  /** The strategy set for the ticker; null = the default (effectivePlutoStrategy). */
+  strategy: PlutoStrategy | null;
   /** % of Pluto's capital budget for this ticker's pot; null = an equal share of what the set allocations leave. */
   allocationPct: number | null;
   /** Overrides the strategy's default share level (pluto_settings.ladder_shares_pct). */
@@ -23,7 +36,7 @@ export interface PlutoTickerSettings {
 }
 
 export type PlutoTickerSettingsField = "allocationPct" | "ladderSharesPct" | "ladderShockOverridePct" | "ladderRungs" | "ladderMinAbsDelta" | "ladderMaxAbsDelta";
-export type PlutoTickerSettingsInput = Partial<Record<PlutoTickerSettingsField, number | null>>;
+export type PlutoTickerSettingsInput = Partial<Record<PlutoTickerSettingsField, number | null>> & { strategy?: PlutoStrategy | null };
 
 /** Above `above` (exclusive) and at most `max`, whole when `integer`; the ladder's bounds are the backtest's. */
 export const plutoTickerSettingsColumns: Record<PlutoTickerSettingsField, { column: string; above: number; max: number; integer?: true }> = {
@@ -41,6 +54,7 @@ function rowToTickerSettings(row: Record<string, unknown>): PlutoTickerSettings 
   return {
     symbol: row.symbol as string,
     tickerId: row.ticker_id as string,
+    strategy: (row.strategy as PlutoStrategy | null) ?? null,
     allocationPct: numberOrNull(row.allocation_pct),
     ladderSharesPct: numberOrNull(row.ladder_shares_pct),
     ladderShockOverridePct: numberOrNull(row.ladder_shock_override_pct),
@@ -55,7 +69,7 @@ function rowToTickerSettings(row: Record<string, unknown>): PlutoTickerSettings 
 function tickerSettingsQuery(connection: Knex) {
   return connection("tickers as t")
     .leftJoin("pluto_ticker_settings as s", "s.ticker_id", "t.id")
-    .select("t.symbol", "t.id as ticker_id", "s.allocation_pct", "s.ladder_shares_pct", "s.ladder_shock_override_pct", "s.ladder_rungs", "s.ladder_min_abs_delta", "s.ladder_max_abs_delta", "s.updated_at", "s.updated_by_user_id");
+    .select("t.symbol", "t.id as ticker_id", "s.strategy", "s.allocation_pct", "s.ladder_shares_pct", "s.ladder_shock_override_pct", "s.ladder_rungs", "s.ladder_min_abs_delta", "s.ladder_max_abs_delta", "s.updated_at", "s.updated_by_user_id");
 }
 
 /** The ticker's settings (every field null when none were set), or null when the symbol is not a known ticker. */
@@ -91,6 +105,10 @@ export class PlutoTickerNotFoundError extends Error {}
 
 export function validatePlutoTickerSettingsInput(input: Record<string, unknown>): string | null {
   for (const [field, value] of Object.entries(input)) {
+    if (field === "strategy") {
+      if (value !== null && !(plutoStrategies as readonly unknown[]).includes(value)) return `strategy must be one of ${plutoStrategies.join(", ")}, or null for the default.`;
+      continue;
+    }
     const spec = plutoTickerSettingsColumns[field as PlutoTickerSettingsField];
     if (!spec) return `${field} is not a ticker setting.`;
     if (value === null) continue;
@@ -125,12 +143,12 @@ export async function updatePlutoTickerSettings(symbol: string, input: PlutoTick
       const maximum = (input.ladderMaxAbsDelta !== undefined ? input.ladderMaxAbsDelta : current.ladderMaxAbsDelta) ?? Number(strategy.ladder_max_abs_delta);
       if (minimum > maximum) throw new PlutoTickerSettingsValidationError(`The ticker's |delta| range would be ${minimum}–${maximum}: the lower limit cannot exceed the upper one.`);
     }
-    const update: Record<string, number | null> = {};
+    const update: Record<string, number | string | null> = {};
     const audit: { ticker_id: string; user_id: string; field: string; old_value: string | null; new_value: string | null }[] = [];
-    for (const [field, value] of Object.entries(input) as [PlutoTickerSettingsField, number | null][]) {
+    for (const [field, value] of Object.entries(input) as [PlutoTickerSettingsField | "strategy", number | string | null][]) {
       const before = current[field];
       if (before === value) continue;
-      update[plutoTickerSettingsColumns[field].column] = value;
+      update[field === "strategy" ? "strategy" : plutoTickerSettingsColumns[field].column] = value;
       audit.push({ ticker_id: current.tickerId, user_id: userId, field, old_value: before === null ? null : String(before), new_value: value === null ? null : String(value) });
     }
     if (audit.length === 0) return current;

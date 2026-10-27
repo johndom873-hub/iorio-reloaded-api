@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildPlutoHowItWorks } from "./howItWorks.js";
-import { plutoLadderSettingsFixture } from "./plutoSettingsFixture.js";
+import { plutoLadderSettingsFixture, plutoVolFarmerV2SettingsFixture } from "./plutoSettingsFixture.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 // The "How it works" tab quotes these numbers to its readers. This test pins every one at today's defaults: when a
@@ -10,6 +10,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 /** Pluto's settings at their migration defaults. */
 const settings: PlutoSettings = {
   ...plutoLadderSettingsFixture,
+  ...plutoVolFarmerV2SettingsFixture,
   capitalBudgetPct: 50, 
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2,
   maxQuoteAgeMinutes: 10, maxFillSlippagePct: 5,

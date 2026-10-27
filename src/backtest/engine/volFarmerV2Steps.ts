@@ -61,10 +61,10 @@ export interface VolFarmerV2Position {
   costPerShare: number;
   /** Premiums net of commissions, in dollars: its Calls' and, for the second, every Put's sold for it. */
   premiumDollars: number;
-  /** Its open Call and the shares that Call covers (another position's Call can share the leg). */
-  call: { legId: string; shares: number } | null;
-  /** The second position's open Put and the shares it would deliver. */
-  put: { legId: string; shares: number } | null;
+  /** Its open Calls and the shares each covers (another position's Call can share the leg); one in the backtest, several on holdings Pluto adopted. */
+  calls: { legId: string; shares: number }[];
+  /** The second position's open Puts and the shares each would deliver; one in the backtest, several on holdings Pluto adopted. */
+  puts: { legId: string; shares: number }[];
 }
 
 /** Each LEAPS trigger: what the free cash was against one contract, and what was bought. */
@@ -275,23 +275,26 @@ function reconcile(book: VolFarmerV2Book, state: VolFarmerV2SymbolState, notes: 
   const calledAway = new Set<"first" | "second">();
   for (const [name, position] of [["first", state.first], ["second", state.second]] as const) {
     if (position === null) continue;
-    const callLeg = position.call === null ? undefined : book.leg(position.call.legId);
-    if (position.call !== null && callLeg !== undefined && callLeg.closed) {
+    for (const call of [...position.calls]) {
+      const callLeg = book.leg(call.legId);
+      if (callLeg === undefined || !callLeg.closed) continue;
       if (callLeg.assigned) {
-        position.shares = Math.max(0, position.shares - position.call.shares);
-        notes.push(`the ${name} position's Call was assigned: ${position.call.shares} shares called away${position.shares > 0 ? `, ${position.shares} left` : ""}`);
+        position.shares = Math.max(0, position.shares - call.shares);
+        notes.push(`the ${name} position's Call was assigned: ${call.shares} shares called away${position.shares > 0 ? `, ${position.shares} left` : ""}`);
         if (position.shares === 0) calledAway.add(name);
       }
-      position.call = null;
+      position.calls.splice(position.calls.indexOf(call), 1);
     }
-    const putLeg = position.put === null ? undefined : book.leg(position.put.legId);
-    if (position.put !== null && putLeg !== undefined && putLeg.closed) {
+    for (const put of [...position.puts]) {
+      const putLeg = book.leg(put.legId);
+      if (putLeg === undefined || !putLeg.closed) continue;
       if (putLeg.assigned) {
-        position.shares += position.put.shares;
-        position.costPerShare = putLeg.strike!;
-        notes.push(`the second position's Put was assigned: ${position.put.shares} shares at ${putLeg.strike!.toFixed(2)}`);
+        // Shares already held (several Puts assigned): the cost is the average of theirs and the strike's.
+        position.costPerShare = position.shares === 0 ? putLeg.strike! : (position.shares * position.costPerShare + put.shares * putLeg.strike!) / (position.shares + put.shares);
+        position.shares += put.shares;
+        notes.push(`the second position's Put was assigned: ${put.shares} shares at ${putLeg.strike!.toFixed(2)}`);
       }
-      position.put = null;
+      position.puts.splice(position.puts.indexOf(put), 1);
     }
   }
   if (calledAway.has("first")) state.first = null;
@@ -404,7 +407,7 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
     Object.assign(state, { ...newVolFarmerV2SymbolState(), cash: state.cash, potDollars: pot });
     state.cash.cycles += 1;
     state.cash.firstHalfLeft.push(pot / 2 - spent);
-    state.first = { shares: lots * sharesPerContractOnCycleScale, costPerShare: spent / (lots * sharesPerContractOnCycleScale), premiumDollars: 0, call: null, put: null };
+    state.first = { shares: lots * sharesPerContractOnCycleScale, costPerShare: spent / (lots * sharesPerContractOnCycleScale), premiumDollars: 0, calls: [], puts: [] };
     say(sellCalls(input, [{ name: "first", position: state.first, call, contracts: lots }]));
     return finish();
   }
@@ -414,12 +417,12 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
     const breakEven = position === null ? null : volFarmerV2BreakEven(position);
     return breakEven === null ? null : asTraded(breakEven);
   };
-  const firstNeedsCall = state.first !== null && state.first.shares > 0 && state.first.call === null;
+  const firstNeedsCall = state.first !== null && state.first.shares > 0 && state.first.calls.length === 0;
   const volumeUsed = new Map<string, number>();
   const orders: CallOrder[] = [];
   let secondFindsNoCall = false;
   for (const [name, position] of [["first", state.first], ["second", state.second]] as const) {
-    if (position === null || position.shares <= 0 || position.call !== null) continue;
+    if (position === null || position.shares <= 0 || position.calls.length > 0) continue;
     const breakEven = breakEvenAsTraded(position)!;
     const lots = Math.floor(position.shares / sharesPerContractOnCycleScale + 1e-9);
     if (lots < 1) continue;
@@ -446,7 +449,7 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
   // 3. Puts for the second position, when the first needed a new Call and its best yields under putsStartCallYieldPct.
   const first = state.first;
   const second = state.second;
-  if (firstNeedsCall && first !== null && first.shares > 0 && (second === null || (second.shares === 0 && second.put === null))) {
+  if (firstNeedsCall && first !== null && first.shares > 0 && (second === null || (second.shares === 0 && second.puts.length === 0))) {
     const firstBreakEven = breakEvenAsTraded(first)!;
     const bestCall = callCandidates(firstBreakEven, false).calls[0] ?? null;
     const bestYield = bestCall?.premiumYield ?? 0;
@@ -471,7 +474,7 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
         const contracts = Math.min(wanted(put), put.volumeCap);
         if (contracts < 1) say(`no Put: ${trigger}, but the volume limit allows none`);
         else {
-          state.second ??= { shares: 0, costPerShare: 0, premiumDollars: 0, call: null, put: null };
+          state.second ??= { shares: 0, costPerShare: 0, premiumDollars: 0, calls: [], puts: [] };
           state.cash.secondHalfLeft.push(state.potDollars / 2 - contracts * put.strike * sharesPerContract);
           say(sellPut(input, state.second, put, contracts, `${trigger}; strike at most ${strikeCap.toFixed(2)}${stepNote}`, firstBreakEven, stepScores));
         }
@@ -528,7 +531,7 @@ function sellCalls(input: VolFarmerV2LookInput, orders: readonly CallOrder[]): s
       chosenBecause: `vol farmer v2: the highest premium yield at or above the ${group.map((order) => order.name).join(" and ")} position's break-even, ${contracts < group.reduce((sum, order) => sum + Math.floor(order.position.shares / sharesPerContractOnCycleScale + 1e-9), 0) ? "the volume covering the most lots" : "its volume covering every lot"}`,
       candidateScores: { premiumYield: call.premiumYield, delta: call.delta, impliedVolatility: call.impliedVolatility, timeValue: call.timeValue, dte: call.dte, bid: call.bid, ask: call.ask, volumeCap: call.volumeCap, stockPrice, ...breakEvensBefore },
     });
-    for (const order of group) order.position.call = { legId: callLegId, shares: order.contracts * sharesPerContractOnCycleScale };
+    for (const order of group) order.position.calls.push({ legId: callLegId, shares: order.contracts * sharesPerContractOnCycleScale });
     descriptions.push(description);
   }
   return descriptions.join(" · ");
@@ -548,7 +551,7 @@ function sellPut(input: VolFarmerV2LookInput, second: VolFarmerV2Position, put: 
     chosenBecause: `vol farmer v2: ${why}; the highest premium yield up to |delta| ${v2.putMaxAbsDelta}, on half the pot`,
     candidateScores: { premiumYield: put.premiumYield, delta: put.delta, impliedVolatility: put.impliedVolatility, timeValue: put.timeValue, dte: put.dte, bid: put.bid, ask: put.ask, volumeCap: put.volumeCap, stockPrice: market.stockPrice, breakEvenFirst: firstBreakEvenAsTraded, ...stepScores },
   });
-  second.put = { legId: putLegId, shares: contracts * sharesPerContractOnCycleScale };
+  second.puts.push({ legId: putLegId, shares: contracts * sharesPerContractOnCycleScale });
   return description;
 }
 

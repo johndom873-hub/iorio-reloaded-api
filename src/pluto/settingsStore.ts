@@ -55,6 +55,19 @@ export interface PlutoSettings {
   ladderMaxOpenPositions: number;
   /** Across every ladder ticker: ladder orders sent in a day, counted as the per-ticker daily cap counts them. */
   ladderMaxOrdersPerDay: number;
+  // Vol Farmer v2 (the backtest's volFarmerV2 keys with a "volFarmerV2" prefix, and the Vol Farmer's Call keys it reads;
+  // volFarmerV2Settings.ts maps them back). Set once from the lab's values of 2026-10-27; never synced with the lab.
+  volFarmerV2PutsStartCallYieldPct: number;
+  volFarmerV2PutMaxAbsDelta: number;
+  volFarmerV2StepBelowFirstBreakEvenPct: number;
+  volFarmerV2StepRule: "fixed" | "implied_move_at_put_sale";
+  volFarmerV2LeapsMinDte: number;
+  volFarmerV2LeapsAbsDelta: number;
+  /** % of the ticker's allocation a LEAPS purchase spends at most (the lab's cap is a share of the account). */
+  volFarmerV2LeapsMaxAllocationPct: number;
+  volFarmerV2CallMinAbsDelta: number;
+  volFarmerV2CallMaxAbsDelta: number;
+  volFarmerV2MaxSpreadPctOfMid: number;
   updatedAt: string;
   updatedByUserId: string | null;
 }
@@ -94,6 +107,17 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   ladderMaxOrdersPerTickerPerDay: { column: "ladder_max_orders_per_ticker_per_day", kind: "integer", min: 1, max: 1000 },
   ladderMaxOpenPositions: { column: "ladder_max_open_positions", kind: "integer", min: 1, max: 10000 },
   ladderMaxOrdersPerDay: { column: "ladder_max_orders_per_day", kind: "integer", min: 1, max: 10000 },
+  // Vol Farmer v2's bounds are the backtest's (validateVolFarmerV2Settings, validateVolFarmerSettings).
+  volFarmerV2PutsStartCallYieldPct: { column: "vol_farmer_v2_puts_start_call_yield_pct", kind: "number", min: 0, max: 500 },
+  volFarmerV2PutMaxAbsDelta: { column: "vol_farmer_v2_put_max_abs_delta", kind: "number", min: 0.01, max: 0.99 },
+  volFarmerV2StepBelowFirstBreakEvenPct: { column: "vol_farmer_v2_step_below_first_break_even_pct", kind: "number", min: 0, max: 90 },
+  volFarmerV2StepRule: { column: "vol_farmer_v2_step_rule", kind: "text", oneOf: ["fixed", "implied_move_at_put_sale"] },
+  volFarmerV2LeapsMinDte: { column: "vol_farmer_v2_leaps_min_dte", kind: "integer", min: 30, max: 1000 },
+  volFarmerV2LeapsAbsDelta: { column: "vol_farmer_v2_leaps_abs_delta", kind: "number", min: 0.05, max: 0.99 },
+  volFarmerV2LeapsMaxAllocationPct: { column: "vol_farmer_v2_leaps_max_allocation_pct", kind: "number", min: 0, max: 100 },
+  volFarmerV2CallMinAbsDelta: { column: "vol_farmer_v2_call_min_abs_delta", kind: "number", min: 0, max: 1 },
+  volFarmerV2CallMaxAbsDelta: { column: "vol_farmer_v2_call_max_abs_delta", kind: "number", min: 0, max: 1 },
+  volFarmerV2MaxSpreadPctOfMid: { column: "vol_farmer_v2_max_spread_pct_of_mid", kind: "number", min: 0, max: 200 },
 };
 
 export type PlutoSettingsField = keyof typeof plutoSettingsColumns;
@@ -141,6 +165,8 @@ export function validatePlutoSettingsInput(input: PlutoSettingsInput, current: P
   if (merged.ladderMinDte > merged.ladderMaxDte) return "ladderMinDte cannot exceed ladderMaxDte.";
   if (merged.ladderMaxSpreadPctOfMid <= 0) return "ladderMaxSpreadPctOfMid must be above 0.";
   if (merged.ladderShockMinPct > merged.ladderShockMaxPct) return "ladderShockMinPct cannot exceed ladderShockMaxPct.";
+  if (merged.volFarmerV2CallMinAbsDelta > merged.volFarmerV2CallMaxAbsDelta) return "volFarmerV2CallMinAbsDelta cannot exceed volFarmerV2CallMaxAbsDelta.";
+  if (merged.volFarmerV2MaxSpreadPctOfMid <= 0) return "volFarmerV2MaxSpreadPctOfMid must be above 0.";
   return null;
 }
 
