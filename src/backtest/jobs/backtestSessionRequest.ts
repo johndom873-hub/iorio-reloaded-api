@@ -14,6 +14,7 @@ import {
   defaultBacktestSteadyStakeSettings,
   defaultBacktestVolFarmerSettings,
   defaultBacktestVolFarmerV2Settings,
+  volFarmerV2LooksChoices,
   volFarmerV2StepRules,
   type BacktestBaselineSettings,
   type BacktestBookMode,
@@ -302,6 +303,7 @@ export function validateVolFarmerV2Settings(values: Record<string, unknown>): st
   if (!isNumberIn(values.leapsMinDte, 30, 1000) || !Number.isInteger(values.leapsMinDte)) return "volFarmerV2.leapsMinDte must be a whole number from 30 to 1000.";
   if (!isNumberIn(values.leapsAbsDelta, 0.05, 0.99)) return "volFarmerV2.leapsAbsDelta must be a number from 0.05 to 0.99.";
   if (!isNumberIn(values.leapsMaxAccountPct, 0, 100)) return "volFarmerV2.leapsMaxAccountPct must be a number from 0 to 100.";
+  if (!(volFarmerV2LooksChoices as readonly unknown[]).includes(values.looks)) return `volFarmerV2.looks must be one of ${volFarmerV2LooksChoices.join(", ")}.`;
   return null;
 }
 

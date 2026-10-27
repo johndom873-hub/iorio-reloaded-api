@@ -7,7 +7,8 @@ import { defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, t
 import { BacktestBarHistory } from "./backtestBarHistory.js";
 import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
-import { chooseVolFarmerV2Leaps, contractsAffordable, describeVolFarmerV2Run, impliedVolatilityBefore, runVolFarmerV2Look, volFarmerV2BreakEven, volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap } from "./backtestVolFarmerV2Look.js";
+import { describeVolFarmerV2Run, impliedVolatilityBefore, runVolFarmerV2Look } from "./backtestVolFarmerV2Look.js";
+import { chooseVolFarmerV2Leaps, contractsAffordable, volFarmerV2BreakEven, volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap } from "./volFarmerV2Steps.js";
 import { expirySettlementInstant, settleExpiry } from "./ledger/ledgerEvents.js";
 import { ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
 import { createSimulatedLedger, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
@@ -269,5 +270,21 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.quantity).toBe(4 + put.quantity!);
     expect(calls[0]!.description).toMatch(/first position 4×.*second position \d+×/);
+  });
+
+  it("decides at a later look on that look's quotes and price, and records the look's time", async () => {
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings, looks: "every_look" } } as unknown as EffectiveBacktestSettings;
+    // The 10:00 capture at 100; the 10:30 look's own quotes at 90.
+    const tenOClock = lookSymbolOf("2026-03-09", 100, "2026-03-13");
+    const later = lookSymbolOf("2026-03-09", 90, "2026-03-13");
+    const lookSymbol = { ...tenOClock, bars: barsWithImpliedVolatility([]), intraday: { quotes: later.market.quotes, stockPrice: 90 } } as BacktestLookSymbol;
+    const result = await runVolFarmerV2Look({ todayIso: "2026-03-09", lookTimeEt: "10:30", symbols: [lookSymbol], settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
+    expect(result.actions.map((action) => action.kind)).toEqual(["open_covered_call"]);
+    // Half the pot at 90: floor(50,000 ÷ 9,000.50) = 5 lots, bought at the look's price.
+    expect(result.actions[0]!.description).toContain("with 500 shares bought @ 90.00");
+    expect(result.actions[0]!.lookTimeEt).toBe("10:30");
+    expect(result.actions[0]!.at).toBe(easternInstant("2026-03-09", 10, 30).toISOString());
+    expect(result.breakEvenLevels![0]!.lookTimeEt).toBe("10:30");
   });
 });

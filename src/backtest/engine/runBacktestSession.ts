@@ -686,19 +686,20 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       const spyBaselineDay = spyBuyAndHold?.markDay(todayIso, spyPriceAtTen(todayIso), interestPeriod) ?? null;
 
       const hedgePutQuotesByKey = new Map<string, HedgePutQuoteSource>();
-      const leapsCallQuotesBySymbol = new Map<string, HedgePutQuoteSource>();
-      /** A symbol's 10:00 Calls of every listed expiry, for Vol Farmer v2's LEAPS (each read once a day and expiry); undefined for any other decision maker. */
-      const leapsCallQuotesOf = (entry: SessionSymbol): HedgePutQuoteSource | undefined => {
+      const leapsCallQuotesByKey = new Map<string, HedgePutQuoteSource>();
+      const listedCallExpiriesBySymbol = new Map<string, string[]>();
+      /** A symbol's Calls of every listed expiry at a look, for Vol Farmer v2's LEAPS (each read once a day, look and expiry); undefined for any other decision maker. */
+      const leapsCallQuotesAt = (entry: SessionSymbol, lookTimeEt: string): HedgePutQuoteSource | undefined => {
         if (!leapsOn) return undefined;
-        let source = leapsCallQuotesBySymbol.get(entry.symbol);
+        const key = `${entry.symbol}|${lookTimeEt}`;
+        let source = leapsCallQuotesByKey.get(key);
         if (!source) {
-          let expiries: string[] | null = null;
           const quotesByExpiry = new Map<string, SymbolFileQuote[]>();
           source = {
-            listedExpiries: () => (expiries ??= entry.file.loadCallExpiries(todayIso)),
-            quotesOf: (expiry) => quotesByExpiry.get(expiry) ?? quotesByExpiry.set(expiry, entry.file.loadCallQuotesOfExpiry(todayIso, expiry)).get(expiry)!,
+            listedExpiries: () => listedCallExpiriesBySymbol.get(entry.symbol) ?? listedCallExpiriesBySymbol.set(entry.symbol, entry.file.loadCallExpiries(todayIso)).get(entry.symbol)!,
+            quotesOf: (expiry) => quotesByExpiry.get(expiry) ?? quotesByExpiry.set(expiry, lookTimeEt === captureLookTimeEt ? entry.file.loadCallQuotesOfExpiry(todayIso, expiry) : entry.file.loadIntradayCallQuotesOfExpiry(todayIso, lookTimeEt, expiry)).get(expiry)!,
           };
-          leapsCallQuotesBySymbol.set(entry.symbol, source);
+          leapsCallQuotesByKey.set(key, source);
         }
         return source;
       };
@@ -723,7 +724,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
         return legs.filter((leg) => {
           if (leg.side !== "long" || leg.legType !== "option") return true;
-          const source = leg.optionType === "call" ? leapsCallQuotesOf(entry) : hedgePutQuotesAt(entry, captureLookTimeEt);
+          const source = leg.optionType === "call" ? leapsCallQuotesAt(entry, captureLookTimeEt) : hedgePutQuotesAt(entry, captureLookTimeEt);
           if (!source) return true;
           const strikeAsTraded = leg.strikePrice! / priceToCycleScale;
           const mid = markMidByContract(source.quotesOf(leg.expiryDate!), new Set([roundedStrike(strikeAsTraded)])).get(markKey(leg.expiryDate!, strikeAsTraded, leg.optionType === "call" ? "C" : "P"));
@@ -836,7 +837,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const previousSessionVolumeByContract = capture!.previousSessionVolumeByContract;
         notes.push(...describeDataGaps(entry.file, todayIso, previousFileDay, previousSessionVolumeByContract).map((note) => noteFor(entry, note)));
         const hedgePutQuotes = hedgePutQuotesAt(entry, captureLookTimeEt);
-        const leapsCallQuotes = leapsCallQuotesOf(entry);
+        const leapsCallQuotes = leapsCallQuotesAt(entry, captureLookTimeEt);
         const nextSessionIso = sessionDays[dayIndex + 1];
         daySymbols.push({
           entry,
@@ -901,9 +902,10 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           looksOfDay.push({ lookTimeEt: crossing.lookTimeEt, summary: crossing.summary, filledCount: crossing.actions.length, refusedCount: crossing.actions.length === 0 ? 1 : 0, opensStopped: [] });
         }
       };
-      // The Steady Stake and Vol Farmer v2 decide at 10:00 only, the Vol Farmer too but reads every look's quotes (the IVs
-      // a crossing is priced on), the baseline at every look unless its looks say the first only.
-      const decidesAtCaptureLookOnly = settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" : settings.decisionMaker === "steady_stake" || settings.decisionMaker === "vol_farmer_v2";
+      // The Steady Stake decides at 10:00 only, the Vol Farmer too but reads every look's quotes (the IVs a crossing is
+      // priced on), the baseline and Vol Farmer v2 at every look unless their looks say the first only.
+      const decidesAtCaptureLookOnly =
+        settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" : settings.decisionMaker === "vol_farmer_v2" ? settings.volFarmerV2.looks === "first_look" : settings.decisionMaker === "steady_stake";
       const runLook = settings.decisionMaker === "baseline" ? runBaselineLook : settings.decisionMaker === "steady_stake" ? runSteadyStakeLook : settings.decisionMaker === "vol_farmer_v2" ? runVolFarmerV2Look : runVolFarmerLook;
       for (const lookTimeEt of lookTimes) {
         const isCaptureLook = lookTimeEt === captureLookTimeEt;
@@ -922,7 +924,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
             markLegs(entry, openLegsAtLook.filter((leg) => symbolOfLeg(leg) === entry), lookPrice, quotes, splitFactor);
             entry.lastAdjustedStockPrice = lookPrice / splitFactor;
             const hedgePutQuotes = hedgePutQuotesAt(entry, lookTimeEt);
-            lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: lookPrice }, ...(hedgePutQuotes ? { hedgePutQuotes } : {}) });
+            const leapsCallQuotes = leapsCallQuotesAt(entry, lookTimeEt);
+            lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: lookPrice }, ...(hedgePutQuotes ? { hedgePutQuotes } : {}), ...(leapsCallQuotes ? { leapsCallQuotes } : {}) });
           }
         }
         if (lookSymbols.length === 0) continue;
