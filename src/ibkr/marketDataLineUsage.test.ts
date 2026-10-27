@@ -6,13 +6,13 @@ describe("summarizeMarketDataLineUsage", () => {
     const usage = summarizeMarketDataLineUsage(
       [
         { holder: "marketDataPool", lines: 25 },
-        { holder: "optionChainCapture", lines: 50 },
+        { holder: "marketQuoteLoop", lines: 50 },
         { holder: "snapshot:pricing:AAOI:1", lines: 1 },
         { holder: "snapshot:prices:2", lines: 3 },
       ],
       20,
     );
-    expect(usage).toEqual({ inUse: 74, budget: 90, byUse: [{ label: "Screens", lines: 20 }, { label: "Chain capture", lines: 50 }, { label: "Snapshots", lines: 4 }] });
+    expect(usage).toEqual({ inUse: 74, budget: 90, byUse: [{ label: "Screens", lines: 20 }, { label: "Market quote loop", lines: 50 }, { label: "Snapshots", lines: 4 }] });
   });
 
   it("leaves out uses holding nothing, and names an unknown holder by its prefix", () => {

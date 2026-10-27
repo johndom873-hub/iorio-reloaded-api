@@ -11,7 +11,7 @@ const calls = vi.hoisted(() => ({
   startStalePendingOrderSweep: vi.fn(),
   startGenosuke: vi.fn(),
   startNotificationBroadcaster: vi.fn(),
-  startDaySignalsLoop: vi.fn(),
+  startMarketQuoteLoop: vi.fn(),
   startOpsMonitor: vi.fn(),
   startOrderTelegramNotices: vi.fn(),
   startProcessMemoryMonitor: vi.fn(),
@@ -27,8 +27,11 @@ vi.mock("./lib/installShutdownHandler.js", () => ({ installShutdownHandler: call
 vi.mock("./lib/stalePendingOrders.js", () => ({ startStalePendingOrderSweep: calls.startStalePendingOrderSweep }));
 vi.mock("./genosuke/bot.js", () => ({ startGenosuke: calls.startGenosuke }));
 vi.mock("./lib/notificationBroadcaster.js", () => ({ startNotificationBroadcaster: calls.startNotificationBroadcaster }));
-vi.mock("./lib/daySignalsLoop.js", () => ({ startDaySignalsLoop: calls.startDaySignalsLoop }));
-vi.mock("./pluto/ladderBandPlanLoader.js", () => ({ createDayLoopLadderBand: () => ({ ladderBand: "fake" }) }));
+vi.mock("./lib/marketQuoteLoop.js", () => ({ startMarketQuoteLoop: calls.startMarketQuoteLoop }));
+vi.mock("./pluto/ladderBandPlanLoader.js", () => ({ createLadderQuoteConsumer: () => ({ consumer: "ladder" }) }));
+vi.mock("./lib/assignmentRiskConsumer.js", () => ({ createAssignmentRiskConsumer: () => ({ consumer: "assignment risk" }) }));
+vi.mock("./lib/volatilityConsumer.js", () => ({ createVolatilityConsumer: () => ({ consumer: "volatility" }) }));
+vi.mock("./backtest/backtestDataDirectory.js", () => ({ readBacktestDataDirectory: () => null }));
 vi.mock("./lib/opsMonitor.js", () => ({ startOpsMonitor: calls.startOpsMonitor }));
 vi.mock("./lib/orderTelegramNotices.js", () => ({ startOrderTelegramNotices: calls.startOrderTelegramNotices }));
 vi.mock("./lib/processMemoryMonitor.js", () => ({ startProcessMemoryMonitor: calls.startProcessMemoryMonitor }));
@@ -50,7 +53,7 @@ const completeBootEnvironment: Record<string, string> = {
   IBKR_TUNNEL_SSH_PRIVATE_KEY_BASE64: "a2V5",
   IBKR_GATEWAY_HOST: "gateway.unit-test.example",
   PORT: "4321",
-  DAY_SIGNALS_LOOP_ENABLED: "true",
+  MARKET_QUOTE_LOOP_ENABLED: "true",
   IBKR_MARKET_DATA_LINES_ENABLED: "true",
   PASSKEY_LOGIN: "off",
   PASSKEY_RP_ID: "localhost",
@@ -101,12 +104,12 @@ describe("server.ts boot validation", () => {
   it("does not start any background work before the port is bound", async () => {
     stubBootEnvironment();
     await importServer();
-    for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startOrderTelegramNotices, calls.startProcessMemoryMonitor, calls.startDaySignalsLoop, calls.announceWebDynoStart, calls.resumeInterruptedBackfillRuns, calls.borrowRead, calls.borrowLive]) {
+    for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startOrderTelegramNotices, calls.startProcessMemoryMonitor, calls.startMarketQuoteLoop, calls.announceWebDynoStart, calls.resumeInterruptedBackfillRuns, calls.borrowRead, calls.borrowLive]) {
       expect(started).not.toHaveBeenCalled();
     }
   });
 
-  for (const missingName of ["PORT", "DAY_SIGNALS_LOOP_ENABLED", "IBKR_MARKET_DATA_LINES_ENABLED", "PASSKEY_LOGIN", "DATABASE_URL", "FRONTEND_ORIGIN"]) {
+  for (const missingName of ["PORT", "MARKET_QUOTE_LOOP_ENABLED", "IBKR_MARKET_DATA_LINES_ENABLED", "PASSKEY_LOGIN", "DATABASE_URL", "FRONTEND_ORIGIN"]) {
     it(`fails fast with a message naming ${missingName} when it is missing, and never binds the port`, async () => {
       stubBootEnvironment({ [missingName]: undefined });
       await expect(importServer()).rejects.toThrow(`Missing required environment variable: ${missingName}`);
@@ -114,9 +117,9 @@ describe("server.ts boot validation", () => {
     });
   }
 
-  it("fails fast when DAY_SIGNALS_LOOP_ENABLED is neither true nor false", async () => {
-    stubBootEnvironment({ DAY_SIGNALS_LOOP_ENABLED: "yes" });
-    await expect(importServer()).rejects.toThrow('DAY_SIGNALS_LOOP_ENABLED must be "true" or "false", got: yes');
+  it("fails fast when MARKET_QUOTE_LOOP_ENABLED is neither true nor false", async () => {
+    stubBootEnvironment({ MARKET_QUOTE_LOOP_ENABLED: "yes" });
+    await expect(importServer()).rejects.toThrow('MARKET_QUOTE_LOOP_ENABLED must be "true" or "false", got: yes');
     expect(calls.listen).not.toHaveBeenCalled();
   });
 
@@ -149,26 +152,26 @@ describe("server.ts boot validation", () => {
 });
 
 describe("server.ts once the port is bound", () => {
-  it("starts the broadcaster, stale-order sweep, bot, monitor and Day Signals loop, warms both IBKR connections and announces the start", async () => {
-    stubBootEnvironment({ DAY_SIGNALS_LOOP_ENABLED: "true" });
+  it("starts the broadcaster, stale-order sweep, bot, monitor and market quote loop, warms both IBKR connections and announces the start", async () => {
+    stubBootEnvironment({ MARKET_QUOTE_LOOP_ENABLED: "true" });
     await importServer();
     runListenCallback();
     await vi.waitFor(() => expect(calls.announceWebDynoStart).toHaveBeenCalledWith({ subject: "API" }));
-    for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startOrderTelegramNotices, calls.startProcessMemoryMonitor, calls.startDaySignalsLoop, calls.resumeInterruptedBackfillRuns, calls.borrowRead, calls.borrowLive]) {
+    for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startOrderTelegramNotices, calls.startProcessMemoryMonitor, calls.startMarketQuoteLoop, calls.resumeInterruptedBackfillRuns, calls.borrowRead, calls.borrowLive]) {
       expect(started).toHaveBeenCalledTimes(1);
     }
-    // The loop quotes the CC + Put Ladder's band beside Signals' contracts.
-    expect(calls.startDaySignalsLoop).toHaveBeenCalledWith({ ladderBand: { ladderBand: "fake" } });
+    // The ladder's consumer first: its band is quoted first in every cycle.
+    expect(calls.startMarketQuoteLoop).toHaveBeenCalledWith([{ consumer: "ladder" }, { consumer: "assignment risk" }, { consumer: "volatility" }]);
   });
 
-  it("leaves the Day Signals loop off when DAY_SIGNALS_LOOP_ENABLED is false, starting everything else", async () => {
-    stubBootEnvironment({ DAY_SIGNALS_LOOP_ENABLED: "false" });
+  it("leaves the market quote loop off when MARKET_QUOTE_LOOP_ENABLED is false, starting everything else", async () => {
+    stubBootEnvironment({ MARKET_QUOTE_LOOP_ENABLED: "false" });
     await importServer();
     runListenCallback();
-    expect(calls.startDaySignalsLoop).not.toHaveBeenCalled();
+    expect(calls.startMarketQuoteLoop).not.toHaveBeenCalled();
     expect(calls.startOpsMonitor).toHaveBeenCalledTimes(1);
     expect(calls.startGenosuke).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toMatch(/Day Signals loop disabled/);
+    expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toMatch(/Market quote loop disabled/);
   });
 
   it("survives a failed start notice and a failed IBKR warm-up: they are logged, never thrown", async () => {

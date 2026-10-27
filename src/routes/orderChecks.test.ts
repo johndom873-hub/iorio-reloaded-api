@@ -25,7 +25,7 @@ const evaluateOrderLimitsMock = vi.fn();
 vi.mock("../lib/orderLimits.js", () => ({ evaluateOrderLimits: (...args: unknown[]) => evaluateOrderLimitsMock(...args) }));
 
 const loadTickerBySymbolMock = vi.fn();
-vi.mock("../lib/signalsChainStore.js", () => ({ loadTickerBySymbol: (...args: unknown[]) => loadTickerBySymbolMock(...args) }));
+vi.mock("../lib/tickerLookup.js", () => ({ loadTickerBySymbol: (...args: unknown[]) => loadTickerBySymbolMock(...args) }));
 
 const fetchWhatIfCommissionRangeMock = vi.fn();
 vi.mock("../ibkr/ibkrWhatIfCommission.js", () => ({ fetchWhatIfCommissionRange: (...args: unknown[]) => fetchWhatIfCommissionRangeMock(...args) }));

@@ -218,7 +218,7 @@ describe("quoteContracts", () => {
     it("fails with the shortage message when nothing is free, and opens no window", async () => {
       mocks.reserveResults.push({ ok: false, availableLines: 0, priorityLinesHeld: 50 });
       await expect(quoteContracts(ib, "AAPL", [call(100)])).rejects.toThrow(
-        "IBKR market data is restricted while a scheduled scan runs (the 10:00 ET chain capture; 50 lines reserved for it) — AAPL needs 1 lines, 0 available. Try again after.",
+        "IBKR market data is restricted while the market quote loop and Pluto hold their reserved lines (50) — AAPL needs 1 lines, 0 available. Try again shortly.",
       );
       expect(mocks.windowOptions).toBeNull();
       expect(mocks.releaseCalls).toEqual([]);

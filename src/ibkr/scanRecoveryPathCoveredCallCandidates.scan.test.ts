@@ -4,25 +4,21 @@ import type { OptionQuote } from "./fetchOptionChain.js";
 
 const mocks = vi.hoisted(() => ({
   storedChain: { expirations: [] as string[], strikesByExpiry: new Map<string, number[]>(), fetchedAt: null as Date | null },
-  archivedRows: [] as { expiry: string; strike: string; delta: string }[],
+  closeImpliedVolatility: null as number | null,
+  impliedVolatilityTickerIds: [] as string[][],
   quoteRequests: [] as { symbol: string; contracts: { expiry: string; strike: number; right: string }[] }[],
   quotesToReturn: [] as unknown[],
   calendarContext: { resolved: true, events: [] as { eventType: "earnings" | "ex_dividend"; eventDate: string }[] },
   calendarTickerIds: [] as string[],
-  archiveQueryOperations: [] as unknown[][],
 }));
 
-vi.mock("../db/connection.js", () => {
-  const builder: Record<string, unknown> = {};
-  for (const operation of ["join", "where", "whereIn", "whereNotNull"]) {
-    builder[operation] = (...args: unknown[]) => {
-      mocks.archiveQueryOperations.push([operation, ...args]);
-      return builder;
-    };
-  }
-  builder.select = () => Promise.resolve(mocks.archivedRows);
-  return { db: Object.assign(() => builder, { raw: (sql: string) => ({ rawSql: sql }) }) };
-});
+vi.mock("../lib/volatilityScreen.js", () => ({
+  loadCloseImpliedVolatilities: async (tickerIds: string[]) => {
+    mocks.impliedVolatilityTickerIds.push(tickerIds);
+    return new Map(mocks.closeImpliedVolatility === null ? [] : tickerIds.map((tickerId) => [tickerId, mocks.closeImpliedVolatility!]));
+  },
+}));
+vi.mock("../lib/riskFreeRate.js", () => ({ getRiskFreeRate: async () => 0 }));
 vi.mock("./fetchOptionChain.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./fetchOptionChain.js")>()),
   loadStoredOptionChain: async () => mocks.storedChain,
@@ -58,12 +54,12 @@ beforeEach(() => {
   // 11:00 Eastern on 2026-10-06: 2026-10-16 is 10 days out, 2026-10-23 is 17, 2026-11-20 is 45, 2026-11-21 is 46.
   vi.setSystemTime(new Date("2026-10-06T15:00:00Z"));
   mocks.storedChain = { expirations: [], strikesByExpiry: new Map(), fetchedAt: null };
-  mocks.archivedRows = [];
+  mocks.closeImpliedVolatility = null;
+  mocks.impliedVolatilityTickerIds.length = 0;
   mocks.quoteRequests.length = 0;
   mocks.quotesToReturn = [];
   mocks.calendarContext = { resolved: true, events: [] };
   mocks.calendarTickerIds.length = 0;
-  mocks.archiveQueryOperations.length = 0;
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 afterEach(() => {
@@ -124,23 +120,17 @@ describe("scanRecoveryPathCoveredCallCandidates: which contracts get quoted", ()
     expect(mocks.quoteRequests).toEqual([]);
   });
 
-  it("trims the strikes by today's archived deltas, keeping strikes with no archived delta", async () => {
-    storeChain({ "20261016": [101, 105, 110, 115] });
-    mocks.archivedRows = [
-      { expiry: "20261016", strike: "101.0000", delta: "0.55" },
-      { expiry: "20261016", strike: "105.0000", delta: "0.38" },
-      { expiry: "20261016", strike: "110.0000", delta: "0.25" },
-    ];
-    await scanRecoveryPathCoveredCallCandidates(ib, "AAPL", "t1", 100, window);
-    // Band 0.2-0.3 with a 0.1 margin keeps archived |delta| in 0.1..0.4: 101 (0.55) is dropped, 115 (no archive) stays.
-    expect(mocks.quoteRequests[0]!.contracts.map((contract) => contract.strike)).toEqual([105, 110, 115]);
-  });
-
-  it("asks the archive for the ticker's complete or partial call snapshots of today's Eastern date", async () => {
-    storeChain({ "20261016": [105] });
+  it("trims the strikes by deltas estimated at the ticker's 30-day IV, quoting the full band without one", async () => {
+    storeChain({ "20261016": [101, 103, 105, 107, 110] });
     await scanRecoveryPathCoveredCallCandidates(ib, "AAPL", "ticker-9", 100, window);
-    expect(mocks.archiveQueryOperations).toContainEqual(["where", { "s.ticker_id": "ticker-9", "s.trading_date": "2026-10-06", "q.option_right": "C" }]);
-    expect(mocks.archiveQueryOperations).toContainEqual(["whereIn", "s.status", ["complete", "partial"]]);
+    expect(mocks.quoteRequests[0]!.contracts.map((contract) => contract.strike)).toEqual([101, 103, 105, 107, 110]);
+    expect(mocks.impliedVolatilityTickerIds).toEqual([["ticker-9"]]);
+    // At 40% IV, 10 days out, spot 100, no rate: call |delta| ≈ 0.45, 0.34, 0.24, 0.16, 0.08. Band 0.2-0.3 with the 0.1
+    // margin keeps 0.1..0.4: 101 and 110 are dropped.
+    mocks.closeImpliedVolatility = 0.4;
+    mocks.quoteRequests.length = 0;
+    await scanRecoveryPathCoveredCallCandidates(ib, "AAPL", "ticker-9", 100, window);
+    expect(mocks.quoteRequests[0]!.contracts.map((contract) => contract.strike)).toEqual([103, 105, 107]);
   });
 
   it("quotes the symbol once for all expiries, and loads the calendar for the ticker", async () => {
