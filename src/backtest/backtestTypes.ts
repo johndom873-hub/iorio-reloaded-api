@@ -365,12 +365,17 @@ export interface BacktestVolFarmerV2Settings {
   leapsMinDte: number;
   /** The LEAPS: that expiry's Call whose |delta| is nearest this. */
   leapsAbsDelta: number;
+  /**
+   * The LEAPS cap (Marcelo 2026-10-27), % of the account's value at the 10:00 look, positions marked: a LEAPS purchase
+   * spends at most this, never more than the free cash. 0: no cap, all the free cash.
+   */
+  leapsMaxAccountPct: number;
 }
 
 export const volFarmerV2StepRules = ["fixed", "implied_move_at_put_sale"] as const;
 export type VolFarmerV2StepRule = (typeof volFarmerV2StepRules)[number];
 
-export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7 };
+export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 0 };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5), read by the retired rules
@@ -1449,6 +1454,11 @@ export interface BacktestCycleTimelineRow {
    * the two shared. Absent on other sessions' rows and on sessions run before 2026-10-27.
    */
   positionBreakEvens?: { first: number | null; second: number | null };
+  /**
+   * Vol Farmer v2 with the Step at each Put sale: the Step the Put's strike was capped by, % below B-E¹, and the IV it came
+   * from (null: no IV in the 10 sessions before, the fixed Step). Absent on other rows and on sessions run before 2026-10-27.
+   */
+  putStep?: { stepPct: number; impliedVolatility: number | null };
   /** The shares the cycle held once the row's moment (its look's orders, or the end's marks) was done, as traded on the row's day; added when the cycle is read. */
   sharesHeld?: number;
   /** A put sold as a rung of the ladder: the figures its sale recorded (null for any other put); absent on other rows. */

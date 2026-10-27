@@ -204,8 +204,9 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
       { value: "implied_move_at_put_sale", label: "One-month implied move, at each Put sale" },
     ],
   },
-  { path: "volFarmerV2.leapsMinDte", label: "LEAPS expiry from", unit: "days", editable: true, note: "when the second position finds no Call at or above its break-even, the free cash buys a LEAPS Call of the first listed expiry at least this many days out (30 to 1000), sold when the second position is called away" },
+  { path: "volFarmerV2.leapsMinDte", label: "LEAPS expiry from", unit: "days", editable: true, note: "when the second position finds no Call at or above its break-even, the free cash (up to the LEAPS cap) buys a LEAPS Call of the first listed expiry at least this many days out (30 to 1000), sold when the second position is called away" },
   { path: "volFarmerV2.leapsAbsDelta", label: "LEAPS |delta|", unit: "number", editable: true, note: "of that expiry's Calls, the one whose |delta| (from its own implied volatility) is nearest this" },
+  { path: "volFarmerV2.leapsMaxAccountPct", label: "LEAPS cap", unit: "percent", editable: true, note: "% of the account's value at the 10:00 look (positions marked) a LEAPS purchase spends at most, never more than the free cash. 0: no cap, all the free cash (0 to 100)" },
   { path: "steadyStake.stakePct", label: "Stake", unit: "percent", editable: true, note: "% of the pot: the share of each ticker's pot held in its shares. At the 10:00 look, whole shares are bought or sold back to it when their value drifts out of the band" },
   { path: "steadyStake.rebalanceBandPct", label: "Rebalancing band", unit: "percent", editable: true, note: "% of the pot: shares are traded back to the stake once their value is off it by more than this. A $100,000 pot at 80% ± 5 holds shares worth $75,000 to $85,000" },
   { path: "steadyStake.callCoveragePct", label: "Calls on expiry days", unit: "percent", editable: true, note: "% of the free round lots: at 10:00 on a day the ticker has an expiry, Calls expiring at that day's close, the contract nearest the Calls' |delta| first, then the next nearest while the volume limit leaves lots uncovered. 0 = no Calls" },
@@ -737,7 +738,7 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
   {
     group: "Vol Farmer v2",
     section: "vol_farmer_v2",
-    rows: ["volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta"].map((path) => ({
+    rows: ["volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta", "volFarmerV2.leapsMaxAccountPct"].map((path) => ({
       path,
       appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v2"] }], explanation: "Applies only with Vol Farmer v2 as decision maker." },
     })),

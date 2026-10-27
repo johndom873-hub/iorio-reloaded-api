@@ -11,7 +11,7 @@ import { captureLookTimeEt, lookInstantMs } from "./backtestTickerInputs.js";
 import { baselineQuoteRejection, describeRejections, noteBaselineForwardAnchors, roundedStrike, selectBaselineCandidates, type BaselineCandidate, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
 import { buyLeapsCall, expirySettlementInstant, openCashSecuredPut, openCoveredCall, sellLeapsCall } from "./ledger/ledgerEvents.js";
 import { optionCommissionDollars, optionPurchaseFillPrice, optionSaleFillPrice, stockCommissionDollars } from "./ledger/ledgerFills.js";
-import { ledgerCapitalAtRisk, ledgerFreeCash } from "./ledger/ledgerSelectors.js";
+import { ledgerCapitalAtRisk, ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
 import { cycleSplitFactorFor, isSymbolFlat, legsOfPosition, positionsOfSymbol, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 
 // Vol Farmer v2 (decision maker "vol_farmer_v2", Marcelo 2026-10-27; research): two Covered Calls at different price
@@ -37,7 +37,8 @@ import { cycleSplitFactorFor, isSymbolFlat, legsOfPosition, positionsOfSymbol, t
 //   4. LEAPS: the second position holds shares and no Call at or above its break-even passes 2's rules, and it has bought
 //      no LEAPS since it holds them: of the 10:00 Calls of the first listed expiry at least leapsMinDte days out (spread
 //      within the limit, bid ≥ $0.05), the one whose |delta| (its own IV, on the forward) is nearest leapsAbsDelta; as
-//      many contracts as the free cash pays for (fill + commission), no more than its 10:00 ask offered, tried again at
+//      many contracts as min(the free cash, leapsMaxAccountPct % of the account's value at the look; 0: no cap) pays
+//      for (fill + commission), no more than its 10:00 ask offered, tried again at
 //      each look until one is bought (strategy "leaps", its own records: buy_leaps, sell_leaps). It is
 //      sold at the first 10:00 look after the second position is called away (the session's fill rule); held to its
 //      expiry, the session settles it at its intrinsic value.
@@ -130,6 +131,11 @@ export function impliedVolatilityBefore(bars: BacktestBarHistory, todayIso: stri
 /** The one-month implied move as the Step: IV × √(21 ÷ 252), in %; the fixed Step without an IV (Marcelo 2026-10-27). */
 export function volFarmerV2ImpliedMoveStep(fixedStepPct: number, impliedVolatility: number | null): VolFarmerV2Step {
   return impliedVolatility === null ? { stepPct: fixedStepPct, impliedVolatility: null } : { stepPct: impliedVolatility * Math.sqrt(21 / 252) * 100, impliedVolatility };
+}
+
+/** What a LEAPS purchase may spend (Marcelo 2026-10-27): the free cash, no more than the cap's share of the account's value. */
+export function volFarmerV2LeapsBudget(freeCash: number, accountValue: number, leapsMaxAccountPct: number): number {
+  return leapsMaxAccountPct > 0 ? Math.min(freeCash, accountValue * (leapsMaxAccountPct / 100)) : freeCash;
 }
 
 /** A position's break-even per share, on the cycle's scale; null without shares. */
@@ -566,8 +572,12 @@ function buyLeaps(input: SymbolLook, state: VolFarmerV2SymbolState, secondBreakE
   if (leaps === null) return `no LEAPS: no Call of ${expiry} has a usable quote`;
   const contractCost = leaps.fillPrice * sharesPerContract + optionCommissionDollars(1);
   if (log.contractCost === null) log.contractCost = contractCost;
-  const affordable = contractsAffordable(freeCash, leaps.fillPrice);
-  if (affordable < 1) return `no LEAPS: one contract of the ${leaps.strike} Call costs ${formatWholeDollars(contractCost)}, more than the free cash (${formatWholeDollars(freeCash)})`;
+  const capped = v2.leapsMaxAccountPct > 0;
+  const accountValue = ledgerNetLiquidationValue(ledger, context.priceByLegId);
+  const budget = volFarmerV2LeapsBudget(freeCash, accountValue, v2.leapsMaxAccountPct);
+  const cashText = capped ? `free cash ${formatWholeDollars(freeCash)}, LEAPS cap ${formatWholeDollars(accountValue * (v2.leapsMaxAccountPct / 100))} (${v2.leapsMaxAccountPct}% of the account ${formatWholeDollars(accountValue)})` : `free cash ${formatWholeDollars(freeCash)}`;
+  const affordable = contractsAffordable(budget, leaps.fillPrice);
+  if (affordable < 1) return `no LEAPS: one contract of the ${leaps.strike} Call costs ${formatWholeDollars(contractCost)}, more than ${capped ? `${formatWholeDollars(budget)} (${cashText})` : `the free cash (${formatWholeDollars(freeCash)})`}`;
   // No more than the 10:00 ask offered (Marcelo 2026-10-27): long-dated Calls trade rarely, but are quoted deep.
   const offered = leaps.askSize ?? 0;
   if (offered < 1) return `no LEAPS: the ${leaps.strike} Call shows no size at its ask`;
@@ -581,7 +591,7 @@ function buyLeaps(input: SymbolLook, state: VolFarmerV2SymbolState, secondBreakE
   log.contracts = contracts;
   const dte = daysToExpiry(expiry, todayIso);
   const contractLabel = describeOptionContract({ strike: leaps.strike, right: "C", expiry, dte });
-  const description = `${symbol} Buy ${contractLabel}${describeOrderSize(contracts, leaps.fillPrice)} (LEAPS: delta ${leaps.delta.toFixed(2)}, IV ${percent(leaps.impliedVolatility)}; the second position has no Call at or above its break-even ${secondBreakEvenAsTraded.toFixed(2)}; free cash ${formatWholeDollars(freeCash)}${contracts < affordable ? `, which pays for ${affordable}: ${offered} offered at the ask` : ""})`;
+  const description = `${symbol} Buy ${contractLabel}${describeOrderSize(contracts, leaps.fillPrice)} (LEAPS: delta ${leaps.delta.toFixed(2)}, IV ${percent(leaps.impliedVolatility)}; the second position has no Call at or above its break-even ${secondBreakEvenAsTraded.toFixed(2)}; ${cashText}${contracts < affordable ? `, which pays for ${affordable}: ${offered} offered at the ask` : ""})`;
   input.actions.push({
     actionId,
     tradingDate: todayIso,
@@ -593,12 +603,12 @@ function buyLeaps(input: SymbolLook, state: VolFarmerV2SymbolState, secondBreakE
     candidateId: `${symbol}:leaps:${expiry}:${roundedStrike(leaps.strike)}`,
     description,
     automatic: false,
-    chosenBecause: `vol farmer v2: the second position has no Call at or above its break-even; of the first expiry ${v2.leapsMinDte} or more days out, the Call whose |delta| is nearest ${v2.leapsAbsDelta}, with all the free cash, up to the contracts offered at its ask`,
+    chosenBecause: `vol farmer v2: the second position has no Call at or above its break-even; of the first expiry ${v2.leapsMinDte} or more days out, the Call whose |delta| is nearest ${v2.leapsAbsDelta}, with ${capped ? `the free cash up to the LEAPS cap (${v2.leapsMaxAccountPct}% of the account)` : "all the free cash"}, up to the contracts offered at its ask`,
     outcome: "filled",
     blockReason: null,
     gateResults: [{ gate: "vol_farmer_v2", ok: true, detail: `${contracts} contract(s)` }],
     contract: { strategyKey: "leaps", expiry, strike: leaps.strike, right: "C" },
-    candidateScores: { bid: leaps.bid, ask: leaps.ask, askSize: leaps.askSize, dte, stockPrice, impliedVolatility: leaps.impliedVolatility, delta: leaps.delta, freeCash, costDollars: leaps.fillPrice * sharesPerContract * contracts + optionCommissionDollars(contracts) },
+    candidateScores: { bid: leaps.bid, ask: leaps.ask, askSize: leaps.askSize, dte, stockPrice, impliedVolatility: leaps.impliedVolatility, delta: leaps.delta, freeCash, costDollars: leaps.fillPrice * sharesPerContract * contracts + optionCommissionDollars(contracts), ...(capped ? { accountValue, leapsBudget: budget } : {}) },
     quantity: contracts,
     limitPrice: leaps.fillPrice,
     fillPrice: leaps.fillPrice,

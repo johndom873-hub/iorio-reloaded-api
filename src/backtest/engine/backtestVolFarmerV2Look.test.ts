@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { easternInstant } from "../../lib/easternIsoDate.js";
+import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
 import { blackScholesDelta, blackScholesPriceOnForward } from "../../lib/impliedVolatilitySurface.js";
 import { contractKey } from "../../lib/optionContractKey.js";
 import { defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, type BacktestVolFarmerV2Settings, type EffectiveBacktestSettings, type VolFarmerV2StepRule } from "../backtestTypes.js";
 import { BacktestBarHistory } from "./backtestBarHistory.js";
 import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
-import { chooseVolFarmerV2Leaps, contractsAffordable, describeVolFarmerV2Run, impliedVolatilityBefore, runVolFarmerV2Look, volFarmerV2BreakEven, volFarmerV2ImpliedMoveStep, volFarmerV2PutStrikeCap } from "./backtestVolFarmerV2Look.js";
+import { chooseVolFarmerV2Leaps, contractsAffordable, describeVolFarmerV2Run, impliedVolatilityBefore, runVolFarmerV2Look, volFarmerV2BreakEven, volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap } from "./backtestVolFarmerV2Look.js";
 import { expirySettlementInstant, settleExpiry } from "./ledger/ledgerEvents.js";
-import { ledgerFreeCash } from "./ledger/ledgerSelectors.js";
+import { ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
 import { createSimulatedLedger, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 
 /** Daily bars at 100 with IBKR's 30-day IV as given (null: none that day). */
@@ -36,6 +37,15 @@ describe("the v2 formulas", () => {
     expect(impliedVolatilityBefore(bars, "2026-03-11")).toBe(0.5);
     expect(impliedVolatilityBefore(bars, "2026-03-12")).toBeNull();
     expect(impliedVolatilityBefore(bars, "2026-03-13")).toBe(0.7);
+  });
+
+  it("caps what a LEAPS spends at a share of the account", () => {
+    // No cap: all the free cash. MSTR on 27 Oct 2025 with a 10% cap: min($96,142, 10% of $363,289) = $36,328.90, 3 contracts at $10,250.68.
+    expect(volFarmerV2LeapsBudget(96_142, 363_289, 0)).toBe(96_142);
+    expect(volFarmerV2LeapsBudget(96_142, 363_289, 10)).toBeCloseTo(36_328.9, 6);
+    expect(contractsAffordable(volFarmerV2LeapsBudget(96_142, 363_289, 10), 102.5)).toBe(3);
+    // Never more than the free cash.
+    expect(volFarmerV2LeapsBudget(20_000, 363_289, 10)).toBe(20_000);
   });
 
   it("buys as many contracts as the cash pays for, commission included", () => {
@@ -213,6 +223,26 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(afterCallAway.actions[0]).toMatchObject({ kind: "sell_leaps", contract: { strategyKey: "leaps", right: "C" } });
     expect(openOption(ledger, "call", "long")).toEqual([]);
     expect(describeVolFarmerV2Run(ledger, [symbol])).toMatch(/1 LEAPS trigger\(s\), 1 bought \(\d+× on 2026-03-23\)/);
+  });
+
+  it("spends no more than the LEAPS cap's share of the account on the LEAPS", async () => {
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    const cap = { leapsMaxAccountPct: 10 };
+    await look(ledger, "2026-03-09", 100, "2026-03-13", cap, 100);
+    settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
+    const put = (await look(ledger, "2026-03-16", 80, "2026-03-20", cap, 100)).actions[0]!;
+    // The cap leaves the Puts on half the pot.
+    expect(put.quantity).toBe(Math.floor(50_000 / (put.contract!.strike! * 100)));
+    settleExpiry(ledger, { legId: openOption(ledger, "put")[0]!.id, expiryClose: put.contract!.strike! - 3 });
+    // The free cash would pay for more; 10% of the account (no marks given: each leg at its entry price) is the limit, though the ask offers 100.
+    const freeCash = ledgerFreeCash(ledger);
+    const accountValue = ledgerNetLiquidationValue(ledger, new Map());
+    expect(freeCash).toBeGreaterThan(accountValue * 0.1);
+    const leaps = (await look(ledger, "2026-03-23", 55, "2026-03-27", cap, 100)).actions.find((action) => action.kind === "buy_leaps")!;
+    expect(leaps.quantity).toBe(contractsAffordable(accountValue * 0.1, leaps.fillPrice!));
+    expect(leaps.quantity).toBeLessThan(contractsAffordable(freeCash, leaps.fillPrice!));
+    expect((leaps.candidateScores as { accountValue: number }).accountValue).toBeCloseTo(accountValue, 6);
+    expect(leaps.description).toContain(`LEAPS cap ${formatWholeDollars(accountValue * 0.1)} (10% of the account ${formatWholeDollars(accountValue)})`);
   });
 
   it("buys no LEAPS while its ask shows no size, and buys it at a later look that shows one", async () => {
