@@ -1432,6 +1432,12 @@ export interface BacktestCycleTimelineRow {
    * (engine version 3 on). Null while no shares were held; absent on other rows.
    */
   breakEvenAtSale?: number | null;
+  /**
+   * Vol Farmer v2: the break-even of the position the sale was for, before its premium, as its sale recorded it: B-E¹ (the
+   * first position's: its Calls, and the Puts whose strike it caps) and B-E² (the second's Calls); both for one Call order
+   * the two shared. Absent on other sessions' rows and on sessions run before 2026-10-27.
+   */
+  positionBreakEvens?: { first: number | null; second: number | null };
   /** The shares the cycle held once the row's moment (its look's orders, or the end's marks) was done, as traded on the row's day; added when the cycle is read. */
   sharesHeld?: number;
   /** A put sold as a rung of the ladder: the figures its sale recorded (null for any other put); absent on other rows. */

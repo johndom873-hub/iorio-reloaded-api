@@ -688,8 +688,8 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
       // A hedge Put's purchase (a Vol Farmer cycle shows a copy of it, its cost moved to the hand-over marks).
       if (entry.bucket === "hedge" && entry.instrument === "option" && /^Bought put @/.test(entry.label)) return { ...entry, hedgeCostYield: hedgePurchases.costYieldOf(entry.tradingDate, entry.strike, entry.expiryDate), sharesHeld: sharesHeld[index]!, freeCashShare, ...crossing };
       if (!sold || entry.instrument !== "option" || !isSourceRow) return { ...entry, sharesHeld: sharesHeld[index]!, freeCashShare, ...crossing };
-      const { premiumYield, delta, ladderRung } = sales.recordedOf(entry.tradingDate, sold[1] === "put" ? "P" : "C", entry.strike, entry.expiryDate, entry.at);
-      return { ...entry, premiumYield, delta, breakEvenAtSale: breakEvens[index]!, sharesHeld: sharesHeld[index]!, ...(sold[1] === "put" ? { ladderRung } : {}), freeCashShare, ...crossing };
+      const { premiumYield, delta, ladderRung, positionBreakEvens } = sales.recordedOf(entry.tradingDate, sold[1] === "put" ? "P" : "C", entry.strike, entry.expiryDate, entry.at);
+      return { ...entry, premiumYield, delta, breakEvenAtSale: breakEvens[index]!, ...(positionBreakEvens ? { positionBreakEvens } : {}), sharesHeld: sharesHeld[index]!, ...(sold[1] === "put" ? { ladderRung } : {}), freeCashShare, ...crossing };
     }),
     // Stretches stored before their no-candidate detail was kept have none.
     // A stretch's shares from the cycle's own trades: stored before 2026-10-21 they came from the ledger's stock legs, which
@@ -778,7 +778,7 @@ async function loadHeldCallReasonsByDay(sessionId: string, symbol: string, fromD
  * What the engine recorded at a symbol's option sales over a cycle's days, per day and contract: the annualised yield and
  * the delta (contract-weighted).
  */
-type RecordedSale = { premiumYield: number | null; delta: number | null; ladderRung: BacktestLadderRungRecord | null };
+type RecordedSale = { premiumYield: number | null; delta: number | null; ladderRung: BacktestLadderRungRecord | null; positionBreakEvens: { first: number | null; second: number | null } | null };
 
 const ladderScoreKeys = ["ladderCap", "ladderTop", "ladderBreakEven", "ladderFloor", "ladderAverageCost", "ladderShock", "ladderCommitted", "ladderRungCollateral", "ladderReserve", "ladderBase", "premiumYield", "rank", "eligibleCount", "bestCandidateStrike", "bestCandidatePremiumYield"] as const;
 
@@ -837,8 +837,8 @@ async function loadVolFarmerCrossingInstants(sessionId: string, symbol: string, 
 
 async function loadSaleRecords(sessionId: string, symbol: string, timeline: readonly BacktestCycleTimelineRow[]): Promise<{ recordedOf: (date: string, right: "C" | "P", strike: number | null, expiry: string | null, at: string | null) => RecordedSale }> {
   const dates = timeline.map((entry) => entry.tradingDate).sort();
-  if (dates.length === 0) return { recordedOf: () => ({ premiumYield: null, delta: null, ladderRung: null }) };
-  const sales: { date: string; at: Date; kind: string; contract: { strike: number; expiry: string }; quantity: string; premium_yield: string | null; delta: string | null; chosen_because: string | null; ladder: Partial<Record<(typeof ladderScoreKeys)[number], number | null>> | null }[] = await db("backtest_actions")
+  if (dates.length === 0) return { recordedOf: () => ({ premiumYield: null, delta: null, ladderRung: null, positionBreakEvens: null }) };
+  const sales: { date: string; at: Date; kind: string; contract: { strike: number; expiry: string }; quantity: string; premium_yield: string | null; delta: string | null; break_even_first: string | null; break_even_second: string | null; chosen_because: string | null; ladder: Partial<Record<(typeof ladderScoreKeys)[number], number | null>> | null }[] = await db("backtest_actions")
     .where({ session_id: sessionId, symbol, outcome: "filled" })
     .whereIn("kind", ["open_cash_secured_put", "open_covered_call"])
     .whereBetween("trading_date", [dates[0]!, dates.at(-1)!])
@@ -853,6 +853,8 @@ async function loadSaleRecords(sessionId: string, symbol: string, timeline: read
       "chosen_because",
       db.raw("candidate_scores->>'premiumYield' as premium_yield"),
       db.raw("candidate_scores->>'delta' as delta"),
+      db.raw("candidate_scores->>'breakEvenFirst' as break_even_first"),
+      db.raw("candidate_scores->>'breakEvenSecond' as break_even_second"),
       db.raw(`case when jsonb_exists(candidate_scores, 'ladderCap') then jsonb_build_object(${ladderScoreKeys.map((key) => `'${key}', candidate_scores->'${key}'`).join(", ")}) end as ladder`),
     );
   const rungs = sales.some((sale) => sale.ladder !== null) ? await loadLadderRungs(sessionId, symbol) : null;
@@ -861,6 +863,8 @@ async function loadSaleRecords(sessionId: string, symbol: string, timeline: read
   // A rung is one look's order: read by the sale's instant, as the timeline's row is (a contract sold again at a later look is another rung).
   const rungByMoment = new Map<string, BacktestLadderRungRecord | null>();
   const collateralUsedByRung = new Map<string, number>();
+  // Vol Farmer v2: the position break-evens its sale of the contract recorded (one order per contract and look).
+  const positionBreakEvensByKey = new Map<string, { first: number | null; second: number | null }>();
   for (const sale of sales) {
     const right = sale.kind === "open_covered_call" ? "C" : "P";
     const key = keyOf(sale.date, right, Number(sale.contract.strike), sale.contract.expiry);
@@ -886,6 +890,9 @@ async function loadSaleRecords(sessionId: string, symbol: string, timeline: read
       collateralUsedByRung.set(rungKey, (collateralUsedByRung.get(rungKey) ?? 0) + Number(sale.contract.strike) * 100 * Number(sale.quantity));
     }
     totals.set(key, total);
+    if ((sale.break_even_first !== null || sale.break_even_second !== null) && !positionBreakEvensByKey.has(key)) {
+      positionBreakEvensByKey.set(key, { first: sale.break_even_first === null ? null : Number(sale.break_even_first), second: sale.break_even_second === null ? null : Number(sale.break_even_second) });
+    }
   }
   return {
     recordedOf: (date, right, strike, expiry, at) => {
@@ -895,6 +902,7 @@ async function loadSaleRecords(sessionId: string, symbol: string, timeline: read
         premiumYield: total && total.yieldContracts > 0 ? total.weightedYield / total.yieldContracts : null,
         delta: total && total.deltaContracts > 0 ? total.weightedDelta / total.deltaContracts : null,
         ladderRung: key === null || at === null ? null : (rungByMoment.get(`${at}|${key}`) ?? null),
+        positionBreakEvens: key === null ? null : (positionBreakEvensByKey.get(key) ?? null),
       };
     },
   };

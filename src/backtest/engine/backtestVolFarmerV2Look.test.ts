@@ -99,6 +99,9 @@ describe("Vol Farmer v2 at the looks", () => {
     // What the shares cost (commission in) less the Call's premium net of its commission, per share.
     expect(firstBreakEven).toBeCloseTo((40_000 + 400 * 0.005 + 1 - (firstCall.fillPrice! * 400 - 4 * 0.68)) / 400, 1);
     expect(firstCall.contract!.strike).toBeGreaterThanOrEqual(firstBreakEven);
+    // The Wheel cycles' B-E¹ of the sale: the break-even the Call was held to, before its own premium (the shares' cost,
+    // $0.005 a share commission included).
+    expect((firstCall.candidateScores as { breakEvenFirst: number }).breakEvenFirst).toBeCloseTo((40_000 + 400 * 0.005) / 400, 6);
 
     // Thursday 12 March at 80, the Call sold on Monday is still open: no Put, however far the price fell.
     const callStillOpen = await look(ledger, "2026-03-12", 80, "2026-03-13");
@@ -115,6 +118,8 @@ describe("Vol Farmer v2 at the looks", () => {
     // Half the pot secures floor(50,000 ÷ (strike × 100)) contracts.
     expect(put.quantity).toBe(Math.floor(50_000 / (put.contract!.strike! * 100)));
     expect(put.description).toContain(`no Call at or above the first break-even ${firstBreakEven.toFixed(2)}`);
+    // A Put records B-E¹, the break-even its strike cap is measured from.
+    expect((put.candidateScores as { breakEvenFirst: number }).breakEvenFirst).toBeCloseTo(firstBreakEven, 2);
 
     // Assigned at Friday's close: Monday 23 March the second position sells its own Call, at or above its own break-even.
     settleExpiry(ledger, { legId: openOption(ledger, "put")[0]!.id, expiryClose: put.contract!.strike! - 3 });
@@ -125,6 +130,8 @@ describe("Vol Farmer v2 at the looks", () => {
     const putNet = put.fillPrice! * secondShares - 0.68 * put.quantity!;
     const callNet = secondCall.fillPrice! * secondShares - 0.68 * put.quantity!;
     expect(breakEvenIn(secondCall.description, "second")).toBeCloseTo(put.contract!.strike! - (putNet + callNet) / secondShares, 2);
+    // The second position's Call records B-E², before its own premium.
+    expect((secondCall.candidateScores as { breakEvenSecond: number }).breakEvenSecond).toBeCloseTo(put.contract!.strike! - putNet / secondShares, 6);
     expect(assigned.actions.some((action) => action.kind === "open_cash_secured_put")).toBe(false);
   });
 

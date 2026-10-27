@@ -373,7 +373,7 @@ function lookAtSymbol(input: SymbolLook): string | null {
         else {
           state.second ??= { shares: 0, costPerShare: 0, premiumDollars: 0, call: null, put: null };
           state.cash.secondHalfLeft.push(state.potDollars / 2 - contracts * put.strike * sharesPerContract);
-          say(sellPut(input, state.second, put, contracts, `${trigger}; strike at most ${strikeCap.toFixed(2)}`, priceToCycleScale, sharesPerContractOnCycleScale, stockPrice));
+          say(sellPut(input, state.second, put, contracts, `${trigger}; strike at most ${strikeCap.toFixed(2)}`, firstBreakEven, priceToCycleScale, sharesPerContractOnCycleScale, stockPrice));
         }
       }
     }
@@ -420,6 +420,8 @@ function sellCalls(input: SymbolLook, orders: readonly { name: "first" | "second
     context.priceByLegId.set(opened.stockLegId, stockPrice * priceToCycleScale);
     if (opened.leftoverPositionId !== null) for (const leg of legsOfPosition(ledger, opened.leftoverPositionId)) context.priceByLegId.set(leg.id, stockPrice * priceToCycleScale);
     const commission = optionCommissionDollars(contracts);
+    // The break-even each position held this Call to, before its premium: the Wheel cycles' B-E¹ / B-E² of the sale.
+    const breakEvensBefore = Object.fromEntries(group.map((order) => [order.name === "first" ? "breakEvenFirst" : "breakEvenSecond", volFarmerV2BreakEven(order.position)! / priceToCycleScale]));
     const whose: string[] = [];
     for (const order of group) {
       order.position.call = { legId: opened.callLegId, shares: order.contracts * sharesPerContractOnCycleScale };
@@ -445,7 +447,7 @@ function sellCalls(input: SymbolLook, orders: readonly { name: "first" | "second
       blockReason: null,
       gateResults: [{ gate: "vol_farmer_v2", ok: true, detail: `${contracts} contract(s): volume allows ${call.volumeCap}` }],
       contract: { strategyKey: "covered_call", expiry: call.expiry, strike: call.strike, right: "C" },
-      candidateScores: { premiumYield: call.premiumYield, delta: call.delta, impliedVolatility: call.impliedVolatility, timeValue: call.timeValue, dte: call.dte, bid: call.bid, ask: call.ask, volumeCap: call.volumeCap, stockPrice },
+      candidateScores: { premiumYield: call.premiumYield, delta: call.delta, impliedVolatility: call.impliedVolatility, timeValue: call.timeValue, dte: call.dte, bid: call.bid, ask: call.ask, volumeCap: call.volumeCap, stockPrice, ...breakEvensBefore },
       quantity: contracts,
       limitPrice: call.fillPrice,
       fillPrice: call.fillPrice,
@@ -457,7 +459,7 @@ function sellCalls(input: SymbolLook, orders: readonly { name: "first" | "second
   return descriptions.join(" · ");
 }
 
-function sellPut(input: SymbolLook, second: VolFarmerV2Position, put: BaselineCandidate, contracts: number, why: string, priceToCycleScale: number, sharesPerContractOnCycleScale: number, stockPrice: number): string {
+function sellPut(input: SymbolLook, second: VolFarmerV2Position, put: BaselineCandidate, contracts: number, why: string, firstBreakEvenAsTraded: number, priceToCycleScale: number, sharesPerContractOnCycleScale: number, stockPrice: number): string {
   const { context, lookSymbol, at } = input;
   const { ledger, todayIso } = context;
   const symbol = lookSymbol.profile.symbol;
@@ -485,7 +487,7 @@ function sellPut(input: SymbolLook, second: VolFarmerV2Position, put: BaselineCa
     blockReason: null,
     gateResults: [{ gate: "vol_farmer_v2", ok: true, detail: `${contracts} contract(s): volume allows ${put.volumeCap}` }],
     contract: { strategyKey: "cash_secured_put", expiry: put.expiry, strike: put.strike, right: "P" },
-    candidateScores: { premiumYield: put.premiumYield, delta: put.delta, impliedVolatility: put.impliedVolatility, timeValue: put.timeValue, dte: put.dte, bid: put.bid, ask: put.ask, volumeCap: put.volumeCap, stockPrice },
+    candidateScores: { premiumYield: put.premiumYield, delta: put.delta, impliedVolatility: put.impliedVolatility, timeValue: put.timeValue, dte: put.dte, bid: put.bid, ask: put.ask, volumeCap: put.volumeCap, stockPrice, breakEvenFirst: firstBreakEvenAsTraded },
     quantity: contracts,
     limitPrice: put.fillPrice,
     fillPrice: put.fillPrice,
