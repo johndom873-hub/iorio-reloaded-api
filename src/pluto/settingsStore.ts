@@ -11,7 +11,6 @@ export type PlutoTelegramVerbosity = "actions" | "off";
 export interface PlutoSettings {
   // Capital
   capitalBudgetPct: number;
-  maxActionsPerSession: number;
   // Market
   windowStartEt: string;
   windowEndEt: string;
@@ -65,7 +64,6 @@ type ColumnKind = "number" | "integer" | "text";
 /** camelCase field → snake_case column, with the kind that decides parsing and validation. */
 export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedAt" | "updatedByUserId">, { column: string; kind: ColumnKind; min?: number; max?: number; oneOf?: readonly string[] }> = {
   capitalBudgetPct: { column: "capital_budget_pct", kind: "number", min: 0, max: 100 },
-  maxActionsPerSession: { column: "max_actions_per_session", kind: "integer", min: 0 },
   maxQuoteAgeMinutes: { column: "max_quote_age_minutes", kind: "integer", min: 0 },
   windowStartEt: { column: "window_start_et", kind: "text" },
   windowEndEt: { column: "window_end_et", kind: "text" },

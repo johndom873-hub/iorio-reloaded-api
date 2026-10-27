@@ -73,7 +73,6 @@ export function fixturePlutoSettings(overrides: Partial<PlutoSettings> = {}): Pl
   return {
     ...plutoLadderSettingsFixture,
     capitalBudgetPct: 50,
-    maxActionsPerSession: 10,
     windowStartEt: "10:00",
     windowEndEt: "15:30",
     dailyLossBreakerPct: 5,

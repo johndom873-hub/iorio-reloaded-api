@@ -5,7 +5,7 @@ import { plutoLadderSettingsFixture } from "./plutoSettingsFixture.js";
 // The approved defaults (2026-09-28), as the store would read them back.
 const current: PlutoSettings = {
   ...plutoLadderSettingsFixture,
-  capitalBudgetPct: 30, maxActionsPerSession: 10,
+  capitalBudgetPct: 30,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2,
   maxQuoteAgeMinutes: 10, maxFillSlippagePct: 25,
   bandQuotePollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, maxEnabledTickers: 15,
@@ -21,7 +21,8 @@ describe("validatePlutoSettingsInput", () => {
   it("rejects unknown fields, wrong kinds and out-of-range numbers", () => {
     expect(validatePlutoSettingsInput({ nope: 1 } as never, current)).toMatch(/not a Pluto setting/);
     expect(validatePlutoSettingsInput({ capitalBudgetPct: "30" as never }, current)).toMatch(/must be a number/);
-    expect(validatePlutoSettingsInput({ maxActionsPerSession: 2.5 }, current)).toMatch(/whole number/);
+    expect(validatePlutoSettingsInput({ burstLines: 2.5 }, current)).toMatch(/whole number/);
+    expect(validatePlutoSettingsInput({ maxActionsPerSession: 10 } as never, current)).toMatch(/not a Pluto setting/);
     expect(validatePlutoSettingsInput({ capitalBudgetPct: 101 }, current)).toMatch(/cannot be above 100/);
     expect(validatePlutoSettingsInput({ dailyLossBreakerPct: -1 }, current)).toMatch(/cannot be below 0/);
     expect(validatePlutoSettingsInput({ minGrade: "good" } as never, current)).toMatch(/not a Pluto setting/);

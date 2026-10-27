@@ -10,7 +10,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 /** Pluto's settings at their migration defaults. */
 const settings: PlutoSettings = {
   ...plutoLadderSettingsFixture,
-  capitalBudgetPct: 50, maxActionsPerSession: 10,
+  capitalBudgetPct: 50, 
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2,
   maxQuoteAgeMinutes: 10, maxFillSlippagePct: 5,
   bandQuotePollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, maxEnabledTickers: 15,

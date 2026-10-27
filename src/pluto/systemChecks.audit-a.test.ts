@@ -39,14 +39,13 @@ vi.mock("../lib/marketSessionStatus.js", async () => {
 });
 vi.mock("../lib/platformControls.js", () => ({ fetchTradingHalt: async () => ({ enabled: false }) }));
 vi.mock("../lib/tradingGate.js", () => ({ classifyTradingStatus: () => ({ state: "ok", reason: null }) }));
-vi.mock("./counters.js", () => ({ loadPlutoTodayCounters: async () => ({ actionsToday: 0 }) }));
 vi.mock("./sessionSchedule.js", () => ({ resolvePlutoSession: async () => ({ windowStartEt: "09:45", windowEndEt: "15:30", closeTimeEt: "16:00", closeSource: "ibkr_liquid_hours", closeReadAt: "x", cancelByMs: 0 }) }));
 vi.mock("./stateStore.js", () => ({ loadPlutoState: async () => ({ mode: "on", paused: false, breakers: {} }), describePlutoBlock: () => null }));
 vi.mock("../lib/notifyTelegram.js", () => ({ notifyPlutoTelegram: vi.fn(), notifyTelegram: vi.fn() }));
 
 const { runPlutoSystemChecks } = await import("./systemChecks.js");
 
-const settings = { dailyLossBreakerPct: 3, maxActionsPerSession: 10, windowEndEt: "15:30" } as never;
+const settings = { dailyLossBreakerPct: 3, windowEndEt: "15:30" } as never;
 const at = new Date("2026-10-07T15:00:00Z"); // 11:00 ET
 
 beforeEach(() => {

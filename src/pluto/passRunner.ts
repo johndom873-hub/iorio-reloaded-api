@@ -97,9 +97,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
       await notifyPlutoTelegram(`🛑 Pluto breaker tripped (reconciliation): ${checks.checks.reconciliation.detail}. Pluto is paused until a human resets it.`);
     }
   }
-  // The day's actions cap is recorded but does not stop the ladder, which keeps to its own book limits.
-  const blockingFailures = checks.failures.filter((failure) => !failure.startsWith("actions_cap:"));
-  if (blockingFailures.length > 0) return { ...(await skip(checks.failures.join(" | "), checks.checks)), skippedOnSystemChecks: true };
+  if (checks.failures.length > 0) return { ...(await skip(checks.failures.join(" | "), checks.checks)), skippedOnSystemChecks: true };
 
   // Market stress (design round 4, item 72): a broad intraday drop stops the ladder's sales for as long as it lasts.
   // Recorded as a check, not a breaker, so it lifts on its own when SPY recovers.

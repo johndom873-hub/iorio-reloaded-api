@@ -51,6 +51,11 @@ function ladderOrdersSentToday(now: Date, symbol: string | null, connection: Kne
   return (symbol === null ? query : query.where({ symbol })).count({ count: "*" }).first();
 }
 
+/** Ladder orders sent today across the book, as the book's daily cap counts them (the screen's "Orders today"). */
+export async function loadLadderOrdersSentToday(now: Date, connection: Knex = db): Promise<number> {
+  return Number((await ladderOrdersSentToday(now, null, connection))?.count ?? 0);
+}
+
 export async function loadLadderTickerOrderCounts(ticker: { tickerId: string; symbol: string }, now: Date, connection: Knex = db): Promise<LadderOrderCounts> {
   const [working, ordersToday, openPositions] = await Promise.all([
     loadWorkingLadderSales(ticker.symbol, connection),

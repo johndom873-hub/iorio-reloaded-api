@@ -116,6 +116,13 @@ describe("PUT /pluto/settings: ladder-only settings", () => {
   });
 });
 
+describe("GET /pluto/state: today's orders against the ladder's daily cap", () => {
+  it("counts the ladder's orders sent today against ladderMaxOrdersPerDay", async () => {
+    const [{ json: state }, { json: settings }] = await Promise.all([get("/state"), get("/settings")]);
+    expect(state.counters).toEqual({ ordersToday: expect.any(Number), maxOrdersPerDay: settings.ladderMaxOrdersPerDay });
+  });
+});
+
 async function post(path: string, body: unknown) {
   const response = await fetch(`${baseUrl}/pluto${path}`, { method: "POST", headers: { "content-type": "application/json", "x-test-user-id": userId }, body: JSON.stringify(body) });
   return { status: response.status, json: (await response.json()) as any };

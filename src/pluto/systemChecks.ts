@@ -5,7 +5,6 @@ import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { computeMarketSessionStatus, easternInstant, type MarketSessionState } from "../lib/marketSessionStatus.js";
 import { fetchTradingHalt } from "../lib/platformControls.js";
 import { classifyTradingStatus } from "../lib/tradingGate.js";
-import { loadPlutoTodayCounters, type PlutoTodayCounters } from "./counters.js";
 import type { PlutoSystemCheck } from "./ledger.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { resolvePlutoSession, type PlutoSession } from "./sessionSchedule.js";
@@ -27,7 +26,6 @@ export interface PlutoSystemCheckContext {
   marketState: MarketSessionState;
   netLiquidationValue: number | null;
   totalCashValue: number | null;
-  counters: PlutoTodayCounters;
   todayEasternIso: string;
   session: PlutoSession;
 }
@@ -141,8 +139,6 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
     record("daily_loss", false, `could not read the P&L snapshot: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  const counters = await loadPlutoTodayCounters(now);
-  record("actions_cap", counters.actionsToday < settings.maxActionsPerSession, `${counters.actionsToday} of ${settings.maxActionsPerSession} actions today`);
   // Position reconciliation: the health-check job compares IBKR's holdings with the book and
   // stores what it found in job_runs.details.reconciliationProblems.
   try {
@@ -154,5 +150,5 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   }
 
   const failures = Object.entries(checks).filter(([, check]) => !check.ok).map(([name, check]) => `${name}: ${check.detail}`);
-  return { ok: failures.length === 0, checks, failures, context: { state, marketState, netLiquidationValue, totalCashValue, counters, todayEasternIso, session } };
+  return { ok: failures.length === 0, checks, failures, context: { state, marketState, netLiquidationValue, totalCashValue, todayEasternIso, session } };
 }

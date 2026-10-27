@@ -12,7 +12,7 @@ vi.mock("../db/connection.js", async () => {
 vi.mock("../lib/notifyTelegram.js", () => ({ notifyTelegram: vi.fn(), notifyPlutoTelegram: vi.fn() }));
 
 const { db } = await import("../db/connection.js");
-const { loadPlutoOrdersTodayBreakdown, loadPlutoTodayCounters } = await import("./counters.js");
+const { loadPlutoOrdersTodayBreakdown } = await import("./counters.js");
 let passId = "";
 
 async function insertAction(createdAtIso: string, outcome: string): Promise<void> {
@@ -37,7 +37,7 @@ describe("Pluto counters across the fall DST change (audit A)", () => {
   it("counts only actions on the instant's Eastern date", async () => {
     const breakdown = await loadPlutoOrdersTodayBreakdown(new Date("2001-11-04T20:00:00Z"));
     expect(breakdown).toEqual({ sent: 2, filled: 1, working: 1, blocked: 0 });
-    expect((await loadPlutoTodayCounters(new Date("2001-11-05T04:59:00Z"))).actionsToday).toBe(2); // 23:59 EST on 11-04
+    expect((await loadPlutoOrdersTodayBreakdown(new Date("2001-11-05T04:59:00Z"))).sent).toBe(2); // 23:59 EST on 11-04
     expect((await loadPlutoOrdersTodayBreakdown(new Date("2001-11-05T12:00:00Z"))).blocked).toBe(1);
   });
 });

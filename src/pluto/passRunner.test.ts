@@ -7,7 +7,6 @@ const harness = vi.hoisted(() => ({
   enabledSymbols: ["AAA", "BBB"],
   spyDayChangePct: 0.5 as number | null,
   systemChecksOk: true,
-  actionsCapReached: false,
   netLiquidationValue: 1_000_000 as number | null,
   finishFailuresLeft: 0,
   ladderThrows: null as unknown,
@@ -42,8 +41,8 @@ vi.mock("./ledger.js", () => ({
 vi.mock("./stateStore.js", () => ({ loadPlutoState: async () => ({ breakers: {} }), recordPlutoPass: vi.fn(), tripPlutoBreaker: vi.fn() }));
 vi.mock("./systemChecks.js", () => ({
   runPlutoSystemChecks: async () => ({
-    failures: [...(harness.systemChecksOk ? [] : ["account_data: account summary failed: timeout"]), ...(harness.actionsCapReached ? ["actions_cap: 10 of 10 actions today"] : [])],
-    checks: { ...(harness.systemChecksOk ? {} : { account_data: { ok: false, detail: "account summary failed: timeout" } }), ...(harness.actionsCapReached ? { actions_cap: { ok: false, detail: "10 of 10 actions today" } } : {}) },
+    failures: harness.systemChecksOk ? [] : ["account_data: account summary failed: timeout"],
+    checks: harness.systemChecksOk ? {} : { account_data: { ok: false, detail: "account summary failed: timeout" } },
     context: { state: { stressOverrideDate: null }, todayEasternIso: "2026-10-07", session: { cancelByMs: 123 }, netLiquidationValue: harness.netLiquidationValue, totalCashValue: 400_000 },
   }),
 }));
@@ -58,7 +57,6 @@ const round = (symbols: string[], overrides: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   harness.spyDayChangePct = 0.5;
   harness.systemChecksOk = true;
-  harness.actionsCapReached = false;
   harness.netLiquidationValue = 1_000_000;
   harness.finishFailuresLeft = 0;
   harness.ladderThrows = null;
@@ -103,15 +101,6 @@ describe("runPlutoPass", () => {
     harness.systemChecksOk = false;
     expect(await runPlutoPass(round(["AAA"]), context)).toMatchObject({ skippedReason: "account_data: account summary failed: timeout", skippedOnSystemChecks: true });
     expect(harness.ladderRounds).toHaveLength(0);
-  });
-
-  it("is not stopped by the day's actions cap alone, but is by the cap with another failing check", async () => {
-    harness.actionsCapReached = true;
-    await runPlutoPass(round(["AAA"]), context);
-    expect(harness.ladderRounds).toHaveLength(1);
-    harness.systemChecksOk = false;
-    expect((await runPlutoPass(round(["AAA"]), context)).skippedOnSystemChecks).toBe(true);
-    expect(harness.ladderRounds).toHaveLength(1);
   });
 
   it("sells nothing before today's opening look, nor without a net liquidation value", async () => {

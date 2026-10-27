@@ -7,7 +7,6 @@ import { validateBacktestBookPageQuery, validateBacktestSettingsOverrides, valid
 const snapshot: BacktestSettings = {
   pluto: {
     capitalBudgetPct: 50,
-    maxActionsPerSession: 10,
     maxQuoteAgeMinutes: 5,
     windowStartEt: "10:00",
     windowEndEt: "15:30",

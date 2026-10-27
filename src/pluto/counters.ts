@@ -2,26 +2,11 @@ import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 
-// Today's session counters, straight from the ledger in Eastern time. Read by the screen's
-// state endpoint and by the agent's system checks (the action cap).
-
-export interface PlutoTodayCounters {
-  actionsToday: number;
-}
+// Today's Pluto orders, straight from the ledger in Eastern time, for the screen's "Orders today" figure.
 
 const actionOutcomesThatCount = ["order_built", "confirmed", "filled", "partially_filled", "cancelled", "cancelled_partially_filled", "rejected", "error"];
 
-export async function loadPlutoTodayCounters(now: Date = new Date()): Promise<PlutoTodayCounters> {
-  const todayIso = easternIsoDate(now);
-  const actionsToday = await db("pluto_actions")
-    .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date = ?", [todayIso])
-    .whereIn("outcome", actionOutcomesThatCount)
-    .count<{ count: string }[]>("* as count")
-    .then((rows) => Number(rows[0]?.count ?? 0));
-  return { actionsToday };
-}
-
-/** Today's orders by where they got to, for the screen's "Orders today" figure: sent = every order that reached the routes (the action cap's count). */
+/** Today's orders by where they got to, for the screen's "Orders today" figure: sent = every order that reached the routes. */
 export interface PlutoOrdersTodayBreakdown {
   sent: number;
   filled: number;
