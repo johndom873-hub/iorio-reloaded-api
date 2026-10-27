@@ -77,6 +77,8 @@ export class BacktestSymbolFile {
   private readonly putExpiriesStatement: StatementSync;
   private readonly putQuotesOfExpiryStatement: StatementSync;
   private readonly intradayPutQuotesOfExpiryStatement: StatementSync | null;
+  private readonly callExpiriesStatement: StatementSync;
+  private readonly callQuotesOfExpiryStatement: StatementSync;
 
   constructor(private readonly database: DatabaseSync) {
     // The downloader may be committing a day: wait for its lock instead of failing.
@@ -99,6 +101,8 @@ export class BacktestSymbolFile {
     this.putExpiriesStatement = database.prepare("SELECT DISTINCT expiry FROM quotes WHERE trading_date = ? AND option_right = 'P' ORDER BY expiry");
     this.putQuotesOfExpiryStatement = database.prepare("SELECT strike, bid, ask, bid_size AS bidSize, ask_size AS askSize FROM quotes WHERE trading_date = ? AND expiry = ? AND option_right = 'P'");
     this.intradayPutQuotesOfExpiryStatement = hasIntradayTables ? database.prepare("SELECT strike, bid, ask FROM intraday_quotes WHERE trading_date = ? AND look_time = ? AND expiry = ? AND option_right = 'P'") : null;
+    this.callExpiriesStatement = database.prepare("SELECT DISTINCT expiry FROM quotes WHERE trading_date = ? AND option_right = 'C' ORDER BY expiry");
+    this.callQuotesOfExpiryStatement = database.prepare("SELECT strike, bid, ask, bid_size AS bidSize, ask_size AS askSize FROM quotes WHERE trading_date = ? AND expiry = ? AND option_right = 'C'");
   }
 
   /** Opens the symbol's file from BACKTEST_DATA_DIR; throws when it has not been downloaded. */
@@ -205,6 +209,16 @@ export class BacktestSymbolFile {
   loadIntradayPutQuotesOfExpiry(tradingDate: string, lookTime: string, expiry: string): SymbolFileQuote[] {
     if (!this.intradayPutQuotesOfExpiryStatement) return [];
     return (this.intradayPutQuotesOfExpiryStatement.all(tradingDate, lookTime, expiry) as Record<string, unknown>[]).map((row) => ({ expiry, strike: Number(row.strike), right: "P" as const, bid: numberOrNull(row.bid), ask: numberOrNull(row.ask), bidSize: null, askSize: null }));
+  }
+
+  /** Every Call expiry the day's 10:00 quotes hold, ascending, whatever its distance (Vol Farmer v2's LEAPS). */
+  loadCallExpiries(tradingDate: string): string[] {
+    return (this.callExpiriesStatement.all(tradingDate) as { expiry: string }[]).map((row) => String(row.expiry));
+  }
+
+  /** One expiry's Calls at 10:00, with their sizes. */
+  loadCallQuotesOfExpiry(tradingDate: string, expiry: string): SymbolFileQuote[] {
+    return (this.callQuotesOfExpiryStatement.all(tradingDate, expiry) as Record<string, unknown>[]).map((row) => ({ expiry, strike: Number(row.strike), right: "C" as const, bid: numberOrNull(row.bid), ask: numberOrNull(row.ask), bidSize: numberOrNull(row.bidSize), askSize: numberOrNull(row.askSize) }));
   }
 
   close(): void {

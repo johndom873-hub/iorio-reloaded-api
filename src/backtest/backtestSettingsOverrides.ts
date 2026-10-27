@@ -1,4 +1,4 @@
-import { defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, defaultBacktestVolFarmerSettings, type BacktestModelSettings, type BacktestRestOfDayCurve, type BacktestSettings, type BacktestSettingsOverrides, type EffectiveBacktestSettings } from "./backtestTypes.js";
+import { defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, type BacktestModelSettings, type BacktestRestOfDayCurve, type BacktestSettings, type BacktestSettingsOverrides, type EffectiveBacktestSettings } from "./backtestTypes.js";
 import { liveSurfaceFitLimits, type SurfaceFitLimits } from "../lib/impliedVolatilitySurface.js";
 import { gradeMarginCutPoints, type GradeMarginCutPoints } from "../lib/contractValuation.js";
 import type { TradingSettings } from "../lib/tradingSettingsStore.js";
@@ -18,6 +18,7 @@ export function applyBacktestOverrides(snapshot: BacktestSettings, overrides: Ba
     baseline: { ...defaultBacktestBaselineSettings, ...snapshot.baseline, ...overrides.baseline },
     steadyStake: { ...defaultBacktestSteadyStakeSettings, ...snapshot.steadyStake, ...overrides.steadyStake },
     volFarmer: { ...defaultBacktestVolFarmerSettings, ...snapshot.volFarmer, ...overrides.volFarmer },
+    volFarmerV2: { ...defaultBacktestVolFarmerV2Settings, ...snapshot.volFarmerV2, ...overrides.volFarmerV2 },
   };
 }
 
@@ -65,6 +66,7 @@ export function countBacktestOverrides(snapshot: BacktestSettings, overrides: Ba
     changedIn({ ...defaultBacktestModelSettings, ...snapshot.model }, overrides.model) +
     changedIn({ ...defaultBacktestBaselineSettings, ...snapshot.baseline }, overrides.baseline) +
     changedIn({ ...defaultBacktestSteadyStakeSettings, ...snapshot.steadyStake }, overrides.steadyStake) +
-    changedIn({ ...defaultBacktestVolFarmerSettings, ...snapshot.volFarmer }, overrides.volFarmer)
+    changedIn({ ...defaultBacktestVolFarmerSettings, ...snapshot.volFarmer }, overrides.volFarmer) +
+    changedIn({ ...defaultBacktestVolFarmerV2Settings, ...snapshot.volFarmerV2 }, overrides.volFarmerV2)
   );
 }

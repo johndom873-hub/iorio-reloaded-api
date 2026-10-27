@@ -11,6 +11,7 @@ import {
   defaultBacktestPolicySettings,
   defaultBacktestSteadyStakeSettings,
   defaultBacktestVolFarmerSettings,
+  defaultBacktestVolFarmerV2Settings,
   type BacktestLabAuditRow,
   type BacktestLabChange,
   type BacktestLabTickerOverrides,
@@ -75,6 +76,7 @@ async function completeSettings(stored: BacktestSettings, connection: Knex): Pro
     baseline: withCodeKeys(defaultBacktestBaselineSettings, stored.baseline),
     steadyStake: withCodeKeys(defaultBacktestSteadyStakeSettings, stored.steadyStake),
     volFarmer: withCodeKeys(defaultBacktestVolFarmerSettings, stored.volFarmer),
+    volFarmerV2: withCodeKeys(defaultBacktestVolFarmerV2Settings, stored.volFarmerV2),
   };
 }
 

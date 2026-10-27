@@ -563,11 +563,13 @@ export interface BuyHedgePutEvent {
   actionId: string | null;
   /** Shares one contract covers on the cycle's scale: 100 unless a split since the cycle began changed it. */
   sharesPerContract?: number;
+  /** A Put when omitted; a Call for Vol Farmer v2's LEAPS (a long Call is a hedge position too). */
+  optionType?: "put" | "call";
 }
 
 /**
- * Long Puts bought for the hedge (backtestBaselineHedge.ts), only while the symbol's cycle is open (a hedge never starts
- * one): the leg at the fill plus the commission per share (the cost live's average cost carries), the opening trade, the
+ * Long Puts bought for the hedge (backtestBaselineHedge.ts), or Vol Farmer v2's LEAPS Calls, only while the symbol's cycle
+ * is open (a hedge never starts one): the leg at the fill plus the commission per share (the cost live's average cost carries), the opening trade, the
  * cost out and the commission out. One position per contract: a short option on it refuses the purchase, and the hedge
  * position already holding it takes the new leg (each purchase keeps its own time and price).
  */
@@ -587,7 +589,7 @@ function applyBuyHedgePut(ledger: SimulatedLedger, event: BuyHedgePutEvent): { p
     legType: "option",
     side: "long",
     quantity: event.contracts,
-    optionType: "put",
+    optionType: event.optionType ?? "put",
     strikePrice: event.strike,
     expiryDate: event.expiryDate,
     multiplier: sharesPerContract,
@@ -736,19 +738,20 @@ export interface SettleHedgePutEvent {
 export type HedgeSettlementOutcome = "hedge_worthless" | "hedge_sold_at_intrinsic";
 
 /**
- * A hedge Put still held at its expiry close (the hedge sells one before that; this settles one no quote let it sell),
- * stamped 16:00 Eastern of its expiry date. In the money by the assignment threshold or more, it is sold at its intrinsic
- * value (strike − close) without commission: live would exercise it, selling shares at the strike for the same dollars,
- * where this keeps the shares. Otherwise it expires worthless: the leg exits at 0 with no trade.
+ * A hedge Put (or a LEAPS Call) still held at its expiry close (the hedge sells one before that; this settles one no quote
+ * let it sell), stamped 16:00 Eastern of its expiry date. In the money by the assignment threshold or more, it is sold at
+ * its intrinsic value (a Put's strike − close, a Call's close − strike) without commission: live would exercise it, for the
+ * same dollars. Otherwise it expires worthless: the leg exits at 0 with no trade.
  */
 function applySettleHedgePut(ledger: SimulatedLedger, event: SettleHedgePutEvent): HedgeSettlementOutcome {
   const leg = requireLeg(ledger, event.legId);
   const position = requirePosition(ledger, leg.positionId);
-  if (position.strategyKey !== "hedge" || leg.legType !== "option" || leg.side !== "long" || leg.optionType !== "put" || leg.strikePrice === null || leg.expiryDate === null || leg.exitAt !== null) throw new Error(`Leg ${leg.id} is not an open hedge Put: nothing to settle.`);
+  if (position.strategyKey !== "hedge" || leg.legType !== "option" || leg.side !== "long" || leg.optionType === null || leg.strikePrice === null || leg.expiryDate === null || leg.exitAt !== null) throw new Error(`Leg ${leg.id} is not an open hedge option: nothing to settle.`);
   const at = expirySettlementInstant(leg.expiryDate);
   leg.expiryClose = event.expiryClose;
-  if (isAssignedAtExpiry("put", leg.strikePrice, event.expiryClose)) {
-    sellHedgePutContracts(ledger, { legId: leg.id, contracts: leg.quantity, fillPrice: leg.strikePrice - event.expiryClose, at, actionId: null }, 0);
+  if (isAssignedAtExpiry(leg.optionType, leg.strikePrice, event.expiryClose)) {
+    const intrinsic = leg.optionType === "put" ? leg.strikePrice - event.expiryClose : event.expiryClose - leg.strikePrice;
+    sellHedgePutContracts(ledger, { legId: leg.id, contracts: leg.quantity, fillPrice: intrinsic, at, actionId: null }, 0);
     return "hedge_sold_at_intrinsic";
   }
   leg.exitPrice = 0;

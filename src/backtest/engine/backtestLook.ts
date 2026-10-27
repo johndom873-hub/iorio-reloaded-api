@@ -130,6 +130,8 @@ export interface BacktestLookSymbol {
   adjustedDailyClosesBeforeToday: readonly { date: string; close: number }[];
   /** The look's long-dated Puts, for the baseline wheel's hedge; absent when the hedge is off. */
   hedgePutQuotes?: HedgePutQuoteSource;
+  /** The 10:00 look's Calls of every listed expiry, for Vol Farmer v2's LEAPS; absent for every other decision maker. */
+  leapsCallQuotes?: HedgePutQuoteSource;
 }
 
 /** What a symbol's looks of one day share: the Signals inputs built from the 10:00 capture (the surface fit among them) and its calendar figures. */

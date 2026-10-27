@@ -19,9 +19,9 @@ export type BacktestTablesMode = "walk_forward" | "current";
  * through the subscription, src/backtest/llm/). "baseline": none of Pluto or Signals, the naive wheel of
  * BacktestBaselineSettings (Marcelo 2026-10-13), to measure what each rule adds. "steady_stake": the Steady Stake of
  * BacktestSteadyStakeSettings, also without Pluto or Signals. "vol_farmer": the Vol Farmer of BacktestVolFarmerSettings, also
- * without Pluto or Signals.
+ * without Pluto or Signals; "vol_farmer_v2": Vol Farmer v2 of BacktestVolFarmerV2Settings (research).
  */
-export type BacktestDecisionMaker = "rules" | "llm" | "baseline" | "steady_stake" | "vol_farmer";
+export type BacktestDecisionMaker = "rules" | "llm" | "baseline" | "steady_stake" | "vol_farmer" | "vol_farmer_v2";
 
 /**
  * The naive wheel (approved by Marcelo 2026-10-13; the research log has the full rules). At every look: free round lots of
@@ -332,6 +332,31 @@ export interface BacktestVolFarmerSettings {
 export const defaultBacktestVolFarmerSettings: BacktestVolFarmerSettings = { callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, callMinDte: 1, callMaxDte: 45, callExpiry: "in_range", putMinDte: 0, putMaxDte: 360, putMaxStrikeAbovePricePct: 0, protectionFallPct: 20, maxSpreadPctOfMid: 50, putCashReservePct: 10, crossing: "unwind", putExpiry: "in_range", hedgeRuleCallPremiums: "excluded", minPutProtectionPct: 0, hedgeWithoutCall: "none", putChoice: "most_protection", maxPutCostPctOfCallPremium: 0, putRoll: "none", hedgeAfterExpiry: "keep", afterAssignment: "end", hedgeRuleStockPnl: "excluded", putCashIn: "none", cashInPutMinProtectionPct: 0, hedge: "put" };
 
 /**
+ * Vol Farmer v2 (decision maker "vol_farmer_v2", Marcelo 2026-10-27; research): two Covered Calls at different price
+ * levels, no hedge Put. The first position buys shares with half the pot and sells Calls at or above its break-even (what
+ * the shares cost less its Calls' premiums). While the best of those Calls yields under putTriggerCallYieldPct a year,
+ * Puts are sold with the other half, struck at least putStrikeBelowFirstBreakEvenPct below that break-even; their shares,
+ * once assigned, are the second position, with a break-even of its own (the strike less its Puts' and Calls' premiums).
+ * When the second position finds no Call at or above its break-even, the free cash buys a LEAPS Call, sold when the second
+ * position is called away. Calls and Puts on the next listed expiry, held to it; the Calls' |delta| range and the spread
+ * limit are the Vol Farmer's settings (backtestVolFarmerV2Look.ts).
+ */
+export interface BacktestVolFarmerV2Settings {
+  /** Puts are sold while the best Call the first position can sell yields under this, percent a year (no Call: 0%). */
+  putTriggerCallYieldPct: number;
+  /** The Puts' highest |delta|. */
+  putMaxAbsDelta: number;
+  /** A Put's strike is at least this far below the first position's break-even, percent. */
+  putStrikeBelowFirstBreakEvenPct: number;
+  /** The LEAPS: the first listed expiry at least this many days out. */
+  leapsMinDte: number;
+  /** The LEAPS: that expiry's Call whose |delta| is nearest this. */
+  leapsAbsDelta: number;
+}
+
+export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putTriggerCallYieldPct: 5, putMaxAbsDelta: 0.2, putStrikeBelowFirstBreakEvenPct: 15, leapsMinDte: 365, leapsAbsDelta: 0.7 };
+
+/**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5). Everything else in a pass is
  * Pluto's own code. A pass considers closes first, then rolls, then opens, and takes at most one action; an open is
  * always Pluto's own top pick (Edge Yield, then Edge $).
@@ -422,6 +447,8 @@ export interface BacktestSettings {
   steadyStake?: BacktestSteadyStakeSettings;
   /** Absent on sessions created before the Vol Farmer existed: the defaults apply. */
   volFarmer?: BacktestVolFarmerSettings;
+  /** Absent on sessions created before Vol Farmer v2 existed: the defaults apply. */
+  volFarmerV2?: BacktestVolFarmerV2Settings;
 }
 
 export interface BacktestSettingsOverrides {
@@ -434,6 +461,7 @@ export interface BacktestSettingsOverrides {
   baseline?: Partial<BacktestBaselineSettings>;
   steadyStake?: Partial<BacktestSteadyStakeSettings>;
   volFarmer?: Partial<BacktestVolFarmerSettings>;
+  volFarmerV2?: Partial<BacktestVolFarmerV2Settings>;
 }
 
 /**
@@ -535,6 +563,7 @@ export interface EffectiveBacktestSettings extends BacktestSettings {
   baseline: BacktestBaselineSettings;
   steadyStake: BacktestSteadyStakeSettings;
   volFarmer: BacktestVolFarmerSettings;
+  volFarmerV2: BacktestVolFarmerV2Settings;
 }
 
 export interface BacktestJobView {
@@ -779,6 +808,7 @@ export type BacktestSettingGroup =
   | "Hedge"
   | "Steady Stake"
   | "Vol Farmer"
+  | "Vol Farmer v2"
   | "Capital and sizing"
   | "Candidate quality"
   | "Model"
@@ -786,9 +816,9 @@ export type BacktestSettingGroup =
   | "Rules' choices";
 
 /** "baseline_wheel": rows a Baseline wheel session (the CC + Put Ladder) reads, some shared with the rules and the AI model;
- *  "steady_stake": rows only the Steady Stake reads; "vol_farmer": rows only the Vol Farmer reads; "pluto_rules": rows only
- *  the rules and the AI model read. */
-export type BacktestSettingSection = "baseline_wheel" | "steady_stake" | "vol_farmer" | "pluto_rules";
+ *  "steady_stake": rows only the Steady Stake reads; "vol_farmer": rows the Vol Farmer reads (a few Vol Farmer v2 too);
+ *  "vol_farmer_v2": rows only Vol Farmer v2 reads; "pluto_rules": rows only the rules and the AI model read. */
+export type BacktestSettingSection = "baseline_wheel" | "steady_stake" | "vol_farmer" | "vol_farmer_v2" | "pluto_rules";
 
 /** A row's value against another row's: `oneOf` / `noneOf` its choice values, or a number `above`. */
 export interface BacktestSettingCondition {

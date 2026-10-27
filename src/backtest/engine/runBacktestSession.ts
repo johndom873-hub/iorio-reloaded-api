@@ -43,6 +43,7 @@ import { prepareModelTablesForSession } from "./walkForwardModelTables.js";
 import { runBaselineLook } from "./backtestBaselineLook.js";
 import { runSteadyStakeLook } from "./backtestSteadyStakeLook.js";
 import { describeVolFarmerCash, runVolFarmerLook, scanVolFarmerCrossing } from "./backtestVolFarmerLook.js";
+import { describeVolFarmerV2Run, runVolFarmerV2Look } from "./backtestVolFarmerV2Look.js";
 
 // The backtest engine's entry point (docs/backtesting/FORMULAS.md, FULL-FIDELITY-DESIGN.md, DATA-FILES.md). Called by the
 // job process (scripts/run-backtest-job.ts) for a backtest job. One session = one or several symbols from its start to
@@ -390,6 +391,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     session.bookMode === "pots" && session.symbolSettings ? new Map(Object.entries(session.symbolSettings).map(([symbol, ticker]) => [symbol, { baseline: { ...settings.baseline, ...ticker.baseline }, weight: ticker.weight }])) : undefined;
   // The baseline wheel's hedge (backtestBaselineHedge.ts) reads long-dated Puts from the files of the tickers it is on for; the Vol Farmer's, from every file.
   const hedgeOnFor = (symbol: string) => settings.decisionMaker === "vol_farmer" || (settings.decisionMaker === "baseline" && hedgeIsOn(tickerSetupBySymbol?.get(symbol)?.baseline ?? settings.baseline));
+  // Vol Farmer v2 buys its LEAPS from the 10:00 Calls of every listed expiry (backtestVolFarmerV2Look.ts).
+  const leapsOn = settings.decisionMaker === "vol_farmer_v2";
   const severalSymbols = symbolNames.length > 1;
   const startingValue = Number(session.startingValue);
   const dataDirectory = requireBacktestDataDirectory();
@@ -710,10 +713,12 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const settlementDate = closeOnExpiry || calendar.isSession(expiryDate) ? expiryDate : (calendar.sessionBefore(expiryDate) ?? expiryDate);
         const settlementClose = settlementDate === expiryDate ? closeOnExpiry : settlementCloseOnCycleScale(settlementDate, cycleSplitFactor, owner.bars, owner.intradayPrices);
         const tradedScale = cycleSplitFactor / (splitFactorOn(owner.schedule, expiryDate) ?? cycleSplitFactor);
-        const contractLabel = describeOptionContract({ symbol: owner.symbol, strike: roundedStrike(leg.strikePrice! / tradedScale), right: "P", expiry: expiryDate, dte: null });
+        const right = leg.optionType === "call" ? "C" : "P";
+        const contractLabel = describeOptionContract({ symbol: owner.symbol, strike: roundedStrike(leg.strikePrice! / tradedScale), right, expiry: expiryDate, dte: null });
         if (!settlementClose) throw new Error(`Cannot settle the hedge's ${contractLabel}: the ${owner.symbol} data file has no IBKR daily or 30-minute bar for ${settlementDate}. Press Update on its row in Data files and run the session again.`);
         const outcome = settleHedgePut(ledger, { legId: leg.id, expiryClose: settlementClose.close });
-        notes.push(`hedge ${contractLabel} ${settings.decisionMaker === "vol_farmer" ? "held to its expiry" : "still held at its expiry (no quote to sell it at)"}: ${outcome === "hedge_worthless" ? "expired worthless" : `sold at its intrinsic value, ${((leg.strikePrice! - settlementClose.close) / tradedScale).toFixed(2)}`} at the ${(settlementClose.close / tradedScale).toFixed(2)} close`);
+        const intrinsic = right === "C" ? settlementClose.close - leg.strikePrice! : leg.strikePrice! - settlementClose.close;
+        notes.push(`${right === "C" ? "LEAPS" : "hedge"} ${contractLabel} ${settings.decisionMaker === "vol_farmer" || settings.decisionMaker === "vol_farmer_v2" ? "held to its expiry" : "still held at its expiry (no quote to sell it at)"}: ${outcome === "hedge_worthless" ? "expired worthless" : `sold at its intrinsic value, ${(intrinsic / tradedScale).toFixed(2)}`} at the ${(settlementClose.close / tradedScale).toFixed(2)} close`);
       }
 
       // b. Interest since the previous session day.
@@ -729,6 +734,22 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       const spyBaselineDay = spyBuyAndHold?.markDay(todayIso, spyPriceAtTen(todayIso), interestPeriod) ?? null;
 
       const hedgePutQuotesByKey = new Map<string, HedgePutQuoteSource>();
+      const leapsCallQuotesBySymbol = new Map<string, HedgePutQuoteSource>();
+      /** A symbol's 10:00 Calls of every listed expiry, for Vol Farmer v2's LEAPS (each read once a day and expiry); undefined for any other decision maker. */
+      const leapsCallQuotesOf = (entry: SessionSymbol): HedgePutQuoteSource | undefined => {
+        if (!leapsOn) return undefined;
+        let source = leapsCallQuotesBySymbol.get(entry.symbol);
+        if (!source) {
+          let expiries: string[] | null = null;
+          const quotesByExpiry = new Map<string, SymbolFileQuote[]>();
+          source = {
+            listedExpiries: () => (expiries ??= entry.file.loadCallExpiries(todayIso)),
+            quotesOf: (expiry) => quotesByExpiry.get(expiry) ?? quotesByExpiry.set(expiry, entry.file.loadCallQuotesOfExpiry(todayIso, expiry)).get(expiry)!,
+          };
+          leapsCallQuotesBySymbol.set(entry.symbol, source);
+        }
+        return source;
+      };
       const listedPutExpiriesBySymbol = new Map<string, string[]>();
       /** A symbol's long-dated Puts at a look, for the hedge (each read once a day, look and expiry); undefined when the hedge is off for it. */
       const hedgePutQuotesAt = (entry: SessionSymbol, lookTimeEt: string): HedgePutQuoteSource | undefined => {
@@ -745,15 +766,15 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         }
         return source;
       };
-      /** The hedge's Puts the 10:00 quotes left unmarked (past the 45-day window): marked from their own expiry's 10:00 quotes. Returns the legs still unmarked. */
+      /** The hedge's Puts and Vol Farmer v2's LEAPS Calls the 10:00 quotes left unmarked (past the 45-day window): marked from their own expiry's 10:00 quotes. Returns the legs still unmarked. */
       const markLongDatedHedgeLegs = (entry: SessionSymbol, legs: readonly LedgerLeg[], splitFactor: number): LedgerLeg[] => {
-        const source = hedgePutQuotesAt(entry, captureLookTimeEt);
-        if (!source) return [...legs];
         const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
         return legs.filter((leg) => {
           if (leg.side !== "long" || leg.legType !== "option") return true;
+          const source = leg.optionType === "call" ? leapsCallQuotesOf(entry) : hedgePutQuotesAt(entry, captureLookTimeEt);
+          if (!source) return true;
           const strikeAsTraded = leg.strikePrice! / priceToCycleScale;
-          const mid = markMidByContract(source.quotesOf(leg.expiryDate!), new Set([roundedStrike(strikeAsTraded)])).get(markKey(leg.expiryDate!, strikeAsTraded, "P"));
+          const mid = markMidByContract(source.quotesOf(leg.expiryDate!), new Set([roundedStrike(strikeAsTraded)])).get(markKey(leg.expiryDate!, strikeAsTraded, leg.optionType === "call" ? "C" : "P"));
           if (mid === undefined) return true;
           priceByLegId.set(leg.id, mid * priceToCycleScale);
           return false;
@@ -833,7 +854,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           continue;
         }
         const unmarkedByTheDayQuotes = markLegs(entry, legsOfSymbol, stockPrice, quotes, splitFactor);
-        const unmarkedAtCapture = unmarkedByTheDayQuotes.length > 0 && hasFileDay && hedgeOnFor(entry.symbol) ? markLongDatedHedgeLegs(entry, unmarkedByTheDayQuotes, splitFactor) : unmarkedByTheDayQuotes;
+        const unmarkedAtCapture = unmarkedByTheDayQuotes.length > 0 && hasFileDay && (hedgeOnFor(entry.symbol) || leapsOn) ? markLongDatedHedgeLegs(entry, unmarkedByTheDayQuotes, splitFactor) : unmarkedByTheDayQuotes;
         if (unmarkedAtCapture.length > 0 && hasFileDay) {
           for (const [legId, mark] of laterMarksOfDay(entry, unmarkedAtCapture, splitFactor)) {
             laterMarkByLegId.set(legId, mark);
@@ -864,6 +885,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const previousSessionVolumeByContract = capture!.previousSessionVolumeByContract;
         notes.push(...describeDataGaps(entry.file, todayIso, previousFileDay, previousSessionVolumeByContract).map((note) => noteFor(entry, note)));
         const hedgePutQuotes = hedgePutQuotesAt(entry, captureLookTimeEt);
+        const leapsCallQuotes = leapsCallQuotesOf(entry);
         const nextSessionIso = sessionDays[dayIndex + 1];
         daySymbols.push({
           entry,
@@ -878,6 +900,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
             optionContractsRepresentable: aligned.representable,
             adjustedDailyClosesBeforeToday: entry.adjustedDailyCloses.slice(0, entry.closesBeforeTodayCount),
             ...(hedgePutQuotes ? { hedgePutQuotes } : {}),
+            ...(leapsCallQuotes ? { leapsCallQuotes } : {}),
           },
         });
       }
@@ -993,11 +1016,11 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         }
         if (lookSymbols.length === 0) continue;
 
-        // The baseline wheel, the Steady Stake and the Vol Farmer have none of Pluto's checks; the Steady Stake decides at
-        // 10:00 only, the Vol Farmer too but reads every look's quotes (the IVs a crossing is priced on).
-        if (settings.decisionMaker === "baseline" || settings.decisionMaker === "steady_stake" || settings.decisionMaker === "vol_farmer") {
-          if (settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" && !isCaptureLook : settings.decisionMaker === "steady_stake" && !isCaptureLook) continue;
-          const runLook = settings.decisionMaker === "baseline" ? runBaselineLook : settings.decisionMaker === "steady_stake" ? runSteadyStakeLook : runVolFarmerLook;
+        // The baseline wheel, the Steady Stake and both Vol Farmers have none of Pluto's checks; the Steady Stake and Vol
+        // Farmer v2 decide at 10:00 only, the Vol Farmer too but reads every look's quotes (the IVs a crossing is priced on).
+        if (settings.decisionMaker === "baseline" || settings.decisionMaker === "steady_stake" || settings.decisionMaker === "vol_farmer" || settings.decisionMaker === "vol_farmer_v2") {
+          if (settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" && !isCaptureLook : (settings.decisionMaker === "steady_stake" || settings.decisionMaker === "vol_farmer_v2") && !isCaptureLook) continue;
+          const runLook = settings.decisionMaker === "baseline" ? runBaselineLook : settings.decisionMaker === "steady_stake" ? runSteadyStakeLook : settings.decisionMaker === "vol_farmer_v2" ? runVolFarmerV2Look : runVolFarmerLook;
           const look = await runLook({ todayIso, lookTimeEt, symbols: lookSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
           actions.push(...look.actions);
           optionSales.push(...look.optionSales);
@@ -1159,6 +1182,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     }
     const volFarmerCashNote = settings.decisionMaker === "vol_farmer" ? describeVolFarmerCash(ledger, symbols.map((entry) => entry.symbol)) : null;
     if (volFarmerCashNote !== null) sessionNotes.push(volFarmerCashNote);
+    const volFarmerV2Note = settings.decisionMaker === "vol_farmer_v2" ? describeVolFarmerV2Run(ledger, symbols.map((entry) => entry.symbol)) : null;
+    if (volFarmerV2Note !== null) sessionNotes.push(volFarmerV2Note);
     const bookRecords = buildBookRecords({ ledger, symbols, optionSales, actions, priceByLegId, lastSessionDateIso, calendar, noSaleRecords: { shortfalls, notes: noSaleNotes, noCandidates: noCandidateNotes } });
     // The book holds every share it sells (the ledger refuses anything else); the platform's cycle derivation reading it
     // must agree. A cycle whose shares do not reconcile is named in the notes, its figures not to be trusted.
