@@ -1,6 +1,6 @@
 import { loadCommissionEstimator, loadStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import type { InternalApiClient } from "../lib/internalApiClient.js";
-import { accountContextFromTotalCash } from "../lib/signalsStore.js";
+import { accountContextFromTotalCash } from "../lib/accountContext.js";
 import { frozenSymbolSet } from "../lib/tickerFreeze.js";
 import { loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
 import { executePlutoOrder, watchPlutoOrder } from "./executor.js";

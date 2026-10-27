@@ -71,7 +71,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const now = new Date();
 
   const skip = async (reason: string, systemChecks?: Record<string, PlutoSystemCheck>): Promise<PassSummary> => {
-    await finishPass({ skippedReason: reason, modelCalled: false, ...(systemChecks ? { systemChecks } : {}) });
+    await finishPass({ skippedReason: reason, ...(systemChecks ? { systemChecks } : {}) });
     await recordPlutoEvent("pass_skipped", { passId, trigger: request.trigger, reason });
     await recordPlutoPass();
     return { passId, skippedReason: reason, outcome: null };
@@ -116,7 +116,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const ladder = await runLadderRound({ passId, settings, api: context.api, marketWatch: context.marketWatch, trackWatch: context.trackWatch, now, todayIso: checks.context.todayEasternIso, totalCashValue: checks.context.totalCashValue, netLiquidationValue: checks.context.netLiquidationValue, cancelByMs: checks.context.session.cancelByMs, symbols: request.symbols });
   const sent = ladder.outcomes.filter((outcome) => outcome.outcome === "confirmed").length;
   const skippedReason = sent > 0 ? null : ladder.planned === 0 ? `the ladder planned no sale (${ladder.looked.length} ticker(s) looked at${ladder.notes.length > 0 ? `; ${ladder.notes.join("; ")}` : ""})` : `none of the ladder's ${ladder.planned} planned sale(s) was sent`;
-  await finishPass({ candidateCount: ladder.planned, systemChecks: checks.checks, modelCalled: false, skippedReason });
+  await finishPass({ candidateCount: ladder.planned, systemChecks: checks.checks, skippedReason });
   if (skippedReason) await recordPlutoEvent("pass_skipped", { passId, trigger: request.trigger, reason: skippedReason });
   await recordPlutoPass();
   return { passId, skippedReason, outcome: sent > 0 ? "trade" : null };

@@ -19,32 +19,10 @@ export interface PlutoSystemCheck {
   detail: string;
 }
 
-export interface PlutoPassRow {
-  id: string;
-  startedAt: string;
-  finishedAt: string | null;
-  trigger: PlutoTrigger;
-  triggerDetail: Record<string, unknown>;
-  inputHash: string | null;
-  candidateCount: number;
-  systemChecks: Record<string, PlutoSystemCheck>;
-  modelCalled: boolean;
-  skippedReason: string | null;
-  tokensIn: number | null;
-  tokensOut: number | null;
-  costUsd: number | null;
-  servedModelIds: string[];
-}
-
 export async function startPlutoPass(trigger: PlutoTrigger, triggerDetail: Record<string, unknown> = {}, settingsSnapshot: unknown = null): Promise<string> {
   const settingsVersionId = settingsSnapshot === null ? null : await ensurePlutoSettingsVersion(settingsSnapshot);
   const [row] = await db("pluto_passes").insert({ trigger, trigger_detail: JSON.stringify(triggerDetail), settings_version_id: settingsVersionId }).returning("id");
   return row.id as string;
-}
-
-/** The poll pass found out what it really was (a grade crossing or a held-leg change): rename it before the model is called. */
-export async function relabelPlutoPass(passId: string, trigger: PlutoTrigger, triggerDetail: Record<string, unknown>): Promise<void> {
-  await db("pluto_passes").where({ id: passId }).update({ trigger, trigger_detail: JSON.stringify(triggerDetail) });
 }
 
 // Nothing Pluto records is ever deleted (Marcelo, 2026-10-07): events, passes, decisions and actions are kept for later analysis.
@@ -61,15 +39,10 @@ export async function closeAbandonedPlutoPasses(now: Date = new Date()): Promise
 }
 
 export interface FinishPlutoPassInput {
-  inputHash?: string | null;
   candidateCount?: number;
   systemChecks?: Record<string, PlutoSystemCheck>;
-  modelCalled?: boolean;
+  /** Null for a round that sent an order; it also replaces an "abandoned" label the sweep may have written meanwhile. */
   skippedReason?: string | null;
-  tokensIn?: number | null;
-  tokensOut?: number | null;
-  costUsd?: number | null;
-  servedModelIds?: string[];
 }
 
 export async function finishPlutoPass(passId: string, input: FinishPlutoPassInput): Promise<void> {
@@ -77,59 +50,10 @@ export async function finishPlutoPass(passId: string, input: FinishPlutoPassInpu
     .where({ id: passId })
     .update({
       finished_at: db.fn.now(),
-      ...(input.inputHash !== undefined ? { input_hash: input.inputHash } : {}),
       ...(input.candidateCount !== undefined ? { candidate_count: input.candidateCount } : {}),
       ...(input.systemChecks !== undefined ? { system_checks: JSON.stringify(input.systemChecks) } : {}),
-      ...(input.modelCalled !== undefined ? { model_called: input.modelCalled } : {}),
-      // A finish that records a model call clears an "abandoned" label the sweep may have written meanwhile (a round over 10 minutes).
-      ...(input.skippedReason !== undefined ? { skipped_reason: input.skippedReason } : input.modelCalled === true ? { skipped_reason: null } : {}),
-      ...(input.tokensIn !== undefined ? { tokens_in: input.tokensIn } : {}),
-      ...(input.tokensOut !== undefined ? { tokens_out: input.tokensOut } : {}),
-      ...(input.costUsd !== undefined ? { cost_usd: input.costUsd } : {}),
-      ...(input.servedModelIds !== undefined ? { served_model_ids: input.servedModelIds } : {}),
+      ...(input.skippedReason !== undefined ? { skipped_reason: input.skippedReason } : {}),
     });
-}
-
-export interface RecordPlutoDecisionInput {
-  passId: string;
-  callIndex: number;
-  modelId: string;
-  servedModelId: string | null;
-  serviceTier?: string | null;
-  inputPayload: unknown;
-  rawOutput: string | null;
-  parsedOutput: unknown | null;
-  schemaValid: boolean;
-  latencyMs: number | null;
-  tokensIn: number | null;
-  tokensOut: number | null;
-  costUsd: number | null;
-  error: string | null;
-  /** pluto_prompts row of the exact system prompt used (null for a call that never built one). */
-  promptId?: string | null;
-}
-
-export async function recordPlutoDecision(input: RecordPlutoDecisionInput): Promise<string> {
-  const [row] = await db("pluto_decisions")
-    .insert({
-      pass_id: input.passId,
-      call_index: input.callIndex,
-      model_id: input.modelId,
-      served_model_id: input.servedModelId,
-      service_tier: input.serviceTier ?? null,
-      prompt_id: input.promptId ?? null,
-      input_payload: JSON.stringify(input.inputPayload),
-      raw_output: input.rawOutput,
-      parsed_output: input.parsedOutput === null ? null : JSON.stringify(input.parsedOutput),
-      schema_valid: input.schemaValid,
-      latency_ms: input.latencyMs,
-      tokens_in: input.tokensIn,
-      tokens_out: input.tokensOut,
-      cost_usd: input.costUsd,
-      error: input.error,
-    })
-    .returning("id");
-  return row.id as string;
 }
 
 export type PlutoActionKind = "open_covered_call" | "open_cash_secured_put" | "roll" | "close_shares" | "close_leg" | "close_position" | "no_trade";

@@ -1,5 +1,5 @@
 import { Worker } from "node:worker_threads";
-import { contractKey } from "../../lib/signalsLiveScoring.js";
+import { contractKey } from "../../lib/optionContractKey.js";
 import { engineWorkerExecArgv, engineWorkerModuleUrl } from "./engineWorkerThreads.js";
 import type { SymbolFileEndOfDayRow, SymbolFileQuote } from "./backtestSymbolFile.js";
 

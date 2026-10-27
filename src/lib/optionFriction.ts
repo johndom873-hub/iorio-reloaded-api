@@ -1,5 +1,5 @@
-// Option trading costs for the Signal Engine. The valuation model charges a sale λ × the half-spread × 100 plus the
-// commission per contract (frictionDollarsPerContract in signalCandidates.ts).
+// Option trading costs. A sale is charged λ × the half-spread × 100 plus the commission per contract
+// (frictionDollarsPerContract): the premium yields, the backtests and the valuation model all use it.
 //
 // λ = the Risk & Limits spread cost, default 0.5 (Marcelo 2026-10-05). Orders go out as limits at the mid, which never
 // fill worse than the mid, but a fill tends to come once the price has moved toward the limit, up to half a spread below
@@ -9,6 +9,10 @@
 
 export const commissionPerContractDollars = 0.68;
 export const sharesPerContract = 100;
+
+export function frictionDollarsPerContract(bid: number, ask: number, spreadShareCharged: number, commissionPerContract: number): number {
+  return (spreadShareCharged * (ask - bid)) / 2 * 100 + commissionPerContract;
+}
 
 const standardNormalDensity = (x: number) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
 

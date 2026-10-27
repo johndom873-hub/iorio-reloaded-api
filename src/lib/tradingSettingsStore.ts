@@ -18,7 +18,6 @@ export interface TradingSettings {
   recoveryDteMin: number;
   recoveryDteMax: number;
   /** Signals drops candidates whose annualised yield is below this percentage. */
-  minAnnualizedYieldPct: number;
   /** Order setup warns when the order's commission is above this percentage of its premium. */
   commissionWarnSharePctOfPremium: number;
   /** Limit-price check: an order's limit may be worse than the live mid by at most this share of the mid... */
@@ -41,7 +40,6 @@ export const tradingSettingsColumns = {
   deltaTargetMax: "delta_target_max",
   recoveryDteMin: "recovery_dte_min",
   recoveryDteMax: "recovery_dte_max",
-  minAnnualizedYieldPct: "min_annualized_yield_pct",
   commissionWarnSharePctOfPremium: "commission_warn_share_of_premium_pct",
   priceCheckMaxDeviationPct: "price_check_max_deviation_pct",
   priceCheckMinToleranceDollars: "price_check_min_tolerance_dollars",
@@ -54,7 +52,7 @@ export type TradingSettingsInput = Record<keyof typeof tradingSettingsColumns, n
 /** The column is a 32-bit integer; a window beyond this would be refused by the database as a server error instead of a clear message. */
 const maximumDteDays = 2_147_483_647;
 
-const percentageFields = ["maxOrderPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct", "spreadCostChargedPct"] as const;
+const percentageFields = ["maxOrderPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct", "spreadCostChargedPct"] as const;
 
 const maximumToleranceDollars = 1000;
 const maximumUnfilledCancelMinutes = 1440;
@@ -92,7 +90,6 @@ export function mapTradingSettingsRow(row: TradingSettingsRow): Omit<TradingSett
     deltaTargetMax: Number(row.delta_target_max),
     recoveryDteMin: Number(row.recovery_dte_min),
     recoveryDteMax: Number(row.recovery_dte_max),
-    minAnnualizedYieldPct: Number(row.min_annualized_yield_pct),
     commissionWarnSharePctOfPremium: Number(row.commission_warn_share_of_premium_pct),
     priceCheckMaxDeviationPct: Number(row.price_check_max_deviation_pct),
     priceCheckMinToleranceDollars: Number(row.price_check_min_tolerance_dollars),

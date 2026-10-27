@@ -1,8 +1,7 @@
 import type { PlutoSettings } from "../pluto/settingsStore.js";
 import type { TradingSettings } from "../lib/tradingSettingsStore.js";
-import type { OpenCandidateRanking } from "../lib/signalCandidates.js";
 import type { KellyEdgeBasis } from "../pluto/postModelGates.js";
-import type { ModelForecastMethod } from "../lib/volatilityEdge.js";
+import type { ModelForecastMethod } from "../lib/volatilityForecast.js";
 import type { LadderLevels } from "./engine/backtestBaselineLadder.js";
 
 // The backtesting API contract (docs/backtesting/). The app mirrors these types in src/api/backtest.ts.
@@ -394,6 +393,9 @@ export const defaultBacktestPolicySettings: BacktestPolicySettings = { roll: "fl
  * stored settings. They changed the model's figures and Pluto's use of them, never the fills
  * (trading.spreadCostChargedPct prices every fill).
  */
+/** The order the retired rules backtests ranked their opens in, kept for their stored settings. */
+export type OpenCandidateRanking = "edge_yield" | "hist_yield" | "edge_dollars";
+
 export interface BacktestModelSettings {
   /** The Yang-Zhang window of the valuation forecast, in sessions; the walk-forward tables are built on the same window. */
   forecastWindowDays: number;
@@ -413,7 +415,7 @@ export interface BacktestModelSettings {
   surfaceMaxRmseVp: number;
   /** The share of the half-spread the model charges as friction; null: the fills' share (sessions created before the split). */
   spreadCostChargedPct: number | null;
-  /** The valuation forecast (volatilityEdge.ts ModelForecastMethod); the walk-forward tables stay standardized by Yang-Zhang 21. */
+  /** The valuation forecast (volatilityForecast.ts ModelForecastMethod); the walk-forward tables stay standardized by Yang-Zhang 21. */
   forecastMethod: ModelForecastMethod;
   /** The variance clock's rest-of-day curve: live's, measured on 2026-06..10, or the 2020–2026 measure (varianceClock.ts). */
   restOfDayCurve: BacktestRestOfDayCurve;
@@ -422,7 +424,7 @@ export interface BacktestModelSettings {
 export type BacktestRestOfDayCurve = "measured_2026_june_to_october" | "measured_2020_to_2026";
 export const backtestRestOfDayCurves: readonly BacktestRestOfDayCurve[] = ["measured_2026_june_to_october", "measured_2020_to_2026"];
 
-/** Live's values (volatilityEdge.ts, contractValuation.ts, signalCandidates.ts, postModelGates.ts, impliedVolatilitySurface.ts). */
+/** The values live used while Signals ran (volatilityForecast.ts, contractValuation.ts, postModelGates.ts, impliedVolatilitySurface.ts). */
 export const defaultBacktestModelSettings: BacktestModelSettings = {
   forecastWindowDays: 21,
   gradeStrongMarginPct: 20,

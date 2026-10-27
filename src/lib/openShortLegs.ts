@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 
-// Open short option legs on covered-call and cash-secured-put positions (moved out of signalsStore.ts 2026-10-27): the
+// Open short option legs on covered-call and cash-secured-put positions: the
 // Ticker modal's rolls and the assignment-risk alert's legs.
 
 /** An open short option leg as read from position_legs. */

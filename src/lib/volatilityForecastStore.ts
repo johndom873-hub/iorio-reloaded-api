@@ -1,5 +1,5 @@
 import { db } from "../db/connection.js";
-import { longForecastWindowDays, selectModelVolatilityForecast, type ModelVolatilityForecast } from "./volatilityEdge.js";
+import { longForecastWindowDays, selectModelVolatilityForecast, type ModelVolatilityForecast } from "./volatilityForecast.js";
 import type { DailyOhlcvBar } from "./realizedVolatility.js";
 
 /** Bars needed for the longest window: 63 returns plus the prior close. */

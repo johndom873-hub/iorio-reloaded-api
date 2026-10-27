@@ -2,7 +2,7 @@ import type { Cycle } from "../../lib/cycles.js";
 import { easternIsoDate } from "../../lib/easternIsoDate.js";
 import { daysToExpiry } from "../../lib/optionContractLabel.js";
 import { legRealizedPnl } from "../../lib/positionSelectors.js";
-import { addCalendarDays } from "../../lib/signalsRoadmap.js";
+import { addCalendarDays } from "../../lib/calendarDays.js";
 import type { BacktestAction, BacktestCycle, BacktestCycleDetail, BacktestCycleGap, BacktestCycleTimelineRow, BacktestFill, BacktestPosition, BacktestPositionLeg, BacktestTrade } from "../backtestTypes.js";
 import { buildCycleGaps, buildStockOnlyStretches, closeLookupOf, type NoSaleRecords } from "./backtestIdleStretches.js";
 import { shareDirectionOf } from "../cycleCashBreakEven.js";

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { easternInstant } from "../../lib/easternIsoDate.js";
 import { blackScholesDelta, blackScholesPriceOnForward } from "../../lib/impliedVolatilitySurface.js";
-import { contractKey } from "../../lib/signalsLiveScoring.js";
+import { contractKey } from "../../lib/optionContractKey.js";
 import { defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, type BacktestVolFarmerV2Settings, type EffectiveBacktestSettings } from "../backtestTypes.js";
 import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";

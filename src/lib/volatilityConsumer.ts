@@ -3,7 +3,7 @@ import { loadStoredOptionChain, type StoredOptionChain } from "../ibkr/fetchOpti
 import { blackScholesDelta } from "./impliedVolatilitySurface.js";
 import type { MarketQuoteConsumer, QuoteLoopContract, QuoteLoopCycle } from "./marketQuoteLoop.js";
 import { loadTradingSessionsBetween } from "./marketSessionStatus.js";
-import { calendarDaysUntilExpiry } from "./optionChainCaptureWindow.js";
+import { calendarDaysUntilExpiry } from "./optionChainExpiryRange.js";
 import { loadOptionDataUniverse, type OptionDataTicker } from "./optionDataUniverse.js";
 import { yearsToSessionClose } from "./quoteOwnDelta.js";
 import { getRiskFreeRate } from "./riskFreeRate.js";

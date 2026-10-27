@@ -1,7 +1,7 @@
 import type { BacktestSymbolFile, SymbolFileEndOfDayRow, SymbolFileQuote } from "../engine/backtestSymbolFile.js";
 import { noteBaselineForwardAnchors, selectBaselineCandidates, type BaselineCandidateInput, type BaselineForwardAnchor } from "../engine/baselineSaleSteps.js";
 import type { BacktestBaselineSettings } from "../backtestTypes.js";
-import { contractKey } from "../../lib/signalsLiveScoring.js";
+import { contractKey } from "../../lib/optionContractKey.js";
 import { commissionPerContractDollars } from "../../lib/optionFriction.js";
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib/commissionEstimate.js";
 import { blackScholesDelta, impliedVolatilityFromPrice, parityImpliedForward, yearsBetweenIsoDates } from "../../lib/impliedVolatilitySurface.js";

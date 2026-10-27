@@ -9,7 +9,7 @@ import { daysToExpiry } from "../lib/optionContractLabel.js";
 import { ladderBookCapitalVerdict } from "../lib/orderLimits.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
-import type { LiveOptionQuote } from "../lib/signalsLiveScoring.js";
+import type { LiveOptionQuote } from "../lib/optionContractKey.js";
 import type { ExecuteLadderOpenInput, ExecuteResult } from "./executor.js";
 import type { PlutoGateResult, RecordPlutoActionInput } from "./ledger.js";
 import { loadWorkingLadderSales } from "./ladderLookLoader.js";

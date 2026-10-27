@@ -1,7 +1,7 @@
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { readFileDailyBars, readFileIntradayPrices, type FileIntradayPrices } from "../backtestFileStockBars.js";
-import { contractKey } from "../../lib/signalsLiveScoring.js";
+import { contractKey } from "../../lib/optionContractKey.js";
 import type { StoredDailyBar } from "./backtestBarHistory.js";
 
 // Read access to one symbol's ThetaData file (docs/backtesting/DATA-FILES.md, schema versions 1 to 3): the days it

@@ -1,6 +1,6 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
-import { contractKey } from "./signalsLiveScoring.js";
+import { contractKey } from "./optionContractKey.js";
 
 // option_session_volumes (migration 20261015300004): each contract's full-session volume and last-seen IV, from the
 // after-close capture (src/ibkr/runOptionSessionVolumeCapture.ts).

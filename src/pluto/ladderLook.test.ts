@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { blackScholesPriceOnForward, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
-import { contractKey } from "../lib/signalsLiveScoring.js";
+import { contractKey } from "../lib/optionContractKey.js";
 import type { LadderBandQuote } from "./ladderBandQuotes.js";
 import { latestCycleQuotes, runLadderLook, type LadderLookInput } from "./ladderLook.js";
 import { ladderBaselineFromPlutoSettings } from "./ladderSettings.js";

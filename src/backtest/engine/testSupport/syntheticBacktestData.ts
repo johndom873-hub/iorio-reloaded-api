@@ -90,7 +90,7 @@ export function fixturePlutoSettings(overrides: Partial<PlutoSettings> = {}): Pl
   };
 }
 
-/** A session's settings: the dev values, with the trading settings' minimum yield lowered so synthetic chains trade. */
+/** A session's settings: the dev values. */
 export function fixtureBacktestSettings(plutoOverrides: Partial<PlutoSettings> = {}): BacktestSettings {
   return {
     pluto: fixturePlutoSettings(plutoOverrides),
@@ -102,7 +102,6 @@ export function fixtureBacktestSettings(plutoOverrides: Partial<PlutoSettings> =
       deltaTargetMax: 0.5,
       recoveryDteMin: 1,
       recoveryDteMax: 14,
-      minAnnualizedYieldPct: 10,
       commissionWarnSharePctOfPremium: 5,
       priceCheckMaxDeviationPct: 2,
       priceCheckMinToleranceDollars: 0.05,

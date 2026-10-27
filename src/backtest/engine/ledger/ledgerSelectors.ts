@@ -44,7 +44,7 @@ export function ledgerCashLockedInCashSecuredPuts(ledger: SimulatedLedger): numb
   return cashLockedInCashSecuredPuts(openPositions(ledger).map((position) => ledgerPositionFigures(ledger, position)));
 }
 
-/** Cash not reserved for the open puts, never below zero (signalsStore's account context). */
+/** Cash not reserved for the open puts, never below zero (as live's accountContext.ts). */
 export function ledgerFreeCash(ledger: SimulatedLedger): number {
   return Math.max(0, ledger.cash - ledgerCashLockedInCashSecuredPuts(ledger));
 }

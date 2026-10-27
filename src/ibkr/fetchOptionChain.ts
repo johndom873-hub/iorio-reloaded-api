@@ -3,7 +3,7 @@ import type { Contract, ContractDetails, IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { nextReqIdFor } from "./sharedReadConnection.js";
 import { db } from "../db/connection.js";
-import { calendarDaysUntilExpiry, captureMaximumDaysToExpiry, captureMinimumDaysToExpiry } from "../lib/optionChainCaptureWindow.js";
+import { calendarDaysUntilExpiry, storedChainMaximumDaysToExpiry, storedChainMinimumDaysToExpiry } from "../lib/optionChainExpiryRange.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 
@@ -313,7 +313,7 @@ export async function refreshStoredOptionChain(
   const expiriesInWindow = expirations
     .filter((expiry) => {
       const daysToExpiry = calendarDaysUntilExpiry(todayIso, expiry);
-      return daysToExpiry >= captureMinimumDaysToExpiry && daysToExpiry <= captureMaximumDaysToExpiry;
+      return daysToExpiry >= storedChainMinimumDaysToExpiry && daysToExpiry <= storedChainMaximumDaysToExpiry;
     })
     .sort();
 

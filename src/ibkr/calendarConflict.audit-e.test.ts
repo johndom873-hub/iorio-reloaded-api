@@ -20,7 +20,6 @@ vi.mock("../db/connection.js", async () => {
 vi.mock("../lib/notifyTelegram.js", () => ({ notifyTelegram: vi.fn(async () => true) }));
 
 const { fetchCalendarConflictContext, fetchMacroEventWarningEvents } = await import("./calendarConflict.js");
-const { expirySpansMacroEvent } = await import("../lib/volatilityEdge.js");
 
 const events = [
   { title: "audit-e CPI on expiry", at: "2034-11-03T13:30:00Z" }, // 08:30 EST
@@ -57,15 +56,6 @@ describe("fetchMacroEventWarningEvents edges", () => {
   it("does not count an event exactly at 16:00 ET on the expiry date (EST)", async () => {
     expect(await titlesBefore("20341110")).not.toContain("audit-e at the close");
     expect(await titlesBefore("20341113")).toContain("audit-e at the close");
-  });
-
-  it("agrees with the Signals flag rule (expirySpansMacroEvent) on every case", async () => {
-    const nowMs = Date.now();
-    for (const expiry of ["2034-10-25", "2034-11-03", "2034-11-07", "2034-11-08", "2034-11-10", "2034-11-13"]) {
-      const fromQuery = await titlesBefore(expiry.replace(/-/g, ""));
-      const fromRule = events.filter((event) => expirySpansMacroEvent(nowMs, expiry, [{ eventAtMs: Date.parse(event.at) }])).map((event) => event.title);
-      expect([...fromQuery].sort()).toEqual([...fromRule].sort());
-    }
   });
 });
 

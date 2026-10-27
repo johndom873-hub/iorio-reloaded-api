@@ -1,6 +1,6 @@
 import { easternInstant } from "../../lib/easternIsoDate.js";
-import { addCalendarDays } from "../../lib/signalsRoadmap.js";
-import { longForecastWindowDays } from "../../lib/volatilityEdge.js";
+import { addCalendarDays } from "../../lib/calendarDays.js";
+import { longForecastWindowDays } from "../../lib/volatilityForecast.js";
 import type { ValuationGroup } from "../../lib/volatilityModelTables.js";
 import { backtestCaptureLookTimeEt } from "../backtestTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
@@ -69,7 +69,7 @@ export function earningsKnownOn(earnings: BacktestTickerProfile["earnings"], tod
 
 /**
  * Earnings an expiry must not span on a day: the dates known that day (earningsKnownOn) from today on, except a report
- * today before the open (loadEarningsDatesNotYetReported).
+ * today before the open (as live's loadNextEarningsDate).
  */
 export function earningsNotYetReported(earnings: BacktestTickerProfile["earnings"], todayIso: string): string[] {
   return earningsKnownOn(earnings, todayIso)

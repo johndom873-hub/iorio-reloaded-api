@@ -8,7 +8,7 @@ import { borrowSharedConnectionOrConnect, sharedReadConnection } from "../ibkr/s
 import { loadAccountContext } from "../lib/accountContext.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { loadUpcomingMajorMacroEvents } from "../lib/macroEventCalendar.js";
-import { calendarDaysUntilExpiry } from "../lib/optionChainCaptureWindow.js";
+import { calendarDaysUntilExpiry } from "../lib/optionChainExpiryRange.js";
 import { loadOpenShortLegs } from "../lib/openShortLegs.js";
 import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { loadNextEarningsDate } from "../lib/tickerCalendarQueries.js";

@@ -2,7 +2,7 @@ import type { BaselineForwardAnchor } from "../backtest/engine/baselineSaleSteps
 import { impliedVolatilityFromPrice, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import { daysToExpiry } from "../lib/optionContractLabel.js";
 import { forwardFromAnchor, yearsToSessionClose } from "../lib/quoteOwnDelta.js";
-import { contractKey } from "../lib/signalsLiveScoring.js";
+import { contractKey } from "../lib/optionContractKey.js";
 import type { LadderBandQuote } from "./ladderBandQuotes.js";
 import { isInLadderUniverse, ladderRequoteBand, selectLadderRequoteContracts, type LadderRequoteContract } from "./ladderRequoteBand.js";
 import type { PlutoSettings } from "./settingsStore.js";

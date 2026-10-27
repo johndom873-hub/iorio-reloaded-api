@@ -21,7 +21,6 @@ const snapshot: BacktestSettings = {
     deltaTargetMax: 0.3,
     recoveryDteMin: 7,
     recoveryDteMax: 45,
-    minAnnualizedYieldPct: 20,
     commissionWarnSharePctOfPremium: 5,
     priceCheckMaxDeviationPct: 10,
     priceCheckMinToleranceDollars: 0.05,

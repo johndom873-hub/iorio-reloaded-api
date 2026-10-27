@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { requireEnvironmentVariable } from "../../config/env.js";
-import { addCalendarDays } from "../../lib/signalsRoadmap.js";
+import { addCalendarDays } from "../../lib/calendarDays.js";
 
 // The 3-month Treasury bill rate for the backtest (docs/backtesting/FORMULAS.md, "Interest on idle cash"): FRED series
 // DTB3, daily, in percent. It is both the interest idle cash earns and the risk-free rate of the day's surface fit and

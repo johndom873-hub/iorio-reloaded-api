@@ -3,7 +3,7 @@ import { streamOptionQuotes } from "../ibkr/streamOptionQuotes.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { impliedVolatilityFromPrice } from "../lib/impliedVolatilitySurface.js";
 import { loadTradingSessionsBetween } from "../lib/marketSessionStatus.js";
-import { calendarDaysUntilExpiry } from "../lib/optionChainCaptureWindow.js";
+import { calendarDaysUntilExpiry } from "../lib/optionChainExpiryRange.js";
 import { deltaFromQuoteMid, yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import type { StreamProducer } from "./streamProducers.js";

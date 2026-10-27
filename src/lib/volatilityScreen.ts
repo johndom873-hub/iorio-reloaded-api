@@ -2,7 +2,7 @@ import { db } from "../db/connection.js";
 import { easternIsoDate } from "./easternIsoDate.js";
 import { computeIvMetrics } from "./ivMetrics.js";
 import { loadTradingSessionsBetween } from "./marketSessionStatus.js";
-import { calendarDaysUntilExpiry } from "./optionChainCaptureWindow.js";
+import { calendarDaysUntilExpiry } from "./optionChainExpiryRange.js";
 import { loadOptionDataUniverse, type OptionDataTicker } from "./optionDataUniverse.js";
 import { coveredCallYieldAfterCosts } from "./premiumYield.js";
 import { deltaFromQuoteMid, yearsToSessionClose } from "./quoteOwnDelta.js";

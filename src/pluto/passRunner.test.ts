@@ -72,7 +72,7 @@ describe("runPlutoPass", () => {
     const summary = await runPlutoPass(round(["AAA"]), context);
     expect(harness.ladderRounds).toEqual([expect.objectContaining({ passId: "pass-1", todayIso: "2026-10-07", totalCashValue: 400_000, netLiquidationValue: 1_000_000, cancelByMs: 123, symbols: ["AAA"] })]);
     expect(summary).toEqual({ passId: "pass-1", skippedReason: null, outcome: "trade" });
-    expect(ledger.finishPlutoPass).toHaveBeenCalledWith("pass-1", expect.objectContaining({ candidateCount: 2, modelCalled: false, skippedReason: null }));
+    expect(ledger.finishPlutoPass).toHaveBeenCalledWith("pass-1", expect.objectContaining({ candidateCount: 2, skippedReason: null }));
   });
 
   it("names every enabled ticker on a round without symbols of its own", async () => {

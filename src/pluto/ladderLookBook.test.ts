@@ -3,7 +3,7 @@ import { defaultBacktestBaselineSettings } from "../backtest/backtestTypes.js";
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
 import { makeBaselineSelector, noteBaselineForwardAnchors, planBaselineSales, type BaselineCandidate, type BaselineForwardAnchor } from "../backtest/engine/baselineSaleSteps.js";
 import { blackScholesPriceOnForward, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
-import { contractKey } from "../lib/signalsLiveScoring.js";
+import { contractKey } from "../lib/optionContractKey.js";
 import { nextLadderCycleMemory } from "./ladderCycleMemory.js";
 import { ladderBaselineFromPlutoSettings } from "./ladderSettings.js";
 import { plutoLadderSettingsFixture } from "./plutoSettingsFixture.js";

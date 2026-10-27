@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { easternInstant } from "../../lib/easternIsoDate.js";
-import { addCalendarDays } from "../../lib/signalsRoadmap.js";
+import { addCalendarDays } from "../../lib/calendarDays.js";
 import { backtestCandidateChecks, type BacktestOrderShortfall } from "../backtestTypes.js";
 import { buildCycleGaps, buildStockOnlyStretches, closeLookupOf, type NoSaleRecords } from "./backtestIdleStretches.js";
 import type { BacktestNoCandidateNote, BacktestNoSaleNote } from "./backtestLookTypes.js";

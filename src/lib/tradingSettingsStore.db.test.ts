@@ -85,7 +85,6 @@ const completeInput = {
   deltaTargetMax: 0.35,
   recoveryDteMin: 5,
   recoveryDteMax: 60,
-  minAnnualizedYieldPct: 40,
   commissionWarnSharePctOfPremium: 7.5,
   priceCheckMaxDeviationPct: 12.5,
   priceCheckMinToleranceDollars: 0.1,
@@ -107,7 +106,6 @@ describe("the seeded trading_settings row", () => {
       deltaTargetMax: 0.3,
       recoveryDteMin: 30,
       recoveryDteMax: 45,
-      minAnnualizedYieldPct: 50,
       commissionWarnSharePctOfPremium: 5,
       priceCheckMaxDeviationPct: 10,
       priceCheckMinToleranceDollars: 0.05,
@@ -156,7 +154,6 @@ describe("loadTradingSettingsForEditing", () => {
         "deltaTargetMin",
         "maxConcentrationPerTickerPct",
         "maxOrderPctOfPortfolio",
-        "minAnnualizedYieldPct",
         "minCashReservePct",
         "priceCheckMaxDeviationPct",
         "priceCheckMinToleranceDollars",
@@ -189,7 +186,6 @@ describe("saveTradingSettings", () => {
     expect(Number(row.delta_target_max)).toBe(0.35);
     expect(row.recovery_dte_min).toBe(5);
     expect(row.recovery_dte_max).toBe(60);
-    expect(Number(row.min_annualized_yield_pct)).toBe(40);
     expect(Number(row.commission_warn_share_of_premium_pct)).toBe(7.5);
     expect(row.updated_by_user_id).toBe(userId);
     expect((row.updated_at as Date).getTime()).toBeGreaterThan(new Date("2026-01-02T00:00:00Z").getTime());
@@ -318,7 +314,6 @@ function knownSettingsAsInput() {
     deltaTargetMax: knownValues.delta_target_max,
     recoveryDteMin: knownValues.recovery_dte_min,
     recoveryDteMax: knownValues.recovery_dte_max,
-    minAnnualizedYieldPct: knownValues.min_annualized_yield_pct,
     commissionWarnSharePctOfPremium: knownValues.commission_warn_share_of_premium_pct,
     priceCheckMaxDeviationPct: knownValues.price_check_max_deviation_pct,
     priceCheckMinToleranceDollars: knownValues.price_check_min_tolerance_dollars,

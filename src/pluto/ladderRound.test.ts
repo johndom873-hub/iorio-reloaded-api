@@ -21,7 +21,7 @@ const harness = vi.hoisted(() => ({
 
 vi.mock("../db/connection.js", () => ({ db: () => ({}) }));
 vi.mock("../lib/commissionEstimate.js", async (original) => ({ ...(await original<object>()), loadCommissionEstimator: async () => ({ perContractDollars: () => 0.65 }), loadStockCommissionEstimator: async () => ({ perShareDollars: () => 0.005 }) }));
-vi.mock("../lib/signalsStore.js", () => ({ accountContextFromTotalCash: async () => ({ freeCash: 400_000 }) }));
+vi.mock("../lib/accountContext.js", () => ({ accountContextFromTotalCash: async () => ({ freeCash: 400_000 }) }));
 vi.mock("../lib/tickerFreeze.js", () => ({ frozenSymbolSet: async () => new Set(["FRZN"]) }));
 vi.mock("./book.js", () => ({ loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }), loadLastFilledPlutoActionAtBySymbol: async () => new Map() }));
 vi.mock("./executor.js", () => ({ executePlutoOrder: vi.fn(), watchPlutoOrder: vi.fn() }));

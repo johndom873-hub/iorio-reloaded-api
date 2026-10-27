@@ -16,7 +16,7 @@ vi.mock("../lib/notifyTelegram.js", () => ({ notifyTelegram: vi.fn(async () => t
 vi.mock("./ledger.js", () => ({ recordPlutoEvent: vi.fn(async () => {}), updatePlutoAction: vi.fn(async () => {}) }));
 vi.mock("./stateStore.js", () => ({ tripPlutoBreaker: vi.fn(async () => {}) }));
 
-const { compareFillsWithReference, watchPlutoOrder, executePlutoClose } = await import("./executor.js");
+const { compareFillsWithReference, watchPlutoOrder } = await import("./executor.js");
 const { updatePlutoAction } = await import("./ledger.js");
 const { tripPlutoBreaker } = await import("./stateStore.js");
 const { notifyPlutoTelegram } = await import("../lib/notifyTelegram.js");
@@ -120,18 +120,3 @@ describe("watchPlutoOrder — fills recorded after the status (2026-10-08)", () 
   });
 });
 
-describe("executePlutoClose — route refusals", () => {
-  const closeInput = { actionId: "a1", symbol: "AUD", positionId: "p1", legs: [{ legId: "l1", limitPrice: 0.53 }], description: "Buy back", reasons: ["automatic close: Formula P3"] };
-  it("a 409 from the close route (close gate, active order) is a blocked action, not a breaker", async () => {
-    const api = { post: vi.fn(async () => { throw new InternalApiError(409, "An order for this position is already in progress"); }) } as never;
-    const result = await executePlutoClose(api, settings, closeInput);
-    expect(result.outcome).toBe("blocked");
-    expect(tripPlutoBreaker).not.toHaveBeenCalled();
-  });
-  it("a 500 from the close route trips order_error", async () => {
-    const api = { post: vi.fn(async () => { throw new InternalApiError(500, "boom"); }) } as never;
-    const result = await executePlutoClose(api, settings, closeInput);
-    expect(result.outcome).toBe("error");
-    expect(tripPlutoBreaker).toHaveBeenCalledWith("order_error", expect.stringContaining("build failed"));
-  });
-});

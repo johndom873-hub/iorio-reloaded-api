@@ -5,9 +5,6 @@ import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { fillsAreComplete, shouldWaitForFills } from "../lib/orderFills.js";
 import { daysToExpiry, describeOptionContract, describeOrderSize, formatStrike } from "../lib/optionContractLabel.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
-import { optionMidLimitPrice } from "../lib/optionLimitPrice.js";
-import type { SignalCandidate } from "../lib/signalCandidates.js";
-import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import { recordPlutoEvent, updatePlutoAction, type PlutoActionOutcome } from "./ledger.js";
 import type { PlutoOrderPlan } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
@@ -15,7 +12,7 @@ import { classifyRoutineOrderProblem, routineOrderProblemLabels } from "./routin
 import { tripPlutoBreaker } from "./stateStore.js";
 
 // Execution (design round 3, items 6 and 22): the agent never writes an order row itself. It builds
-// through the same routes the screens use — POST /positions/orders or /positions/:id/roll — with the
+// through the same route the screens use — POST /positions/orders — with the
 // scores snapshot (live, fresh quotes only) and its pluto_action_id, confirms (Adaptive Normal on a single
 // leg; a combo is a plain net-limit order), then watches the order and cancels it before the session close
 // (the platform's unfilled-order sweep cancels it sooner when it sits unfilled). The order gate every order
@@ -34,29 +31,6 @@ interface OrderRequestResponse {
   updatedAt?: string | null;
 }
 
-export interface ExecuteOpenInput {
-  kind: "open";
-  actionId: string;
-  symbol: string;
-  candidate: SignalCandidate;
-  plan: PlutoOrderPlan;
-  /** Why the order is sent, for the Telegram message: the model's reasons, or code's for an automatic order. */
-  reasons: string[];
-  scoresSnapshot: unknown;
-}
-
-export interface ExecuteRollInput {
-  kind: "roll";
-  actionId: string;
-  symbol: string;
-  roll: RollSignalCandidate;
-  heldLeg: HeldLegScore;
-  plan: PlutoOrderPlan;
-  /** Why the order is sent, for the Telegram message: the model's reasons, or code's for an automatic order. */
-  reasons: string[];
-  scoresSnapshot: unknown;
-}
-
 /** A CC + Put Ladder sale (ladderOrders.ts): no Signals candidate, its own contract record and the shares it buys. */
 export interface ExecuteLadderOpenInput {
   kind: "ladder_open";
@@ -71,7 +45,7 @@ export interface ExecuteLadderOpenInput {
   scoresSnapshot: unknown;
 }
 
-export type ExecuteInput = ExecuteOpenInput | ExecuteRollInput | ExecuteLadderOpenInput;
+export type ExecuteInput = ExecuteLadderOpenInput;
 
 export interface ExecuteResult {
   outcome: PlutoActionOutcome;
@@ -104,18 +78,9 @@ function isoToIbkrExpiry(expiryIso: string): string {
   return expiryIso.replace(/-/g, "");
 }
 
-/** "SMCI Sell $46 Call · 9 Oct (2DTE) · 11× @ 0.39"; "MU Roll $105 Put · 10 Oct → $100 Put · 17 Oct (9DTE) · 2× @ 0.40". */
+/** "SMCI Sell $46 Call · 9 Oct (2DTE) · 11× @ 0.39". */
 export function describeOrder(input: ExecuteInput): string {
-  const size = describeOrderSize(input.plan.quantity, input.plan.limitPrice);
-  if (input.kind === "ladder_open") return `${input.symbol} Sell ${describeOptionContract(input.contract)}${size}`;
-  if (input.kind === "open") {
-    const { candidate } = input;
-    return `${input.symbol} Sell ${describeOptionContract({ strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P", expiry: candidate.expiry, dte: candidate.dte })}${size}`;
-  }
-  const { heldLeg, roll } = input;
-  const from = describeOptionContract({ strike: heldLeg.strike, right: heldLeg.right, expiry: heldLeg.expiry, dte: null });
-  const to = describeOptionContract({ strike: roll.replacement.strike, right: heldLeg.right, expiry: roll.replacement.expiry, dte: roll.replacement.dte });
-  return `${input.symbol} Roll ${from} → ${to}${size}`;
+  return `${input.symbol} Sell ${describeOptionContract(input.contract)}${describeOrderSize(input.plan.quantity, input.plan.limitPrice)}`;
 }
 
 /** Builds and confirms; returns once IBKR has the order (confirmed) or the route refused it (blocked). */
@@ -123,45 +88,21 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
   const description = describeOrder(input);
   let built: OrderRequestResponse;
   try {
-    if (input.kind === "ladder_open") {
-      built = await api.post<OrderRequestResponse>("/positions/orders", {
-        symbol: input.symbol,
-        strategyKey: input.strategyKey,
-        option: { quantity: input.plan.quantity, limitPrice: input.plan.limitPrice, strikePrice: input.contract.strike, expiryDate: isoToIbkrExpiry(input.contract.expiry) },
-        ...(input.buyEveryShare ? { buyEveryShare: true } : {}),
-        signalSnapshot: input.scoresSnapshot,
-        plutoActionId: input.actionId,
-      });
-    } else if (input.kind === "open") {
-      built = await api.post<OrderRequestResponse>("/positions/orders", {
-        symbol: input.symbol,
-        strategyKey: input.candidate.strategyKey,
-        option: { quantity: input.plan.quantity, limitPrice: input.plan.limitPrice, strikePrice: input.candidate.strike, expiryDate: isoToIbkrExpiry(input.candidate.expiry) },
-        signalSnapshot: input.scoresSnapshot,
-        plutoActionId: input.actionId,
-      });
-    } else {
-      const held = input.heldLeg;
-      const closeLimitPrice = held.bid !== null && held.ask !== null ? optionMidLimitPrice(held.bid, held.ask, "buy") : null;
-      if (closeLimitPrice === null) return await blocked(input, "the held leg has no live two-sided quote to price the buyback");
-      built = await api.post<OrderRequestResponse>(`/positions/${input.roll.positionId}/roll`, {
-        closeLegId: input.roll.legId,
-        closeLimitPrice,
-        newLeg: { strikePrice: input.roll.replacement.strike, expiryDate: isoToIbkrExpiry(input.roll.replacement.expiry), quantity: input.plan.quantity, limitPrice: input.plan.limitPrice },
-        signalSnapshot: input.scoresSnapshot,
-        plutoActionId: input.actionId,
-      });
-    }
+    built = await api.post<OrderRequestResponse>("/positions/orders", {
+      symbol: input.symbol,
+      strategyKey: input.strategyKey,
+      option: { quantity: input.plan.quantity, limitPrice: input.plan.limitPrice, strikePrice: input.contract.strike, expiryDate: isoToIbkrExpiry(input.contract.expiry) },
+      ...(input.buyEveryShare ? { buyEveryShare: true } : {}),
+      signalSnapshot: input.scoresSnapshot,
+      plutoActionId: input.actionId,
+    });
   } catch (error) {
     if (error instanceof InternalApiError && (error.status === 400 || error.status === 404 || error.status === 409)) return await blocked(input, `build refused: ${error.message}`);
     return await errored(input, `build failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  // A Covered Call entry's shares are priced by the route at the live price; a roll's buyback at the held leg's ask.
-  const otherReferenceLegs: PlutoReferenceLeg[] =
-    input.kind === "open" || input.kind === "ladder_open"
-      ? (built.payload?.legs ?? []).filter((leg) => leg.role === "stock").map((leg) => ({ side: leg.action === "SELL" ? ("sell" as const) : ("buy" as const), price: Number(leg.unitPrice), multiplier: 1 }))
-      : [{ side: "buy", price: input.heldLeg.ask!, multiplier: 100 }]; // a roll without a two-sided held quote was blocked above
+  // A Covered Call entry's shares are priced by the route at the live price.
+  const otherReferenceLegs: PlutoReferenceLeg[] = (built.payload?.legs ?? []).filter((leg) => leg.role === "stock").map((leg) => ({ side: leg.action === "SELL" ? ("sell" as const) : ("buy" as const), price: Number(leg.unitPrice), multiplier: 1 }));
   await updatePlutoAction(input.actionId, { outcome: "order_built", orderRequestId: built.id, referenceOtherLegs: otherReferenceLegs.length > 0 ? otherReferenceLegs : null });
   await recordPlutoEvent("order_built", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description });
 
@@ -189,54 +130,6 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
   async function errored(action: ExecuteInput, reason: string, orderId: string | null = null): Promise<ExecuteResult> {
     await updatePlutoAction(action.actionId, { outcome: "error", blockReason: reason, orderRequestId: orderId });
     await recordPlutoEvent("order_outcome", { actionId: action.actionId, symbol: action.symbol, outcome: "error", reason });
-    await tripPlutoBreaker("order_error", reason);
-    await recordPlutoEvent("breaker_tripped", { name: "order_error", detail: reason });
-    await notifyPlutoTelegram(`🛑 Pluto breaker tripped (order_error): ${reason}. Pluto is paused until a human resets it.`);
-    return { outcome: "error", orderId, detail: reason };
-  }
-}
-
-export interface ExecuteCloseInput {
-  actionId: string;
-  symbol: string;
-  positionId: string;
-  legs: { legId: string; limitPrice: number }[];
-  description: string;
-  reasons: string[];
-}
-
-/** Closes through POST /positions/:id/close (the server-side close gate runs there and again at confirm). */
-export async function executePlutoClose(api: InternalApiClient, settings: PlutoSettings, input: ExecuteCloseInput): Promise<ExecuteResult> {
-  let built: OrderRequestResponse;
-  try {
-    built = await api.post<OrderRequestResponse>(`/positions/${input.positionId}/close`, { legs: input.legs, plutoActionId: input.actionId });
-  } catch (error) {
-    if (error instanceof InternalApiError && (error.status === 400 || error.status === 404 || error.status === 409)) return await closeBlocked(`build refused: ${error.message}`);
-    return await closeErrored(`build failed: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  await updatePlutoAction(input.actionId, { outcome: "order_built", orderRequestId: built.id });
-  await recordPlutoEvent("order_built", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description: input.description });
-  try {
-    const confirmed = await api.post<OrderRequestResponse>(`/positions/orders/${built.id}/confirm`, { adaptivePriority: "Normal" });
-    if (confirmed.status === "pending_confirmation") return await closeBlocked("confirm did not move the order", built.id);
-  } catch (error) {
-    await api.post(`/positions/orders/${built.id}/cancel`, {}).catch(() => {});
-    if (error instanceof InternalApiError && error.status === 409) return await closeBlocked(`confirm refused: ${error.message}`, built.id);
-    return await closeErrored(`confirm failed: ${error instanceof Error ? error.message : String(error)}`, built.id);
-  }
-  await updatePlutoAction(input.actionId, { outcome: "confirmed" });
-  await recordPlutoEvent("order_confirmed", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description: input.description });
-  if (settings.telegramVerbosity !== "off") await notifyPlutoTelegram(`🪐 Pluto sent a close: ${input.description}\n${input.reasons.join(" ")}`);
-  return { outcome: "confirmed", orderId: built.id, detail: input.description };
-
-  async function closeBlocked(reason: string, orderId: string | null = null): Promise<ExecuteResult> {
-    await updatePlutoAction(input.actionId, { outcome: "blocked", blockReason: reason, orderRequestId: orderId });
-    await recordPlutoEvent("action_blocked", { actionId: input.actionId, symbol: input.symbol, reason, stage: "route" });
-    return { outcome: "blocked", orderId, detail: reason };
-  }
-  async function closeErrored(reason: string, orderId: string | null = null): Promise<ExecuteResult> {
-    await updatePlutoAction(input.actionId, { outcome: "error", blockReason: reason, orderRequestId: orderId });
-    await recordPlutoEvent("order_outcome", { actionId: input.actionId, symbol: input.symbol, outcome: "error", reason });
     await tripPlutoBreaker("order_error", reason);
     await recordPlutoEvent("breaker_tripped", { name: "order_error", detail: reason });
     await notifyPlutoTelegram(`🛑 Pluto breaker tripped (order_error): ${reason}. Pluto is paused until a human resets it.`);

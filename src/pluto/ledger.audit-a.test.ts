@@ -22,8 +22,8 @@ async function insertUnfinishedPass(startedAt: Date): Promise<string> {
   return row.id as string;
 }
 
-async function readPass(id: string): Promise<{ finished_at: Date | null; skipped_reason: string | null; model_called: boolean }> {
-  return db("pluto_passes").where({ id }).first("finished_at", "skipped_reason", "model_called");
+async function readPass(id: string): Promise<{ finished_at: Date | null; skipped_reason: string | null; candidate_count: number | null }> {
+  return db("pluto_passes").where({ id }).first("finished_at", "skipped_reason", "candidate_count");
 }
 
 afterAll(async () => {
@@ -58,12 +58,12 @@ describe("closeAbandonedPlutoPasses + finishPlutoPass (audit A)", () => {
     expect((await readPass(id)).skipped_reason).toBe("round failed: boom");
   });
 
-  it("BUG(edge): a slow round (>10 min) swept by its own process's housekeeping, then finishing with a model call, keeps skipped_reason 'abandoned'", async () => {
+  it("a slow round (>10 min) swept by its own process's housekeeping, then sending an order, clears 'abandoned'", async () => {
     const id = await insertUnfinishedPass(new Date(Date.now() - 11 * 60_000));
     await closeAbandonedPlutoPasses();
-    await finishPlutoPass(id, { modelCalled: true, candidateCount: 2, tokensIn: 10, tokensOut: 5, costUsd: 0.01, servedModelIds: ["m"] });
+    await finishPlutoPass(id, { candidateCount: 2, skippedReason: null });
     const row = await readPass(id);
-    expect(row.model_called).toBe(true);
+    expect(row.candidate_count).toBe(2);
     expect(row.skipped_reason).toBeNull();
   });
 });

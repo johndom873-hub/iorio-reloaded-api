@@ -1,6 +1,6 @@
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
-import { addCalendarDays } from "../../lib/signalsRoadmap.js";
+import { addCalendarDays } from "../../lib/calendarDays.js";
 import { earlyCloseDatesIso, openDaysFromCalendarRows, tradingSessionsFromCalendarRows, type TradingSession } from "../../lib/marketSessionStatus.js";
 import type { SymbolFileDay } from "./backtestSymbolFile.js";
 

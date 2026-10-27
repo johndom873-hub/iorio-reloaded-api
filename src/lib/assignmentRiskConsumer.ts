@@ -1,7 +1,7 @@
 import { decideAssignmentRiskAlert, loadAssignmentRiskAlertStates, loadHeldShortLegs, notifyAssignmentRisk, rearmAssignmentRiskAlert, recordAssignmentRiskAlert, type AssignmentRiskAlert, type AssignmentRiskAlertState, type HeldShortLeg } from "./assignmentRiskAlerts.js";
 import { contractKeyOf, type MarketQuoteConsumer, type QuoteLoopCycle, type QuoteLoopOptionQuote } from "./marketQuoteLoop.js";
 import { loadTradingSessionsBetween } from "./marketSessionStatus.js";
-import { calendarDaysUntilExpiry } from "./optionChainCaptureWindow.js";
+import { calendarDaysUntilExpiry } from "./optionChainExpiryRange.js";
 import { deltaFromQuoteMid, yearsToSessionClose } from "./quoteOwnDelta.js";
 import { getRiskFreeRate } from "./riskFreeRate.js";
 

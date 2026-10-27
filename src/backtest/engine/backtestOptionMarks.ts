@@ -1,4 +1,4 @@
-import { contractKey } from "../../lib/signalsLiveScoring.js";
+import { contractKey } from "../../lib/optionContractKey.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 
 // How a session marks the options it holds: at the mid of a two-sided quote. With no bid, a placeholder ask (a $4.5 call

@@ -5,7 +5,7 @@ import { fetchPricesPoolFirst } from "../ibkr/pricePool.js";
 import type { BaselineCommissions } from "../backtest/engine/baselineSaleSteps.js";
 import { fetchOpenCycleSummaryRowsByTickerId } from "../lib/cycleBreakEvenQueries.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
-import { loadPreviousClose } from "../lib/signalsStore.js";
+import { loadPreviousClose } from "../lib/tickerCalendarQueries.js";
 import { loadLadderBandQuotes } from "./ladderBandQuotes.js";
 import { defaultLadderBandPlannerDependencies } from "./ladderBandPlanLoader.js";
 import type { LadderClock } from "./ladderBandPlan.js";

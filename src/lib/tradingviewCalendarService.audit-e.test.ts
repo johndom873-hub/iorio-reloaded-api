@@ -14,7 +14,8 @@ vi.mock("./notifyTelegram.js", () => ({ notifyTelegram: vi.fn(async () => true) 
 const { db } = await import("../db/connection.js");
 const testDb: Knex = db;
 const { upsertEarningsEvents, upsertDividendEvents } = await import("./tradingviewCalendarService.js");
-const { loadEarningsDatesNotYetReported, loadNextEarningsDate, loadEarningsDatesForForecastWindow, loadTickerSignalsInputs } = await import("./signalsStore.js");
+const { loadNextEarningsDate, loadEarningsDatesForForecastWindow } = await import("./tickerCalendarQueries.js");
+const { fetchCalendarConflictContext } = await import("../ibkr/calendarConflict.js");
 
 const createdTickerIds: string[] = [];
 let counter = Date.now() % 1_000_000;
@@ -88,7 +89,7 @@ describe("upsertEarningsEvents replaces a moved date (real DB)", () => {
     expect(await storedDates(ticker.id, "earnings")).toEqual(["2026-10-07", "2027-01-12"]);
     const today = await testDb("ticker_calendar_events").where({ ticker_id: ticker.id, event_type: "earnings" }).whereRaw("event_date = '2026-10-07'").first("event_time");
     expect(today.event_time).toBe("-1");
-    expect(await loadEarningsDatesNotYetReported(ticker.id, "2026-10-07")).toEqual(["2027-01-12"]);
+    expect(await loadNextEarningsDate(ticker.id, "2026-10-07")).toBe("2027-01-12");
   });
 
   it("stores TradingView's report instant as its US Eastern date: a 19:05 EST after-close report is not the next day", async () => {
@@ -139,16 +140,15 @@ describe("upsertEarningsEvents with TradingView's stand-in next date (real DB)",
     expect(await storedDates(ticker.id, "earnings")).toEqual(["2026-05-13", "2026-08-12", "2027-02-16"]);
   });
 
-  it("Signals reads the ticker as unresolved while its next date is missing or far, and resolved once a usual one is stored", async () => {
+  it("the calendar check reads the ticker as unresolved while its next date is missing or far, and resolved once a usual one is stored", async () => {
     const ticker = await createTicker();
     await insertEvent(ticker.id, "earnings", "2026-08-12", "-1");
-    const tickerRow = { tickerId: ticker.id, symbol: ticker.symbol, companyName: null, sector: null };
     const at = new Date("2026-10-27T14:00:00Z");
-    expect((await loadTickerSignalsInputs(tickerRow, at)).earningsCalendarResolved).toBe(false);
+    expect((await fetchCalendarConflictContext(ticker.id, at)).resolved).toBe(false);
     await insertEvent(ticker.id, "earnings", "2027-02-16", "0");
-    expect((await loadTickerSignalsInputs(tickerRow, at)).earningsCalendarResolved).toBe(false);
+    expect((await fetchCalendarConflictContext(ticker.id, at)).resolved).toBe(false);
     await insertEvent(ticker.id, "earnings", "2026-11-12", "0");
-    expect((await loadTickerSignalsInputs(tickerRow, at)).earningsCalendarResolved).toBe(true);
+    expect((await fetchCalendarConflictContext(ticker.id, at)).resolved).toBe(true);
   });
 });
 
@@ -173,15 +173,15 @@ describe("upsertDividendEvents replaces a moved ex-date (real DB)", () => {
   });
 });
 
-describe("loadEarningsDatesNotYetReported (real DB)", () => {
-  it("drops only today's before-open row; after-close, unknown (0) and missing times on today count; future and past by date", async () => {
+describe("loadNextEarningsDate (real DB)", () => {
+  it("skips only today's before-open row; after-close, unknown (0) and missing times on today count; past dates never", async () => {
     const cases: [string | null, boolean][] = [["-1", false], ["1", true], ["0", true], [null, true]];
     for (const [time, counts] of cases) {
       const ticker = await createTicker();
       await insertEvent(ticker.id, "earnings", "2026-07-20", "-1");
       await insertEvent(ticker.id, "earnings", "2026-10-07", time);
       await insertEvent(ticker.id, "earnings", "2027-01-12", "-1");
-      expect(await loadEarningsDatesNotYetReported(ticker.id, "2026-10-07")).toEqual(counts ? ["2026-10-07", "2027-01-12"] : ["2027-01-12"]);
+      expect(await loadNextEarningsDate(ticker.id, "2026-10-07")).toBe(counts ? "2026-10-07" : "2027-01-12");
       expect(await loadEarningsDatesForForecastWindow(ticker.id)).toHaveLength(3);
     }
   });
@@ -189,27 +189,16 @@ describe("loadEarningsDatesNotYetReported (real DB)", () => {
   it("a before-open row tomorrow still counts today", async () => {
     const ticker = await createTicker();
     await insertEvent(ticker.id, "earnings", "2026-10-08", "-1");
-    expect(await loadEarningsDatesNotYetReported(ticker.id, "2026-10-07")).toEqual(["2026-10-08"]);
+    expect(await loadNextEarningsDate(ticker.id, "2026-10-07")).toBe("2026-10-08");
   });
 
-  it("loadNextEarningsDate (Pluto's next_earnings) agrees with the exclusion on a before-open report day", async () => {
-    // The exclusion no longer counts today's before-open report, but loadNextEarningsDate still returns today: Pluto's prompt
-    // is told "if anything you are offered would still be open on next_earnings, do not choose it", so on a before-open
-    // report day it is told to refuse every candidate the exclusion has just let through.
+
+  it("the calendar check reads today's Eastern date (19:30 ET = 23:30Z still today) and skips today's before-open report", async () => {
     const ticker = await createTicker();
     await insertEvent(ticker.id, "earnings", "2026-10-07", "-1");
     await insertEvent(ticker.id, "earnings", "2027-01-12", "0");
-    const notYetReported = await loadEarningsDatesNotYetReported(ticker.id, "2026-10-07");
-    expect(await loadNextEarningsDate(ticker.id, "2026-10-07")).toBe([...notYetReported].sort()[0]);
-  });
-
-  it("loadTickerSignalsInputs feeds the exclusion the not-yet-reported dates with today's Eastern date (19:30 ET = 23:30Z still today)", async () => {
-    const ticker = await createTicker();
-    await insertEvent(ticker.id, "earnings", "2026-10-07", "-1");
-    await insertEvent(ticker.id, "earnings", "2027-01-12", "0");
-    const inputs = await loadTickerSignalsInputs({ tickerId: ticker.id, symbol: ticker.symbol, companyName: null, sector: null }, new Date("2026-10-07T23:30:00Z"));
-    expect(inputs.todayEasternIso).toBe("2026-10-07");
-    expect(inputs.earningsDatesIso).toEqual(["2027-01-12"]);
-    expect(inputs.earningsCalendarResolved).toBe(true);
+    const context = await fetchCalendarConflictContext(ticker.id, new Date("2026-10-07T23:30:00Z"));
+    expect(context.events.filter((event) => event.eventType === "earnings").map((event) => event.eventDate)).toEqual(["2027-01-12"]);
+    expect(context.resolved).toBe(true);
   });
 });

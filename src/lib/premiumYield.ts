@@ -1,4 +1,4 @@
-import { commissionPerContractDollars, sharesPerContract } from "./optionFriction.js";
+import { commissionPerContractDollars, frictionDollarsPerContract, sharesPerContract } from "./optionFriction.js";
 
 // The Volatility screen's Call yield (approved by Marcelo 2026-10-27), the same formula as the app's chain and order
 // form (iorio-reloaded-app src/lib/payoff.ts computeAnnualizedYield for a covered call):
@@ -26,6 +26,6 @@ export function coveredCallYieldAfterCosts(input: CallYieldInput): number | null
   const mid = (bid + ask) / 2;
   const exposurePerShare = spotPrice - mid;
   if (!(exposurePerShare > 0)) return null;
-  const frictionDollarsPerContract = spreadShareCharged * ((ask - bid) / 2) * sharesPerContract + commissionPerContractDollars;
-  return ((mid - frictionDollarsPerContract / sharesPerContract) / exposurePerShare) * (365 / Math.max(daysToExpiry, 1));
+  const friction = frictionDollarsPerContract(bid, ask, spreadShareCharged, commissionPerContractDollars);
+  return ((mid - friction / sharesPerContract) / exposurePerShare) * (365 / Math.max(daysToExpiry, 1));
 }

@@ -1,7 +1,7 @@
 import { fetchAccountSummary, type AccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { computeCashLockedInCsps } from "./positionExposure.js";
 
-// The account's free cash: the cash balance less what open cash-secured puts hold (moved out of signalsStore.ts 2026-10-27).
+// The account's free cash: the cash balance less what open cash-secured puts hold.
 
 export interface AccountContext {
   freeCash: number;

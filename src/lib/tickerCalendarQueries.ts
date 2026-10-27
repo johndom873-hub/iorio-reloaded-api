@@ -1,7 +1,7 @@
 import { db } from "../db/connection.js";
 import { isRegularDividendCadence } from "./impliedVolatilitySurface.js";
 
-// Per-ticker reads of daily closes and calendar events (moved out of signalsStore.ts 2026-10-27).
+// Per-ticker reads of daily closes and calendar events.
 
 export interface PreviousClose {
   close: number;
@@ -20,7 +20,7 @@ export async function loadPreviousClose(tickerId: string, todayEasternIso: strin
   return row ? { close: Number(row.close), dateIso: row.dateIso } : null;
 }
 
-/** The next earnings report still to come: today's counts unless it was before the open (as loadEarningsDatesNotYetReported). */
+/** The next earnings report still to come: today's counts unless it was before the open. */
 export async function loadNextEarningsDate(tickerId: string, todayIso: string): Promise<string | null> {
   const row = await db("ticker_calendar_events")
     .where({ ticker_id: tickerId, event_type: "earnings" })
@@ -53,20 +53,8 @@ export async function loadDividendCadenceUnknown(tickerId: string, todayIso: str
 }
 
 export async function loadEarningsDatesForForecastWindow(tickerId: string): Promise<string[]> {
-  // Every stored earnings row (the Shortlist readiness count); the Signals exclusion uses loadEarningsDatesNotYetReported.
+  // Every stored earnings row (the Shortlist readiness count).
   const rows: { eventDate: string }[] = await db("ticker_calendar_events").where({ ticker_id: tickerId, event_type: "earnings" }).select(db.raw('event_date::text as "eventDate"'));
   return rows.map((row) => row.eventDate);
 }
 
-/**
- * The earnings dates the Signals exclusion checks: today's only when not reported before the open (TradingView's event_time
- * "-1" = before the open, "1" = after the close, "0" or none = unknown time, which still counts).
- */
-export async function loadEarningsDatesNotYetReported(tickerId: string, todayIso: string): Promise<string[]> {
-  const rows: { eventDate: string }[] = await db("ticker_calendar_events")
-    .where({ ticker_id: tickerId, event_type: "earnings" })
-    .where("event_date", ">=", todayIso)
-    .whereRaw("not (event_date = ?::date and event_time is not distinct from '-1')", [todayIso])
-    .select(db.raw('event_date::text as "eventDate"'));
-  return rows.map((row) => row.eventDate);
-}

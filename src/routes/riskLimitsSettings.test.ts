@@ -73,7 +73,6 @@ const validPayload = {
   deltaTargetMax: 0.4,
   recoveryDteMin: 7,
   recoveryDteMax: 60,
-  minAnnualizedYieldPct: 35,
   commissionWarnSharePctOfPremium: 6,
   priceCheckMaxDeviationPct: 15,
   priceCheckMinToleranceDollars: 0.1,
@@ -82,7 +81,7 @@ const validPayload = {
 };
 
 const fieldNames = Object.keys(validPayload) as (keyof typeof validPayload)[];
-const percentageFieldNames = ["maxOrderPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct", "spreadCostChargedPct"] as const;
+const percentageFieldNames = ["maxOrderPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct", "spreadCostChargedPct"] as const;
 
 beforeAll(async () => {
   originalRow = await testDb("trading_settings").first();
@@ -162,7 +161,6 @@ function validPayloadFromRow(row: typeof knownRow) {
     deltaTargetMax: row.delta_target_max,
     recoveryDteMin: row.recovery_dte_min,
     recoveryDteMax: row.recovery_dte_max,
-    minAnnualizedYieldPct: row.min_annualized_yield_pct,
     commissionWarnSharePctOfPremium: row.commission_warn_share_of_premium_pct,
     priceCheckMaxDeviationPct: row.price_check_max_deviation_pct,
     priceCheckMinToleranceDollars: row.price_check_min_tolerance_dollars,
@@ -187,7 +185,6 @@ describe("PUT /risk-limits/settings: a valid save", () => {
     expect(Number(row.delta_target_max)).toBe(0.4);
     expect(row.recovery_dte_min).toBe(7);
     expect(row.recovery_dte_max).toBe(60);
-    expect(Number(row.min_annualized_yield_pct)).toBe(35);
     expect(Number(row.commission_warn_share_of_premium_pct)).toBe(6);
     expect(Number(row.price_check_max_deviation_pct)).toBe(15);
     expect(Number(row.price_check_min_tolerance_dollars)).toBe(0.1);
@@ -225,7 +222,6 @@ describe("PUT /risk-limits/settings: a valid save", () => {
       deltaTargetMax: 1,
       recoveryDteMin: 0,
       recoveryDteMax: 0,
-      minAnnualizedYieldPct: 100,
       commissionWarnSharePctOfPremium: 0,
       priceCheckMaxDeviationPct: 100,
       priceCheckMinToleranceDollars: 1000,
@@ -249,8 +245,8 @@ describe("PUT /risk-limits/settings: a valid save", () => {
   });
 
   it("two saves at the same time leave one complete payload, never a mixture of the two", async () => {
-    const first = { ...validPayload, maxOrderPctOfPortfolio: 11, deltaTargetMin: 0.11, recoveryDteMax: 61, minAnnualizedYieldPct: 31 };
-    const second = { ...validPayload, maxOrderPctOfPortfolio: 14, deltaTargetMin: 0.14, recoveryDteMax: 64, minAnnualizedYieldPct: 34 };
+    const first = { ...validPayload, maxOrderPctOfPortfolio: 11, deltaTargetMin: 0.11, recoveryDteMax: 61 };
+    const second = { ...validPayload, maxOrderPctOfPortfolio: 14, deltaTargetMin: 0.14, recoveryDteMax: 64 };
     const [firstResponse, secondResponse] = await Promise.all([call("PUT", "/risk-limits/settings", first), call("PUT", "/risk-limits/settings", second)]);
     expect([firstResponse.status, secondResponse.status]).toEqual([200, 200]);
     const { updatedAt: _a, updatedByDisplayName: _b, ...stored } = (await call("GET", "/risk-limits/settings")).json;

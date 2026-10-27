@@ -1,4 +1,3 @@
-import type { SignalGrade } from "./signalCandidates.js";
 import { exactInputCachesAreEnabled } from "./exactInputCaches.js";
 import { RecentEntriesCache } from "./recentEntriesCache.js";
 import { calibratedEdgeMargin, standardizedReturnBucketsFor, type ValuationGroup, type VolatilityModelTables } from "./volatilityModelTables.js";
@@ -32,6 +31,9 @@ import { calibratedEdgeMargin, standardizedReturnBucketsFor, type ValuationGroup
 // The variance clock (τ) values the contract; calendar time (T) annualizes what the capital earns.
 // Grades on the edge margin (approved 2026-10-12): strong ≥ 20%, good ≥ 10%, weak ≥ 0%, else avoid (a negative margin).
 
+/** The valuation model's grade of a contract, from its edge margin. */
+export type ValuationGrade = "strong" | "good" | "weak" | "avoid";
+
 export const gradeMarginCutPoints = { strong: 0.2, good: 0.1, weak: 0 } as const;
 export const expectedShortfallTailShare = 0.05;
 export const stressStandardDeviations = 2;
@@ -52,7 +54,7 @@ export interface GradeMarginCutPoints {
 }
 
 /** `cutPoints`: live always gradeMarginCutPoints; a backtest session may grade with its own. */
-export function gradeForEdgeMargin(edgeMargin: number, cutPoints: GradeMarginCutPoints = gradeMarginCutPoints): SignalGrade {
+export function gradeForEdgeMargin(edgeMargin: number, cutPoints: GradeMarginCutPoints = gradeMarginCutPoints): ValuationGrade {
   if (edgeMargin >= cutPoints.strong) return "strong";
   if (edgeMargin >= cutPoints.good) return "good";
   if (edgeMargin >= cutPoints.weak) return "weak";
@@ -115,7 +117,7 @@ export interface ContractValuation {
   varianceSessions: number;
   /** Calendar years to expiry the yields are annualized over. */
   calendarYears: number;
-  grade: SignalGrade;
+  grade: ValuationGrade;
 }
 
 /**

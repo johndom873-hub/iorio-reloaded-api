@@ -2,7 +2,7 @@ import { OptionType } from "@stoqey/ib";
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 import { subscribeToPooledQuote, type PooledQuote } from "../ibkr/marketDataPool.js";
-import type { LiveOptionQuote } from "../lib/signalsLiveScoring.js";
+import type { LiveOptionQuote } from "../lib/optionContractKey.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 // Pluto's own market data (design round 4, 2026-09-28): one stock line per enabled ticker plus SPY,

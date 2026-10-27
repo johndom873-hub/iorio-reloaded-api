@@ -1,7 +1,7 @@
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
 import { easternInstant, easternIsoDate } from "../../lib/easternIsoDate.js";
-import { addCalendarDays } from "../../lib/signalsRoadmap.js";
+import { addCalendarDays } from "../../lib/calendarDays.js";
 
 // A session's free cash at any moment, rebuilt from what it recorded (Marcelo 2026-10-21, the Wheel cycles' Cash):
 //

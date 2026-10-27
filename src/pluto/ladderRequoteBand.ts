@@ -1,6 +1,6 @@
 import { blackScholesDelta, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import { daysToExpiry } from "../lib/optionContractLabel.js";
-import { contractKey } from "../lib/signalsLiveScoring.js";
+import { contractKey } from "../lib/optionContractKey.js";
 import { baselineMaxVolumeShare } from "../backtest/engine/baselineSaleSteps.js";
 import type { PlutoSettings } from "./settingsStore.js";
 

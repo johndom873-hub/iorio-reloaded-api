@@ -1,7 +1,9 @@
 import { db } from "../db/connection.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { earningsNextDateDoubt, tickerCalendarProfile } from "../lib/tickerCalendarRelevance.js";
-import type { SignalStrategyKey } from "../lib/signalCandidates.js";
+
+/** The short position whose expiry is checked against the calendar. */
+export type CalendarConflictStrategy = "covered_call" | "cash_secured_put";
 
 export interface CalendarConflict {
   eventType: "earnings" | "ex_dividend";
@@ -31,8 +33,7 @@ export async function fetchCalendarConflictContext(tickerId: string, now: Date =
 
   // Cast to ::text — a bare `date` column round-trips through node-pg's
   // local-timezone Date parsing otherwise, see project_postgres_date_local_timezone_parsing.
-  // From today in US Eastern time (not the server's UTC date). Today's before-open report has already happened, as in the
-  // Signals earnings exclusion (loadEarningsDatesNotYetReported).
+  // From today in US Eastern time (not the server's UTC date). Today's before-open report has already happened.
   const todayIso = easternIsoDate(now);
   const [rows, lastReportIso]: [{ eventType: "earnings" | "ex_dividend"; eventDate: string }[], string | null] = await Promise.all([
     db("ticker_calendar_events")
@@ -68,7 +69,7 @@ export async function loadLastEarningsReportDate(tickerId: string, todayIso: str
  */
 export function findCalendarConflict(
   context: CalendarConflictContext,
-  strategyKey: SignalStrategyKey,
+  strategyKey: CalendarConflictStrategy,
   expiryIso: string,
 ): CalendarConflict | null {
   for (const event of context.events) {
@@ -89,7 +90,7 @@ export interface MacroEventWarningEvent {
  * expiry — advisory-only per Marcelo's 2026-08-31 decision, unlike
  * earnings/ex-dividend which hard-exclude via findCalendarConflict above. The
  * events are the major US ones (macroEventCalendar.ts) still ahead and before the
- * expiry's 16:00 ET close: the same rule as the Signals flag (expirySpansMacroEvent).
+ * expiry's 16:00 ET close.
  */
 export async function fetchMacroEventWarningEvents(expiryYyyymmdd: string): Promise<MacroEventWarningEvent[]> {
   return db("major_macro_events")
