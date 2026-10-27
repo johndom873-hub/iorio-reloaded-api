@@ -5,7 +5,7 @@ import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { ensurePlutoSettingsVersion } from "./settingsVersions.js";
 import { loadLadderRecommendedShock, type LadderRecommendedShock } from "./ladderRecommendedShock.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
-import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, type PlutoTickerSettings } from "./tickerSettingsStore.js";
+import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, type PlutoStrategy, type PlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // The CC + Put Ladder's settings for one ticker, in the backtest's names and units, so the live ladder, the ticker
 // configuration screen and the Backtesting screen's Analyse modal read the same values and can hand them straight to
@@ -166,6 +166,9 @@ export interface LadderTickerScreenSettings extends LadderTickerSettings {
   capitalBudgetDollars: number | null;
   /** What the recommended shock was computed from; null for an unknown ticker. */
   recommendedShockSource: Omit<LadderRecommendedShock, "recommendedShockPct"> | null;
+  /** The strategy set on the ticker (null: the default) and the one Pluto runs on it. */
+  strategy: PlutoStrategy | null;
+  effectiveStrategy: PlutoStrategy;
 }
 
 async function loadLastClose(symbol: string, connection: Knex): Promise<{ price: number; date: string } | null> {
@@ -187,7 +190,7 @@ export async function loadLadderScreenSettings(symbols: readonly string[], conne
     symbols.map(async (symbol) => {
       const [tickerSettings, recommendedShock, lastClose] = await Promise.all([loadPlutoTickerSettings(symbol, connection), loadLadderRecommendedShock(symbol, context.settings, todayIso, connection), loadLastClose(symbol, connection)]);
       const recommendedShockSource = recommendedShock && { maxDrawdownPct: recommendedShock.maxDrawdownPct, closesUsed: recommendedShock.closesUsed, fromIso: recommendedShock.fromIso, toIso: recommendedShock.toIso };
-      return { ...ladderTickerSettingsFrom(symbol, context, tickerSettings, recommendedShock), lastClose, capitalBudgetDollars, recommendedShockSource };
+      return { ...ladderTickerSettingsFrom(symbol, context, tickerSettings, recommendedShock), lastClose, capitalBudgetDollars, recommendedShockSource, strategy: tickerSettings?.strategy ?? null, effectiveStrategy: effectivePlutoStrategy({ strategy: tickerSettings?.strategy ?? null }) };
     }),
   );
 }

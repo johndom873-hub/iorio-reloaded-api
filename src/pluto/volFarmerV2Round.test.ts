@@ -8,11 +8,12 @@ import type { VolFarmerV2Memory } from "./volFarmerV2LiveBook.js";
 // One Vol Farmer v2 round, everything outside its own work mocked: the tickers, the market, the book's counts, the memory
 // store and the executor. Checked: which tickers it looks at, a flat ticker's opening order (recorded under v2, sent with
 // its shares, its leg kept as pending), adoption, an order a cap holds or SPY's stress stops undone, and an order still
-// working counted as planned until it settles.
+// working counted as planned until it settles; each ticker's last round saved for the screen, with its figures.
 
 const harness = vi.hoisted(() => ({
   memory: new Map<string, unknown>(),
   saves: [] as { tickerId: string; adopted: boolean }[],
+  lastRounds: new Map<string, { notes: string[]; figures: unknown }>(),
   outcomes: new Map<string, unknown>(),
   positions: [] as unknown[],
   breakEven: null as number | null,
@@ -32,6 +33,7 @@ vi.mock("../ibkr/pricePool.js", () => ({ fetchPricesPoolFirst: async () => ({ st
 vi.mock("../ibkr/fetchOptionChain.js", () => ({ loadStoredOptionChain: async () => ({ expirations: [], strikesByExpiry: new Map(), fetchedAt: null }) }));
 vi.mock("../lib/cycleBreakEvenQueries.js", () => ({ fetchOpenCycleSummaryRowsByTickerId: async (ids: string[]) => new Map(ids.map((id) => [id, {}])) }));
 vi.mock("../lib/cycleInputRows.js", () => ({ summarizeOpenCycleFromRows: () => ({ breakEvenPerShare: harness.breakEven }) }));
+vi.mock("../lib/positionExposure.js", () => ({ computeTickerExposure: async () => 30_000 }));
 vi.mock("./book.js", () => ({ loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }), loadLastFilledPlutoActionAtBySymbol: async () => new Map() }));
 vi.mock("./executor.js", () => ({
   executePlutoOrder: vi.fn(async (_api: unknown, _settings: unknown, input: Record<string, unknown>) => (harness.executed.push(input), { outcome: "confirmed", orderId: `order-${harness.executed.length}`, detail: "sent" })),
@@ -66,6 +68,9 @@ vi.mock("./volFarmerV2LookLoader.js", () => ({
     harness.memory.set(tickerId, structuredClone(memory));
     harness.saves.push({ tickerId, adopted });
   },
+  saveVolFarmerV2LastRound: async (tickerId: string, lastRound: { notes: string[]; figures: unknown }) => {
+    harness.lastRounds.set(tickerId, structuredClone({ notes: lastRound.notes, figures: lastRound.figures }));
+  },
   loadVolFarmerV2OrderOutcomes: async (actionIds: string[]) => new Map(actionIds.flatMap((id) => (harness.outcomes.has(id) ? [[id, harness.outcomes.get(id)]] : []))),
   loadVolFarmerV2LegStatuses: async () => new Map(),
   loadVolFarmerV2StepImpliedVolatility: async () => null,
@@ -93,6 +98,7 @@ function round(stressed = false) {
 beforeEach(() => {
   harness.memory.clear();
   harness.saves.length = 0;
+  harness.lastRounds.clear();
   harness.outcomes.clear();
   harness.positions = [];
   harness.breakEven = null;
@@ -115,6 +121,9 @@ describe("runVolFarmerV2Round", () => {
     expect(memory.pending).toEqual([expect.objectContaining({ ref: "action:action-1", kind: "covered_call", contracts: 12, startsCycle: true })]);
     expect(memory.state.first).toMatchObject({ shares: 1_200, calls: [{ legId: "action:action-1", shares: 1_200 }] });
     expect(summary.sent).toBe(1);
+    // Pot $250,000; committed: the exposure, 30,000; free cash: the budget's $500,000 at most the account's $400,000; LEAPS cap 10% of the pot.
+    expect(harness.lastRounds.get("t-VFT")).toEqual({ notes: [expect.stringContaining("VFT Sell $105 Call")], figures: { potDollars: 250_000, committedDollars: 30_000, freeCashDollars: 400_000, leapsCapDollars: 25_000 } });
+    expect(harness.lastRounds.has("t-LAD")).toBe(false);
   });
 
   it("counts an order still working as planned, and opens afresh once it ended unfilled", async () => {
@@ -165,5 +174,6 @@ describe("runVolFarmerV2Round", () => {
     const summary = await round();
     expect(summary.notes).toEqual([expect.stringContaining("VFT: holds no shares yet")]);
     expect(harness.memory.has("t-VFT")).toBe(false);
+    expect(harness.lastRounds.get("t-VFT")).toEqual({ notes: [expect.stringContaining("holds no shares yet")], figures: null });
   });
 });

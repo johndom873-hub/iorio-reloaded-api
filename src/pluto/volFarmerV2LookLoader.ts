@@ -11,7 +11,7 @@ import type { VolFarmerV2Memory, VolFarmerV2OrderOutcome } from "./volFarmerV2Li
 // sent ended, and the status of every leg its memory refers to.
 
 export async function loadVolFarmerV2Memory(tickerId: string, connection: Knex = db): Promise<VolFarmerV2Memory | null> {
-  const row: { memory: VolFarmerV2Memory } | undefined = await connection("pluto_vol_farmer_v2_cycles").where({ ticker_id: tickerId }).first("memory");
+  const row: { memory: VolFarmerV2Memory | null } | undefined = await connection("pluto_vol_farmer_v2_cycles").where({ ticker_id: tickerId }).first("memory");
   return row?.memory ?? null;
 }
 
@@ -20,6 +20,24 @@ export async function saveVolFarmerV2Memory(tickerId: string, memory: VolFarmerV
   const stored: VolFarmerV2Memory = { ...memory, state: { ...memory.state, cash: { cycles: 0, firstHalfLeft: [], secondHalfLeft: [], leapsTriggers: [] }, leapsTrigger: null } };
   const row = { ticker_id: tickerId, memory: JSON.stringify(stored), updated_at: connection.fn.now(), ...(adopted ? { adopted_at: connection.fn.now() } : {}) };
   await connection("pluto_vol_farmer_v2_cycles").insert(row).onConflict("ticker_id").merge();
+}
+
+/** The figures a round read for a ticker, for the Pluto screen's warnings. */
+export interface VolFarmerV2RoundFigures {
+  /** The ticker's pot: its allocation of Pluto's budget, the cap the pot check holds its orders to. */
+  potDollars: number;
+  /** What the ticker commits as the pot check counts it: its exposure (Positions' EXP $) plus its orders still working. */
+  committedDollars: number;
+  /** The free cash v2's steps were given: Pluto's budget left, at most the account's free cash. */
+  freeCashDollars: number;
+  /** The most a LEAPS purchase spends: v2's LEAPS cap, % of the pot. */
+  leapsCapDollars: number;
+}
+
+/** A round's notes on a ticker and its figures (null: it stopped before reading the book); a ticker not adopted yet gets a row with no memory. */
+export async function saveVolFarmerV2LastRound(tickerId: string, lastRound: { at: Date; notes: string[]; figures: VolFarmerV2RoundFigures | null }, connection: Knex = db): Promise<void> {
+  const row = { ticker_id: tickerId, last_round_at: lastRound.at, last_round_notes: JSON.stringify(lastRound.notes), last_round_figures: lastRound.figures === null ? null : JSON.stringify(lastRound.figures) };
+  await connection("pluto_vol_farmer_v2_cycles").insert(row).onConflict("ticker_id").merge(["last_round_at", "last_round_notes", "last_round_figures"]);
 }
 
 /** Every ticker's memory forgotten, for a ticker whose strategy changes: v2 adopts its holdings afresh when it next runs it. */
