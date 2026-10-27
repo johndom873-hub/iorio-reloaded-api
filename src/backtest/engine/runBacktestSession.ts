@@ -180,7 +180,7 @@ export function lookTimesInWindow(windowStartEt: string, windowEndEt: string, cl
 }
 
 /** One look of a day, for the day's summary. */
-interface DayLookSummary {
+export interface DayLookSummary {
   lookTimeEt: string;
   /** The look in one line, without where opens were stopped. */
   summary: string;
@@ -193,20 +193,24 @@ interface DayLookSummary {
 /**
  * The day in one line. A day of one look at 10:00 reads as that look. Otherwise every look that filled an order is
  * named with its time; of the looks that only had choices refused, the first is told in full and the others are named;
- * the looks with nothing to tell are counted, and when no look did anything the first one says why. Where opens were
- * stopped for lack of room is said once for the day.
+ * the looks with nothing to tell are counted, and when no look did anything the first one says why. With
+ * `firstLookNoted` (Vol Farmer v2, whose look notes why a position sold no Call), a first look that did nothing but noted
+ * something is told in full too. Where opens were stopped for lack of room is said once for the day.
  */
-function summarizeDayLooks(looks: readonly DayLookSummary[]): string[] {
+export function summarizeDayLooks(looks: readonly DayLookSummary[], firstLookNoted = false): string[] {
   if (looks.length === 0) return [];
   const opensStopped = [...new Set(looks.flatMap((look) => look.opensStopped))];
   if (looks.length === 1 && looks[0]!.lookTimeEt === captureLookTimeEt) return [looks[0]!.summary, ...opensStopped];
   const withFills = looks.filter((look) => look.filledCount > 0);
   const onlyRefused = looks.filter((look) => look.filledCount === 0 && look.refusedCount > 0);
   if (withFills.length + onlyRefused.length === 0) return [`${looks[0]!.lookTimeEt} ${looks[0]!.summary}`, ...(looks.length > 1 ? [`no action at the ${looks.length - 1} later look${looks.length === 2 ? "" : "s"} either`] : [])];
-  const quietCount = looks.length - withFills.length - onlyRefused.length;
+  const firstLook = looks[0]!;
+  const firstLookTold = firstLookNoted && firstLook.filledCount + firstLook.refusedCount === 0 && firstLook.summary !== "No action";
+  const quietCount = looks.length - withFills.length - onlyRefused.length - (firstLookTold ? 1 : 0);
   const laterRefusedLooks = onlyRefused.slice(1);
   const laterRefusedCount = laterRefusedLooks.reduce((sum, look) => sum + look.refusedCount, 0);
   return [
+    ...(firstLookTold ? [`${firstLook.lookTimeEt} ${firstLook.summary}`] : []),
     ...withFills.map((look) => `${look.lookTimeEt} ${look.summary}`),
     ...(onlyRefused.length > 0 ? [`${onlyRefused[0]!.lookTimeEt} ${onlyRefused[0]!.summary}`] : []),
     ...(laterRefusedLooks.length > 0 ? [`${laterRefusedCount} more choice${laterRefusedCount === 1 ? "" : "s"} refused at ${laterRefusedLooks.map((look) => look.lookTimeEt).join(", ")}`] : []),
@@ -946,7 +950,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       scanVolFarmerCrossings(clockTime(closeMinutesByDay.get(todayIso) ?? regularCloseMinutesEt));
       if (lookedAfterCapture) runStatistics.daysWithIntradayLooks += 1;
       runStatistics.looksRun += looksOfDay.length;
-      const summaryParts = looksOfDay.length > 0 ? summarizeDayLooks(looksOfDay) : [`No action: ${daySymbols.length > 0 ? `no look inside the trading window ${pluto.windowStartEt}–${pluto.windowEndEt} ET has quotes` : nothingScoredReason}`];
+      const summaryParts = looksOfDay.length > 0 ? summarizeDayLooks(looksOfDay, settings.decisionMaker === "vol_farmer_v2") : [`No action: ${daySymbols.length > 0 ? `no look inside the trading window ${pluto.windowStartEt}–${pluto.windowEndEt} ET has quotes` : nothingScoredReason}`];
       // The day is recorded as marked at 10:00, before its looks: an action's cash and exposure show from the next day.
       days.push({ tradingDate: todayIso, accountValue, cash: cashAtMark, exposureDollars, sharesValueDollars, interestDollars, baselineValue, baselineExposureDollars: baselineSharesValue, baselineInterestDollars, spyBaselineValue: spyBaselineDay?.value ?? null, spyBaselineExposureDollars: spyBaselineDay?.exposureDollars ?? null, spyBaselineInterestDollars: spyBaselineDay?.interestDollars ?? null, decisionSummary: [...summaryParts, ...notes].join(" · "), looksRun: looksOfDay.length, actionsTaken: filledActionsToday });
 
