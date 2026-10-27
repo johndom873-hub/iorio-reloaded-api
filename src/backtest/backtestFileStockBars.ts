@@ -5,8 +5,9 @@ import type { StoredDailyBar } from "./engine/backtestBarHistory.js";
 // IBKR's stock prices inside a symbol's data file (docs/backtesting/DATA-FILES.md, "IBKR stock bars"): daily bars with
 // the daily implied volatility for the last 20 years, and 30-minute bars from the first year the file has option data.
 // The backtests take every stock price from them, never from the option quotes (Marcelo 2026-10-14). Node writes them
-// after a download and on Update, the whole set at once, so every bar carries the same split adjustment (IBKR adjusts
-// for splits as of the fetch). The ThetaData downloader never touches these tables.
+// after a download and on Update: the last month's bars over the stored ones when both agree to the cent on the days they
+// share, else the whole set at once, so every bar carries the same split adjustment (IBKR adjusts for splits as of the
+// fetch). The ThetaData downloader never touches these tables.
 
 export const fileStockBarsVersion = "1";
 export const fileDailyBarYears = 20;
@@ -37,14 +38,26 @@ function hasTable(database: DatabaseSync, name: string): boolean {
   return database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
 }
 
-/** Replaces the file's IBKR stock bars with `bars` in one transaction, so a reader never sees two adjustments mixed. */
-export function writeFileStockBars(database: DatabaseSync, bars: { daily: readonly StoredDailyBar[]; intraday: readonly FileIntradayBar[]; fetchedAt: Date }): void {
+interface FileStockBarsToWrite {
+  daily: readonly StoredDailyBar[];
+  intraday: readonly FileIntradayBar[];
+  fetchedAt: Date;
+}
+
+/** Writes `bars` in one transaction: in place of every stored bar ("replace"), or over the stored bars of the same days ("add"). */
+function storeFileStockBars(database: DatabaseSync, bars: FileStockBarsToWrite, mode: "replace" | "add"): void {
   if (bars.daily.length === 0 || bars.intraday.length === 0) throw new Error("No IBKR bars to write: the file keeps the ones it has.");
   database.exec("BEGIN IMMEDIATE");
   try {
     database.exec(createTablesSql);
-    database.exec("DELETE FROM ibkr_daily_bars; DELETE FROM ibkr_intraday_bars;");
-    const insertDaily = database.prepare("INSERT INTO ibkr_daily_bars VALUES (?, ?, ?, ?, ?, ?, ?)");
+    if (mode === "replace") database.exec("DELETE FROM ibkr_daily_bars; DELETE FROM ibkr_intraday_bars;");
+    // Adding, a day's stored implied volatility stays when the new bar has none (its request failed).
+    const insertDaily = database.prepare(
+      mode === "replace"
+        ? "INSERT INTO ibkr_daily_bars VALUES (?, ?, ?, ?, ?, ?, ?)"
+        : `INSERT INTO ibkr_daily_bars VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (trading_date) DO UPDATE SET open = excluded.open, high = excluded.high, low = excluded.low,
+             close = excluded.close, volume = excluded.volume, implied_volatility = coalesce(excluded.implied_volatility, ibkr_daily_bars.implied_volatility)`,
+    );
     for (const bar of bars.daily) insertDaily.run(bar.tradingDate, bar.open, bar.high, bar.low, bar.close, bar.volume, bar.impliedVolatility);
     const insertIntraday = database.prepare("INSERT OR REPLACE INTO ibkr_intraday_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
     for (const bar of bars.intraday) insertIntraday.run(easternIsoDate(bar.barStart), easternMinutesOfDay(bar.barStart), bar.barStart.toISOString(), bar.open, bar.high, bar.low, bar.close, bar.volume);
@@ -56,6 +69,87 @@ export function writeFileStockBars(database: DatabaseSync, bars: { daily: readon
     database.exec("ROLLBACK");
     throw error;
   }
+}
+
+/** Replaces the file's IBKR stock bars with `bars` in one transaction, so a reader never sees two adjustments mixed. */
+export function writeFileStockBars(database: DatabaseSync, bars: FileStockBarsToWrite): void {
+  storeFileStockBars(database, bars, "replace");
+}
+
+/**
+ * Writes `bars` over the file's bars of the same days and keeps the others, in one transaction. Only for bars on the stored
+ * bars' split adjustment: the caller has compared them on the days both have (refreshFileStockBars.ts).
+ */
+export function addFileStockBars(database: DatabaseSync, bars: FileStockBarsToWrite): void {
+  storeFileStockBars(database, bars, "add");
+}
+
+/** The key of a 30-minute bar: its Eastern date and start, minutes ET ("2026-10-26 570"). */
+export const intradayBarKey = (tradingDate: string, startMinutesEt: number): string => `${tradingDate} ${startMinutesEt}`;
+
+/** The file's IBKR bars from a date on, with the extent of all of them: what a fresh tail is checked against. */
+export interface StoredFileStockBarsTail {
+  /** ibkr_bars_version of the stored bars; null when the meta key is missing. */
+  version: string | null;
+  dailyFirstDate: string;
+  dailyLastDate: string;
+  intradayFirstDate: string;
+  intradayLastDate: string;
+  dailyCloseByDate: Map<string, number | null>;
+  /** By intradayBarKey. */
+  intradayCloseByKey: Map<string, number | null>;
+}
+
+/** The file's bars from `fromDateIso` on; null when it has no daily or no 30-minute bars. */
+export function readFileStockBarsTail(database: DatabaseSync, fromDateIso: string): StoredFileStockBarsTail | null {
+  if (!hasTable(database, "ibkr_daily_bars") || !hasTable(database, "ibkr_intraday_bars")) return null;
+  const daily = database.prepare("SELECT min(trading_date) AS first, max(trading_date) AS last FROM ibkr_daily_bars").get() as { first: string | null; last: string | null };
+  const intraday = database.prepare("SELECT min(trading_date) AS first, max(trading_date) AS last FROM ibkr_intraday_bars").get() as { first: string | null; last: string | null };
+  if (!daily.first || !daily.last || !intraday.first || !intraday.last) return null;
+  const version = (database.prepare("SELECT value FROM meta WHERE key = 'ibkr_bars_version'").get() as { value: string } | undefined)?.value ?? null;
+  const dailyRows = database.prepare("SELECT trading_date AS tradingDate, close FROM ibkr_daily_bars WHERE trading_date >= ?").all(fromDateIso) as unknown as { tradingDate: string; close: number | null }[];
+  const intradayRows = database
+    .prepare("SELECT trading_date AS tradingDate, start_minutes_et AS startMinutesEt, close FROM ibkr_intraday_bars WHERE trading_date >= ?")
+    .all(fromDateIso) as unknown as { tradingDate: string; startMinutesEt: number; close: number | null }[];
+  return {
+    version,
+    dailyFirstDate: daily.first,
+    dailyLastDate: daily.last,
+    intradayFirstDate: intraday.first,
+    intradayLastDate: intraday.last,
+    dailyCloseByDate: new Map(dailyRows.map((row) => [row.tradingDate, row.close])),
+    intradayCloseByKey: new Map(intradayRows.map((row) => [intradayBarKey(row.tradingDate, row.startMinutesEt), row.close])),
+  };
+}
+
+/** How many IBKR bars the file holds and their extent (after a refresh, for its log line); null when it has none. */
+export function summarizeFileStockBars(database: DatabaseSync): {
+  dailyBars: number;
+  dailyFirstDate: string;
+  dailyLastDate: string;
+  impliedVolatilityDays: number;
+  intradayBars: number;
+  intradayFirstDate: string;
+  intradayLastDate: string;
+} | null {
+  if (!hasTable(database, "ibkr_daily_bars") || !hasTable(database, "ibkr_intraday_bars")) return null;
+  const daily = database.prepare("SELECT count(*) AS bars, count(implied_volatility) AS impliedVolatilityDays, min(trading_date) AS first, max(trading_date) AS last FROM ibkr_daily_bars").get() as {
+    bars: number;
+    impliedVolatilityDays: number;
+    first: string | null;
+    last: string | null;
+  };
+  const intraday = database.prepare("SELECT count(*) AS bars, min(trading_date) AS first, max(trading_date) AS last FROM ibkr_intraday_bars").get() as { bars: number; first: string | null; last: string | null };
+  if (!daily.first || !daily.last || !intraday.first || !intraday.last) return null;
+  return {
+    dailyBars: Number(daily.bars),
+    dailyFirstDate: daily.first,
+    dailyLastDate: daily.last,
+    impliedVolatilityDays: Number(daily.impliedVolatilityDays),
+    intradayBars: Number(intraday.bars),
+    intradayFirstDate: intraday.first,
+    intradayLastDate: intraday.last,
+  };
 }
 
 /** The file's IBKR daily bars, ascending; null when it has none (a file from before they were kept: Update adds them). */

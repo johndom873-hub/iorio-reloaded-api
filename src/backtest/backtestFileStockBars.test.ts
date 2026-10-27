@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { easternInstant } from "../lib/easternIsoDate.js";
-import { describeFileStockBars, FileIntradayPrices, readFileDailyBars, readFileIntradayPrices, writeFileStockBars, type FileIntradayBar } from "./backtestFileStockBars.js";
+import { addFileStockBars, describeFileStockBars, FileIntradayPrices, intradayBarKey, readFileDailyBars, readFileIntradayPrices, readFileStockBarsTail, summarizeFileStockBars, writeFileStockBars, type FileIntradayBar } from "./backtestFileStockBars.js";
 
 const dailyBar = (tradingDate: string, close: number) => ({ tradingDate, open: close - 1, high: close + 1, low: close - 2, close, volume: 1_000_000, impliedVolatility: 0.5 });
 const intradayBar = (dateIso: string, startsAt: string, close: number): FileIntradayBar => ({ barStart: easternInstant(dateIso, Number(startsAt.slice(0, 2)), Number(startsAt.slice(3))), open: close, high: close, low: close, close, volume: 1_000 });
@@ -78,6 +78,41 @@ describe("a data file's IBKR stock bars", () => {
     const prices = readFileIntradayPrices(database, "2026-03-01", "2026-03-02")!;
     expect(prices.lastDate).toBe("2026-03-02");
     expect(prices.priceAt("2026-03-03", "10:00")).toBeNull();
+  });
+
+  it("adds a tail over the bars of the same days and keeps the others, keeping a day's implied volatility when the tail has none", () => {
+    writeFileStockBars(database, first);
+    const tailDaily = [{ ...dailyBar("2026-03-03", 101), volume: 2_000_000, impliedVolatility: null }, { ...dailyBar("2026-03-04", 102), impliedVolatility: 0.6 }];
+    addFileStockBars(database, { daily: tailDaily, intraday: [intradayBar("2026-03-03", "09:30", 100.5), intradayBar("2026-03-04", "09:30", 101.5)], fetchedAt: new Date("2026-10-15T01:00:00Z") });
+    expect(readFileDailyBars(database)).toEqual([dailyBar("2026-03-02", 100), { ...dailyBar("2026-03-03", 101), volume: 2_000_000 }, { ...dailyBar("2026-03-04", 102), impliedVolatility: 0.6 }]);
+    const prices = readFileIntradayPrices(database, "2026-03-01", "2026-03-31")!;
+    expect(prices.priceAt("2026-03-02", "16:00")).toBe(100);
+    expect(prices.priceAt("2026-03-04", "10:00")).toBe(101.5);
+    expect(metaValue(database, "ibkr_bars_fetched_at")).toBe("2026-10-15T01:00:00.000Z");
+    expect(summarizeFileStockBars(database)).toEqual({
+      dailyBars: 3,
+      dailyFirstDate: "2026-03-02",
+      dailyLastDate: "2026-03-04",
+      impliedVolatilityDays: 3,
+      intradayBars: 4,
+      intradayFirstDate: "2026-03-02",
+      intradayLastDate: "2026-03-04",
+    });
+  });
+
+  it("reads the closes from a date on, the extent of every bar and their version, to check a tail against", () => {
+    expect(readFileStockBarsTail(database, "2026-03-03")).toBeNull();
+    expect(summarizeFileStockBars(database)).toBeNull();
+    writeFileStockBars(database, first);
+    expect(readFileStockBarsTail(database, "2026-03-03")).toEqual({
+      version: "1",
+      dailyFirstDate: "2026-03-02",
+      dailyLastDate: "2026-03-03",
+      intradayFirstDate: "2026-03-02",
+      intradayLastDate: "2026-03-03",
+      dailyCloseByDate: new Map([["2026-03-03", 101]]),
+      intradayCloseByKey: new Map([[intradayBarKey("2026-03-03", 570), 100.5]]),
+    });
   });
 });
 
