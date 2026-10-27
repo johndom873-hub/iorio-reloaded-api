@@ -2,13 +2,17 @@ import { describe, expect, it } from "vitest";
 import { easternInstant } from "../../lib/easternIsoDate.js";
 import { blackScholesDelta, blackScholesPriceOnForward } from "../../lib/impliedVolatilitySurface.js";
 import { contractKey } from "../../lib/optionContractKey.js";
-import { defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, type BacktestVolFarmerV2Settings, type EffectiveBacktestSettings } from "../backtestTypes.js";
+import { defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, type BacktestVolFarmerV2Settings, type EffectiveBacktestSettings, type VolFarmerV2StepRule } from "../backtestTypes.js";
+import { BacktestBarHistory } from "./backtestBarHistory.js";
 import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
-import { chooseVolFarmerV2Leaps, contractsAffordable, describeVolFarmerV2Run, runVolFarmerV2Look, volFarmerV2BreakEven, volFarmerV2PutStrikeCap } from "./backtestVolFarmerV2Look.js";
+import { chooseVolFarmerV2Leaps, contractsAffordable, describeVolFarmerV2Run, impliedVolatilityBefore, runVolFarmerV2Look, volFarmerV2BreakEven, volFarmerV2ImpliedMoveStep, volFarmerV2PutStrikeCap } from "./backtestVolFarmerV2Look.js";
 import { expirySettlementInstant, settleExpiry } from "./ledger/ledgerEvents.js";
 import { ledgerFreeCash } from "./ledger/ledgerSelectors.js";
 import { createSimulatedLedger, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
+
+/** Daily bars at 100 with IBKR's 30-day IV as given (null: none that day). */
+const barsWithImpliedVolatility = (days: [string, number | null][]) => new BacktestBarHistory(days.map(([tradingDate, impliedVolatility]) => ({ tradingDate, open: 100, high: 100, low: 100, close: 100, volume: 1_000, impliedVolatility })));
 
 describe("the v2 formulas", () => {
   it("puts a position's premiums against its shares' cost", () => {
@@ -19,6 +23,19 @@ describe("the v2 formulas", () => {
 
   it("caps the Puts' strike a set share below the first break-even", () => {
     expect(volFarmerV2PutStrikeCap(246, 15)).toBeCloseTo(209.1, 10);
+  });
+
+  it("takes the one-month implied move as the Step, from the latest IV of the 10 sessions before the day", () => {
+    // IV 60%: 60 × √(21 ÷ 252) = 17.32% below the first break-even; no IV, the fixed Step.
+    expect(volFarmerV2ImpliedMoveStep(15, 0.6).stepPct).toBeCloseTo(17.3205, 4);
+    expect(volFarmerV2ImpliedMoveStep(15, null)).toEqual({ stepPct: 15, impliedVolatility: null });
+    // IV on the 1st, none on the 2nd to the 11th, IV again on the 12th.
+    const days = Array.from({ length: 12 }, (_, index) => `2026-03-${String(index + 1).padStart(2, "0")}`);
+    const bars = barsWithImpliedVolatility(days.map((day, index): [string, number | null] => [day, index === 0 ? 0.5 : index === 11 ? 0.7 : null]));
+    // On the 11th the 10 sessions before it reach back to the 1st; on the 12th they don't, and its own bar is not before it.
+    expect(impliedVolatilityBefore(bars, "2026-03-11")).toBe(0.5);
+    expect(impliedVolatilityBefore(bars, "2026-03-12")).toBeNull();
+    expect(impliedVolatilityBefore(bars, "2026-03-13")).toBe(0.7);
   });
 
   it("buys as many contracts as the cash pays for, commission included", () => {
@@ -81,9 +98,9 @@ describe("Vol Farmer v2 at the looks", () => {
 
   let actionNumber = 0;
   const nextActionId = () => `action-${++actionNumber}`;
-  function look(ledger: SimulatedLedger, todayIso: string, stockPrice: number, expiry: string, more: Partial<BacktestVolFarmerV2Settings> = {}, leapsAskSize: number | null = 10) {
+  function look(ledger: SimulatedLedger, todayIso: string, stockPrice: number, expiry: string, more: Partial<BacktestVolFarmerV2Settings> = {}, leapsAskSize: number | null = 10, bars = barsWithImpliedVolatility([])) {
     const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings, ...more } } as unknown as EffectiveBacktestSettings;
-    return runVolFarmerV2Look({ todayIso, lookTimeEt: "10:00", symbols: [lookSymbolOf(todayIso, stockPrice, expiry, leapsAskSize)], settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
+    return runVolFarmerV2Look({ todayIso, lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf(todayIso, stockPrice, expiry, leapsAskSize), bars }], settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
   }
   const openOption = (ledger: SimulatedLedger, optionType: "call" | "put", side: "short" | "long" = "short"): LedgerLeg[] => ledger.legs.filter((leg) => leg.legType === "option" && leg.optionType === optionType && leg.side === side && leg.exitAt === null);
   const breakEvenIn = (description: string, position: "first" | "second") => Number(new RegExp(`${position} position \\d+×, break-even now (\\d+\\.\\d+)`).exec(description)![1]);
@@ -120,6 +137,9 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(put.description).toContain(`no Call at or above the first break-even ${firstBreakEven.toFixed(2)}`);
     // A Put records B-E¹, the break-even its strike cap is measured from.
     expect((put.candidateScores as { breakEvenFirst: number }).breakEvenFirst).toBeCloseTo(firstBreakEven, 2);
+    // The fixed Step is neither said nor recorded.
+    expect(put.description).not.toContain("Step");
+    expect(put.candidateScores).not.toHaveProperty("stepPct");
 
     // Assigned at Friday's close: Monday 23 March the second position sells its own Call, at or above its own break-even.
     settleExpiry(ledger, { legId: openOption(ledger, "put")[0]!.id, expiryClose: put.contract!.strike! - 3 });
@@ -133,6 +153,33 @@ describe("Vol Farmer v2 at the looks", () => {
     // The second position's Call records B-E², before its own premium.
     expect((secondCall.candidateScores as { breakEvenSecond: number }).breakEvenSecond).toBeCloseTo(put.contract!.strike! - putNet / secondShares, 6);
     expect(assigned.actions.some((action) => action.kind === "open_cash_secured_put")).toBe(false);
+  });
+
+  it("takes the Step from IBKR's IV at each Put sale, and the fixed Step without one", async () => {
+    // IV 30% on Friday 6 March, before the cycle opens on Monday 9 March; 90% on Friday 13 March, before the Put on Monday 16 March.
+    const bars = barsWithImpliedVolatility([["2026-03-06", 0.3], ["2026-03-13", 0.9]]);
+    const putAfterFall = async (stepRule: VolFarmerV2StepRule, history: BacktestBarHistory) => {
+      const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+      const opened = await look(ledger, "2026-03-09", 100, "2026-03-13", { stepRule }, 10, history);
+      settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
+      const afterFall = await look(ledger, "2026-03-16", 80, "2026-03-20", { stepRule }, 10, history);
+      const put = afterFall.actions.find((action) => action.kind === "open_cash_secured_put")!;
+      return { firstBreakEven: breakEvenIn(opened.actions[0]!.description, "first"), put, scores: put.candidateScores as { stepPct: number; stepImpliedVolatility: number | null } };
+    };
+
+    // At the Put sale the latest IV is Friday's 90%: 90 × √(21 ÷ 252) = 25.98%, so the Put is struck lower than with the fixed 15%.
+    const fixed = await putAfterFall("fixed", bars);
+    const atSale = await putAfterFall("implied_move_at_put_sale", bars);
+    expect(atSale.scores.stepPct).toBeCloseTo(90 * Math.sqrt(21 / 252), 10);
+    expect(atSale.scores.stepImpliedVolatility).toBe(0.9);
+    expect(atSale.put.contract!.strike).toBeLessThanOrEqual(volFarmerV2PutStrikeCap(atSale.firstBreakEven, atSale.scores.stepPct) + 0.01);
+    expect(atSale.put.contract!.strike).toBeLessThan(fixed.put.contract!.strike!);
+    expect(atSale.put.description).toContain("(Step 26.0%: IV 90.0% × √(21 ÷ 252))");
+
+    // No IV in the 10 sessions before the day: the fixed Step, 15%.
+    const withoutIv = await putAfterFall("implied_move_at_put_sale", barsWithImpliedVolatility([]));
+    expect(withoutIv.scores).toMatchObject({ stepPct: 15, stepImpliedVolatility: null });
+    expect(withoutIv.put.description).toContain("(Step 15.0%: no IV in the last 10 sessions, the fixed Step)");
   });
 
   it("buys a LEAPS with the free cash, up to the contracts its ask offers, when the second position finds no Call, and sells it once that position is called away", async () => {

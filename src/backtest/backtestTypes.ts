@@ -353,15 +353,24 @@ export interface BacktestVolFarmerV2Settings {
   putsStartCallYieldPct: number;
   /** Put |delta|: the Puts' highest |delta|. */
   putMaxAbsDelta: number;
-  /** A Put's strike is at least this far below the first position's break-even, percent. */
+  /** A Put's strike is at least this far below the first position's break-even, percent (with stepRule "fixed"). */
   stepBelowFirstBreakEvenPct: number;
+  /**
+   * How the Step is set (Marcelo 2026-10-27): "fixed" is stepBelowFirstBreakEvenPct; "implied_move_at_put_sale" is the
+   * one-month implied move at each Put sale, IBKR's 30-day IV of the latest daily bar before the day (within 10
+   * sessions) × √(21 ÷ 252). No IV in those 10 sessions: the fixed Step.
+   */
+  stepRule: VolFarmerV2StepRule;
   /** The LEAPS: the first listed expiry at least this many days out. */
   leapsMinDte: number;
   /** The LEAPS: that expiry's Call whose |delta| is nearest this. */
   leapsAbsDelta: number;
 }
 
-export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, leapsMinDte: 365, leapsAbsDelta: 0.7 };
+export const volFarmerV2StepRules = ["fixed", "implied_move_at_put_sale"] as const;
+export type VolFarmerV2StepRule = (typeof volFarmerV2StepRules)[number];
+
+export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7 };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5), read by the retired rules

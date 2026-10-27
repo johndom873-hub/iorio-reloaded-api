@@ -3,6 +3,7 @@ import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
 import { blackScholesDelta, impliedVolatilityFromPrice } from "../../lib/impliedVolatilitySurface.js";
 import { daysToExpiry, describeOptionContract, describeOrderSize } from "../../lib/optionContractLabel.js";
 import { openCandidateId } from "./candidateIds.js";
+import type { BacktestBarHistory } from "./backtestBarHistory.js";
 import type { BacktestAction, BacktestBreakEvenLevel, BacktestVolFarmerSettings, BacktestVolFarmerV2Settings } from "../backtestTypes.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { BacktestLookContext, BacktestLookResult, BacktestLookSymbol, BacktestOptionSale } from "./backtestLookTypes.js";
@@ -105,6 +106,30 @@ function stateOf(ledger: SimulatedLedger, symbol: string): VolFarmerV2SymbolStat
   let state = bySymbol.get(symbol);
   if (!state) bySymbol.set(symbol, (state = newSymbolState()));
   return state;
+}
+
+/** The Step, % below the first break-even, and the IV it came from (null: the fixed Step). */
+export interface VolFarmerV2Step {
+  stepPct: number;
+  impliedVolatility: number | null;
+}
+
+/** How many sessions back the implied-move Step looks for IBKR's 30-day IV before falling back to the fixed Step. */
+export const stepImpliedVolatilityLookbackSessions = 10;
+
+/** IBKR's 30-day implied volatility of the latest daily bar before `todayIso`, within the last 10 sessions; null when none. */
+export function impliedVolatilityBefore(bars: BacktestBarHistory, todayIso: string): number | null {
+  const recent = bars.rowsBefore(todayIso, stepImpliedVolatilityLookbackSessions);
+  for (let index = recent.length - 1; index >= 0; index -= 1) {
+    const impliedVolatility = recent[index]!.impliedVolatility;
+    if (impliedVolatility !== null && impliedVolatility > 0) return impliedVolatility;
+  }
+  return null;
+}
+
+/** The one-month implied move as the Step: IV × √(21 ÷ 252), in %; the fixed Step without an IV (Marcelo 2026-10-27). */
+export function volFarmerV2ImpliedMoveStep(fixedStepPct: number, impliedVolatility: number | null): VolFarmerV2Step {
+  return impliedVolatility === null ? { stepPct: fixedStepPct, impliedVolatility: null } : { stepPct: impliedVolatility * Math.sqrt(21 / 252) * 100, impliedVolatility };
 }
 
 /** A position's break-even per share, on the cycle's scale; null without shares. */
@@ -360,20 +385,30 @@ function lookAtSymbol(input: SymbolLook): string | null {
     const bestCall = callCandidates(firstBreakEven, false).calls[0] ?? null;
     const bestYield = bestCall?.premiumYield ?? 0;
     if (bestYield * 100 < v2.putsStartCallYieldPct) {
-      const strikeCap = volFarmerV2PutStrikeCap(firstBreakEven, v2.stepBelowFirstBreakEvenPct);
+      const step: VolFarmerV2Step =
+        v2.stepRule === "implied_move_at_put_sale" ? volFarmerV2ImpliedMoveStep(v2.stepBelowFirstBreakEvenPct, impliedVolatilityBefore(lookSymbol.bars, todayIso)) : { stepPct: v2.stepBelowFirstBreakEvenPct, impliedVolatility: null };
+      const strikeCap = volFarmerV2PutStrikeCap(firstBreakEven, step.stepPct);
+      // The implied-move rule says which Step it used and records it with the Put; the fixed rule's records stay as they were.
+      const stepNote =
+        v2.stepRule === "fixed"
+          ? ""
+          : step.impliedVolatility === null
+            ? ` (Step ${step.stepPct.toFixed(1)}%: no IV in the last ${stepImpliedVolatilityLookbackSessions} sessions, the fixed Step)`
+            : ` (Step ${step.stepPct.toFixed(1)}%: IV ${percent(step.impliedVolatility)} × √(21 ÷ 252))`;
+      const stepScores: Record<string, number | null> = v2.stepRule === "fixed" ? {} : { stepPct: step.stepPct, stepImpliedVolatility: step.impliedVolatility };
       const { candidates: puts, rejections } = candidatesOf("P", { minAbsDelta: 0, maxAbsDelta: v2.putMaxAbsDelta, maximumStrike: strikeCap, heldExcluded: true });
       const freeCash = ledgerFreeCash(ledger);
       const wanted = (candidate: BaselineCandidate) => Math.min(Math.floor(state.potDollars / 2 / (candidate.strike * sharesPerContract) + 1e-9), Math.floor(freeCash / (candidate.strike * sharesPerContract) + 1e-9));
       const put = pickByVolume(puts, wanted, (candidate) => candidate.volumeCap);
       const trigger = bestCall === null ? `no Call at or above the first break-even ${firstBreakEven.toFixed(2)}` : `the best Call at or above the first break-even ${firstBreakEven.toFixed(2)} yields ${percent(bestYield, 2)} a year, under ${v2.putsStartCallYieldPct}%`;
-      if (put === null) say(`no Put: ${trigger}, but none qualifies at or below ${strikeCap.toFixed(2)} (${describeRejections(rejections) || "none listed"})`);
+      if (put === null) say(`no Put: ${trigger}, but none qualifies at or below ${strikeCap.toFixed(2)}${stepNote} (${describeRejections(rejections) || "none listed"})`);
       else {
         const contracts = Math.min(wanted(put), put.volumeCap);
         if (contracts < 1) say(`no Put: ${trigger}, but the volume limit allows none`);
         else {
           state.second ??= { shares: 0, costPerShare: 0, premiumDollars: 0, call: null, put: null };
           state.cash.secondHalfLeft.push(state.potDollars / 2 - contracts * put.strike * sharesPerContract);
-          say(sellPut(input, state.second, put, contracts, `${trigger}; strike at most ${strikeCap.toFixed(2)}`, firstBreakEven, priceToCycleScale, sharesPerContractOnCycleScale, stockPrice));
+          say(sellPut(input, state.second, put, contracts, `${trigger}; strike at most ${strikeCap.toFixed(2)}${stepNote}`, firstBreakEven, stepScores, priceToCycleScale, sharesPerContractOnCycleScale, stockPrice));
         }
       }
     }
@@ -459,7 +494,7 @@ function sellCalls(input: SymbolLook, orders: readonly { name: "first" | "second
   return descriptions.join(" · ");
 }
 
-function sellPut(input: SymbolLook, second: VolFarmerV2Position, put: BaselineCandidate, contracts: number, why: string, firstBreakEvenAsTraded: number, priceToCycleScale: number, sharesPerContractOnCycleScale: number, stockPrice: number): string {
+function sellPut(input: SymbolLook, second: VolFarmerV2Position, put: BaselineCandidate, contracts: number, why: string, firstBreakEvenAsTraded: number, stepScores: Record<string, number | null>, priceToCycleScale: number, sharesPerContractOnCycleScale: number, stockPrice: number): string {
   const { context, lookSymbol, at } = input;
   const { ledger, todayIso } = context;
   const symbol = lookSymbol.profile.symbol;
@@ -487,7 +522,7 @@ function sellPut(input: SymbolLook, second: VolFarmerV2Position, put: BaselineCa
     blockReason: null,
     gateResults: [{ gate: "vol_farmer_v2", ok: true, detail: `${contracts} contract(s): volume allows ${put.volumeCap}` }],
     contract: { strategyKey: "cash_secured_put", expiry: put.expiry, strike: put.strike, right: "P" },
-    candidateScores: { premiumYield: put.premiumYield, delta: put.delta, impliedVolatility: put.impliedVolatility, timeValue: put.timeValue, dte: put.dte, bid: put.bid, ask: put.ask, volumeCap: put.volumeCap, stockPrice, breakEvenFirst: firstBreakEvenAsTraded },
+    candidateScores: { premiumYield: put.premiumYield, delta: put.delta, impliedVolatility: put.impliedVolatility, timeValue: put.timeValue, dte: put.dte, bid: put.bid, ask: put.ask, volumeCap: put.volumeCap, stockPrice, breakEvenFirst: firstBreakEvenAsTraded, ...stepScores },
     quantity: contracts,
     limitPrice: put.fillPrice,
     fillPrice: put.fillPrice,
