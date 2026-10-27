@@ -39,6 +39,8 @@ export interface CycleOptionLegRow {
   /** The timeline's label for the leg's opening or closing row in place of the fill's: a simulated book's bookkeeping moves name themselves. Never selected. */
   openingRowLabel?: string;
   closingRowLabel?: string;
+  /** The leg's position is a LEAPS (see CycleOptionLeg). Never selected; a simulated ledger states it. */
+  leaps?: boolean;
 }
 
 // An early assignment settles the cycle on the assignment date (Marcelo 2026-10-15): a short leg that left before its

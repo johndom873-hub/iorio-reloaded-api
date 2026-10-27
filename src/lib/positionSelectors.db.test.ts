@@ -45,7 +45,7 @@ interface SeedLeg {
 interface SeedPosition {
   name: string;
   tickerId: string;
-  strategyKey: "hedge" | "covered_call" | "cash_secured_put" | "unstructured";
+  strategyKey: "hedge" | "leaps" | "covered_call" | "cash_secured_put" | "unstructured";
   status: "open" | "closed";
   legs: SeedLeg[];
   /** Hand-worked figures; null = the SQL returns NULL. */
@@ -64,6 +64,15 @@ const seedPositions: SeedPosition[] = [
     status: "open",
     legs: [option("long", "put", 45, "2026-04-17", 2, 0.4, day(2)), option("long", "call", 60, "2026-04-17", 1, 0.25, day(3), { exitPrice: 0.1, exitAt: day(10), closingTradeCommissions: [0.68] })],
     expected: { capitalAtRisk: 105, capitalDeployed: 105, realizedPnl: -15.68, realizedPremiumPnl: -15.68, realizedStockPnl: 0 },
+  },
+  {
+    // LEAPS: like a hedge, the premium paid, not the strike: 3.918 × 100 × 2.
+    name: "LEAPS with an open long call",
+    tickerId: firstTickerId,
+    strategyKey: "leaps",
+    status: "open",
+    legs: [option("long", "call", 82, "2028-06-16", 2, 3.918, day(4))],
+    expected: { capitalAtRisk: 783.6, capitalDeployed: 783.6, realizedPnl: 0, realizedPremiumPnl: 0, realizedStockPnl: 0 },
   },
   {
     // Open stock leg + open short call: 50.015 × 200 − 0.7932 × 100 × 2.

@@ -563,23 +563,33 @@ export interface BuyHedgePutEvent {
   actionId: string | null;
   /** Shares one contract covers on the cycle's scale: 100 unless a split since the cycle began changed it. */
   sharesPerContract?: number;
-  /** A Put when omitted; a Call for Vol Farmer v2's LEAPS (a long Call is a hedge position too). */
-  optionType?: "put" | "call";
 }
 
+/** Vol Farmer v2's LEAPS Calls are bought with the same facts as a hedge Put. */
+export type BuyLeapsCallEvent = BuyHedgePutEvent;
+
+/** The two strategies of long options: the hedge's Puts and the LEAPS Calls, each with its cash journal kinds. */
+const longOptionStrategies = {
+  hedge: { optionType: "put", purchase: "hedge_purchase", sale: "hedge_sale", name: "hedge Put", legName: "Hedge" },
+  leaps: { optionType: "call", purchase: "leaps_purchase", sale: "leaps_sale", name: "LEAPS Call", legName: "LEAPS" },
+} as const;
+type LongOptionStrategy = keyof typeof longOptionStrategies;
+
 /**
- * Long Puts bought for the hedge (backtestBaselineHedge.ts), or Vol Farmer v2's LEAPS Calls, only while the symbol's cycle
- * is open (a hedge never starts one): the leg at the fill plus the commission per share (the cost live's average cost carries), the opening trade, the
+ * Long Puts bought for the hedge (backtestBaselineHedge.ts), only while the symbol's cycle is open (a hedge never starts
+ * one): the leg at the fill plus the commission per share (the cost live's average cost carries), the opening trade, the
  * cost out and the commission out. One position per contract: a short option on it refuses the purchase, and the hedge
- * position already holding it takes the new leg (each purchase keeps its own time and price).
+ * position already holding it takes the new leg (each purchase keeps its own time and price). Vol Farmer v2's LEAPS Calls
+ * are bought the same way, as positions of their own strategy, "leaps".
  */
-function applyBuyHedgePut(ledger: SimulatedLedger, event: BuyHedgePutEvent): { positionId: string; legId: string } {
+function applyBuyLongOption(ledger: SimulatedLedger, event: BuyHedgePutEvent, strategy: LongOptionStrategy): { positionId: string; legId: string } {
+  const { optionType, purchase } = longOptionStrategies[strategy];
   requirePositiveWholeNumber(event.contracts, "Contracts");
-  if (isSymbolFlat(ledger, event.symbol)) throw new Error(`${event.symbol}: a hedge is bought only while the cycle is open.`);
+  if (isSymbolFlat(ledger, event.symbol)) throw new Error(`${event.symbol}: a ${strategy === "hedge" ? "hedge" : "LEAPS"} is bought only while the cycle is open.`);
   const holdsContract = (leg: LedgerLeg) => leg.exitAt === null && leg.legType === "option" && leg.expiryDate === event.expiryDate && leg.strikePrice !== null && Math.abs(leg.strikePrice - event.strike) < 0.0001;
-  const holder = positionsOfSymbol(ledger, event.symbol).find((position) => position.status === "open" && position.strategyKey === "hedge" && position.keptSince === undefined && legsOfPosition(ledger, position.id).some(holdsContract));
+  const holder = positionsOfSymbol(ledger, event.symbol).find((position) => position.status === "open" && position.strategyKey === strategy && position.keptSince === undefined && legsOfPosition(ledger, position.id).some(holdsContract));
   if (!holder) requireContractNotHeld(ledger, event.symbol, event.expiryDate, event.strike);
-  const position = holder ?? createPosition(ledger, event.symbol, "hedge", event.at);
+  const position = holder ?? createPosition(ledger, event.symbol, strategy, event.at);
   const sharesPerContract = event.sharesPerContract ?? standardSharesPerContract;
   const commission = optionCommissionDollars(event.contracts);
   const leg: LedgerLeg = {
@@ -589,7 +599,7 @@ function applyBuyHedgePut(ledger: SimulatedLedger, event: BuyHedgePutEvent): { p
     legType: "option",
     side: "long",
     quantity: event.contracts,
-    optionType: event.optionType ?? "put",
+    optionType,
     strikePrice: event.strike,
     expiryDate: event.expiryDate,
     multiplier: sharesPerContract,
@@ -602,9 +612,17 @@ function applyBuyHedgePut(ledger: SimulatedLedger, event: BuyHedgePutEvent): { p
   };
   ledger.legs.push(leg);
   recordTrade(ledger, leg, { side: "buy", quantity: event.contracts, price: event.fillPrice, commission, at: event.at, isClosingTrade: false, actionId: event.actionId });
-  recordLegCash(ledger, position, leg, event.at, "hedge_purchase", -event.fillPrice * sharesPerContract * event.contracts);
+  recordLegCash(ledger, position, leg, event.at, purchase, -event.fillPrice * sharesPerContract * event.contracts);
   recordLegCash(ledger, position, leg, event.at, "commission", -commission);
   return { positionId: position.id, legId: leg.id };
+}
+
+function applyBuyHedgePut(ledger: SimulatedLedger, event: BuyHedgePutEvent): { positionId: string; legId: string } {
+  return applyBuyLongOption(ledger, event, "hedge");
+}
+
+function applyBuyLeapsCall(ledger: SimulatedLedger, event: BuyLeapsCallEvent): { positionId: string; legId: string } {
+  return applyBuyLongOption(ledger, event, "leaps");
 }
 
 export interface SellHedgePutEvent {
@@ -617,17 +635,21 @@ export interface SellHedgePutEvent {
   actionId: string | null;
 }
 
+/** Vol Farmer v2's LEAPS Calls are sold with the same facts as a hedge Put. */
+export type SellLeapsCallEvent = SellHedgePutEvent;
+
 /**
- * Hedge Puts sold. All of a leg's contracts: the leg exits at the fill. Fewer: they are carved into their own closed leg
- * (parentLegId), which takes the closing trade, and the rest stay open. The position closes (closed via app) once none of
- * its legs is open. `commission` is the closing trade's: none for a Put settled at expiry.
+ * Hedge Puts (or LEAPS Calls) sold. All of a leg's contracts: the leg exits at the fill. Fewer: they are carved into their
+ * own closed leg (parentLegId), which takes the closing trade, and the rest stay open. The position closes (closed via app)
+ * once none of its legs is open. `commission` is the closing trade's: none for an option settled at expiry.
  */
-function sellHedgePutContracts(ledger: SimulatedLedger, event: SellHedgePutEvent, commission: number): { soldLegId: string; positionClosed: boolean } {
+function sellLongOptionContracts(ledger: SimulatedLedger, event: SellHedgePutEvent, commission: number, strategy: LongOptionStrategy): { soldLegId: string; positionClosed: boolean } {
+  const { sale, name, legName } = longOptionStrategies[strategy];
   requirePositiveWholeNumber(event.contracts, "Contracts");
   const leg = requireLeg(ledger, event.legId);
   const position = requirePosition(ledger, leg.positionId);
-  if (position.status !== "open" || position.strategyKey !== "hedge" || leg.legType !== "option" || leg.side !== "long" || leg.exitAt !== null) throw new Error(`Leg ${leg.id} is not an open hedge Put.`);
-  if (event.contracts > leg.quantity) throw new Error(`Hedge leg ${leg.id} holds ${leg.quantity} contracts; cannot sell ${event.contracts}.`);
+  if (position.status !== "open" || position.strategyKey !== strategy || leg.legType !== "option" || leg.side !== "long" || leg.exitAt !== null) throw new Error(`Leg ${leg.id} is not an open ${name}.`);
+  if (event.contracts > leg.quantity) throw new Error(`${legName} leg ${leg.id} holds ${leg.quantity} contracts; cannot sell ${event.contracts}.`);
   let soldLeg = leg;
   if (event.contracts < leg.quantity) {
     soldLeg = { ...leg, id: nextLedgerId(ledger, "leg"), parentLegId: leg.id, quantity: event.contracts };
@@ -637,7 +659,7 @@ function sellHedgePutContracts(ledger: SimulatedLedger, event: SellHedgePutEvent
   soldLeg.exitPrice = event.fillPrice;
   soldLeg.exitAt = event.at;
   recordTrade(ledger, soldLeg, { side: "sell", quantity: event.contracts, price: event.fillPrice, commission, at: event.at, isClosingTrade: true, actionId: event.actionId });
-  recordLegCash(ledger, position, soldLeg, event.at, "hedge_sale", event.fillPrice * soldLeg.multiplier * event.contracts);
+  recordLegCash(ledger, position, soldLeg, event.at, sale, event.fillPrice * soldLeg.multiplier * event.contracts);
   recordLegCash(ledger, position, soldLeg, event.at, "commission", -commission);
   const positionClosed = legsOfPosition(ledger, position.id).every((positionLeg) => positionLeg.exitAt !== null);
   if (positionClosed) closePosition(position, event.at, "closed_via_app");
@@ -646,7 +668,11 @@ function sellHedgePutContracts(ledger: SimulatedLedger, event: SellHedgePutEvent
 }
 
 function applySellHedgePut(ledger: SimulatedLedger, event: SellHedgePutEvent): { soldLegId: string; positionClosed: boolean } {
-  return sellHedgePutContracts(ledger, event, optionCommissionDollars(event.contracts));
+  return sellLongOptionContracts(ledger, event, optionCommissionDollars(event.contracts), "hedge");
+}
+
+function applySellLeapsCall(ledger: SimulatedLedger, event: SellLeapsCallEvent): { soldLegId: string; positionClosed: boolean } {
+  return sellLongOptionContracts(ledger, event, optionCommissionDollars(event.contracts), "leaps");
 }
 
 /** Carves `contracts` off an open hedge leg into a closed slice at `exitPrice` with no trade and no cash (the whole leg exits when it is all of them). */
@@ -737,29 +763,44 @@ export interface SettleHedgePutEvent {
 
 export type HedgeSettlementOutcome = "hedge_worthless" | "hedge_sold_at_intrinsic";
 
+/** A LEAPS Call whose expiry date has closed, settled with the same facts as a hedge Put. */
+export type SettleLeapsCallEvent = SettleHedgePutEvent;
+
+export type LeapsSettlementOutcome = "leaps_worthless" | "leaps_sold_at_intrinsic";
+
 /**
- * A hedge Put (or a LEAPS Call) still held at its expiry close (the hedge sells one before that; this settles one no quote
- * let it sell), stamped 16:00 Eastern of its expiry date. In the money by the assignment threshold or more, it is sold at
- * its intrinsic value (a Put's strike − close, a Call's close − strike) without commission: live would exercise it, for the
- * same dollars. Otherwise it expires worthless: the leg exits at 0 with no trade.
+ * A hedge Put still held at its expiry close (the hedge sells one before that; this settles one no quote let it sell),
+ * stamped 16:00 Eastern of its expiry date. In the money by the assignment threshold or more, it is sold at its intrinsic
+ * value (strike − close) without commission: live would exercise it, selling shares at the strike for the same dollars,
+ * where this keeps the shares. Otherwise it expires worthless: the leg exits at 0 with no trade. A LEAPS Call held to its
+ * expiry settles the same way, at close − strike. Returns whether it was sold at its intrinsic value.
  */
-function applySettleHedgePut(ledger: SimulatedLedger, event: SettleHedgePutEvent): HedgeSettlementOutcome {
+function settleLongOptionAtExpiry(ledger: SimulatedLedger, event: SettleHedgePutEvent, strategy: LongOptionStrategy): boolean {
+  const { optionType, name } = longOptionStrategies[strategy];
   const leg = requireLeg(ledger, event.legId);
   const position = requirePosition(ledger, leg.positionId);
-  if (position.strategyKey !== "hedge" || leg.legType !== "option" || leg.side !== "long" || leg.optionType === null || leg.strikePrice === null || leg.expiryDate === null || leg.exitAt !== null) throw new Error(`Leg ${leg.id} is not an open hedge option: nothing to settle.`);
+  if (position.strategyKey !== strategy || leg.legType !== "option" || leg.side !== "long" || leg.optionType !== optionType || leg.strikePrice === null || leg.expiryDate === null || leg.exitAt !== null) throw new Error(`Leg ${leg.id} is not an open ${name}: nothing to settle.`);
   const at = expirySettlementInstant(leg.expiryDate);
   leg.expiryClose = event.expiryClose;
-  if (isAssignedAtExpiry(leg.optionType, leg.strikePrice, event.expiryClose)) {
-    const intrinsic = leg.optionType === "put" ? leg.strikePrice - event.expiryClose : event.expiryClose - leg.strikePrice;
-    sellHedgePutContracts(ledger, { legId: leg.id, contracts: leg.quantity, fillPrice: intrinsic, at, actionId: null }, 0);
-    return "hedge_sold_at_intrinsic";
+  if (isAssignedAtExpiry(optionType, leg.strikePrice, event.expiryClose)) {
+    const intrinsic = optionType === "put" ? leg.strikePrice - event.expiryClose : event.expiryClose - leg.strikePrice;
+    sellLongOptionContracts(ledger, { legId: leg.id, contracts: leg.quantity, fillPrice: intrinsic, at, actionId: null }, 0, strategy);
+    return true;
   }
   leg.exitPrice = 0;
   leg.exitAt = at;
   leg.settledAs = "worthless";
   if (legsOfPosition(ledger, position.id).every((positionLeg) => positionLeg.exitAt !== null)) closePosition(position, at, "expired_worthless");
   endCycleIfFlat(ledger, position.symbol, at);
-  return "hedge_worthless";
+  return false;
+}
+
+function applySettleHedgePut(ledger: SimulatedLedger, event: SettleHedgePutEvent): HedgeSettlementOutcome {
+  return settleLongOptionAtExpiry(ledger, event, "hedge") ? "hedge_sold_at_intrinsic" : "hedge_worthless";
+}
+
+function applySettleLeapsCall(ledger: SimulatedLedger, event: SettleLeapsCallEvent): LeapsSettlementOutcome {
+  return settleLongOptionAtExpiry(ledger, event, "leaps") ? "leaps_sold_at_intrinsic" : "leaps_worthless";
 }
 
 /**
@@ -836,6 +877,18 @@ export function buyHedgePut(...args: Parameters<typeof applyBuyHedgePut>): Retur
 
 export function sellHedgePut(...args: Parameters<typeof applySellHedgePut>): ReturnType<typeof applySellHedgePut> {
   return changingLedger(args[0], () => applySellHedgePut(...args));
+}
+
+export function buyLeapsCall(...args: Parameters<typeof applyBuyLeapsCall>): ReturnType<typeof applyBuyLeapsCall> {
+  return changingLedger(args[0], () => applyBuyLeapsCall(...args));
+}
+
+export function sellLeapsCall(...args: Parameters<typeof applySellLeapsCall>): ReturnType<typeof applySellLeapsCall> {
+  return changingLedger(args[0], () => applySellLeapsCall(...args));
+}
+
+export function settleLeapsCall(...args: Parameters<typeof applySettleLeapsCall>): ReturnType<typeof applySettleLeapsCall> {
+  return changingLedger(args[0], () => applySettleLeapsCall(...args));
 }
 
 export function settleHedgePut(...args: Parameters<typeof applySettleHedgePut>): ReturnType<typeof applySettleHedgePut> {

@@ -1059,7 +1059,7 @@ describe("backtest routes", () => {
       await testDb("backtest_sessions").where({ id: session.id }).update({ metrics: JSON.stringify({ startValue: 1_000_000, endValue: 1_001_000, cagr: 0.05, interestDollars: 100 }) });
       try {
         const withMetrics = (await request("GET", `/backtest/sessions/${session.id}`)).body as BacktestSessionDetail;
-        expect(withMetrics.pnlSources).toEqual({ shares: { pnlDollars: expect.closeTo(850.68, 6), cagrPart: expect.closeTo((0.05 * 850.68) / 1_000, 9), daysHeldShare: expect.any(Number) }, coveredCalls: null, hedge: null });
+        expect(withMetrics.pnlSources).toEqual({ shares: { pnlDollars: expect.closeTo(850.68, 6), cagrPart: expect.closeTo((0.05 * 850.68) / 1_000, 9), daysHeldShare: expect.any(Number) }, coveredCalls: null, hedge: null, leaps: null });
       } finally {
         await testDb("backtest_sessions").where({ id: session.id }).update({ metrics: storedMetrics === null ? null : JSON.stringify(storedMetrics) });
       }

@@ -147,10 +147,10 @@ export const positionSelect = `
     -- and showed "–" for EXP $/% on those rows — same bug class already
     -- fixed for Stock P&L display 2026-08-30, see positionHasStockLeg's
     -- doc comment in positionPnl.ts. Fixed 2026-09-24.
-    -- A hedge (long option) can lose at most the premium paid, not the strike (approved 2026-10-01).
+    -- A hedge or a LEAPS (long option) can lose at most the premium paid, not the strike (approved 2026-10-01).
     -- Every other branch is net of the premium received (see premiumReceivedPerShareSql).
     CASE
-      WHEN p.strategy_key = 'hedge' THEN (
+      WHEN p.strategy_key IN ('hedge', 'leaps') THEN (
         SELECT SUM(pl.entry_price * pl.multiplier * pl.quantity)
         FROM position_legs pl
         WHERE pl.position_id = p.id AND pl.leg_type = 'option'
@@ -173,7 +173,7 @@ export const positionSelect = `
     -- as its base once they are sold or moved on (Marcelo, 2026-10-07: a closed covered call over what its shares cost,
     -- not its strike).
     CASE
-      WHEN p.strategy_key = 'hedge' THEN (
+      WHEN p.strategy_key IN ('hedge', 'leaps') THEN (
         SELECT SUM(pl.entry_price * pl.multiplier * pl.quantity)
         FROM position_legs pl
         WHERE pl.position_id = p.id AND pl.leg_type = 'option'

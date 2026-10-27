@@ -26,8 +26,8 @@ function rowAmounts(row: BacktestCycleTimelineRow, hedgeRealized = 0, optionPrem
   const commission = row.commissionDollars ?? 0;
   const bought = shareDirectionOf(row.label) === 1;
   const left = shareDirectionOf(row.label) === -1;
-  // A hedge's cost is not premium earned on the shares; an open option's mark is not premium received.
-  const premium = row.bucket === "hedge" ? hedgeRealized : optionPremiumsIncluded && !(row.at === null && row.label.startsWith("Open ")) ? row.premiumDollars : 0;
+  // A hedge's or a LEAPS' cost is not premium earned on the shares; an open option's mark is not premium received.
+  const premium = row.bucket === "hedge" ? hedgeRealized : row.bucket === "leaps" ? 0 : optionPremiumsIncluded && !(row.at === null && row.label.startsWith("Open ")) ? row.premiumDollars : 0;
   return { acquired: bought ? dollars + commission : 0, disposed: left ? dollars - commission : 0, premium, shares: bought ? row.quantity : left ? -row.quantity : 0 };
 }
 

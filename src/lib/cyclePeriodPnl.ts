@@ -113,7 +113,7 @@ export function truncateCycleInputAsOf(input: CycleInput, baselineDate: string, 
   };
 }
 
-const bucketKeys: CycleBucket[] = ["csp", "unstructured", "cc", "hedge"];
+const bucketKeys: CycleBucket[] = ["csp", "unstructured", "cc", "hedge", "leaps"];
 
 export function openMarkTotal(cycle: Cycle | undefined, bucket: CycleBucket): number {
   if (!cycle) return 0;
@@ -124,7 +124,7 @@ export function openMarkTotal(cycle: Cycle | undefined, bucket: CycleBucket): nu
 export async function computeCyclePeriodPnl(): Promise<CyclePeriodPnl> {
   const emptyBucket = (): BucketPeriodPnl => ({ day: 0, week: 0, month: 0, year: 0, realizedYear: 0, unrealizedYear: 0 });
   const result: CyclePeriodPnl = {
-    buckets: { csp: emptyBucket(), unstructured: emptyBucket(), cc: emptyBucket(), hedge: emptyBucket() },
+    buckets: { csp: emptyBucket(), unstructured: emptyBucket(), cc: emptyBucket(), hedge: emptyBucket(), leaps: emptyBucket() },
     excludedByPeriod: { day: [], week: [], month: [], year: [] },
   };
   const baselineDates = await loadBaselineDates();

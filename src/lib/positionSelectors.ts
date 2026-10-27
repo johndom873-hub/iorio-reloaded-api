@@ -91,7 +91,7 @@ function optionCollateral(leg: PositionLegFigures): number | null {
 
 /** positionSelect's capitalAtRisk (EXP $): the capital exposed now, net of the premium received. Null when the position has nothing to measure. */
 export function positionCapitalAtRisk(position: Pick<PositionFigures, "strategyKey" | "legs">): number | null {
-  if (position.strategyKey === "hedge") return hedgePremiumPaid(position.legs);
+  if (position.strategyKey === "hedge" || position.strategyKey === "leaps") return hedgePremiumPaid(position.legs);
   // The SQL takes one open stock leg (LIMIT 1, unordered): a position holds at most one.
   const openStockLeg = stockLegsOf(position.legs).find(isOpen);
   if (openStockLeg) {
@@ -104,7 +104,7 @@ export function positionCapitalAtRisk(position: Pick<PositionFigures, "strategyK
 
 /** positionSelect's capitalDeployed (the P&L % base): capitalAtRisk plus what partial closes carved off and what the shares cost once they left. */
 export function positionCapitalDeployed(position: Pick<PositionFigures, "strategyKey" | "legs">): number | null {
-  if (position.strategyKey === "hedge") return hedgePremiumPaid(position.legs);
+  if (position.strategyKey === "hedge" || position.strategyKey === "leaps") return hedgePremiumPaid(position.legs);
   const stockLegs = stockLegsOf(position.legs);
   if (stockLegs.length > 0) {
     const shortCalls = shortCallLegsOf(position.legs);

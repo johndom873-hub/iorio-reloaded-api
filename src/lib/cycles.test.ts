@@ -304,6 +304,21 @@ describe("hedge (long option) legs", () => {
     const withHedge = deriveCycles(withShares([hedgeLeg()]))[0]!;
     expect(withHedge.breakEvenPerShare).toBeCloseTo(without.breakEvenPerShare!, 6);
   });
+
+  it("a leg of a LEAPS position goes in the leaps bucket instead, with the same P&L and capital, and stays out of the break-even", () => {
+    const cycle = deriveCycles(baseInput([hedgeLeg({ leaps: true })], new Map([["pos-hedge", 1465.28]])))[0]!;
+    expect(cycle.buckets.leaps.capital).toBeCloseTo(hedgeCost, 2);
+    expect(cycle.buckets.leaps.total).toBeCloseTo(1465.28, 2);
+    expect(cycle.buckets.hedge).toEqual({ premium: 0, stock: 0, total: 0, capital: 0 });
+    expect(cycle.timeline.map((row) => row.bucket)).toEqual(["leaps", "leaps"]);
+    expect(cycle.total).toBeCloseTo(1465.28, 2);
+    const withShares = (legs: CycleOptionLeg[]): CycleInput => ({
+      ...baseInput(legs),
+      stockLegs: [{ positionId: "pos-stock", quantity: 100, entryAt: new Date("2026-09-20T14:00:00Z"), exitAt: null }],
+      stockTrades: [{ at: new Date("2026-09-20T14:00:00Z"), side: "buy", quantity: 100, price: 100, commission: 0 }],
+    });
+    expect(deriveCycles(withShares([hedgeLeg({ leaps: true })]))[0]!.breakEvenPerShare).toBeCloseTo(deriveCycles(withShares([]))[0]!.breakEvenPerShare!, 6);
+  });
 });
 
 describe("shares bought and sold within the same moment", () => {

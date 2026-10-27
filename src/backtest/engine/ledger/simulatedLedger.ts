@@ -7,8 +7,8 @@ import type { PositionLegFigures } from "../../../lib/positionSelectors.js";
 // (docs/backtesting/INVENTORY-WHEEL-ACCOUNTING.md §1.5), so the live selectors and the cycle engine read it unchanged
 // (ledgerSelectors.ts).
 
-/** "hedge": long Puts the baseline wheel's hedge buys (backtestBaselineHedge.ts), as live keeps a held long option. */
-export type LedgerStrategyKey = "cash_secured_put" | "covered_call" | "unstructured" | "hedge";
+/** "hedge": long Puts the baseline wheel's hedge buys (backtestBaselineHedge.ts), as live keeps a held long option; "leaps": Vol Farmer v2's long Calls. */
+export type LedgerStrategyKey = "cash_secured_put" | "covered_call" | "unstructured" | "hedge" | "leaps";
 /** moved_between_cycles: a hedge position whose Puts were all moved out of its cycle or into one (bookkeeping, no trade). */
 export type LedgerCloseReason = "assigned" | "expired_worthless" | "closed_via_app" | "stock_rolled_into_covered_call" | "moved_between_cycles";
 /** cc_call_bought_back_stock: a covered call's call bought back alone (the baseline wheel's profit-taking); Pluto never does it. */
@@ -73,10 +73,10 @@ export interface LedgerShareSource {
 /**
  * What moved the cash: `premium` an option sold, `buyback` an option bought back, `commission` on either or on shares,
  * `share_purchase` and `share_sale` stock fills, `assignment` shares put to the book at the strike, `call_away` shares
- * called away at the strike, `hedge_purchase` and `hedge_sale` a hedge's long Puts bought and sold, `interest` on the
- * cash balance, `deposit` the starting cash.
+ * called away at the strike, `hedge_purchase` and `hedge_sale` a hedge's long Puts bought and sold, `leaps_purchase` and
+ * `leaps_sale` the LEAPS Calls, `interest` on the cash balance, `deposit` the starting cash.
  */
-export type CashJournalKind = "deposit" | "interest" | "premium" | "buyback" | "commission" | "share_purchase" | "share_sale" | "assignment" | "call_away" | "hedge_purchase" | "hedge_sale";
+export type CashJournalKind = "deposit" | "interest" | "premium" | "buyback" | "commission" | "share_purchase" | "share_sale" | "assignment" | "call_away" | "hedge_purchase" | "hedge_sale" | "leaps_purchase" | "leaps_sale";
 
 /** One movement of cash; `amount` is signed (money in is positive). The journal always sums to `cash`. */
 export interface CashJournalEntry {

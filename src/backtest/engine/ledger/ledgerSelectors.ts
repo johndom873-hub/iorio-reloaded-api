@@ -174,6 +174,7 @@ function optionLegRows(ledger: SimulatedLedger, symbol: string, expiryCloseByDat
         })(),
         ...(leg.enteredBy === "taken_from_kept" ? { openingRowLabel: `Put from the kept ones @ ${leg.entryPrice.toFixed(2)}` } : {}),
         ...(leg.exitedBy === "kept_between_cycles" && leg.exitPrice !== null ? { closingRowLabel: `Put kept for the next entry @ ${leg.exitPrice.toFixed(2)}` } : {}),
+        ...(position.strategyKey === "leaps" ? { leaps: true } : {}),
       });
     }
   }
@@ -361,6 +362,11 @@ export function ledgerLegsDueForSettlement(ledger: SimulatedLedger, dateIso: str
 /** Open hedge Puts whose expiry date is on or before `dateIso`: what the day's settlement settles when the hedge could not sell them. */
 export function ledgerHedgeLegsDueForSettlement(ledger: SimulatedLedger, dateIso: string): LedgerLeg[] {
   return openLegs(ledger).flatMap(({ leg, position }) => (position.strategyKey === "hedge" && leg.legType === "option" && leg.expiryDate !== null && leg.expiryDate <= dateIso ? [leg] : []));
+}
+
+/** Open LEAPS Calls whose expiry date is on or before `dateIso`: what the day's settlement settles of those held to expiry. */
+export function ledgerLeapsLegsDueForSettlement(ledger: SimulatedLedger, dateIso: string): LedgerLeg[] {
+  return openLegs(ledger).flatMap(({ leg, position }) => (position.strategyKey === "leaps" && leg.legType === "option" && leg.expiryDate !== null && leg.expiryDate <= dateIso ? [leg] : []));
 }
 
 /** The symbol's open hedge Puts in its cycle, oldest purchase first (the order the hedge sells them in); kept ones are not. */

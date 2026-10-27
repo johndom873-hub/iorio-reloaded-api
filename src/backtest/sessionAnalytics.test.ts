@@ -188,7 +188,17 @@ describe("computePnlSources", () => {
 
   it("leaves out what was never held, gives no CAGR part when the account made nothing, and nothing without cycles", () => {
     const sharesOnly = computePnlSources({ metrics: { ...metrics, endValue: 100_000 }, tradingDates, cycles: [buckets([0, 0], 0, 0, 0)], positions: [positions[0]!], callSaleYields: [], hedgeCostYields: [] })!;
-    expect(sharesOnly).toEqual({ shares: { pnlDollars: -1_000, cagrPart: null, daysHeldShare: 0.8 }, coveredCalls: null, hedge: null });
+    expect(sharesOnly).toEqual({ shares: { pnlDollars: -1_000, cagrPart: null, daysHeldShare: 0.8 }, coveredCalls: null, hedge: null, leaps: null });
     expect(computePnlSources({ metrics, tradingDates, cycles: [], positions, callSaleYields: [], hedgeCostYields: [] })).toBeNull();
+  });
+
+  it("gives Vol Farmer v2's LEAPS a part of its own, from the cycles' leaps bucket, and none to the hedge", () => {
+    // A LEAPS Call bought Wednesday and still held: its mark is 3,000 under what it cost.
+    const leaps = { strategyKey: "leaps" as const, legs: [leg({ legType: "option", optionType: "call", multiplier: 100, quantity: 10, entryAt: "2026-03-04T15:00:00.000Z" })] };
+    const sources = computePnlSources({ metrics, tradingDates, cycles: [{ buckets: { ...buckets([1_000, 0], 0, 0, 0).buckets, leaps: bucket(-3_000) } }], positions: [positions[0]!, positions[1]!, leaps], callSaleYields: [], hedgeCostYields: [] })!;
+    expect(sources.leaps).toEqual({ pnlDollars: -3_000, cagrPart: expect.closeTo(-0.015, 12), daysHeldShare: 0.6 });
+    expect(sources.hedge).toBeNull();
+    // The shares are the rest after interest and every option's: 20,000 - 1,000 - (1,000 - 3,000).
+    expect(sources.shares!.pnlDollars).toBe(21_000);
   });
 });

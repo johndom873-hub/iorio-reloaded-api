@@ -30,8 +30,8 @@ import type { ClaudeCall } from "../llm/askPlutoThroughSubscription.js";
 import { backtestClaudeModel, backtestClaudeReasoningEffort } from "../llm/claudeSubscriptionModelClient.js";
 import { BacktestLlmSession, type BacktestLlmRound } from "./backtestLlmDecider.js";
 
-import { alignOpenOptionLegsToSplitFactor, creditInterest, settleExpiry, settleHedgePut } from "./ledger/ledgerEvents.js";
-import { ledgerCommittedDollars, ledgerHedgeLegsDueForSettlement, ledgerLastFilledActionAt, ledgerLegsDueForSettlement, ledgerNetLiquidationValue, ledgerSharesValue } from "./ledger/ledgerSelectors.js";
+import { alignOpenOptionLegsToSplitFactor, creditInterest, settleExpiry, settleHedgePut, settleLeapsCall } from "./ledger/ledgerEvents.js";
+import { ledgerCommittedDollars, ledgerHedgeLegsDueForSettlement, ledgerLastFilledActionAt, ledgerLeapsLegsDueForSettlement, ledgerLegsDueForSettlement, ledgerNetLiquidationValue, ledgerSharesValue } from "./ledger/ledgerSelectors.js";
 import { describeHedgeTotals, hedgeIsOn, summarizeHedge, type HedgePutQuoteSource } from "./backtestBaselineHedge.js";
 import { createSimulatedLedger, cycleSplitFactorFor, rememberedForRevision, requirePosition, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { loadOrInferSplitSchedule, requireSplitFactors, splitFactorOn, type SplitSchedule } from "./splitFactors.js";
@@ -704,8 +704,11 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         if (settlementClose.source === "intraday_bar") notes.push(noteFor(owner, `settled ${settlementDate} at the close of IBKR's last 30-minute bar (no daily bar)`));
         if (tradedScale !== 1) notes.push(`${contractLabel} was held across a split (×${Number(tradedScale.toFixed(4))}): settled on its cycle's scale at ${settlementClose.close.toFixed(2)}`);
       }
-      // A hedge Put still held at its expiry (no quote let the hedge sell it before): settled on the same close.
-      for (const leg of ledgerHedgeLegsDueForSettlement(ledger, addCalendarDays(todayIso, -1))) {
+      // A hedge Put still held at its expiry (no quote let the hedge sell it before), or a LEAPS Call held to its expiry:
+      // settled on the same close.
+      const longOptionsDueBy = addCalendarDays(todayIso, -1);
+      for (const leg of [...ledgerHedgeLegsDueForSettlement(ledger, longOptionsDueBy), ...ledgerLeapsLegsDueForSettlement(ledger, longOptionsDueBy)]) {
+        const isLeaps = requirePosition(ledger, leg.positionId).strategyKey === "leaps";
         const owner = symbolOfLeg(leg);
         const expiryDate = leg.expiryDate!;
         const cycleSplitFactor = cycleSplitFactorFor(ledger, owner.symbol, splitFactorToday(owner));
@@ -713,12 +716,13 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const settlementDate = closeOnExpiry || calendar.isSession(expiryDate) ? expiryDate : (calendar.sessionBefore(expiryDate) ?? expiryDate);
         const settlementClose = settlementDate === expiryDate ? closeOnExpiry : settlementCloseOnCycleScale(settlementDate, cycleSplitFactor, owner.bars, owner.intradayPrices);
         const tradedScale = cycleSplitFactor / (splitFactorOn(owner.schedule, expiryDate) ?? cycleSplitFactor);
-        const right = leg.optionType === "call" ? "C" : "P";
-        const contractLabel = describeOptionContract({ symbol: owner.symbol, strike: roundedStrike(leg.strikePrice! / tradedScale), right, expiry: expiryDate, dte: null });
-        if (!settlementClose) throw new Error(`Cannot settle the hedge's ${contractLabel}: the ${owner.symbol} data file has no IBKR daily or 30-minute bar for ${settlementDate}. Press Update on its row in Data files and run the session again.`);
-        const outcome = settleHedgePut(ledger, { legId: leg.id, expiryClose: settlementClose.close });
-        const intrinsic = right === "C" ? settlementClose.close - leg.strikePrice! : leg.strikePrice! - settlementClose.close;
-        notes.push(`${right === "C" ? "LEAPS" : "hedge"} ${contractLabel} ${settings.decisionMaker === "vol_farmer" || settings.decisionMaker === "vol_farmer_v2" ? "held to its expiry" : "still held at its expiry (no quote to sell it at)"}: ${outcome === "hedge_worthless" ? "expired worthless" : `sold at its intrinsic value, ${(intrinsic / tradedScale).toFixed(2)}`} at the ${(settlementClose.close / tradedScale).toFixed(2)} close`);
+        const contractLabel = describeOptionContract({ symbol: owner.symbol, strike: roundedStrike(leg.strikePrice! / tradedScale), right: isLeaps ? "C" : "P", expiry: expiryDate, dte: null });
+        if (!settlementClose) throw new Error(`Cannot settle the ${isLeaps ? "LEAPS" : "hedge's"} ${contractLabel}: the ${owner.symbol} data file has no IBKR daily or 30-minute bar for ${settlementDate}. Press Update on its row in Data files and run the session again.`);
+        const soldAtIntrinsic = isLeaps
+          ? settleLeapsCall(ledger, { legId: leg.id, expiryClose: settlementClose.close }) === "leaps_sold_at_intrinsic"
+          : settleHedgePut(ledger, { legId: leg.id, expiryClose: settlementClose.close }) === "hedge_sold_at_intrinsic";
+        const intrinsic = isLeaps ? settlementClose.close - leg.strikePrice! : leg.strikePrice! - settlementClose.close;
+        notes.push(`${isLeaps ? "LEAPS" : "hedge"} ${contractLabel} ${settings.decisionMaker === "vol_farmer" || settings.decisionMaker === "vol_farmer_v2" ? "held to its expiry" : "still held at its expiry (no quote to sell it at)"}: ${soldAtIntrinsic ? `sold at its intrinsic value, ${(intrinsic / tradedScale).toFixed(2)}` : "expired worthless"} at the ${(settlementClose.close / tradedScale).toFixed(2)} close`);
       }
 
       // b. Interest since the previous session day.
@@ -767,7 +771,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         return source;
       };
       /** The hedge's Puts and Vol Farmer v2's LEAPS Calls the 10:00 quotes left unmarked (past the 45-day window): marked from their own expiry's 10:00 quotes. Returns the legs still unmarked. */
-      const markLongDatedHedgeLegs = (entry: SessionSymbol, legs: readonly LedgerLeg[], splitFactor: number): LedgerLeg[] => {
+      const markLongDatedOptionLegs = (entry: SessionSymbol, legs: readonly LedgerLeg[], splitFactor: number): LedgerLeg[] => {
         const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
         return legs.filter((leg) => {
           if (leg.side !== "long" || leg.legType !== "option") return true;
@@ -854,7 +858,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           continue;
         }
         const unmarkedByTheDayQuotes = markLegs(entry, legsOfSymbol, stockPrice, quotes, splitFactor);
-        const unmarkedAtCapture = unmarkedByTheDayQuotes.length > 0 && hasFileDay && (hedgeOnFor(entry.symbol) || leapsOn) ? markLongDatedHedgeLegs(entry, unmarkedByTheDayQuotes, splitFactor) : unmarkedByTheDayQuotes;
+        const unmarkedAtCapture = unmarkedByTheDayQuotes.length > 0 && hasFileDay && (hedgeOnFor(entry.symbol) || leapsOn) ? markLongDatedOptionLegs(entry, unmarkedByTheDayQuotes, splitFactor) : unmarkedByTheDayQuotes;
         if (unmarkedAtCapture.length > 0 && hasFileDay) {
           for (const [legId, mark] of laterMarksOfDay(entry, unmarkedAtCapture, splitFactor)) {
             laterMarkByLegId.set(legId, mark);

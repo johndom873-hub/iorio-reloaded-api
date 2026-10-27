@@ -681,8 +681,8 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
     timeline: shown.rows.map((entry, shownIndex) => {
       const index = shown.sourceIndexes[shownIndex]!;
       const isSourceRow = row.timeline![index] === entry;
-      // A hedge's "Sold put" closes a long Put: not a sale held to the break-even, with no yield or delta recorded.
-      const sold = entry.bucket === "hedge" ? null : /^Sold (put|call) @/.exec(entry.label);
+      // A hedge's "Sold put" or a LEAPS' "Sold call" closes a long option: not a sale held to the break-even, with no yield or delta recorded.
+      const sold = entry.bucket === "hedge" || entry.bucket === "leaps" ? null : /^Sold (put|call) @/.exec(entry.label);
       const freeCashShare = freeCash?.shareAfter(entry.tradingDate, entry.at) ?? null;
       const crossing = entry.at !== null && crossingInstants.has(Date.parse(entry.at)) ? { crossing: true } : {};
       // A hedge Put's purchase (a Vol Farmer cycle shows a copy of it, its cost moved to the hand-over marks).

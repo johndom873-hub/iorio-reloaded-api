@@ -1221,7 +1221,7 @@ export interface BacktestPositionLeg {
 export interface BacktestPosition {
   positionId: string;
   symbol: string;
-  strategyKey: "cash_secured_put" | "covered_call" | "unstructured" | "hedge";
+  strategyKey: "cash_secured_put" | "covered_call" | "unstructured" | "hedge" | "leaps";
   status: "open" | "closed";
   openedAt: string;
   closedAt: string | null;
@@ -1303,7 +1303,7 @@ export interface BacktestFillsPage {
 /** The time of the capture's own look, "HH:MM" Eastern: the day's account mark and surface fit are taken then. */
 export const backtestCaptureLookTimeEt = "10:00";
 
-export type BacktestActionKind = "open_cash_secured_put" | "open_covered_call" | "roll" | "buy_shares" | "close_shares" | "close_leg" | "close_position" | "buy_hedge" | "sell_hedge";
+export type BacktestActionKind = "open_cash_secured_put" | "open_covered_call" | "roll" | "buy_shares" | "close_shares" | "close_leg" | "close_position" | "buy_hedge" | "sell_hedge" | "buy_leaps" | "sell_leaps";
 
 /** One thing Pluto did or tried in a pass: filled, or blocked with the gate that refused it. */
 export interface BacktestAction {
@@ -1378,7 +1378,8 @@ export interface BacktestCycle {
   freeCashShareLowest?: { share: number; on: string } | null;
   /** The cycle's session days with shares and no Call open, and its session days with shares (cycleNoCallDays.ts), read with the session's detail. */
   noCallDays?: { days: number; shareDays: number };
-  buckets: { csp: BacktestCycleBucket; unstructured: BacktestCycleBucket; cc: BacktestCycleBucket; hedge: BacktestCycleBucket };
+  /** leaps: absent on cycles stored before the LEAPS had a bucket of their own. */
+  buckets: { csp: BacktestCycleBucket; unstructured: BacktestCycleBucket; cc: BacktestCycleBucket; hedge: BacktestCycleBucket; leaps?: BacktestCycleBucket };
   dataFlags: string[];
 }
 
@@ -1584,7 +1585,7 @@ export interface BacktestPnlSource {
   daysHeldShare: number;
 }
 
-/** The session tiles' Shares, Covered Calls and Hedge, the whole account's; null on a session without wheel cycles. */
+/** The session tiles' Shares, Covered Calls, Hedge and LEAPS, the whole account's; null on a session without wheel cycles. */
 export interface BacktestPnlSources {
   /** The account's P&L less its interest and every option's: what the shares made, sold and still held at the account's last marks; null when none were held. */
   shares: BacktestPnlSource | null;
@@ -1592,6 +1593,8 @@ export interface BacktestPnlSources {
   coveredCalls: (BacktestPnlSource & { quotedYieldMedian: number | null; quotedCount: number }) | null;
   /** The hedge Puts: what they were sold or settled for less their cost and commissions, an open one at its last mark; with the median yearly cost of each purchase (hedgePutCostYield). */
   hedge: (BacktestPnlSource & { quotedCostMedian: number | null; quotedCount: number }) | null;
+  /** Vol Farmer v2's LEAPS Calls: what they were sold or settled for less their cost and commissions, an open one at its last mark. */
+  leaps: BacktestPnlSource | null;
 }
 
 /** Per-ticker figures over the session's positions, option sales and cycles. */
