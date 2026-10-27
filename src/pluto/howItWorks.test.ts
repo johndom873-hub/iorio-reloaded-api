@@ -10,15 +10,11 @@ import type { PlutoSettings } from "./settingsStore.js";
 /** Pluto's settings at their migration defaults. */
 const settings: PlutoSettings = {
   ...plutoLadderSettingsFixture,
-  capitalBudgetPct: 50, maxTickerPctOfBudget: 10, maxSectorPctOfBudget: 100, maxOpenPositions: 15, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
-  minGrade: "good", minEdgeYieldPct: 15, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
-  maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3, stressRiskBudgetPct: 1, stressSigmas: 2,
-  windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3,
-  maxEdgeMarginDriftPts: 10, tickerCooldownMinutes: 60, maxFillSlippagePct: 5,
-  modelId: "openai/gpt-6-luna", reasoningEffort: "medium", callTimeoutSeconds: 90, dailyCostCeilingUsd: 1, confidenceFloor: 0.6, consecutiveModelFailuresBreaker: 3, promptVersion: "v4.4",
-  daySignalsPollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, perTickerModelCooldownMinutes: 5, maxEnabledTickers: 15, messageRateLimitPerSecond: 8,
+  capitalBudgetPct: 50, maxActionsPerSession: 10,
+  windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2,
+  maxQuoteAgeMinutes: 10, maxFillSlippagePct: 5,
+  bandQuotePollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, maxEnabledTickers: 15,
   crashLoopRestartsPerHour: 3, telegramVerbosity: "actions",
-  unstructuredCloseMinPct: 1, unstructuredCloseMinDollars: 50, buybackMinDte: 2,
   updatedAt: "2026-10-15T00:00:00.000Z", updatedByUserId: null,
 };
 const figures = { unfilledOrderCancelMinutes: 15 };

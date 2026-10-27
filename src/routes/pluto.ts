@@ -88,8 +88,6 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
       netLiquidationValue,
       netLiquidationValueAsOf: lastSnapshot ? String(lastSnapshot.snapshot_date).slice(0, 10) : null,
       capitalBudgetPct: settings.capitalBudgetPct,
-      orderSizePctOfBudget: settings.orderSizePctOfBudget,
-      maxOpenPositions: settings.maxOpenPositions,
     },
     agent: agentHealth
       ? {

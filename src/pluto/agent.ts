@@ -30,7 +30,7 @@ import { easternIsoDate, easternMinutesOfDay } from "../lib/easternIsoDate.js";
 //   - a 45 s heartbeat row (worker_health, process_name "pluto_agent") for the screen;
 //   - a 60 s housekeeping tick: settings, state, the watched stock lines, the opening analysis;
 //   - a 60 s readiness tick: the pre-open check (readiness.ts) on the platform readiness timetable;
-//   - one continuous loop: every daySignalsPollSeconds it reads the ladder band quotes and analyses the tickers whose
+//   - one continuous loop: every bandQuotePollSeconds it reads the ladder band quotes and analyses the tickers whose
 //     contracts carry a quote newer than the one Pluto last analysed; events that change a decision without a new
 //     quote (an order ending, a cooldown ending, a position closing, a settings change) queue a forced round;
 //   - rounds run one at a time, never overlapping; order watches outlive their round.
@@ -44,12 +44,7 @@ export const plutoProcessName = "pluto_agent";
 
 // Settings that shape how Pluto operates but never what it would decide: changing only these does
 // not warrant a forced round.
-export const settingsFieldsThatNeverChangeADecision = new Set([
-  "telegramVerbosity", "crashLoopRestartsPerHour", "messageRateLimitPerSecond", "burstLines", "burstSettleSeconds",
-  "daySignalsPollSeconds", "callTimeoutSeconds", "maxEnabledTickers", "promptVersion",
-  // Sizing only: how many contracts, never whether to trade.
-  "stressRiskBudgetPct", "stressSigmas",
-]);
+export const settingsFieldsThatNeverChangeADecision = new Set(["telegramVerbosity", "crashLoopRestartsPerHour", "burstLines", "burstSettleSeconds", "bandQuotePollSeconds", "maxEnabledTickers"]);
 
 export class PlutoAgent {
   private readonly api: InternalApiClient;
@@ -433,7 +428,7 @@ export class PlutoAgent {
     const outcome = (result as { outcome?: string } | null)?.outcome ?? "unknown";
     this.queueForcedRound("order_ended", { symbol, outcome }, null);
     const filled = outcome === "filled" || outcome === "partially_filled" || outcome === "cancelled_partially_filled";
-    const cooldownMinutes = this.settings?.tickerCooldownMinutes ?? 0;
+    const cooldownMinutes = this.settings?.ladderTickerCooldownMinutes ?? 0;
     if (!filled || cooldownMinutes <= 0) return;
     const timer = setTimeout(() => {
       this.cooldownTimers.delete(timer);
@@ -452,7 +447,7 @@ export class PlutoAgent {
         console.error(`Pluto loop iteration failed: ${error instanceof Error ? error.stack ?? error.message : error}`);
       }
       if (this.stopped) break;
-      const waitMs = Math.max(1, this.settings?.daySignalsPollSeconds ?? 1) * 1000;
+      const waitMs = Math.max(1, this.settings?.bandQuotePollSeconds ?? 1) * 1000;
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, waitMs);
         this.wakeLoop = () => {

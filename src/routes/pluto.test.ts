@@ -97,22 +97,22 @@ async function put(path: string, body: unknown) {
   return { status: response.status, json: (await response.json()) as any };
 }
 
-describe("PUT /pluto/settings: the edge-margin drift gate (model review, 2026-10-10)", () => {
+describe("PUT /pluto/settings: ladder-only settings", () => {
   // The settings row is shared by every test file, so this writes back the value it holds instead of changing it.
-  it("stores and returns maxEdgeMarginDriftPts, and refuses the retired volatility-point field and out-of-range values", async () => {
+  it("stores and returns bandQuotePollSeconds, and refuses the retired model and strategy fields", async () => {
     const { status, json: current } = await get("/settings");
     expect(status).toBe(200);
-    expect(typeof current.maxEdgeMarginDriftPts).toBe("number");
-    expect(current).not.toHaveProperty("maxEdgeDriftVp");
-    const saved = await put("/settings", { maxEdgeMarginDriftPts: current.maxEdgeMarginDriftPts });
+    expect(typeof current.bandQuotePollSeconds).toBe("number");
+    expect(current).not.toHaveProperty("maxEdgeMarginDriftPts");
+    expect(current).not.toHaveProperty("executionStrategy");
+    const saved = await put("/settings", { bandQuotePollSeconds: current.bandQuotePollSeconds });
     expect(saved.status).toBe(200);
-    expect(saved.json.maxEdgeMarginDriftPts).toBe(current.maxEdgeMarginDriftPts);
-    expect((await get("/settings")).json.maxEdgeMarginDriftPts).toBe(current.maxEdgeMarginDriftPts);
-    const retired = await put("/settings", { maxEdgeDriftVp: 1 });
-    expect(retired.status).toBe(400);
-    expect(retired.json.error).toMatch(/not a Pluto setting/);
-    expect((await put("/settings", { maxEdgeMarginDriftPts: 101 })).status).toBe(400);
-    expect((await put("/settings", { maxEdgeMarginDriftPts: -1 })).status).toBe(400);
+    expect(saved.json.bandQuotePollSeconds).toBe(current.bandQuotePollSeconds);
+    for (const retired of [{ maxEdgeMarginDriftPts: 1 }, { executionStrategy: "cc_put_ladder" }, { minGrade: "good" }]) {
+      const refused = await put("/settings", retired);
+      expect(refused.status).toBe(400);
+      expect(refused.json.error).toMatch(/not a Pluto setting/);
+    }
   });
 });
 

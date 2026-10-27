@@ -212,9 +212,9 @@ describe("backtest routes", () => {
     expect(status).toBe(200);
     const template = body as BacktestSettingsTemplate;
     const plutoRow = await testDb("pluto_settings").where({ id: 1 }).first();
-    // The policy, model, Pluto and Kelly values are still snapshotted; no row shows them.
+    // The policy, Pluto and Kelly values are still snapshotted; no row shows them.
     expect(template.settings.kellyFraction).toBe(kellyFraction);
-    expect(template.settings.pluto.minEdgeYieldPct).toBe(Number(plutoRow.min_edge_yield_pct));
+    expect(template.settings.pluto.capitalBudgetPct).toBe(Number(plutoRow.capital_budget_pct));
     expect(template.settings.trading).not.toHaveProperty("commissionEstimator");
     expect(template.settings).toMatchObject({ decisionMaker: labDecisionMaker, policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
     expect(template.rows.map((row) => `${row.section} · ${row.group}`)).toEqual([

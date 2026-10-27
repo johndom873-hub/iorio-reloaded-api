@@ -22,7 +22,7 @@ const { plutoRouter } = await import("../routes/pluto.js");
 const testDb: Knex = db;
 const marker = `settings-versions-test-${Date.now()}`;
 const createdPassIds: string[] = [];
-type PassJson = { id: string; settingsSnapshot: unknown; promptVersion: string | null };
+type PassJson = { id: string; settingsSnapshot: unknown };
 let server: Server;
 let baseUrl: string;
 let userId: string;
@@ -100,11 +100,11 @@ describe("pass routes", () => {
   let olderPassId: string;
 
   beforeAll(async () => {
-    const versionId = await ensurePlutoSettingsVersion({ marker, promptVersion: "v-test-route" });
-    const olderVersionId = await ensurePlutoSettingsVersion({ marker, promptVersion: "v-test-route-older" });
+    const versionId = await ensurePlutoSettingsVersion({ marker, capitalBudgetPct: 30 });
+    const olderVersionId = await ensurePlutoSettingsVersion({ marker, capitalBudgetPct: 25 });
     // Year 2100: newer than every other test file's passes, so these lead GET /passes.
-    const [versioned] = await testDb("pluto_passes").insert({ started_at: "2100-01-01T00:02:00Z", trigger: "manual", trigger_detail: JSON.stringify({ test: marker }), model_called: true, settings_version_id: versionId }).returning("id");
-    const [older] = await testDb("pluto_passes").insert({ started_at: "2100-01-01T00:01:00Z", trigger: "manual", trigger_detail: JSON.stringify({ test: marker }), model_called: true, settings_version_id: olderVersionId }).returning("id");
+    const [versioned] = await testDb("pluto_passes").insert({ started_at: "2100-01-01T00:02:00Z", trigger: "manual", trigger_detail: JSON.stringify({ test: marker }), settings_version_id: versionId }).returning("id");
+    const [older] = await testDb("pluto_passes").insert({ started_at: "2100-01-01T00:01:00Z", trigger: "manual", trigger_detail: JSON.stringify({ test: marker }), settings_version_id: olderVersionId }).returning("id");
     versionedPassId = versioned.id;
     olderPassId = older.id;
     createdPassIds.push(versionedPassId, olderPassId);
@@ -113,23 +113,17 @@ describe("pass routes", () => {
   it("GET /passes/:id reads the settings through the version", async () => {
     const versioned = (await (await fetch(`${baseUrl}/pluto/passes/${versionedPassId}`)).json()) as PassJson;
     expect(versioned.id).toBe(versionedPassId);
-    expect(versioned.settingsSnapshot).toEqual({ marker, promptVersion: "v-test-route" });
-    expect(versioned.promptVersion).toBe("v-test-route");
+    expect(versioned.settingsSnapshot).toEqual({ marker, capitalBudgetPct: 30 });
+    expect(versioned).not.toHaveProperty("promptVersion");
     const older = (await (await fetch(`${baseUrl}/pluto/passes/${olderPassId}`)).json()) as PassJson;
-    expect(older.promptVersion).toBe("v-test-route-older");
+    expect(older.settingsSnapshot).toEqual({ marker, capitalBudgetPct: 25 });
   });
 
-  it("GET /passes and GET /model-decisions carry each pass's prompt version", async () => {
+  it("GET /passes carries each pass's settings", async () => {
     const passes = (await (await fetch(`${baseUrl}/pluto/passes?limit=2`)).json()) as PassJson[];
-    expect(passes.map((pass) => [pass.id, pass.promptVersion])).toEqual([
-      [versionedPassId, "v-test-route"],
-      [olderPassId, "v-test-route-older"],
-    ]);
-    const decisions = (await (await fetch(`${baseUrl}/pluto/model-decisions?since=2100-01-01T00:00:00Z`)).json()) as { passes: PassJson[]; total: number };
-    expect(decisions.total).toBe(2);
-    expect(decisions.passes.map((pass) => [pass.id, pass.promptVersion])).toEqual([
-      [versionedPassId, "v-test-route"],
-      [olderPassId, "v-test-route-older"],
+    expect(passes.map((pass) => [pass.id, pass.settingsSnapshot])).toEqual([
+      [versionedPassId, { marker, capitalBudgetPct: 30 }],
+      [olderPassId, { marker, capitalBudgetPct: 25 }],
     ]);
   });
 });

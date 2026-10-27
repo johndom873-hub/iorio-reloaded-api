@@ -6,79 +6,30 @@ import { db } from "../db/connection.js";
 // writer through updatePlutoSettings, which records field-level diffs with who/when.
 // Defaults were approved by Marcelo 2026-09-28 and live in the migration.
 
-export type PlutoGrade = "strong" | "good" | "weak";
-export type PlutoReasoningEffort = "low" | "medium" | "high";
 export type PlutoTelegramVerbosity = "actions" | "off";
 
 export interface PlutoSettings {
   // Capital
   capitalBudgetPct: number;
-  maxTickerPctOfBudget: number;
-  maxSectorPctOfBudget: number;
-  maxOpenPositions: number;
   maxActionsPerSession: number;
-  /** The standard order: this share of Pluto's capital budget (budget = capitalBudgetPct of NLV). */
-  orderSizePctOfBudget: number;
-  minCashReservePct: number;
-  // Candidate quality
-  minGrade: PlutoGrade;
-  /** Lowest Edge Yield, % a year on the exposure, a candidate needs (rolls: the net roll Edge $ on the new leg's exposure and days). */
-  minEdgeYieldPct: number;
-  maxAbsDelta: number;
-  minDte: number;
-  maxDte: number;
-  minAnnualizedYieldPct: number;
-  maxSpreadPct: number;
-  minOpenInterest: number;
-  minSessionVolume: number;
-  maxQuoteAgeMinutes: number;
-  maxContractsVolumeSharePct: number;
-  // Model risk
-  maxSliceRmseVp: number;
-  minSlicePointCount: number;
-  maxMidVsSurfaceIvVp: number;
-  maxIvShiftVp: number;
-  /** A ticker whose move today is more than this many times its normal daily move (expectedDailyMovePct) is out for the round. */
-  maxDayMoveMultiple: number;
-  /** Stress cap: an order's new risk may lose at most this % of the account in a stressSigmas move to expiry. 0 = off. */
-  stressRiskBudgetPct: number;
-  /** Stress cap: the adverse move to expiry, in forecast standard deviations, before the fixed add-ons (postModelGates.ts). */
-  stressSigmas: number;
   // Market
   windowStartEt: string;
   windowEndEt: string;
   dailyLossBreakerPct: number;
-  spyStressBreakerPct: number;
   // Execution
-  /** Refuse an order when the edge margin moved more than this many percentage points since the model decided (2026-10-10). */
-  maxEdgeMarginDriftPts: number;
-  /** Minutes after a filled Pluto action on a symbol before Pluto may act on it again; 0 = no cooldown. */
-  tickerCooldownMinutes: number;
+  /** A ladder band quote older than this is left out of the look. */
+  maxQuoteAgeMinutes: number;
   /** A fill this far (% of the reference price) past the reference trips the fill_slippage breaker. */
   maxFillSlippagePct: number;
-  // Model
-  modelId: string;
-  reasoningEffort: PlutoReasoningEffort;
-  callTimeoutSeconds: number;
-  dailyCostCeilingUsd: number;
-  confidenceFloor: number;
-  consecutiveModelFailuresBreaker: number;
-  promptVersion: string;
   // Real-time
-  /** How often the loop checks the Day Signals table for contracts quoted since Pluto last analysed them. */
-  daySignalsPollSeconds: number;
+  /** How often the loop checks the ladder's band quotes for contracts quoted since Pluto last analysed them. */
+  bandQuotePollSeconds: number;
   burstLines: number;
   burstSettleSeconds: number;
-  perTickerModelCooldownMinutes: number;
   maxEnabledTickers: number;
-  messageRateLimitPerSecond: number;
   // Operational
   crashLoopRestartsPerHour: number;
   telegramVerbosity: PlutoTelegramVerbosity;
-  // Closing (Formulas P1 / P2)
-  unstructuredCloseMinPct: number;
-  unstructuredCloseMinDollars: number;
-  buybackMinDte: number;
   // CC + Put Ladder (the backtest's baseline keys with a "ladder" prefix; loadLadderSettingsForTicker maps them back)
   ladderMinAbsDelta: number;
   ladderMaxAbsDelta: number;
@@ -94,7 +45,7 @@ export interface PlutoSettings {
   ladderShockLookbackYears: number;
   /** At most this many of a ticker's ladder orders work at once; the rest go at the next looks. */
   ladderMaxWorkingOrdersPerTicker: number;
-  /** The ladder's SPY stress breaker (Edge Margin: spyStressBreakerPct); the daily-loss breaker is one value for both. */
+  /** The ladder's SPY stress breaker. */
   ladderSpyStressBreakerPct: number;
   /** Minutes after a filled ladder order on a ticker before the ladder may act on it again; 0 = no cooldown. */
   ladderTickerCooldownMinutes: number;
@@ -114,56 +65,18 @@ type ColumnKind = "number" | "integer" | "text";
 /** camelCase field → snake_case column, with the kind that decides parsing and validation. */
 export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedAt" | "updatedByUserId">, { column: string; kind: ColumnKind; min?: number; max?: number; oneOf?: readonly string[] }> = {
   capitalBudgetPct: { column: "capital_budget_pct", kind: "number", min: 0, max: 100 },
-  maxTickerPctOfBudget: { column: "max_ticker_pct_of_budget", kind: "number", min: 0, max: 100 },
-  maxSectorPctOfBudget: { column: "max_sector_pct_of_budget", kind: "number", min: 0, max: 100 },
-  maxOpenPositions: { column: "max_open_positions", kind: "integer", min: 0 },
   maxActionsPerSession: { column: "max_actions_per_session", kind: "integer", min: 0 },
-  orderSizePctOfBudget: { column: "order_size_pct_of_budget", kind: "number", min: 0, max: 100 },
-  minCashReservePct: { column: "min_cash_reserve_pct", kind: "number", min: 0, max: 100 },
-  minGrade: { column: "min_grade", kind: "text", oneOf: ["strong", "good", "weak"] },
-  minEdgeYieldPct: { column: "min_edge_yield_pct", kind: "number", min: 0 },
-  maxAbsDelta: { column: "max_abs_delta", kind: "number", min: 0, max: 1 },
-  minDte: { column: "min_dte", kind: "integer", min: 0 },
-  maxDte: { column: "max_dte", kind: "integer", min: 0 },
-  minAnnualizedYieldPct: { column: "min_annualized_yield_pct", kind: "number", min: 0 },
-  maxSpreadPct: { column: "max_spread_pct", kind: "number", min: 0 },
-  minOpenInterest: { column: "min_open_interest", kind: "integer", min: 0 },
-  minSessionVolume: { column: "min_session_volume", kind: "integer", min: 0 },
   maxQuoteAgeMinutes: { column: "max_quote_age_minutes", kind: "integer", min: 0 },
-  maxContractsVolumeSharePct: { column: "max_contracts_volume_share_pct", kind: "number", min: 0, max: 100 },
-  maxSliceRmseVp: { column: "max_slice_rmse_vp", kind: "number", min: 0 },
-  minSlicePointCount: { column: "min_slice_point_count", kind: "integer", min: 0 },
-  maxMidVsSurfaceIvVp: { column: "max_mid_vs_surface_iv_vp", kind: "number", min: 0 },
-  maxIvShiftVp: { column: "max_iv_shift_vp", kind: "number", min: 0 },
-  // 0 would block every ticker that moved at all; the column is decimal(6,2). 100× normal is effectively off.
-  maxDayMoveMultiple: { column: "max_day_move_multiple", kind: "number", min: 0.5, max: 100 },
-  stressRiskBudgetPct: { column: "stress_risk_budget_pct", kind: "number", min: 0, max: 100 },
-  stressSigmas: { column: "stress_sigmas", kind: "number", min: 0.5, max: 10 },
   windowStartEt: { column: "window_start_et", kind: "text" },
   windowEndEt: { column: "window_end_et", kind: "text" },
   dailyLossBreakerPct: { column: "daily_loss_breaker_pct", kind: "number", min: 0, max: 100 },
-  spyStressBreakerPct: { column: "spy_stress_breaker_pct", kind: "number", min: 0, max: 100 },
-  maxEdgeMarginDriftPts: { column: "max_edge_margin_drift_pts", kind: "number", min: 0, max: 100 },
-  tickerCooldownMinutes: { column: "ticker_cooldown_minutes", kind: "integer", min: 0 },
   maxFillSlippagePct: { column: "max_fill_slippage_pct", kind: "number", min: 0, max: 100 },
-  modelId: { column: "model_id", kind: "text" },
-  reasoningEffort: { column: "reasoning_effort", kind: "text", oneOf: ["low", "medium", "high"] },
-  callTimeoutSeconds: { column: "call_timeout_seconds", kind: "integer", min: 5 },
-  dailyCostCeilingUsd: { column: "daily_cost_ceiling_usd", kind: "number", min: 0 },
-  confidenceFloor: { column: "confidence_floor", kind: "number", min: 0, max: 1 },
-  consecutiveModelFailuresBreaker: { column: "consecutive_model_failures_breaker", kind: "integer", min: 1 },
-  promptVersion: { column: "prompt_version", kind: "text" },
-  daySignalsPollSeconds: { column: "day_signals_poll_seconds", kind: "integer", min: 1 },
+  bandQuotePollSeconds: { column: "day_signals_poll_seconds", kind: "integer", min: 1 },
   burstLines: { column: "burst_lines", kind: "integer", min: 1 },
   burstSettleSeconds: { column: "burst_settle_seconds", kind: "integer", min: 1 },
-  perTickerModelCooldownMinutes: { column: "per_ticker_model_cooldown_minutes", kind: "integer", min: 0 },
   maxEnabledTickers: { column: "max_enabled_tickers", kind: "integer", min: 0 },
-  messageRateLimitPerSecond: { column: "message_rate_limit_per_second", kind: "integer", min: 1 },
   crashLoopRestartsPerHour: { column: "crash_loop_restarts_per_hour", kind: "integer", min: 1 },
   telegramVerbosity: { column: "telegram_verbosity", kind: "text", oneOf: ["actions", "off"] },
-  unstructuredCloseMinPct: { column: "unstructured_close_min_pct", kind: "number", min: 0 },
-  unstructuredCloseMinDollars: { column: "unstructured_close_min_dollars", kind: "number", min: 0 },
-  buybackMinDte: { column: "buyback_min_dte", kind: "integer", min: 0 },
   // The ladder's bounds are the backtest's (validateBaselineSettings), so every live value can be backtested.
   ladderMinAbsDelta: { column: "ladder_min_abs_delta", kind: "number", min: 0, max: 1 },
   ladderMaxAbsDelta: { column: "ladder_max_abs_delta", kind: "number", min: 0, max: 1 },
@@ -224,7 +137,6 @@ export function validatePlutoSettingsInput(input: PlutoSettingsInput, current: P
     if (spec.max !== undefined && value > spec.max) return `${field} cannot be above ${spec.max}.`;
   }
   const merged = { ...current, ...input };
-  if (merged.minDte > merged.maxDte) return "minDte cannot exceed maxDte.";
   if (merged.windowStartEt >= merged.windowEndEt) return "windowStartEt must be before windowEndEt.";
   if (merged.ladderMinAbsDelta <= 0) return "ladderMinAbsDelta must be above 0.";
   if (merged.ladderMinAbsDelta > merged.ladderMaxAbsDelta) return "ladderMinAbsDelta cannot exceed ladderMaxAbsDelta.";
