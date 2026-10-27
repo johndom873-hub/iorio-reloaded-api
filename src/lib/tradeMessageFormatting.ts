@@ -8,6 +8,7 @@ const strategyLabels: Record<string, string> = {
   covered_call: "covered call",
   cash_secured_put: "cash-secured put",
   hedge: "hedge",
+  leaps: "LEAPS",
   unstructured: "unstructured",
 };
 

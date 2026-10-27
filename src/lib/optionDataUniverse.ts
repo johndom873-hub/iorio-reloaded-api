@@ -20,7 +20,7 @@ export async function loadOptionDataUniverse(options: { excludeBeingPrepared?: b
       const shortlisted = builder.whereIn("t.id", activeShortlistTickerIdsQuery());
       if (options.excludeBeingPrepared) excludeTickersBeingPrepared(shortlisted, "t.id");
     })
-    .orWhereIn("t.id", db("positions").where({ status: "open" }).whereNot({ strategy_key: "hedge" }).select("ticker_id"))
+    .orWhereIn("t.id", db("positions").where({ status: "open" }).whereNotIn("strategy_key", ["hedge", "leaps"]).select("ticker_id"))
     .select("t.id as tickerId", "t.symbol", "t.company_name as companyName", "t.ibkr_contract_id as contractId")
     .orderBy("t.symbol");
   return rows.map((row) => ({ tickerId: row.tickerId, symbol: row.symbol, companyName: row.companyName, contractId: row.contractId === null ? null : Number(row.contractId) }));

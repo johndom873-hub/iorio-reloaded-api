@@ -24,7 +24,7 @@ export async function fetchBreakEvenByPositionId(tickerIds: string[]): Promise<M
     db.raw(
       `SELECT p.id, p.ticker_id AS "tickerId",
               COALESCE((SELECT SUM(pl.quantity) FROM position_legs pl WHERE pl.position_id = p.id AND pl.leg_type = 'stock' AND pl.side = 'long' AND pl.exit_at IS NULL), 0)::int AS "sharesHeld"
-       FROM positions p WHERE p.status = 'open' AND p.strategy_key <> 'hedge' AND p.ticker_id = ANY(?)`,
+       FROM positions p WHERE p.status = 'open' AND p.strategy_key NOT IN ('hedge', 'leaps') AND p.ticker_id = ANY(?)`,
       [uniqueTickerIds],
     ),
     // Shares received: recorded with the link; a link from before that column, the receiving position's first stock leg as

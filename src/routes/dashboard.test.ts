@@ -194,6 +194,7 @@ describe("GET /dashboard/portfolio", () => {
     { strategyKey: "cash_secured_put", exposure: 2000 },
     { strategyKey: "unstructured", exposure: 25 },
     { strategyKey: "hedge", exposure: 10 },
+    { strategyKey: "leaps", exposure: 7 },
     { strategyKey: "something_else", exposure: 999_999 },
   ];
 
@@ -201,14 +202,14 @@ describe("GET /dashboard/portfolio", () => {
     computePositionExposuresMock.mockResolvedValue(exposures);
     fetchAccountSummaryMock.mockResolvedValue({ totalCashValue: 8000 });
     computeCashLockedInCspsMock.mockResolvedValue(2000);
-    expect((await get("/dashboard/portfolio")).json).toEqual({ coveredCalls: 1500.5, cashSecuredPuts: 2000, unstructured: 25, hedge: 10, availableCash: 6000 });
+    expect((await get("/dashboard/portfolio")).json).toEqual({ coveredCalls: 1500.5, cashSecuredPuts: 2000, unstructured: 25, hedge: 10, leaps: 7, availableCash: 6000 });
   });
 
   it("answers zeros for an empty book", async () => {
     computePositionExposuresMock.mockResolvedValue([]);
     fetchAccountSummaryMock.mockResolvedValue({ totalCashValue: 100 });
     computeCashLockedInCspsMock.mockResolvedValue(0);
-    expect((await get("/dashboard/portfolio")).json).toEqual({ coveredCalls: 0, cashSecuredPuts: 0, unstructured: 0, hedge: 0, availableCash: 100 });
+    expect((await get("/dashboard/portfolio")).json).toEqual({ coveredCalls: 0, cashSecuredPuts: 0, unstructured: 0, hedge: 0, leaps: 0, availableCash: 100 });
   });
 
   it("still answers (available cash null) when the account lookup fails", async () => {
@@ -238,8 +239,8 @@ describe("GET /dashboard/portfolio/stream", () => {
     expect(response.headers.get("cache-control")).toBe("no-cache");
     const frames = response.text.split("\n\n").filter((frame) => frame.startsWith("data: ")).map((frame) => JSON.parse(frame.slice(6)));
     expect(frames).toEqual([
-      { coveredCalls: 100, cashSecuredPuts: 0, unstructured: 0, hedge: 5, availableCash: 6000 },
-      { coveredCalls: 0, cashSecuredPuts: 300, unstructured: 0, hedge: 0, availableCash: 6000 },
+      { coveredCalls: 100, cashSecuredPuts: 0, unstructured: 0, hedge: 5, leaps: 0, availableCash: 6000 },
+      { coveredCalls: 0, cashSecuredPuts: 300, unstructured: 0, hedge: 0, leaps: 0, availableCash: 6000 },
     ]);
   });
 
@@ -434,6 +435,7 @@ describe("GET /dashboard/summary", () => {
         { strategyKey: "cash_secured_put", realizedPnl: 0, unrealizedPnl: 0 },
         { strategyKey: "unstructured", realizedPnl: 0, unrealizedPnl: 0 },
         { strategyKey: "hedge", realizedPnl: 0, unrealizedPnl: 0 },
+        { strategyKey: "leaps", realizedPnl: 0, unrealizedPnl: 0 },
       ],
     });
   });
@@ -532,7 +534,7 @@ describe("GET /dashboard/summary", () => {
   it("maps the cycle buckets onto the strategy rows (covered call = cc, cash-secured put = csp) with their YTD realized and unrealized", async () => {
     const bucket = (realizedYear: number, unrealizedYear: number) => ({ day: 0, week: 0, month: 0, year: realizedYear + unrealizedYear, realizedYear, unrealizedYear });
     computeCyclePeriodPnlMock.mockResolvedValue({
-      buckets: { cc: bucket(1, 2), csp: bucket(3, 4), unstructured: bucket(5, 6), hedge: bucket(7, 8) },
+      buckets: { cc: bucket(1, 2), csp: bucket(3, 4), unstructured: bucket(5, 6), hedge: bucket(7, 8), leaps: bucket(9, 10) },
       excludedByPeriod: { day: [], week: [], month: [], year: [] },
     });
     expect((await get("/dashboard/summary")).json.strategyBreakdown).toEqual([
@@ -540,6 +542,7 @@ describe("GET /dashboard/summary", () => {
       { strategyKey: "cash_secured_put", realizedPnl: 3, unrealizedPnl: 4 },
       { strategyKey: "unstructured", realizedPnl: 5, unrealizedPnl: 6 },
       { strategyKey: "hedge", realizedPnl: 7, unrealizedPnl: 8 },
+      { strategyKey: "leaps", realizedPnl: 9, unrealizedPnl: 10 },
     ]);
   });
 });
@@ -552,15 +555,16 @@ describe("GET /dashboard/period-pnl-by-strategy", () => {
       cashSecuredPuts: zeros,
       unstructured: zeros,
       hedge: zeros,
+      leaps: zeros,
       residual: zeros,
       total: zeros,
     });
   });
 
-  it("residual = account total - the four strategy buckets, per period; total is the account total", async () => {
+  it("residual = account total - the five strategy buckets, per period; total is the account total", async () => {
     const period = (day: number, week: number, month: number, year: number) => ({ day, week, month, year, realizedYear: 0, unrealizedYear: 0 });
     computeCyclePeriodPnlMock.mockResolvedValue({
-      buckets: { csp: period(10, 20, 30, 40), cc: period(1, 2, 3, 4), unstructured: period(5, 6, 7, 8), hedge: period(100, 200, 300, 400) },
+      buckets: { csp: period(10, 20, 30, 40), cc: period(1, 2, 3, 4), unstructured: period(5, 6, 7, 8), hedge: period(100, 200, 300, 400), leaps: period(1000, 2000, 3000, 4000) },
       excludedByPeriod: { day: [], week: [], month: [], year: [] },
     });
     // The Day card needs two consecutive sessions; today's row is in the week, month and year windows.
@@ -578,16 +582,17 @@ describe("GET /dashboard/period-pnl-by-strategy", () => {
     expect(json.cashSecuredPuts).toEqual({ day: 10, week: 20, month: 30, year: 40 });
     expect(json.unstructured).toEqual({ day: 5, week: 6, month: 7, year: 8 });
     expect(json.hedge).toEqual({ day: 100, week: 200, month: 300, year: 400 });
+    expect(json.leaps).toEqual({ day: 1000, week: 2000, month: 3000, year: 4000 });
     // Account: day 1000 (previous row is the previous session), week/month/year contain today's 1000 (the previous row's daily P&L is 0).
     expect(json.total).toEqual({ day: 1000, week: 1000, month: 1000, year: 1000 });
-    // Buckets add up to 116 / 228 / 340 / 452.
-    expect(json.residual).toEqual({ day: 1000 - 116, week: 1000 - 228, month: 1000 - 340, year: 1000 - 452 });
+    // Buckets add up to 1,116 / 2,228 / 3,340 / 4,452.
+    expect(json.residual).toEqual({ day: 1000 - 1116, week: 1000 - 2228, month: 1000 - 3340, year: 1000 - 4452 });
   });
 
   it("a negative residual (buckets exceed the account total) is reported as is", async () => {
     const period = (value: number) => ({ day: value, week: value, month: value, year: value, realizedYear: 0, unrealizedYear: 0 });
     computeCyclePeriodPnlMock.mockResolvedValue({
-      buckets: { csp: period(50), cc: period(0), unstructured: period(0), hedge: period(0) },
+      buckets: { csp: period(50), cc: period(0), unstructured: period(0), hedge: period(0), leaps: period(0) },
       excludedByPeriod: { day: [], week: [], month: [], year: [] },
     });
     const today = await databaseToday();

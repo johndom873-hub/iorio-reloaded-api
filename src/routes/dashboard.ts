@@ -13,14 +13,14 @@ import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // The known strategy buckets the Dashboard breaks P&L/allocation down by —
 // "unstructured" folds leftover legs that didn't cleanly resolve into a CC
-// or CSP, "hedge" is the long options bought outside the app (approved
-// 2026-10-01), "residual" is whatever's left after subtracting all four known
+// or CSP, "hedge" is the long Puts bought outside the app (approved
+// 2026-10-01), "leaps" the long Calls (Marcelo 2026-10-27), "residual" is whatever's left after subtracting all five known
 // buckets from the trusted account-level total (interest, dividends, fees
 // not tied to a specific trade, cash deposits/withdrawals — none of which
 // this platform captures individually yet, decided 2026-08-28).
-const knownStrategyKeys = ["covered_call", "cash_secured_put", "unstructured", "hedge"] as const;
+const knownStrategyKeys = ["covered_call", "cash_secured_put", "unstructured", "hedge", "leaps"] as const;
 // The Dashboard's P&L cards use the fair cycle attribution (cyclePeriodPnl.ts), whose buckets are named differently.
-const cycleBucketByStrategyKey = { covered_call: "cc", cash_secured_put: "csp", unstructured: "unstructured", hedge: "hedge" } as const;
+const cycleBucketByStrategyKey = { covered_call: "cc", cash_secured_put: "csp", unstructured: "unstructured", hedge: "hedge", leaps: "leaps" } as const;
 
 export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
@@ -208,7 +208,7 @@ dashboardRouter.get("/portfolio", async (_request, response) => {
     computeCashLockedInCsps(),
   ]);
 
-  const byStrategy: Record<string, number> = { covered_call: 0, cash_secured_put: 0, unstructured: 0, hedge: 0 };
+  const byStrategy: Record<string, number> = { covered_call: 0, cash_secured_put: 0, unstructured: 0, hedge: 0, leaps: 0 };
   for (const row of exposures) {
     if (row.strategyKey in byStrategy) byStrategy[row.strategyKey] = (byStrategy[row.strategyKey] ?? 0) + row.exposure;
   }
@@ -221,6 +221,7 @@ dashboardRouter.get("/portfolio", async (_request, response) => {
     cashSecuredPuts: byStrategy.cash_secured_put,
     unstructured: byStrategy.unstructured,
     hedge: byStrategy.hedge,
+    leaps: byStrategy.leaps,
     availableCash,
   });
 });
@@ -256,7 +257,7 @@ dashboardRouter.get("/portfolio/stream", async (request, response) => {
   try {
     await streamPositionExposures(
       serializeAsyncCalls(async (exposures) => {
-        const byStrategy: Record<string, number> = { covered_call: 0, cash_secured_put: 0, unstructured: 0, hedge: 0 };
+        const byStrategy: Record<string, number> = { covered_call: 0, cash_secured_put: 0, unstructured: 0, hedge: 0, leaps: 0 };
         for (const row of exposures) {
           if (row.strategyKey in byStrategy) byStrategy[row.strategyKey] = (byStrategy[row.strategyKey] ?? 0) + row.exposure;
         }
@@ -265,6 +266,7 @@ dashboardRouter.get("/portfolio/stream", async (request, response) => {
           cashSecuredPuts: byStrategy.cash_secured_put,
           unstructured: byStrategy.unstructured,
           hedge: byStrategy.hedge,
+          leaps: byStrategy.leaps,
           availableCash,
         });
       }),
@@ -315,6 +317,7 @@ dashboardRouter.get("/period-pnl-by-strategy", async (_request, response) => {
     cashSecuredPuts: rows.cash_secured_put,
     unstructured: rows.unstructured,
     hedge: rows.hedge,
+    leaps: rows.leaps,
     residual,
     total: accountTotal,
   });
@@ -361,6 +364,7 @@ dashboardRouter.get("/history", async (request, response) => {
     const cashSecuredPuts = strategiesForDay.cash_secured_put ?? 0;
     const unstructured = strategiesForDay.unstructured ?? 0;
     const hedge = strategiesForDay.hedge ?? 0;
+    const leaps = strategiesForDay.leaps ?? 0;
     const dailyPnl = row.dailyPnl === null ? null : Number(row.dailyPnl);
     return {
       ...row,
@@ -368,7 +372,8 @@ dashboardRouter.get("/history", async (request, response) => {
       cashSecuredPuts,
       unstructured,
       hedge,
-      residual: dailyPnl === null ? null : dailyPnl - coveredCalls - cashSecuredPuts - unstructured - hedge,
+      leaps,
+      residual: dailyPnl === null ? null : dailyPnl - coveredCalls - cashSecuredPuts - unstructured - hedge - leaps,
     };
   });
 

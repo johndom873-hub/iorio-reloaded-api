@@ -657,15 +657,15 @@ describe("reconcileHeldPositions — shares sold in several fills keep their qua
   });
 });
 
-describe("reconcileHeldPositions — long options are hedges", () => {
-  it("a long call alone becomes one hedge position with a long leg at the per-share cost, not an unstructured position", async () => {
+describe("reconcileHeldPositions — a long Put is a hedge, a long Call a LEAPS", () => {
+  it("a long call alone becomes one LEAPS position with a long leg at the per-share cost, not an unstructured position", async () => {
     const ticker = await createTicker();
     const callConId = (nextConId += 1);
     await runPass([heldLongOption(ticker.symbol, callConId, OptionType.Call, 82, isoDateDaysFromToday(600), 391.8, 110)]);
     await runPass([heldLongOption(ticker.symbol, callConId, OptionType.Call, 82, isoDateDaysFromToday(600), 391.8, 110)]);
 
     const positions = await positionsFor(ticker.id);
-    expect(positions.map((position) => position.strategy_key)).toEqual(["hedge"]);
+    expect(positions.map((position) => position.strategy_key)).toEqual(["leaps"]);
     expect(positions[0]!.unstructured_reason).toBeNull();
     const legs = await legsFor(positions[0]!.id);
     expect(legs).toHaveLength(1);
@@ -674,7 +674,19 @@ describe("reconcileHeldPositions — long options are hedges", () => {
     expect(await anomaliesFor(positions[0]!.id)).toHaveLength(0);
   });
 
-  it("shares plus a long call (a CSP was assigned): the shares stay a leftover-stock position and the call stays its own hedge", async () => {
+  it("a long put alone becomes one hedge position", async () => {
+    const ticker = await createTicker();
+    const putConId = (nextConId += 1);
+    await runPass([heldLongOption(ticker.symbol, putConId, OptionType.Put, 70, isoDateDaysFromToday(90), 250, 2)]);
+    await runPass([heldLongOption(ticker.symbol, putConId, OptionType.Put, 70, isoDateDaysFromToday(90), 250, 2)]);
+
+    const positions = await positionsFor(ticker.id);
+    expect(positions.map((position) => position.strategy_key)).toEqual(["hedge"]);
+    expect((await legsFor(positions[0]!.id))[0]).toMatchObject({ leg_type: "option", side: "long", quantity: 2, option_type: "put" });
+    expect(await anomaliesFor(positions[0]!.id)).toHaveLength(0);
+  });
+
+  it("shares plus a long call (a CSP was assigned): the shares stay a leftover-stock position and the call stays its own LEAPS", async () => {
     const ticker = await createTicker();
     const stockConId = (nextConId += 1);
     const callConId = (nextConId += 1);
@@ -683,10 +695,10 @@ describe("reconcileHeldPositions — long options are hedges", () => {
     await runPass(held);
 
     const positions = await positionsFor(ticker.id);
-    expect(positions.map((position) => position.strategy_key).sort()).toEqual(["hedge", "unstructured"]);
-    const hedge = positions.find((position) => position.strategy_key === "hedge")!;
+    expect(positions.map((position) => position.strategy_key).sort()).toEqual(["leaps", "unstructured"]);
+    const leaps = positions.find((position) => position.strategy_key === "leaps")!;
     const unstructured = positions.find((position) => position.strategy_key === "unstructured")!;
-    expect((await legsFor(hedge.id)).map((leg) => leg.leg_type)).toEqual(["option"]);
+    expect((await legsFor(leaps.id)).map((leg) => leg.leg_type)).toEqual(["option"]);
     expect((await legsFor(unstructured.id)).map((leg) => leg.leg_type)).toEqual(["stock"]);
   });
 
@@ -704,7 +716,7 @@ describe("reconcileHeldPositions — long options are hedges", () => {
     await runPass(held);
 
     const positions = await positionsFor(ticker.id);
-    expect(positions.map((position) => position.strategy_key).sort()).toEqual(["covered_call", "hedge"]);
+    expect(positions.map((position) => position.strategy_key).sort()).toEqual(["covered_call", "leaps"]);
     const openLegConIds = (await testDb("position_legs").whereIn("position_id", positions.map((position) => position.id)).whereNull("exit_at")).map((leg) => leg.ibkr_contract_id);
     expect(openLegConIds).toContain(String(longCallConId));
   });
@@ -721,10 +733,10 @@ describe("reconcileHeldPositions — long options are hedges", () => {
     await runPass(held);
 
     const positions = await positionsFor(ticker.id);
-    expect(positions.map((position) => position.strategy_key).sort()).toEqual(["cash_secured_put", "hedge"]);
+    expect(positions.map((position) => position.strategy_key).sort()).toEqual(["cash_secured_put", "leaps"]);
   });
 
-  it("a hedge sold at IBKR closes with its exit price from the closing fill", async () => {
+  it("a LEAPS sold at IBKR closes with its exit price from the closing fill", async () => {
     const ticker = await createTicker();
     const callConId = (nextConId += 1);
     await runPass([heldLongOption(ticker.symbol, callConId, OptionType.Call, 82, isoDateDaysFromToday(600), 400)]);

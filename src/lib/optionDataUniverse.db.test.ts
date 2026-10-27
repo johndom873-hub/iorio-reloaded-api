@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import knexLibrary, { type Knex } from "knex";
 
 // The option-data universe (optionDataUniverse.ts) against the test database: active Shortlist entries plus open positions
-// other than a hedge, a removed entry out, a ticker being set up left out of the structure refresh unless a position keeps
+// other than a hedge or a LEAPS, a removed entry out, a ticker being set up left out of the structure refresh unless a position keeps
 // it in; and its consumers: the stale daily-bar check and Price Performance's 3M/1Y reference closes. Only the session
 // clock is mocked; assertions are narrowed to this file's rows.
 vi.mock("../db/connection.js", async () => {
@@ -38,10 +38,10 @@ async function insertTicker(label: string): Promise<{ id: string; symbol: string
 }
 
 // Inserted closed and flipped open once its leg exists: another file's reconciliation sweep closes an open position with no open leg.
-async function insertOpenPosition(tickerId: string, strategyKey: "cash_secured_put" | "hedge"): Promise<void> {
+async function insertOpenPosition(tickerId: string, strategyKey: "cash_secured_put" | "hedge" | "leaps"): Promise<void> {
   const [position] = await testDb("positions").insert({ strategy_key: strategyKey, ticker_id: tickerId, status: "closed", closed_at: new Date() }).returning("id");
   createdPositionIds.push(position.id);
-  const leg = strategyKey === "hedge" ? { side: "long", option_type: "call" } : { side: "short", option_type: "put" };
+  const leg = strategyKey === "hedge" ? { side: "long", option_type: "put" } : strategyKey === "leaps" ? { side: "long", option_type: "call" } : { side: "short", option_type: "put" };
   await testDb("position_legs").insert({ position_id: position.id, leg_type: "option", quantity: 1, multiplier: 100, strike_price: 50, expiry_date: "2031-01-17", entry_price: 1, entry_at: new Date(), ...leg });
   await testDb("positions").where({ id: position.id }).update({ status: "open", closed_at: null });
 }
@@ -59,6 +59,7 @@ beforeAll(async () => {
   const preparingWithPosition = await insertTicker("PREPPOS");
   const offListPut = await insertTicker("PUT");
   const offListHedge = await insertTicker("HDG");
+  const offListLeaps = await insertTicker("LEAPS");
   await testDb("shortlist_entries").insert([
     { ticker_id: listed.id, added_by_user_id: userId },
     // DELETE only sets removed_at: the row stays.
@@ -69,6 +70,7 @@ beforeAll(async () => {
   await insertOpenPosition(preparingWithPosition.id, "cash_secured_put");
   await insertOpenPosition(offListPut.id, "cash_secured_put");
   await insertOpenPosition(offListHedge.id, "hedge");
+  await insertOpenPosition(offListLeaps.id, "leaps");
   await testDb("ticker_backfill_runs").insert([
     { ticker_id: preparing.id, status: "running", steps: JSON.stringify([]), progress_percent: 0 },
     { ticker_id: preparingWithPosition.id, status: "running", steps: JSON.stringify([]), progress_percent: 0 },
@@ -102,7 +104,7 @@ const mineSymbols = (symbols: string[]) =>
     .sort();
 
 describe("loadOptionDataUniverse", () => {
-  it("is every active Shortlist entry plus every open position other than a hedge; a removed entry and a hedge alone are out", async () => {
+  it("is every active Shortlist entry plus every open position other than a hedge or a LEAPS; a removed entry, a hedge and a LEAPS alone are out", async () => {
     expect(mineSymbols((await loadOptionDataUniverse()).map((ticker) => ticker.symbol))).toEqual(["LIST", "PREP", "PREPPOS", "PUT"]);
   });
 

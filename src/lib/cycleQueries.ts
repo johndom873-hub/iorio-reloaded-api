@@ -36,7 +36,7 @@ export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Pr
 
   const [optionRows, stockLegRows, stockTradeRows, barRows, snapshotRows, tickerRows] = await Promise.all([
     db.raw(
-      `SELECT pl.id, pl.position_id AS "positionId", p.ticker_id AS "tickerId", pl.side, pl.option_type AS "optionType",
+      `SELECT pl.id, pl.position_id AS "positionId", p.ticker_id AS "tickerId", pl.side, pl.option_type AS "optionType", p.strategy_key = 'leaps' AS leaps,
               pl.strike_price::float AS strike, pl.quantity, pl.multiplier, pl.entry_price::float AS "entryPrice", pl.entry_at AS "entryAt",
               pl.exit_price::float AS "exitPrice", pl.exit_at AS "exitAt", pl.expiry_date::text AS "expiryDate",
               COALESCE((SELECT SUM(tr.commission) FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade), 0)::float AS "closingCommission",

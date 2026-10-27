@@ -211,9 +211,9 @@ describe("list_trades", () => {
     expect(paths).toEqual(["/trade-blotter?symbol=A%26B%3DC"]);
   });
 
-  it("accepts the hedge and unstructured strategies the shortlist does not", () => {
+  it("accepts the hedge, LEAPS and unstructured strategies the shortlist does not", () => {
     const properties = (toolNamed("list_trades").parameters as { properties: { strategyKey: { enum: string[] } } }).properties;
-    expect(properties.strategyKey.enum).toEqual(["covered_call", "cash_secured_put", "hedge", "unstructured"]);
+    expect(properties.strategyKey.enum).toEqual(["covered_call", "cash_secured_put", "hedge", "leaps", "unstructured"]);
   });
 });
 

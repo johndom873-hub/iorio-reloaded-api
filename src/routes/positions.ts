@@ -48,8 +48,8 @@ positionsRouter.use(requireAuth);
 // v1 strategy scope — matches shortlist.ts.
 const validStrategyKeys = ["covered_call", "cash_secured_put"];
 // Reading (not creating) also covers "unstructured" (bare stock and anything fitting neither strategy
-// is a real open holding, Genosuke filters by it) and "hedge" (a long option bought outside the app).
-const validListStrategyKeys = [...validStrategyKeys, "unstructured", "hedge"];
+// is a real open holding, Genosuke filters by it), "hedge" (a long Put bought outside the app) and "leaps" (a long Call).
+const validListStrategyKeys = [...validStrategyKeys, "unstructured", "hedge", "leaps"];
 const validStatuses = ["open", "closed"];
 const orderRequestsChannel = "order_requests_channel";
 
@@ -227,11 +227,11 @@ positionsRouter.get("/cycles", async (request, response) => {
 positionsRouter.get("/cycles/marks", getCycleMarksHandler);
 
 // Fair strategy scoreboard (approved 2026-09-19): every cycle of every symbol attributed to the CSP / Unstructured /
-// CC / Hedge buckets. Cycles whose ledger can't be trusted (dataFlags) are left out of the totals and counted instead.
+// CC / Hedge / LEAPS buckets. Cycles whose ledger can't be trusted (dataFlags) are left out of the totals and counted instead.
 positionsRouter.get("/cycles/scoreboard", async (_request, response) => {
   const all = await fetchCyclesForTickers("all");
   const zero = () => ({ premium: 0, stock: 0, total: 0, capital: 0 });
-  const buckets = { csp: zero(), unstructured: zero(), cc: zero(), hedge: zero() };
+  const buckets = { csp: zero(), unstructured: zero(), cc: zero(), hedge: zero(), leaps: zero() };
   let cyclesIncluded = 0;
   const excluded: { symbol: string; reason: string }[] = [];
   for (const { symbol, cycles } of all) {
@@ -241,7 +241,7 @@ positionsRouter.get("/cycles/scoreboard", async (_request, response) => {
         continue;
       }
       cyclesIncluded += 1;
-      for (const key of ["csp", "unstructured", "cc", "hedge"] as const) {
+      for (const key of ["csp", "unstructured", "cc", "hedge", "leaps"] as const) {
         buckets[key].premium += cycle.buckets[key].premium;
         buckets[key].stock += cycle.buckets[key].stock;
         buckets[key].total += cycle.buckets[key].total;
@@ -251,8 +251,8 @@ positionsRouter.get("/cycles/scoreboard", async (_request, response) => {
   }
   const withReturn = (bucket: ReturnType<typeof zero>) => ({ ...bucket, returnOnCapital: bucket.capital > 0 ? bucket.total / bucket.capital : null });
   response.json({
-    buckets: { csp: withReturn(buckets.csp), unstructured: withReturn(buckets.unstructured), cc: withReturn(buckets.cc), hedge: withReturn(buckets.hedge) },
-    total: buckets.csp.total + buckets.unstructured.total + buckets.cc.total + buckets.hedge.total,
+    buckets: { csp: withReturn(buckets.csp), unstructured: withReturn(buckets.unstructured), cc: withReturn(buckets.cc), hedge: withReturn(buckets.hedge), leaps: withReturn(buckets.leaps) },
+    total: buckets.csp.total + buckets.unstructured.total + buckets.cc.total + buckets.hedge.total + buckets.leaps.total,
     cyclesIncluded,
     cyclesExcluded: excluded,
   });

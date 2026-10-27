@@ -93,7 +93,7 @@ afterAll(async () => {
 });
 
 describe("loadPlutoBook (test DB)", () => {
-  it("scopes the book to open, non-hedge positions on bot-enabled, not-removed shortlist tickers, and labels Pluto's own", async () => {
+  it("scopes the book to open, non-hedge, non-LEAPS positions on bot-enabled, not-removed shortlist tickers, and labels Pluto's own", async () => {
     try {
       const enabled = await createTicker({ botEnabled: true });
       const disabled = await createTicker({ botEnabled: false });
@@ -106,7 +106,8 @@ describe("loadPlutoBook (test DB)", () => {
       // Shares that came from Pluto's put (assignment) are Pluto's too, transitively.
       const fromPluto = await createPosition(enabled.id, "unstructured", "open", stock(100, 45));
       await testDb("position_share_sources").insert({ position_id: fromPluto.positionId, source_position_id: plutoOwn.positionId });
-      const hedge = await createPosition(enabled.id, "hedge", "open", { leg_type: "option", side: "long", quantity: 2, option_type: "call", strike_price: 60, expiry_date: "2031-12-19", entry_price: 3 });
+      const hedge = await createPosition(enabled.id, "hedge", "open", { leg_type: "option", side: "long", quantity: 2, option_type: "put", strike_price: 30, expiry_date: "2031-12-19", entry_price: 3 });
+      const leaps = await createPosition(enabled.id, "leaps", "open", { leg_type: "option", side: "long", quantity: 2, option_type: "call", strike_price: 60, expiry_date: "2031-12-19", entry_price: 3 });
       const closed = await createPosition(enabled.id, "cash_secured_put", "closed", put(35));
       const plutoOnDisabled = await createPosition(disabled.id, "cash_secured_put", "open", put(40));
       await fillFromPlutoOrder(plutoOnDisabled.legId, disabled.symbol);
@@ -116,7 +117,7 @@ describe("loadPlutoBook (test DB)", () => {
       const book = await loadPlutoBook();
       const ids = book.openPositions.map((position) => position.positionId);
       expect(ids).toEqual(expect.arrayContaining([human.positionId, plutoOwn.positionId, fromPluto.positionId]));
-      for (const excluded of [hedge, closed, plutoOnDisabled, onRemoved, onNotListed]) expect(ids).not.toContain(excluded.positionId);
+      for (const excluded of [hedge, leaps, closed, plutoOnDisabled, onRemoved, onNotListed]) expect(ids).not.toContain(excluded.positionId);
       // No duplicates from the shortlist join.
       expect(new Set(ids).size).toBe(ids.length);
 

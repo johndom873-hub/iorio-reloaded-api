@@ -510,15 +510,16 @@ describe("GET /positions/cycles, /cycles/marks, /cycles/scoreboard and route dis
 
   const bucketOf = (premium: number, stock: number, total: number, capital: number) => ({ premium, stock, total, capital });
   const emptyBucket = bucketOf(0, 0, 0, 0);
-  const cycleOf = (buckets: Partial<Record<"csp" | "unstructured" | "cc" | "hedge", ReturnType<typeof bucketOf>>>, dataFlags: string[] = []) => ({
+  const cycleOf = (buckets: Partial<Record<"csp" | "unstructured" | "cc" | "hedge" | "leaps", ReturnType<typeof bucketOf>>>, dataFlags: string[] = []) => ({
     dataFlags,
-    buckets: { csp: emptyBucket, unstructured: emptyBucket, cc: emptyBucket, hedge: emptyBucket, ...buckets },
+    buckets: { csp: emptyBucket, unstructured: emptyBucket, cc: emptyBucket, hedge: emptyBucket, leaps: emptyBucket, ...buckets },
   });
 
   it("totals the strategy scoreboard across symbols, with the return on capital per bucket", async () => {
     fetchCyclesForTickersMock.mockResolvedValue([
       { symbol: "AAA", tickerId: "t1", cycles: [cycleOf({ csp: bucketOf(200, 0, 200, 9000), cc: bucketOf(100, 50, 150, 5000) }), cycleOf({ csp: bucketOf(100, 0, 100, 1000) })] },
       { symbol: "BBB", tickerId: "t2", cycles: [cycleOf({ cc: bucketOf(40, -10, 30, 5000), hedge: bucketOf(-20, 0, -20, 300) })] },
+      { symbol: "TLT", tickerId: "t3", cycles: [cycleOf({ leaps: bucketOf(60, 0, 60, 1200) })] },
     ]);
     const response = await call("GET", "/positions/cycles/scoreboard");
     expect(response.status).toBe(200);
@@ -532,9 +533,11 @@ describe("GET /positions/cycles, /cycles/marks, /cycles/scoreboard and route dis
         // 180 total on 10000 capital.
         cc: { premium: 140, stock: 40, total: 180, capital: 10_000, returnOnCapital: 0.018 },
         hedge: { premium: -20, stock: 0, total: -20, capital: 300, returnOnCapital: -20 / 300 },
+        // 60 total on 1200 capital.
+        leaps: { premium: 60, stock: 0, total: 60, capital: 1200, returnOnCapital: 0.05 },
       },
-      total: 300 + 0 + 180 - 20,
-      cyclesIncluded: 3,
+      total: 300 + 0 + 180 - 20 + 60,
+      cyclesIncluded: 4,
       cyclesExcluded: [],
     });
   });

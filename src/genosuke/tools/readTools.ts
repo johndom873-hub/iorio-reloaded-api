@@ -14,8 +14,8 @@ import { fetchLogsFromBetterStack, type LogSourceApp } from "../../lib/bettersta
 import { annotateLegOpenState } from "../confirmationText.js";
 import type { GenosukeTool } from "./types.js";
 
-// The blotter route accepts "hedge" and "unstructured" besides the two option strategies.
-const blotterStrategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put", "hedge", "unstructured"] };
+// The blotter route accepts "hedge", "leaps" and "unstructured" besides the two option strategies.
+const blotterStrategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put", "hedge", "leaps", "unstructured"] };
 
 export const readTools: GenosukeTool[] = [
   {

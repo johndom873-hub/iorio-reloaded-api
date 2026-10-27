@@ -39,7 +39,7 @@ export interface CycleOptionLegRow {
   /** The timeline's label for the leg's opening or closing row in place of the fill's: a simulated book's bookkeeping moves name themselves. Never selected. */
   openingRowLabel?: string;
   closingRowLabel?: string;
-  /** The leg's position is a LEAPS (see CycleOptionLeg). Never selected; a simulated ledger states it. */
+  /** The leg's position is a LEAPS (see CycleOptionLeg): selected by the cycle loader from its strategy; a simulated ledger states it. */
   leaps?: boolean;
 }
 
@@ -103,7 +103,7 @@ export interface CycleInputRows {
 function optionLegsOfTicker<Row extends CycleOptionLegRow>(rows: readonly Row[], tickerId: string) {
   return rows
     .filter((row) => row.tickerId === tickerId)
-    .map(({ assignedBeforeExpiry, ...row }) => ({ ...row, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt), ...(assignedBeforeExpiry && row.settledAs === undefined ? { settledAs: "assigned" as const } : {}) }));
+    .map(({ assignedBeforeExpiry, leaps, ...row }) => ({ ...row, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt), ...(assignedBeforeExpiry && row.settledAs === undefined ? { settledAs: "assigned" as const } : {}), ...(leaps ? { leaps: true } : {}) }));
 }
 
 function stockTradesOfTicker(rows: readonly CycleStockTradeRow[], tickerId: string): CycleStockTrade[] {

@@ -603,14 +603,14 @@ async function syncHeldStructures(bySymbol: Map<string, IbkrHeldPosition[]>, hel
       (p) => p.contract.secType === SecType.OPT && p.contract.right === OptionType.Put && p.quantity < 0,
     );
 
-    // A long option is never part of a wheel: one hedge position per distinct contract, handled before
+    // A long option is never part of a wheel: one hedge (Put) or LEAPS (Call) position per distinct contract, handled before
     // (and independent of) the stock / short-call pairing below, exactly like the short puts. Left in
     // the pairing it would merge with leftover shares into one unstructured position, or (when a covered
     // call is present) never get a leg at all and trip the reconciliation check every 10 minutes.
     const longOptionLegs = positionsForSymbol.filter((p) => p.contract.secType === SecType.OPT && p.quantity > 0);
     const sortedLongOptionLegs = [...longOptionLegs].sort((a, b) => (a.contract.conId ?? 0) - (b.contract.conId ?? 0));
     for (const longOptionLeg of sortedLongOptionLegs) {
-      await upsertHedgePosition(symbol, longOptionLeg);
+      await upsertLongOptionPosition(symbol, longOptionLeg);
     }
 
     // One position per distinct short put contract (mirrors
@@ -1286,11 +1286,12 @@ async function upsertSplitCashSecuredPutPosition(symbol: string, putLeg: IbkrHel
   await upsertPositionLeg(positionId!, putLeg, "short");
 }
 
-// One hedge position per distinct long option contract (approved 2026-10-01: a long option bought
-// directly at IBKR, e.g. the long TLT call that hedges the cash-secured puts, is its own strategy
-// instead of "unstructured"). Position and leg are created from what IBKR holds; the leg's own
-// quantity/cost sync and closing run through the same shared paths as every other leg.
-async function upsertHedgePosition(symbol: string, optionLeg: IbkrHeldPosition): Promise<void> {
+// One position per distinct long option contract (approved 2026-10-01: a long option bought directly at
+// IBKR is its own strategy instead of "unstructured"): a long Put is a "hedge", a long Call a "leaps"
+// (Marcelo 2026-10-27), e.g. the long TLT call. Position and leg are created from what IBKR holds; the
+// leg's own quantity/cost sync and closing run through the same shared paths as every other leg.
+async function upsertLongOptionPosition(symbol: string, optionLeg: IbkrHeldPosition): Promise<void> {
+  const strategyKey = optionLeg.contract.right === OptionType.Call ? "leaps" : "hedge";
   const conId = String(optionLeg.contract.conId);
   const existingLeg = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").first();
   let positionId = existingLeg?.position_id as string | undefined;
@@ -1301,15 +1302,15 @@ async function upsertHedgePosition(symbol: string, optionLeg: IbkrHeldPosition):
       console.warn(`reconcileHeldPositions: no tickers row for ${symbol} — skipping sync until it's added via the Screener.`);
       return;
     }
-    const [newPosition] = await db("positions").insert({ strategy_key: "hedge", ticker_id: ticker.id, status: "open" }).returning(["id"]);
+    const [newPosition] = await db("positions").insert({ strategy_key: strategyKey, ticker_id: ticker.id, status: "open" }).returning(["id"]);
     positionId = newPosition.id;
     await publishNotification({ type: "position_opened", positionId: positionId!, symbol });
   } else {
     // Labels are immutable (see reconcileHeldPositions): a long option sitting on another strategy's
     // position can only be older data, so report it instead of relabelling.
     const owner = await db("positions").where({ id: positionId }).first("strategy_key");
-    if (owner?.strategy_key !== "hedge") {
-      console.warn(`upsertHedgePosition(${symbol}): long option leg ${existingLeg!.id} sits on position ${positionId} labelled ${owner?.strategy_key} — left as-is.`);
+    if (owner?.strategy_key !== strategyKey) {
+      console.warn(`upsertLongOptionPosition(${symbol}): long option leg ${existingLeg!.id} sits on position ${positionId} labelled ${owner?.strategy_key} — left as-is.`);
     }
   }
   await upsertPositionLeg(positionId!, optionLeg, "long");
