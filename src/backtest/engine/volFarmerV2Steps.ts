@@ -34,9 +34,13 @@ import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchas
 //      no LEAPS since it holds them: of the Calls of the first listed expiry at least leapsMinDte days out (spread within
 //      the limit, bid ≥ $0.05), the one whose |delta| (its own IV, on the forward) is nearest leapsAbsDelta; as many
 //      contracts as min(the free cash, leapsMaxAccountPct % of the book's cap base; 0: no cap) pays for (fill +
-//      commission), no more than its ask offered where the quote shows it, tried again at each look until one is bought
-//      (strategy "leaps", its own records: buy_leaps, sell_leaps). It is sold at the first look after the second position
-//      is called away (the session's fill rule); held to its expiry, the session settles it at its intrinsic value.
+//      commission): its intended count N, fixed then. The backtest buys no more than its ask offered; tried again at each
+//      look until one is bought (strategy "leaps", its own records: buy_leaps, sell_leaps). Bought short of N (the ask's
+//      size in the backtest, a partial fill live), it is topped up at the next looks with the same contract, N − held
+//      contracts, each top-up no more than the free cash then pays for (and its ask offers, in the backtest), until N are
+//      held or the second position is called away (Marcelo 2026-10-27). It is sold whole at the first look after the
+//      second position is called away (the session's fill rule); held to its expiry, the session settles it at its
+//      intrinsic value.
 // The first position's Calls are struck above the second's break-even (step 3's strike rule), so the second is called away
 // first or with it; a first position called away with the second's Puts open leaves them to their expiry, the same day.
 // When nothing is held, the next cycle starts at the next look (the backtest's next day when it decides at 10:00 only). A
@@ -76,7 +80,8 @@ export interface VolFarmerV2SymbolState {
   potDollars: number;
   first: VolFarmerV2Position | null;
   second: VolFarmerV2Position | null;
-  leaps: { legId: string; expiry: string; strike: number } | null;
+  /** The LEAPS held: one leg per purchase (the first and its top-ups), all of one contract, and the count intended. */
+  leaps: { legIds: string[]; expiry: string; strike: number; intendedContracts: number } | null;
   /** The second position holding shares now has bought its LEAPS (one per holding). */
   leapsBought: boolean;
   /** The second position was called away and a LEAPS is still to be sold. */
@@ -173,6 +178,8 @@ export interface VolFarmerV2Market {
   stockCommissionDollars(shares: number): number;
   /** What the LEAPS cap is a share of, as its note names it ("the account"). */
   leapsCapBaseLabel: string;
+  /** The backtest buys a LEAPS no larger than its ask's size; live, the order fills what the market offers. */
+  capsLeapsAtAskSize: boolean;
 }
 
 /** A Call the look sells: on held shares, or with the shares a new cycle buys. */
@@ -207,7 +214,8 @@ export interface VolFarmerV2LeapsPurchase {
 }
 
 export interface VolFarmerV2LeapsSale {
-  legId: string;
+  /** Every open leg of the LEAPS, sold as one order. */
+  legIds: string[];
   expiry: string;
   strike: number;
   contracts: number;
@@ -293,11 +301,18 @@ function reconcile(book: VolFarmerV2Book, state: VolFarmerV2SymbolState, notes: 
     state.leapsTrigger = null;
     if (state.leaps !== null) state.leapsToSell = true;
   }
-  const leapsLeg = state.leaps === null ? undefined : book.leg(state.leaps.legId);
-  if (state.leaps !== null && leapsLeg !== undefined && leapsLeg.closed) {
+  if (state.leaps !== null && openLeapsLegs(book, state.leaps).length === 0 && state.leaps.legIds.some((legId) => book.leg(legId) !== undefined)) {
     state.leaps = null;
     state.leapsToSell = false;
   }
+}
+
+/** The LEAPS' legs still held, with their contracts. */
+function openLeapsLegs(book: VolFarmerV2Book, leaps: NonNullable<VolFarmerV2SymbolState["leaps"]>): { legId: string; contracts: number }[] {
+  return leaps.legIds.flatMap((legId) => {
+    const leg = book.leg(legId);
+    return leg !== undefined && !leg.closed ? [{ legId, contracts: leg.contracts }] : [];
+  });
 }
 
 /** The candidate whose volume covers `wanted(candidate)` contracts, in their order; else the one covering the most. */
@@ -464,9 +479,13 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
     }
   }
 
-  // 4. The LEAPS, once the second position holds shares no Call at or above its break-even fits.
+  // 4. The LEAPS, once the second position holds shares no Call at or above its break-even fits; one bought short of its
+  // intended count at an earlier look is topped up while the second position holds its shares.
   if (secondFindsNoCall && state.second !== null && state.second.shares > 0 && state.leaps === null && !state.leapsBought) {
     say(buyLeaps(input, breakEvenAsTraded(state.second)!));
+  } else if (state.leaps !== null && !state.leapsToSell && state.second !== null && state.second.shares > 0) {
+    const toppedUp = topUpLeaps(input);
+    if (toppedUp !== null) say(toppedUp);
   }
   return finish();
 }
@@ -555,8 +574,8 @@ function buyLeaps(input: VolFarmerV2LookInput, secondBreakEvenAsTraded: number):
   const cashText = capped ? `free cash ${formatWholeDollars(freeCash)}, LEAPS cap ${formatWholeDollars(capBase * (v2.leapsMaxAccountPct / 100))} (${v2.leapsMaxAccountPct}% of ${market.leapsCapBaseLabel} ${formatWholeDollars(capBase)})` : `free cash ${formatWholeDollars(freeCash)}`;
   const affordable = contractsAffordable(budget, leaps.fillPrice, market.optionCommissionDollars);
   if (affordable < 1) return `no LEAPS: one contract of the ${leaps.strike} Call costs ${formatWholeDollars(contractCost)}, more than ${capped ? `${formatWholeDollars(budget)} (${cashText})` : `the free cash (${formatWholeDollars(freeCash)})`}`;
-  // No more than the ask offered (Marcelo 2026-10-27): long-dated Calls trade rarely, but are quoted deep.
-  const offered = leaps.askSize ?? 0;
+  // The backtest buys no more than the ask offered (Marcelo 2026-10-27): long-dated Calls trade rarely, but are quoted deep.
+  const offered = market.capsLeapsAtAskSize ? (leaps.askSize ?? 0) : affordable;
   if (offered < 1) return `no LEAPS: the ${leaps.strike} Call shows no size at its ask`;
   const contracts = Math.min(affordable, offered);
   const dte = daysToExpiry(expiry, todayIso);
@@ -573,18 +592,54 @@ function buyLeaps(input: VolFarmerV2LookInput, secondBreakEvenAsTraded: number):
     chosenBecause: `vol farmer v2: the second position has no Call at or above its break-even; of the first expiry ${v2.leapsMinDte} or more days out, the Call whose |delta| is nearest ${v2.leapsAbsDelta}, with ${capped ? `the free cash up to the LEAPS cap (${v2.leapsMaxAccountPct}% of ${market.leapsCapBaseLabel})` : "all the free cash"}, up to the contracts offered at its ask`,
     candidateScores: { bid: leaps.bid, ask: leaps.ask, askSize: leaps.askSize, dte, stockPrice, impliedVolatility: leaps.impliedVolatility, delta: leaps.delta, freeCash, costDollars: leaps.fillPrice * sharesPerContract * contracts + market.optionCommissionDollars(contracts), ...(capped ? { accountValue: capBase, leapsBudget: budget } : {}) },
   });
-  state.leaps = { legId, expiry, strike: leaps.strike };
+  state.leaps = { legIds: [legId], expiry, strike: leaps.strike, intendedContracts: affordable };
   state.leapsBought = true;
   log.boughtOn = todayIso;
   log.contracts = contracts;
   return description;
 }
 
+/** A LEAPS held short of its intended count: N − held more of the same contract, as the free cash (and, in the backtest, the ask) allows; null when none is due. */
+function topUpLeaps(input: VolFarmerV2LookInput): string | null {
+  const { state, market, book, farmer } = input;
+  const leaps = state.leaps!;
+  const held = openLeapsLegs(book, leaps).reduce((sum, leg) => sum + leg.contracts, 0);
+  const wanted = leaps.intendedContracts - held;
+  if (held < 1 || wanted < 1) return null;
+  const progress = `${held} of ${leaps.intendedContracts} held`;
+  const quote = market.leapsCallQuotes?.quotesOf(leaps.expiry).find((candidate) => candidate.right === "C" && roundedStrike(candidate.strike) === roundedStrike(leaps.strike));
+  if (!quote || baselineQuoteRejection(quote, farmer.maxSpreadPctOfMid) !== null) return `LEAPS top-up: no usable quote for the ${leaps.strike} Call (${progress})`;
+  const fillPrice = optionPurchaseFillPrice(quote.bid!, quote.ask!, market.spreadShareCharged);
+  const freeCash = book.freeCash();
+  const affordable = contractsAffordable(freeCash, fillPrice, market.optionCommissionDollars);
+  if (affordable < 1) return `LEAPS top-up: one more ${leaps.strike} Call costs ${formatWholeDollars(fillPrice * sharesPerContract + market.optionCommissionDollars(1))}, more than the free cash (${formatWholeDollars(freeCash)}; ${progress})`;
+  const offered = market.capsLeapsAtAskSize ? (quote.askSize ?? 0) : wanted;
+  if (offered < 1) return `LEAPS top-up: the ${leaps.strike} Call shows no size at its ask (${progress})`;
+  const contracts = Math.min(wanted, affordable, offered);
+  const dte = daysToExpiry(leaps.expiry, market.todayIso);
+  const contractLabel = describeOptionContract({ strike: leaps.strike, right: "C", expiry: leaps.expiry, dte });
+  const description = `${market.symbol} Buy ${contractLabel}${describeOrderSize(contracts, fillPrice)} (LEAPS top-up: ${progress}, free cash ${formatWholeDollars(freeCash)})`;
+  const legId = book.buyLeaps({
+    expiry: leaps.expiry,
+    strike: leaps.strike,
+    bid: quote.bid!,
+    ask: quote.ask!,
+    fillPrice,
+    contracts,
+    description,
+    chosenBecause: `vol farmer v2: the LEAPS was bought short of its ${leaps.intendedContracts} contracts, so the same contract is topped up`,
+    candidateScores: { bid: quote.bid, ask: quote.ask, askSize: quote.askSize, dte, stockPrice: market.stockPrice, freeCash, intendedContracts: leaps.intendedContracts, heldContracts: held, costDollars: fillPrice * sharesPerContract * contracts + market.optionCommissionDollars(contracts) },
+  });
+  leaps.legIds.push(legId);
+  if (state.leapsTrigger !== null) state.leapsTrigger.contracts += contracts;
+  return description;
+}
+
 function sellLeaps(input: VolFarmerV2LookInput): string {
   const { state, market, book } = input;
   const leaps = state.leaps!;
-  const leg = book.leg(leaps.legId);
-  if (!leg || leg.closed) {
+  const legs = openLeapsLegs(book, leaps);
+  if (legs.length === 0) {
     state.leaps = null;
     state.leapsToSell = false;
     return "the LEAPS is no longer held";
@@ -592,9 +647,10 @@ function sellLeaps(input: VolFarmerV2LookInput): string {
   const quote = market.leapsCallQuotes?.quotesOf(leaps.expiry).find((candidate) => candidate.right === "C" && roundedStrike(candidate.strike) === roundedStrike(leaps.strike));
   if (!quote || quote.ask === null || !(quote.ask > 0)) return `the LEAPS is kept: no quote to sell the ${leaps.strike} Call at`;
   const fill = optionSaleFillPrice(quote.bid ?? 0, quote.ask, market.spreadShareCharged);
+  const contracts = legs.reduce((sum, leg) => sum + leg.contracts, 0);
   const contractLabel = describeOptionContract({ strike: leaps.strike, right: "C", expiry: leaps.expiry, dte: daysToExpiry(leaps.expiry, market.todayIso) });
-  const description = `${market.symbol} Sell ${contractLabel}${describeOrderSize(leg.contracts, fill)} (LEAPS: the second position was called away)`;
-  book.sellLeaps({ legId: leaps.legId, expiry: leaps.expiry, strike: leaps.strike, contracts: leg.contracts, fillPrice: fill, description, chosenBecause: "vol farmer v2: the second position was called away, so its LEAPS is sold", candidateScores: { bid: quote.bid, ask: quote.ask, stockPrice: market.stockPrice } });
+  const description = `${market.symbol} Sell ${contractLabel}${describeOrderSize(contracts, fill)} (LEAPS: the second position was called away)`;
+  book.sellLeaps({ legIds: legs.map((leg) => leg.legId), expiry: leaps.expiry, strike: leaps.strike, contracts, fillPrice: fill, description, chosenBecause: "vol farmer v2: the second position was called away, so its LEAPS is sold", candidateScores: { bid: quote.bid, ask: quote.ask, stockPrice: market.stockPrice } });
   state.leaps = null;
   state.leapsToSell = false;
   return description;

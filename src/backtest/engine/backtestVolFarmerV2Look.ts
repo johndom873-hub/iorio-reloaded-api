@@ -93,6 +93,7 @@ function marketOf(context: BacktestLookContext, lookSymbol: BacktestLookSymbol, 
     optionCommissionDollars,
     stockCommissionDollars,
     leapsCapBaseLabel: "the account",
+    capsLeapsAtAskSize: true,
   };
 }
 
@@ -240,9 +241,10 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
     },
 
     sellLeaps(sale) {
-      const leg = legById(sale.legId)!;
+      // One order for every leg of the LEAPS (its purchase and top-ups), each closed whole at the order's fill.
+      const legs = sale.legIds.map((legId) => legById(legId)!);
       const actionId = context.nextActionId();
-      sellLeapsCall(ledger, { legId: leg.id, contracts: sale.contracts, fillPrice: sale.fillPrice * priceToCycleScale, at, actionId });
+      for (const leg of legs) sellLeapsCall(ledger, { legId: leg.id, contracts: leg.quantity, fillPrice: sale.fillPrice * priceToCycleScale, at, actionId });
       actions.push({
         actionId,
         tradingDate: todayIso,
@@ -263,7 +265,7 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
         quantity: sale.contracts,
         limitPrice: sale.fillPrice,
         fillPrice: sale.fillPrice,
-        positionIds: [leg.positionId],
+        positionIds: [...new Set(legs.map((leg) => leg.positionId))],
       });
     },
   };
