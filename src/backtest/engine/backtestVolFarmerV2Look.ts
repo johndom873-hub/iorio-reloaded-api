@@ -28,7 +28,7 @@ import { cycleSplitFactorFor, isSymbolFlat, legsOfPosition, positionsOfSymbol, t
 //        break-even, second  = the assigned Put's strike − the premiums net of commissions of every Put sold for it and of
 //                              its Calls ÷ its shares
 //   3. Puts: the first position holds shares, the second holds none and has no Put open, and the best Call 2 finds for
-//      the first position (open Calls not excluded) yields under putTriggerCallYieldPct a year (no Call: 0%): the Puts of
+//      the first position (open Calls not excluded) yields under stepCallYieldPct a year (the Step; no Call: 0%): the Puts of
 //      the same next expiry with |delta| ≤ putMaxAbsDelta, struck ≤ the first break-even × (1 − putStrikeBelowFirstBreak-
 //      EvenPct ÷ 100), spread and volume as the Calls', by premium yield; contracts = min(floor(P ÷ 2 ÷ (100 × strike)),
 //      floor(free cash ÷ (100 × strike)), the volume limit). Assigned, the Put's shares are the second position.
@@ -339,13 +339,13 @@ function lookAtSymbol(input: SymbolLook): string | null {
     const firstBreakEven = breakEvenAsTraded(first)!;
     const bestCall = callCandidates(firstBreakEven, false).calls[0] ?? null;
     const bestYield = bestCall?.premiumYield ?? 0;
-    if (bestYield * 100 < v2.putTriggerCallYieldPct) {
+    if (bestYield * 100 < v2.stepCallYieldPct) {
       const strikeCap = volFarmerV2PutStrikeCap(firstBreakEven, v2.putStrikeBelowFirstBreakEvenPct);
       const { candidates: puts, rejections } = candidatesOf("P", { minAbsDelta: 0, maxAbsDelta: v2.putMaxAbsDelta, maximumStrike: strikeCap, heldExcluded: true });
       const freeCash = ledgerFreeCash(ledger);
       const wanted = (candidate: BaselineCandidate) => Math.min(Math.floor(state.potDollars / 2 / (candidate.strike * sharesPerContract) + 1e-9), Math.floor(freeCash / (candidate.strike * sharesPerContract) + 1e-9));
       const put = pickByVolume(puts, wanted, (candidate) => candidate.volumeCap);
-      const trigger = bestCall === null ? `no Call at or above the first break-even ${firstBreakEven.toFixed(2)}` : `the best Call at or above the first break-even ${firstBreakEven.toFixed(2)} yields ${percent(bestYield, 2)} a year, under ${v2.putTriggerCallYieldPct}%`;
+      const trigger = bestCall === null ? `no Call at or above the first break-even ${firstBreakEven.toFixed(2)}` : `the best Call at or above the first break-even ${firstBreakEven.toFixed(2)} yields ${percent(bestYield, 2)} a year, under ${v2.stepCallYieldPct}%`;
       if (put === null) say(`no Put: ${trigger}, but none qualifies at or below ${strikeCap.toFixed(2)} (${describeRejections(rejections) || "none listed"})`);
       else {
         const contracts = Math.min(wanted(put), put.volumeCap);

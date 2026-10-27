@@ -190,8 +190,8 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
       { value: "none", label: "None" },
     ],
   },
-  { path: "volFarmerV2.putTriggerCallYieldPct", label: "Puts while the Calls yield under", unit: "percent", editable: true, note: "% a year: at each 10:00 look, the best Call the first position can sell (at or above its break-even, the Vol Farmer's |delta| range, the next expiry) is measured by its premium yield; under this (no Call: 0%), Puts are sold with the other half of the pot, beside the Calls" },
-  { path: "volFarmerV2.putMaxAbsDelta", label: "Puts' |delta| up to", unit: "number", editable: true, note: "the Put sold is the one with the highest premium yield of the next expiry up to this |delta|, struck far enough below the first position's break-even (next row); as many contracts as half the pot secures (strike × 100 each)" },
+  { path: "volFarmerV2.stepCallYieldPct", label: "Step", unit: "percent", editable: true, note: "% a year: Puts start while the first position's Calls yield under this. At each 10:00 look, the best Call the first position can sell (at or above its break-even, the Vol Farmer's |delta| range, the next expiry) is measured by its premium yield; under this (no Call: 0%), Puts are sold with the other half of the pot, beside the Calls" },
+  { path: "volFarmerV2.putMaxAbsDelta", label: "Put |delta|", unit: "number", editable: true, note: "the Puts' highest |delta|: the Put sold is the one with the highest premium yield of the next expiry up to this |delta|, struck far enough below the first position's break-even (next row); as many contracts as half the pot secures (strike × 100 each)" },
   { path: "volFarmerV2.putStrikeBelowFirstBreakEvenPct", label: "Puts struck below the first break-even by", unit: "percent", editable: true, note: "% at least: a Put's strike ≤ the first position's break-even × (1 − this ÷ 100), so the second position opens lower than the first (0 to 90)" },
   { path: "volFarmerV2.leapsMinDte", label: "LEAPS expiry from", unit: "days", editable: true, note: "when the second position finds no Call at or above its break-even, the free cash buys a LEAPS Call of the first listed expiry at least this many days out (30 to 1000), sold when the second position is called away" },
   { path: "volFarmerV2.leapsAbsDelta", label: "LEAPS |delta|", unit: "number", editable: true, note: "of that expiry's Calls, the one whose |delta| (from its own implied volatility) is nearest this" },
@@ -726,7 +726,7 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
   {
     group: "Vol Farmer v2",
     section: "vol_farmer_v2",
-    rows: ["volFarmerV2.putTriggerCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.putStrikeBelowFirstBreakEvenPct", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta"].map((path) => ({
+    rows: ["volFarmerV2.stepCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.putStrikeBelowFirstBreakEvenPct", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta"].map((path) => ({
       path,
       appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v2"] }], explanation: "Applies only with Vol Farmer v2 as decision maker." },
     })),

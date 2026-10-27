@@ -342,7 +342,7 @@ export const defaultBacktestVolFarmerSettings: BacktestVolFarmerSettings = { cal
 /**
  * Vol Farmer v2 (decision maker "vol_farmer_v2", Marcelo 2026-10-27; research): two Covered Calls at different price
  * levels, no hedge Put. The first position buys shares with half the pot and sells Calls at or above its break-even (what
- * the shares cost less its Calls' premiums). While the best of those Calls yields under putTriggerCallYieldPct a year,
+ * the shares cost less its Calls' premiums). While the best of those Calls yields under stepCallYieldPct (the Step) a year,
  * Puts are sold with the other half, struck at least putStrikeBelowFirstBreakEvenPct below that break-even; their shares,
  * once assigned, are the second position, with a break-even of its own (the strike less its Puts' and Calls' premiums).
  * When the second position finds no Call at or above its break-even, the free cash buys a LEAPS Call, sold when the second
@@ -350,9 +350,9 @@ export const defaultBacktestVolFarmerSettings: BacktestVolFarmerSettings = { cal
  * limit are the Vol Farmer's settings (backtestVolFarmerV2Look.ts).
  */
 export interface BacktestVolFarmerV2Settings {
-  /** Puts are sold while the best Call the first position can sell yields under this, percent a year (no Call: 0%). */
-  putTriggerCallYieldPct: number;
-  /** The Puts' highest |delta|. */
+  /** The Step: Puts are sold while the best Call the first position can sell yields under this, percent a year (no Call: 0%). */
+  stepCallYieldPct: number;
+  /** Put |delta|: the Puts' highest |delta|. */
   putMaxAbsDelta: number;
   /** A Put's strike is at least this far below the first position's break-even, percent. */
   putStrikeBelowFirstBreakEvenPct: number;
@@ -362,7 +362,7 @@ export interface BacktestVolFarmerV2Settings {
   leapsAbsDelta: number;
 }
 
-export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putTriggerCallYieldPct: 5, putMaxAbsDelta: 0.2, putStrikeBelowFirstBreakEvenPct: 15, leapsMinDte: 365, leapsAbsDelta: 0.7 };
+export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { stepCallYieldPct: 5, putMaxAbsDelta: 0.2, putStrikeBelowFirstBreakEvenPct: 15, leapsMinDte: 365, leapsAbsDelta: 0.7 };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5), read by the retired rules

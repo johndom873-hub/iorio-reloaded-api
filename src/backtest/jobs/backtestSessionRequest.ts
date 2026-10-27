@@ -294,7 +294,7 @@ export function validateVolFarmerSettings(values: Record<string, unknown>): stri
 /** Vol Farmer v2's values (BacktestVolFarmerV2Settings): null when they are valid. */
 export function validateVolFarmerV2Settings(values: Record<string, unknown>): string | null {
   const isNumberIn = (value: unknown, min: number, max: number) => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
-  if (!isNumberIn(values.putTriggerCallYieldPct, 0, 500)) return "volFarmerV2.putTriggerCallYieldPct must be a number from 0 to 500.";
+  if (!isNumberIn(values.stepCallYieldPct, 0, 500)) return "volFarmerV2.stepCallYieldPct must be a number from 0 to 500.";
   if (!isNumberIn(values.putMaxAbsDelta, 0.01, 0.99)) return "volFarmerV2.putMaxAbsDelta must be a number from 0.01 to 0.99.";
   if (!isNumberIn(values.putStrikeBelowFirstBreakEvenPct, 0, 90)) return "volFarmerV2.putStrikeBelowFirstBreakEvenPct must be a number from 0 to 90.";
   if (!isNumberIn(values.leapsMinDte, 30, 1000) || !Number.isInteger(values.leapsMinDte)) return "volFarmerV2.leapsMinDte must be a whole number from 30 to 1000.";
