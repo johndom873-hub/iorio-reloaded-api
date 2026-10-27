@@ -115,3 +115,8 @@ export function weekdaysAfterUntil(fromIso: string, toIso: string): number {
   }
   return weekdays;
 }
+
+/** Calendar days from `fromIso` to `toIso` (YYYY-MM-DD), e.g. 2026-08-12 → 2027-02-16 = 188; negative when `toIso` is earlier. */
+export function calendarDaysBetween(fromIso: string, toIso: string): number {
+  return Math.round((Date.parse(`${toIso}T00:00:00Z`) - Date.parse(`${fromIso}T00:00:00Z`)) / 86_400_000);
+}

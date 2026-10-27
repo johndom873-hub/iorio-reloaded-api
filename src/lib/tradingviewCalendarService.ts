@@ -144,6 +144,12 @@ async function scanTradingView(
   });
 }
 
+/**
+ * How far back the earnings fetch reaches (the dividend fetch keeps 30 days): far enough that TradingView returns every
+ * ticker by its last report, even when its next date is past the lookahead, so the capture can clear a passed estimate.
+ */
+export const EARNINGS_LOOKBACK_DAYS = 150;
+
 /** Earnings dates for the given TradingView tickers within [fromSec, toSec] (unix seconds). */
 export function fetchEarningsEvents(tvTickers: string[], fromSec: number, toSec: number) {
   return scanTradingView(tvTickers, EARNINGS_COLUMNS, "earnings_release_date,earnings_release_next_date", fromSec, toSec);
@@ -168,16 +174,32 @@ function eventDateIso(epochSeconds: unknown): string | null {
   return epochSeconds === null || epochSeconds === undefined ? null : easternIsoDate(new Date((epochSeconds as number) * 1000));
 }
 
-/** Writes earnings rows (from fetchEarningsEvents) to ticker_calendar_events, replacing a next date TradingView has moved. Returns rows written. */
+/**
+ * Removes a ticker's earnings dates between TradingView's last report and today: estimates that passed without a report.
+ * Can include an API Ninjas row a day after TradingView's report date, a duplicate of that report.
+ */
+async function deletePassedUnreportedEarningsDates(tickerId: string, lastReportIso: string, keptDatesIso: string[], todayIso: string): Promise<void> {
+  await db("ticker_calendar_events").where({ ticker_id: tickerId, event_type: "earnings" }).where("event_date", ">", lastReportIso).where("event_date", "<", todayIso).whereNotIn("event_date", keptDatesIso).delete();
+}
+
+/**
+ * Writes earnings rows (from fetchEarningsEvents) to ticker_calendar_events, replacing a next date TradingView has moved.
+ * Once its estimate has passed unreported, TradingView gives today with no report time as the next date: a stand-in, not stored.
+ * Returns rows written.
+ */
 export async function upsertEarningsEvents(rows: Record<string, unknown>[], tickerIdByTvTicker: Map<string, string>, todayIso: string = easternIsoDate(new Date())): Promise<number> {
   let written = 0;
   for (const row of rows) {
     const tickerId = tickerIdByTvTicker.get(row.tvTicker as string);
     if (!tickerId) continue;
-    const nextDateIso = eventDateIso(row.earnings_release_next_date);
+    const lastReportIso = eventDateIso(row.earnings_release_date);
+    const reportedNextDateIso = eventDateIso(row.earnings_release_next_date);
+    const nextDateIsStandIn = reportedNextDateIso !== null && reportedNextDateIso <= todayIso && row.earnings_release_next_time === 0;
+    const nextDateIso = nextDateIsStandIn ? null : reportedNextDateIso;
     for (const dateField of ["earnings_release_date", "earnings_release_next_date"] as const) {
       const raw = row[dateField];
       if (raw === null || raw === undefined) continue;
+      if (dateField === "earnings_release_next_date" && nextDateIsStandIn) continue;
       const eventDate = eventDateIso(raw)!;
       const eventTime = row[dateField === "earnings_release_date" ? "earnings_release_time" : "earnings_release_next_time"];
       await db("ticker_calendar_events")
@@ -193,7 +215,9 @@ export async function upsertEarningsEvents(rows: Record<string, unknown>[], tick
       written++;
     }
     // After the upserts, so the ticker is never without its next date in between.
-    if (nextDateIso) await deleteRevisedFutureDates(tickerId, "earnings", [nextDateIso, eventDateIso(row.earnings_release_date)].filter((date): date is string => date !== null), todayIso);
+    const keptDatesIso = [nextDateIso, lastReportIso].filter((date): date is string => date !== null);
+    if (nextDateIso) await deleteRevisedFutureDates(tickerId, "earnings", keptDatesIso, todayIso);
+    if (lastReportIso && lastReportIso < todayIso) await deletePassedUnreportedEarningsDates(tickerId, lastReportIso, keptDatesIso, todayIso);
   }
   return written;
 }
@@ -253,11 +277,12 @@ export async function captureTickerCalendarEvents(tickerId: string, symbol: stri
 
   const nowSec = Math.floor(Date.now() / 1000);
   const fromSec = nowSec - 30 * 24 * 60 * 60;
+  const earningsFromSec = nowSec - EARNINGS_LOOKBACK_DAYS * 24 * 60 * 60;
   const toSec = nowSec + CALENDAR_LOOKAHEAD_DAYS * 24 * 60 * 60;
   const tickerIdByTvTicker = new Map([[tvTicker, tickerId]]);
 
   const [earningsRows, dividendRows] = await Promise.all([
-    fetchEarningsEvents([tvTicker], fromSec, toSec),
+    fetchEarningsEvents([tvTicker], earningsFromSec, toSec),
     fetchDividendEvents([tvTicker], fromSec, toSec),
   ]);
   const earningsWritten = await upsertEarningsEvents(earningsRows, tickerIdByTvTicker);

@@ -107,6 +107,51 @@ describe("upsertEarningsEvents replaces a moved date (real DB)", () => {
   });
 });
 
+describe("upsertEarningsEvents with TradingView's stand-in next date (real DB)", () => {
+  const nbisRow = (nextDateIso: string, nextTime = 0) => ({
+    earnings_release_date: seconds("2026-08-12T11:42:00Z"),
+    earnings_release_time: -1,
+    earnings_release_next_date: seconds(`${nextDateIso}T12:00:00Z`),
+    earnings_release_next_time: nextTime,
+  });
+
+  it("does not store today with no report time as the next date, nor let it remove the stored next date", async () => {
+    const ticker = await createTicker();
+    await insertEvent(ticker.id, "earnings", "2026-11-12", "0");
+    const written = await upsertEarningsEvents([{ tvTicker: ticker.tvTicker, ...nbisRow("2026-10-23") }], new Map([[ticker.tvTicker, ticker.id]]), "2026-10-23");
+    expect(written).toBe(1);
+    expect(await storedDates(ticker.id, "earnings")).toEqual(["2026-08-12", "2026-11-12"]);
+  });
+
+  it("stores today as the next date when TradingView gives it a report time", async () => {
+    const ticker = await createTicker();
+    await upsertEarningsEvents([{ tvTicker: ticker.tvTicker, ...nbisRow("2026-10-23", 1) }], new Map([[ticker.tvTicker, ticker.id]]), "2026-10-23");
+    expect(await storedDates(ticker.id, "earnings")).toEqual(["2026-08-12", "2026-10-23"]);
+  });
+
+  it("removes estimates that passed without a report, keeping the report and history before it (NBIS 2026-10-22 to 10-26)", async () => {
+    const ticker = await createTicker();
+    await insertEvent(ticker.id, "earnings", "2026-05-13"); // API Ninjas history
+    for (const passedDate of ["2026-10-22", "2026-10-23", "2026-10-26"]) await insertEvent(ticker.id, "earnings", passedDate, "0");
+    await upsertEarningsEvents([{ tvTicker: ticker.tvTicker, ...nbisRow("2026-10-27") }], new Map([[ticker.tvTicker, ticker.id]]), "2026-10-27");
+    expect(await storedDates(ticker.id, "earnings")).toEqual(["2026-05-13", "2026-08-12"]);
+    await upsertEarningsEvents([{ tvTicker: ticker.tvTicker, ...nbisRow("2027-02-16") }], new Map([[ticker.tvTicker, ticker.id]]), "2026-10-27");
+    expect(await storedDates(ticker.id, "earnings")).toEqual(["2026-05-13", "2026-08-12", "2027-02-16"]);
+  });
+
+  it("Signals reads the ticker as unresolved while its next date is missing or far, and resolved once a usual one is stored", async () => {
+    const ticker = await createTicker();
+    await insertEvent(ticker.id, "earnings", "2026-08-12", "-1");
+    const tickerRow = { tickerId: ticker.id, symbol: ticker.symbol, companyName: null, sector: null };
+    const at = new Date("2026-10-27T14:00:00Z");
+    expect((await loadTickerSignalsInputs(tickerRow, at)).earningsCalendarResolved).toBe(false);
+    await insertEvent(ticker.id, "earnings", "2027-02-16", "0");
+    expect((await loadTickerSignalsInputs(tickerRow, at)).earningsCalendarResolved).toBe(false);
+    await insertEvent(ticker.id, "earnings", "2026-11-12", "0");
+    expect((await loadTickerSignalsInputs(tickerRow, at)).earningsCalendarResolved).toBe(true);
+  });
+});
+
 describe("upsertDividendEvents replaces a moved ex-date (real DB)", () => {
   it("deletes the old upcoming ex-date, keeps the past one and both reported dates", async () => {
     const ticker = await createTicker();

@@ -4,6 +4,7 @@ const database = vi.hoisted(() => {
   const state = {
     tickerRow: undefined as { tradingview_ticker: string | null; sector?: string | null } | undefined,
     eventRows: [] as { eventType: string; eventDate: string }[],
+    lastReportRow: undefined as { eventDate: string } | undefined,
     macroEventRows: [] as unknown[],
     calls: [] as { table: string; operations: [string, ...unknown[]][] }[],
   };
@@ -19,7 +20,7 @@ const database = vi.hoisted(() => {
     }
     builder.first = (...args: unknown[]) => {
       entry.operations.push(["first", ...args]);
-      return Promise.resolve(state.tickerRow);
+      return Promise.resolve(table === "tickers" ? state.tickerRow : state.lastReportRow);
     };
     builder.then = (resolve: (rows: unknown) => unknown, reject: (error: unknown) => unknown) =>
       Promise.resolve(table === "ticker_calendar_events" ? state.eventRows : state.macroEventRows).then(resolve, reject);
@@ -89,6 +90,7 @@ describe("fetchCalendarConflictContext", () => {
     database.state.calls.length = 0;
     database.state.tickerRow = { tradingview_ticker: "NASDAQ:AAPL" };
     database.state.eventRows = [];
+    database.state.lastReportRow = undefined;
   });
 
   it("marks the context resolved when the ticker has a TradingView symbol and returns the stored rows", async () => {
@@ -122,6 +124,25 @@ describe("fetchCalendarConflictContext", () => {
     expect(context).toEqual({ resolved: true, events: [] });
     expect(findCalendarConflict(context, "covered_call", "2026-10-16")).toBeNull();
     expect(database.state.calls.some((call) => call.table === "ticker_calendar_events")).toBe(false);
+  });
+
+  it("is unresolved when the next earnings date is doubtful: far past the last report, or missing long after it", async () => {
+    const now = new Date("2026-10-27T14:00:00Z");
+    database.state.lastReportRow = { eventDate: "2026-08-12" };
+    database.state.eventRows = [earningsOn("2027-02-16")];
+    expect((await fetchCalendarConflictContext("t", now)).resolved).toBe(false);
+    database.state.eventRows = [exDividendOn("2026-11-07")];
+    expect((await fetchCalendarConflictContext("t", now)).resolved).toBe(false);
+    database.state.eventRows = [earningsOn("2026-11-12")];
+    expect((await fetchCalendarConflictContext("t", now)).resolved).toBe(true);
+  });
+
+  it("asks for the last report before today, or today's before-open one", async () => {
+    await fetchCalendarConflictContext("ticker-1", new Date("2026-10-27T14:00:00Z"));
+    const lastReportCall = database.state.calls.filter((call) => call.table === "ticker_calendar_events")[1]!;
+    expect(lastReportCall.operations).toContainEqual(["where", { ticker_id: "ticker-1", event_type: "earnings" }]);
+    expect(lastReportCall.operations).toContainEqual(["whereRaw", "(event_date < ?::date or (event_date = ?::date and event_time is not distinct from '-1'))", ["2026-10-27", "2026-10-27"]]);
+    expect(lastReportCall.operations).toContainEqual(["orderBy", "event_date", "desc"]);
   });
 
   it("reads the sector with the TradingView symbol", async () => {

@@ -353,6 +353,13 @@ describe("upsertEarningsEvents", () => {
     ]);
   });
 
+  it("removes the dates between TradingView's last report and today: estimates that passed unreported", async () => {
+    await upsertEarningsEvents([{ tvTicker: "NASDAQ:AAPL", earnings_release_date: OCTOBER_30_SECONDS, earnings_release_next_date: null }], tickerIdByTvTicker, "2026-11-20");
+    expect(recordedDatabaseCalls.filter((call) => call.operation === "delete")).toEqual([
+      { table: "ticker_calendar_events", operation: "delete", where: { ticker_id: "ticker-aapl", event_type: "earnings" }, conditions: [["event_date", ">", "2026-10-30"], ["event_date", "<", "2026-11-20"], ["not in", "event_date", ["2026-10-30"]]] },
+    ]);
+  });
+
   it("removes nothing when TradingView reports no next date", async () => {
     await upsertEarningsEvents([{ tvTicker: "NASDAQ:AAPL", earnings_release_date: OCTOBER_30_SECONDS, earnings_release_next_date: null }], tickerIdByTvTicker, "2026-10-07");
     expect(recordedDatabaseCalls.filter((call) => call.operation === "delete")).toEqual([]);
@@ -484,7 +491,7 @@ describe("captureTickerCalendarEvents", () => {
     expect(insertCalls()).toHaveLength(0);
   });
 
-  it("scans from 30 days back to 90 days ahead and writes earnings and dividends for the resolved ticker", async () => {
+  it("scans earnings from 150 days back and dividends from 30, both to 90 days ahead, and writes them for the resolved ticker", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-06T12:00:00Z"));
     const nowSeconds = Math.floor(Date.now() / 1000);
@@ -495,12 +502,13 @@ describe("captureTickerCalendarEvents", () => {
     const result = await captureTickerCalendarEvents("t1", "KO");
 
     expect(result).toEqual({ resolved: true, tvTicker: "NYSE:KO", earningsWritten: 1, dividendsWritten: 2 });
-    const expectedRange = [nowSeconds - 30 * 86400, nowSeconds + 90 * 86400];
     for (const [, init] of fetchMock.mock.calls) {
       const body = JSON.parse(init.body);
-      expect(body.filter[0].right).toEqual(expectedRange);
+      const lookbackDays = body.columns.includes("earnings_release_date") ? 150 : 30;
+      expect(body.filter[0].right).toEqual([nowSeconds - lookbackDays * 86400, nowSeconds + 90 * 86400]);
       expect(body.symbols).toEqual({ tickers: ["NYSE:KO"] });
     }
+    expect(fetchMock.mock.calls).toHaveLength(2);
     const eventTypes = insertCalls().map((call) => (call.values as { event_type: string }).event_type);
     expect(eventTypes.sort()).toEqual(["earnings", "ex_dividend", "ex_dividend"]);
     expect(insertCalls().every((call) => (call.values as { ticker_id: string }).ticker_id === "t1")).toBe(true);

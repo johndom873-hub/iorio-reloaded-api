@@ -23,6 +23,7 @@ const healthyInputs = (): DataInvariantInputs => ({
   latestTickerCalendarCapturedAt: new Date("2026-09-30T20:00:00Z"),
   latestMajorMacroEventsCapturedAt: new Date("2026-09-30T20:00:00Z"),
   earningsDatesBySymbol: { AAA: ["2026-09-10", "2026-12-09"], BBB: ["2026-10-28"] },
+  earningsReportDatesBySymbol: { AAA: { lastReportIso: "2026-09-10", nextReportIso: "2026-12-09" }, BBB: { lastReportIso: "2026-07-29", nextReportIso: "2026-10-28" } },
   todayEasternIso: "2026-10-01",
 });
 const failing = (inputs: DataInvariantInputs) => evaluateDataInvariants(inputs).filter((result) => !result.ok);
@@ -84,6 +85,25 @@ describe("evaluateDataInvariants", () => {
     expect(failing({ ...healthyInputs(), earningsDatesBySymbol: { AAA: ["2026-09-10", "2026-10-25"] } })).toEqual([]); // exactly 45 days
     // Two sources a day apart about a report already past: harmless, not flagged.
     expect(failing({ ...healthyInputs(), earningsDatesBySymbol: { WDC: ["2026-09-04", "2026-09-05", "2026-11-04"] } })).toEqual([]);
+  });
+
+  it("flags a next earnings date far past the last report, and a missing one long after it (NBIS, 2026-10-27)", () => {
+    const problems = failing({
+      ...healthyInputs(),
+      earningsReportDatesBySymbol: {
+        AAA: { lastReportIso: "2026-09-10", nextReportIso: "2026-12-09" },
+        NBIS: { lastReportIso: "2026-08-12", nextReportIso: "2027-02-16" },
+        MU: { lastReportIso: "2026-07-01", nextReportIso: null },
+        GS: { lastReportIso: "2026-09-20", nextReportIso: null },
+      },
+    });
+    expect(problems).toEqual([
+      {
+        name: "Next earnings date",
+        ok: false,
+        detail: "doubtful (more than 150 days after the last report, or none 60 days after it), so unresolved in Signals and Pluto won't open: NBIS (last 2026-08-12, next 2027-02-16), MU (last 2026-07-01, next none)",
+      },
+    ]);
   });
 
   it("does not repeat a failed snapshot as a missing rate or thin coverage (it is already reported as not complete)", () => {

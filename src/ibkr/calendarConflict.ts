@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
-import { tickerCalendarProfile } from "../lib/tickerCalendarRelevance.js";
+import { earningsNextDateDoubt, tickerCalendarProfile } from "../lib/tickerCalendarRelevance.js";
 import type { SignalStrategyKey } from "../lib/signalCandidates.js";
 
 export interface CalendarConflict {
@@ -12,6 +12,7 @@ export interface CalendarConflictContext {
   // False when the ticker has never resolved to a TradingView symbol, so
   // `events` is necessarily empty regardless of what's actually scheduled —
   // callers should treat this as "not checked," not "confirmed clear."
+  // Also false when the next earnings date is doubtful (earningsNextDateDoubt).
   // An ETF is resolved with no events: neither check applies to it (tickerCalendarRelevance.ts).
   resolved: boolean;
   events: CalendarConflict[];
@@ -33,13 +34,28 @@ export async function fetchCalendarConflictContext(tickerId: string, now: Date =
   // From today in US Eastern time (not the server's UTC date). Today's before-open report has already happened, as in the
   // Signals earnings exclusion (loadEarningsDatesNotYetReported).
   const todayIso = easternIsoDate(now);
-  const rows: { eventType: "earnings" | "ex_dividend"; eventDate: string }[] = await db("ticker_calendar_events")
-    .where({ ticker_id: tickerId })
-    .whereRaw("event_date >= ?::date", [todayIso])
-    .whereRaw("not (event_type = 'earnings' and event_date = ?::date and event_time is not distinct from '-1')", [todayIso])
-    .select("event_type as eventType", db.raw(`event_date::text as "eventDate"`));
+  const [rows, lastReportIso]: [{ eventType: "earnings" | "ex_dividend"; eventDate: string }[], string | null] = await Promise.all([
+    db("ticker_calendar_events")
+      .where({ ticker_id: tickerId })
+      .whereRaw("event_date >= ?::date", [todayIso])
+      .whereRaw("not (event_type = 'earnings' and event_date = ?::date and event_time is not distinct from '-1')", [todayIso])
+      .select("event_type as eventType", db.raw(`event_date::text as "eventDate"`)),
+    loadLastEarningsReportDate(tickerId, todayIso),
+  ]);
+  const nextReportIso = rows.filter((row) => row.eventType === "earnings").map((row) => row.eventDate).sort()[0] ?? null;
 
-  return { resolved, events: rows };
+  return { resolved: resolved && earningsNextDateDoubt(lastReportIso, nextReportIso, todayIso) === null, events: rows };
+}
+
+/** The latest stored earnings date before today, or today's when reported before the open (the counterpart of the "from today" rows). */
+export async function loadLastEarningsReportDate(tickerId: string, todayIso: string): Promise<string | null> {
+  const row: { eventDate?: string } | undefined = await db("ticker_calendar_events")
+    .where({ ticker_id: tickerId, event_type: "earnings" })
+    .whereRaw("(event_date < ?::date or (event_date = ?::date and event_time is not distinct from '-1'))", [todayIso, todayIso])
+    .orderBy("event_date", "desc")
+    .select(db.raw(`event_date::text as "eventDate"`))
+    .first();
+  return row?.eventDate ?? null;
 }
 
 /**

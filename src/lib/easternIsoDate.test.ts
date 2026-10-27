@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { easternInstant, easternIsoDate, easternMinutesOfDay, formatDateWithWeekday, formatEasternDateTime, formatEasternTime, weekdaysAfterUntil } from "./easternIsoDate.js";
+import { calendarDaysBetween, easternInstant, easternIsoDate, easternMinutesOfDay, formatDateWithWeekday, formatEasternDateTime, formatEasternTime, weekdaysAfterUntil } from "./easternIsoDate.js";
 
 describe("Eastern time formatting", () => {
   it("shows summer clock time (EDT, UTC-4)", () => {
@@ -62,5 +62,14 @@ describe("the kept ICU readings answer as ICU does", () => {
     for (const dateIso of ["2024-03-09", "2024-03-10", "2024-03-11", "2024-11-02", "2024-11-03", "2024-11-04"]) {
       for (let minutes = 0; minutes < 24 * 60; minutes += 30) expect(easternInstant(dateIso, Math.floor(minutes / 60), minutes % 60).getTime()).toBe(freshInstant(dateIso, Math.floor(minutes / 60), minutes % 60));
     }
+  });
+});
+
+describe("calendarDaysBetween", () => {
+  it("counts calendar days across a DST change and a year end, negative backwards", () => {
+    expect(calendarDaysBetween("2026-08-12", "2027-02-16")).toBe(188);
+    expect(calendarDaysBetween("2026-10-31", "2026-11-02")).toBe(2);
+    expect(calendarDaysBetween("2026-10-27", "2026-10-27")).toBe(0);
+    expect(calendarDaysBetween("2026-10-27", "2026-10-26")).toBe(-1);
   });
 });

@@ -35,6 +35,7 @@ const base = (earningsDatesBySymbol: Record<string, string[]>): DataInvariantInp
   latestTickerCalendarCapturedAt: new Date("2026-10-06T20:00:00Z"),
   latestMajorMacroEventsCapturedAt: new Date("2026-10-06T20:00:00Z"),
   earningsDatesBySymbol,
+  earningsReportDatesBySymbol: {},
   todayEasternIso: "2026-10-07",
 });
 const earningsCheck = (dates: Record<string, string[]>) => evaluateDataInvariants(base(dates)).find((result) => result.name === "Earnings dates")!;
@@ -96,6 +97,14 @@ describe("loadDataInvariantInputs earnings and macro figures (real DB, rolled ba
     const inputs = await loadDataInvariantInputs(now, "2026-10-06");
     expect(inputs.earningsDatesBySymbol[symbols.inUniverse]?.sort()).toEqual(["2026-09-06", "2026-10-22"]);
     expect(inputs.earningsDatesBySymbol[symbols.outside]).toBeUndefined();
+  });
+
+  it("splits each universe ticker's earnings dates at the data session into the last report and the next date", async () => {
+    const inputs = await loadDataInvariantInputs(now, "2026-10-06");
+    expect(inputs.earningsReportDatesBySymbol[symbols.inUniverse]).toEqual({ lastReportIso: "2026-09-06", nextReportIso: "2026-10-22" });
+    expect(inputs.earningsReportDatesBySymbol[symbols.outside]).toBeUndefined();
+    const onReportDay = await loadDataInvariantInputs(now, "2026-10-22");
+    expect(onReportDay.earningsReportDatesBySymbol[symbols.inUniverse]).toEqual({ lastReportIso: "2026-09-06", nextReportIso: "2026-10-22" }); // time unknown: still to come
   });
 
   it("reports the stalest event key's latest capture as the macro figure", async () => {

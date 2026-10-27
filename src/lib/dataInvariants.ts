@@ -4,6 +4,7 @@ import { lastCompletedSessionDate } from "./marketSessionStatus.js";
 import { activeShortlistTickerIdsQuery } from "./shortlistQueries.js";
 import { excludeTickersBeingPrepared } from "./tickersBeingPrepared.js";
 import { impliedVolatilityMinPercent, twoSidedQuoteMinPercent } from "./optionChainCaptureCoverage.js";
+import { earningsNextDateDoubt, earningsNextDateMaxGapDays, earningsNextDateMissingAfterDays } from "./tickerCalendarRelevance.js";
 
 // Data invariants for the morning digest (opsMonitor.ts): checks on the DATA the nightly and
 // opening jobs produce, independent of whether the jobs themselves reported success. A job that
@@ -48,6 +49,8 @@ export interface DataInvariantInputs {
   latestMajorMacroEventsCapturedAt: Date | null;
   /** Earnings dates (YYYY-MM-DD) from earningsDatesLookbackDays ago on, per universe ticker. */
   earningsDatesBySymbol: Record<string, string[]>;
+  /** Per universe ticker with any earnings date: the last report and the next date, as earningsNextDateDoubt reads them. */
+  earningsReportDatesBySymbol: Record<string, { lastReportIso: string | null; nextReportIso: string | null }>;
   /** The trading date the checks describe (the earnings pairs that matter reach it or later). */
   todayEasternIso: string;
 }
@@ -125,6 +128,17 @@ export function evaluateDataInvariants(input: DataInvariantInputs): InvariantRes
     return pair ? [`${symbol} (${pair[0]} and ${pair[1]})`] : [];
   });
   results.push(result("Earnings dates", tooClose, `no ticker has two earnings dates within ${earningsDatesMinGapDays} days`, `two earnings dates within ${earningsDatesMinGapDays} days`));
+  const doubtfulNextDates = Object.entries(input.earningsReportDatesBySymbol).flatMap(([symbol, { lastReportIso, nextReportIso }]) =>
+    earningsNextDateDoubt(lastReportIso, nextReportIso, input.todayEasternIso) === null ? [] : [`${symbol} (last ${lastReportIso}, next ${nextReportIso ?? "none"})`],
+  );
+  results.push(
+    result(
+      "Next earnings date",
+      doubtfulNextDates,
+      `every ticker's next earnings date is within ${earningsNextDateMaxGapDays} days of its last report`,
+      `doubtful (more than ${earningsNextDateMaxGapDays} days after the last report, or none ${earningsNextDateMissingAfterDays} days after it), so unresolved in Signals and Pluto won't open`,
+    ),
+  );
   return results;
 }
 
@@ -164,7 +178,7 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
     .groupBy("t.symbol")
     .select("t.symbol", db.raw("max(b.trading_date)::text as latest"));
 
-  const [rateRow, calendarRow, tickerCalendarRow, majorMacroEventsRow, earningsRows] = await Promise.all([
+  const [rateRow, calendarRow, tickerCalendarRow, majorMacroEventsRow, earningsRows, earningsReportDateRows] = await Promise.all([
     db("risk_free_rates").max<{ fetched_at: Date | null }[]>("fetched_at as fetched_at").first(),
     db("market_calendar").whereRaw("calendar_date > ?::date and calendar_date <= (?::date + ?::int)", [todayEasternIso, todayEasternIso, marketCalendarCoverageDays]).count<{ count: string }[]>("* as count").first(),
     db("ticker_calendar_events").max<{ captured_at: Date | null }[]>("captured_at as captured_at").first(),
@@ -176,6 +190,17 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
       .where("e.event_type", "earnings")
       .whereRaw("e.event_date >= ?::date - ?::int", [todayEasternIso, earningsDatesLookbackDays])
       .select("t.symbol", db.raw("e.event_date::text as date")) as Promise<{ symbol: string; date: string }[]>,
+    // Last report and next date, split at today as the Signals loaders split them (today's before-open report is the last).
+    db("ticker_calendar_events as e")
+      .join("tickers as t", "t.id", "e.ticker_id")
+      .whereIn("e.ticker_id", universeTickerIds)
+      .where("e.event_type", "earnings")
+      .groupBy("t.symbol")
+      .select(
+        "t.symbol",
+        db.raw(`(max(e.event_date) filter (where e.event_date < ?::date or (e.event_date = ?::date and e.event_time is not distinct from '-1')))::text as "lastReportIso"`, [todayEasternIso, todayEasternIso]),
+        db.raw(`(min(e.event_date) filter (where e.event_date > ?::date or (e.event_date = ?::date and e.event_time is distinct from '-1')))::text as "nextReportIso"`, [todayEasternIso, todayEasternIso]),
+      ) as Promise<{ symbol: string; lastReportIso: string | null; nextReportIso: string | null }[]>,
   ]);
   const earningsDatesBySymbol: Record<string, string[]> = {};
   for (const row of earningsRows) (earningsDatesBySymbol[row.symbol] ??= []).push(row.date);
@@ -199,6 +224,7 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
     latestTickerCalendarCapturedAt: tickerCalendarRow?.captured_at ? new Date(tickerCalendarRow.captured_at) : null,
     latestMajorMacroEventsCapturedAt: majorMacroEventsRow?.captured_at ? new Date(majorMacroEventsRow.captured_at) : null,
     earningsDatesBySymbol,
+    earningsReportDatesBySymbol: Object.fromEntries(earningsReportDateRows.map((row) => [row.symbol, { lastReportIso: row.lastReportIso, nextReportIso: row.nextReportIso }])),
     todayEasternIso,
   };
 }

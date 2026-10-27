@@ -19,6 +19,7 @@ import { buildCalendarCaptureJobOutcome, earningsFetchSource, selectAlertWorthyU
 import { runJob } from "../src/lib/runJob.js";
 import { captureMajorMacroEvents, reportMajorMacroEventHorizon } from "../src/lib/macroEventCalendar.js";
 import {
+  EARNINGS_LOOKBACK_DAYS,
   fetchDividendEvents,
   fetchEarningsEvents,
   resolveTradingViewTickerDetailed,
@@ -51,7 +52,8 @@ async function main(): Promise<void> {
     ).then((result) => result.rows);
 
     const now = new Date();
-    const fromSec = toUnixSeconds(now) - 30 * 24 * 60 * 60; // small trailing window, catches "recent" earnings/div fields
+    const fromSec = toUnixSeconds(now) - 30 * 24 * 60 * 60; // small trailing window, catches "recent" dividend fields
+    const earningsFromSec = toUnixSeconds(now) - EARNINGS_LOOKBACK_DAYS * 24 * 60 * 60;
     const toSec = toUnixSeconds(now) + LOOKAHEAD_DAYS * 24 * 60 * 60;
 
     // Resolve TradingView tickers (cached after first run — see
@@ -74,7 +76,7 @@ async function main(): Promise<void> {
     let earningsWritten = 0;
     let dividendsWritten = 0;
     try {
-      const earningsRows = await fetchEarningsEvents(tvTickers, fromSec, toSec);
+      const earningsRows = await fetchEarningsEvents(tvTickers, earningsFromSec, toSec);
       earningsWritten = await upsertEarningsEvents(earningsRows, tickerIdByTvTicker);
     } catch (error) {
       console.error("daily_calendar_capture: earnings fetch failed", error);
