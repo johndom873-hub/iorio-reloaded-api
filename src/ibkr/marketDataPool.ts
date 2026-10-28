@@ -110,11 +110,17 @@ const lowTickTypes = [7, 73];
 const closeTickTypes = [9, 75];
 const openTickTypes = [14, 76];
 const volumeTickTypes = [8, 74];
+const bidSizeTickTypes = [0, 69];
+const askSizeTickTypes = [3, 70];
 
 export interface PooledQuote {
   last: number | null;
   bid: number | null;
   ask: number | null;
+  // Contracts (options) at the bid and ask. A change to these alone reaches only subscribers that asked for sizes
+  // (subscribeToPooledQuote's includeSizes): they tick far more often than prices.
+  bidSize: number | null;
+  askSize: number | null;
   delta: number | null;
   gamma: number | null;
   vega: number | null;
@@ -134,6 +140,8 @@ export const emptyPooledQuote: PooledQuote = {
   last: null,
   bid: null,
   ask: null,
+  bidSize: null,
+  askSize: null,
   delta: null,
   gamma: null,
   vega: null,
@@ -155,6 +163,8 @@ interface PoolEntry {
   reqId: number;
   quote: PooledQuote;
   subscribers: Set<(quote: PooledQuote) => void>;
+  /** The subscribers (also in `subscribers`) that are also told about bid/ask size changes. */
+  sizeSubscribers: Set<(quote: PooledQuote) => void>;
   /** Monotonic creation order — what "newest first" shedding is decided on. */
   sequence: number;
   /** Shed to fit the budget; not subscribed until a reconcile resumes it. */
@@ -196,6 +206,10 @@ function quoteEqual(a: PooledQuote, b: PooledQuote): boolean {
     a.previousClose === b.previousClose &&
     a.volume === b.volume
   );
+}
+
+function sizesEqual(a: PooledQuote, b: PooledQuote): boolean {
+  return a.bidSize === b.bidSize && a.askSize === b.askSize;
 }
 
 const entriesByPoolKey = new Map<string, PoolEntry>();
@@ -305,10 +319,10 @@ export function pooledLineError(contract: PriceContract): { code: number; messag
   return entriesByPoolKey.get(poolKeyFor(contract))?.lastError ?? null;
 }
 
-export async function subscribeToPooledQuote(contract: PriceContract, onUpdate: (quote: PooledQuote) => void): Promise<() => void> {
+export async function subscribeToPooledQuote(contract: PriceContract, onUpdate: (quote: PooledQuote) => void, options: { includeSizes?: boolean } = {}): Promise<() => void> {
   const poolKey = poolKeyFor(contract);
   if (!entriesByPoolKey.has(poolKey)) {
-    const newEntry: PoolEntry = { contract, reqId: -1, quote: emptyPooledQuote, subscribers: new Set(), sequence: nextSequence++, paused: false, planned: false, answered: false, lastError: null, cancelTimer: null };
+    const newEntry: PoolEntry = { contract, reqId: -1, quote: emptyPooledQuote, subscribers: new Set(), sizeSubscribers: new Set(), sequence: nextSequence++, paused: false, planned: false, answered: false, lastError: null, cancelTimer: null };
     entriesByPoolKey.set(poolKey, newEntry);
     if (contract.legType === "stock") {
       // Fast first paint while the live subscription is still being
@@ -330,6 +344,7 @@ export async function subscribeToPooledQuote(contract: PriceContract, onUpdate: 
     entry.cancelTimer = null;
   }
   entry.subscribers.add(onUpdate);
+  if (options.includeSizes) entry.sizeSubscribers.add(onUpdate);
   onUpdate(entry.quote);
 
   ensureReconcileTimerRunning();
@@ -339,6 +354,7 @@ export async function subscribeToPooledQuote(contract: PriceContract, onUpdate: 
     const current = entriesByPoolKey.get(poolKey);
     if (current !== entry) return;
     entry.subscribers.delete(onUpdate);
+    entry.sizeSubscribers.delete(onUpdate);
     if (entry.subscribers.size > 0 || entry.cancelTimer !== null) return;
     entry.cancelTimer = setTimeout(() => {
       entry.cancelTimer = null;
@@ -466,9 +482,10 @@ function attachListeners(ib: IBApi): void {
     if (!entry || entry.reqId !== reqId) return;
     entry.answered = true;
     const next: PooledQuote = { ...entry.quote, ...patch };
-    if (quoteEqual(entry.quote, next)) return;
+    const onlySizesChanged = quoteEqual(entry.quote, next);
+    if (onlySizesChanged && sizesEqual(entry.quote, next)) return;
     entry.quote = next;
-    for (const subscriber of entry.subscribers) subscriber(next);
+    for (const subscriber of onlySizesChanged ? entry.sizeSubscribers : entry.subscribers) subscriber(next);
   }
 
   ib.on(EventName.tickPrice, (reqId: number, tickType: number, price: number) => {
@@ -489,10 +506,13 @@ function attachListeners(ib: IBApi): void {
     else if (openTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { open: value });
   });
   ib.on(EventName.tickSize, (reqId: number, tickType: number | undefined, size: number | undefined) => {
-    if (tickType === undefined || size === undefined || !volumeTickTypes.includes(tickType)) return;
+    if (tickType === undefined || size === undefined) return;
     const poolKey = reqIdToPoolKey.get(reqId);
     if (!poolKey) return;
-    updateEntry(poolKey, reqId, { volume: size >= 0 ? size : null });
+    const value = size >= 0 ? size : null;
+    if (volumeTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { volume: value });
+    else if (bidSizeTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { bidSize: value });
+    else if (askSizeTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { askSize: value });
   });
   ib.on(
     EventName.tickOptionComputation,

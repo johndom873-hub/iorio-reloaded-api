@@ -14,13 +14,21 @@ function toPriceContract(contract: OptionQuoteContract): PriceContract {
   return { key: `${contract.expiry}|${contract.strike}|${contract.right}`, legType: "option", symbol: contract.symbol, expiry: contract.expiry, strike: contract.strike, right: contract.right };
 }
 
-function toOptionQuote(contract: OptionQuoteContract, quote: PooledQuote): OptionQuote {
+/** An OptionQuote plus the contracts at the bid and ask, kept current only when the stream asked for sizes. */
+export interface PooledOptionQuote extends OptionQuote {
+  bidSize: number | null;
+  askSize: number | null;
+}
+
+function toOptionQuote(contract: OptionQuoteContract, quote: PooledQuote): PooledOptionQuote {
   return {
     expiry: contract.expiry,
     strike: contract.strike,
     right: contract.right,
     bid: quote.bid,
     ask: quote.ask,
+    bidSize: quote.bidSize,
+    askSize: quote.askSize,
     last: quote.last,
     impliedVolatility: quote.impliedVolatility,
     delta: quote.delta,
@@ -43,11 +51,11 @@ function toOptionQuote(contract: OptionQuoteContract, quote: PooledQuote): Optio
  * here — the underlying pool keeps every subscription registered and
  * silently re-establishes them once the shared connection recovers.
  */
-export async function streamPooledOptionQuotes(contracts: OptionQuoteContract[], onUpdate: (quotes: OptionQuote[]) => void, signal: AbortSignal): Promise<OptionQuote[]> {
+export async function streamPooledOptionQuotes(contracts: OptionQuoteContract[], onUpdate: (quotes: PooledOptionQuote[]) => void, signal: AbortSignal, options: { includeSizes?: boolean } = {}): Promise<PooledOptionQuote[]> {
   if (contracts.length === 0 || signal.aborted) return [];
 
   const entries = contracts.map((contract) => ({ contract, quote: emptyPooledQuote }));
-  const currentArray = (): OptionQuote[] => entries.map(({ contract, quote }) => toOptionQuote(contract, quote));
+  const currentArray = (): PooledOptionQuote[] => entries.map(({ contract, quote }) => toOptionQuote(contract, quote));
 
   let settled = false;
   let pushScheduled = false;
@@ -69,11 +77,15 @@ export async function streamPooledOptionQuotes(contracts: OptionQuoteContract[],
   );
   const unsubscribes = await Promise.all(
     entries.map((entry, index) =>
-      subscribeToPooledQuote(toPriceContract(entry.contract), (pooledQuote) => {
-        entries[index]!.quote = pooledQuote;
-        if (settled) schedulePush();
-        else firstReading.check();
-      }),
+      subscribeToPooledQuote(
+        toPriceContract(entry.contract),
+        (pooledQuote) => {
+          entries[index]!.quote = pooledQuote;
+          if (settled) schedulePush();
+          else firstReading.check();
+        },
+        { includeSizes: options.includeSizes },
+      ),
     ),
   );
 

@@ -60,7 +60,7 @@ import { hasPriceAndDelta, quoteContracts } from "./quoteContracts.js";
 
 const ib = {} as never;
 const pooledQuote = (overrides: Partial<PooledQuote> = {}): PooledQuote => ({
-  last: 1.1, bid: 1.0, ask: 1.2, delta: 0.25, gamma: 0.02, vega: 0.1, theta: -0.05, impliedVolatility: 0.4, underlyingPrice: 100, open: null, high: null, low: null, previousClose: null, volume: null, ...overrides,
+  last: 1.1, bid: 1.0, ask: 1.2, bidSize: null, askSize: null, delta: 0.25, gamma: 0.02, vega: 0.1, theta: -0.05, impliedVolatility: 0.4, underlyingPrice: 100, open: null, high: null, low: null, previousClose: null, volume: null, ...overrides,
 });
 const capturedQuote = (overrides: Partial<CapturedOptionQuote> = {}): CapturedOptionQuote =>
   ({
