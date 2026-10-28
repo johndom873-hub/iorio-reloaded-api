@@ -109,6 +109,8 @@ export interface PlutoHowItWorks {
       impliedVolatilityPct: number;
       stepPct: number;
       putStrikeCap: number;
+      /** How far below B-E2 the LEAPS is bought: half the Step, percent (Marcelo 2026-10-28). */
+      leapsEntryBelowSecondBreakEvenPct: number;
       leapsCap: number;
     };
   };
@@ -193,6 +195,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
         impliedVolatilityPct: percent(volFarmerV2ExampleImpliedVolatility),
         stepPct: volFarmerV2Step,
         putStrikeCap: volFarmerV2PutStrikeCap(volFarmerV2ExampleFirstBreakEven, volFarmerV2Step),
+        leapsEntryBelowSecondBreakEvenPct: volFarmerV2Step / 2,
         leapsCap: volFarmerV2LeapsBudget(Number.POSITIVE_INFINITY, pot, settings.volFarmerV2LeapsMaxAllocationPct),
       },
     },

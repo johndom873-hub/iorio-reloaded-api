@@ -299,6 +299,23 @@ export function splitFactorOn(schedule: SplitSchedule, dateIso: string): number 
   return found?.factor ?? null;
 }
 
+/**
+ * The split factor a cycle starting on a day with F = `startFactor` keeps its prices and share counts on, given every
+ * factor the symbol reaches from then to the session's end: `startFactor` when a contract on each of them fits it
+ * (100 × G ÷ the cycle's factor shares, a whole number); else the smallest of them that every one fits (WMT's 3-for-1
+ * in Feb 2024: a cycle opened before it on F = 3 would hold 33⅓ shares a contract after it, on F = 1 300 before and 100
+ * after); else `startFactor`, whose options stop at the first split that does not fit.
+ */
+export function splitFactorForNewCycle(startFactor: number, laterFactors: readonly number[]): number {
+  const reached = [startFactor, ...laterFactors];
+  const fits = (cycleFactor: number) => reached.every((factor) => {
+    const sharesPerContract = (100 * factor) / cycleFactor;
+    return sharesPerContract > 0 && Math.abs(sharesPerContract - Math.round(sharesPerContract)) < 1e-9;
+  });
+  if (fits(startFactor)) return startFactor;
+  return [...reached].sort((a, b) => a - b).find(fits) ?? startFactor;
+}
+
 export class UnresolvedSplitScaleError extends Error {
   constructor(symbol: string, stretch: UnresolvedSplitStretch) {
     const ratios = stretch.ratios.map((day) => `${day.dateIso} ${day.ratio === null ? "no ratio" : day.ratio.toFixed(3)}`).join(", ");

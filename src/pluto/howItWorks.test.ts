@@ -49,12 +49,14 @@ describe("buildPlutoHowItWorks", () => {
       leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAllocationPct: 10,
     });
     // Pot 2,000,000 × 20% × 50% = 200,000: floor(100,000 ÷ 10,000.50) = 9 lots. Step 60% × √(21 ÷ 252) = 17.32%, so the
-    // Puts are struck at most 96 × (1 − 17.32%) = 79.37. The LEAPS spends at most 10% of the 200,000.
+    // Puts are struck at most 96 × (1 − 17.32%) = 79.37. The LEAPS is bought half a Step, 8.66%, below B-E2 and spends at
+    // most 10% of the 200,000.
     expect(example).toMatchObject({ accountValue: 2_000_000, allocationPct: 20, pot: 200_000, stockPrice: 100, lots: 9, firstBreakEven: 96, impliedVolatilityPct: 60, leapsCap: 20_000 });
     expect(example.stepPct).toBeCloseTo(17.3205, 4);
     expect(example.putStrikeCap).toBeCloseTo(79.3723, 4);
+    expect(example.leapsEntryBelowSecondBreakEvenPct).toBeCloseTo(8.6603, 4);
     // The fixed Step rule quotes the fixed Step.
-    expect(buildPlutoHowItWorks({ ...settings, volFarmerV2StepRule: "fixed" }, figures).volFarmerV2.example).toMatchObject({ stepPct: 15, putStrikeCap: 81.6 });
+    expect(buildPlutoHowItWorks({ ...settings, volFarmerV2StepRule: "fixed" }, figures).volFarmerV2.example).toMatchObject({ stepPct: 15, putStrikeCap: 81.6, leapsEntryBelowSecondBreakEvenPct: 7.5 });
   });
 
   it("follows the live settings: the example's pot, rungs and shock move with them", () => {

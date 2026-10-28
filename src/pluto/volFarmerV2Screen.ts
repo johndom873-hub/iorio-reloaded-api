@@ -2,7 +2,7 @@ import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { sharesPerContract } from "../backtest/engine/backtestBook.js";
 import { volFarmerV2BreakEven, type VolFarmerV2Position } from "../backtest/engine/volFarmerV2Steps.js";
-import type { VolFarmerV2Memory, VolFarmerV2OrderKind } from "./volFarmerV2LiveBook.js";
+import { volFarmerV2MemoryFromStored, type VolFarmerV2Memory, type VolFarmerV2OrderKind } from "./volFarmerV2LiveBook.js";
 import type { VolFarmerV2RoundFigures } from "./volFarmerV2LookLoader.js";
 import { effectivePlutoStrategy, loadEnabledPlutoTickerSettings } from "./tickerSettingsStore.js";
 
@@ -62,7 +62,7 @@ export async function loadVolFarmerV2Screen(connection: Knex = db): Promise<VolF
   const legById = new Map(legs.map((leg) => [leg.id, leg]));
   return tickers.map((ticker) => {
     const row = rowByTickerId.get(ticker.tickerId);
-    const memory = row?.memory ?? null;
+    const memory = row?.memory ? volFarmerV2MemoryFromStored(row.memory) : null;
     const optionOf = (legId: string, shares: number): VolFarmerV2ScreenOption | null => {
       const contracts = Math.round(shares / sharesPerContract);
       const pending = memory?.pending.find((order) => order.ref === legId);

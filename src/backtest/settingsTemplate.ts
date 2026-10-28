@@ -204,9 +204,10 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
       { value: "implied_move_at_put_sale", label: "One-month implied move, at each Put sale" },
     ],
   },
-  { path: "volFarmerV2.leapsMinDte", label: "LEAPS expiry from", unit: "days", editable: true, note: "when the second position finds no Call at or above its break-even, the free cash (up to the LEAPS cap) buys a LEAPS Call of the first listed expiry at least this many days out (30 to 1000), sold when the second position is called away" },
+  { path: "volFarmerV2.leapsMinDte", label: "LEAPS expiry from", unit: "days", editable: true, note: "once the price is half a Step below the second position's break-even, B-E2 × (1 − Step ÷ 200) with the Step as the Step rule sets it (B-E2 $100 with a Step of 17.3%: $91.34 or lower), the free cash (up to the LEAPS cap) buys a LEAPS Call of the first listed expiry at least this many days out (30 to 1000), one per holding, sold when the second position is called away" },
   { path: "volFarmerV2.leapsAbsDelta", label: "LEAPS |delta|", unit: "number", editable: true, note: "of that expiry's Calls, the one whose |delta| (from its own implied volatility) is nearest this" },
   { path: "volFarmerV2.leapsMaxAccountPct", label: "LEAPS cap", unit: "percent", editable: true, note: "% of the account's value at the look (positions marked) a LEAPS purchase spends at most, never more than the free cash. 0: no cap, all the free cash (0 to 100)" },
+  { path: "volFarmerV2.leapsSpreadCostChargedPct", label: "LEAPS spread cost share", unit: "percent", editable: true, note: "how much of the half-spread a LEAPS purchase or sale gives up; a held LEAPS is valued at what selling it would bring. 33.3333: two-thirds of the way across the spread, bid $10 and ask $13 buy at $12 and sell at $11. Calls and Puts keep the Spread cost share (0 to 100)" },
   {
     path: "volFarmerV2.looks",
     label: "Decides",
@@ -749,7 +750,7 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
   {
     group: "Vol Farmer v2",
     section: "vol_farmer_v2",
-    rows: ["volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta", "volFarmerV2.leapsMaxAccountPct", "volFarmerV2.looks"].map((path) => ({
+    rows: ["volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta", "volFarmerV2.leapsMaxAccountPct", "volFarmerV2.leapsSpreadCostChargedPct", "volFarmerV2.looks"].map((path) => ({
       path,
       appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v2"] }], explanation: "Applies only with Vol Farmer v2 as decision maker." },
     })),

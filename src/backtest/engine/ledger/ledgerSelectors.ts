@@ -5,7 +5,8 @@ import { stockAcquisitionByPositionIdFromRecords } from "../../../lib/stockAcqui
 import { deriveCycles, type Cycle, type CycleInput } from "../../../lib/cycles.js";
 import { computeUnrealizedPnlByPosition, type UnrealizedPnlByPosition } from "../../../lib/positionOrderRules.js";
 import { availableUncoveredShares, cashLockedInCashSecuredPuts, positionCapitalAtRisk, positionCapitalDeployed, positionRealizedPnl, type PositionFigures, type PositionRealizedPnl } from "../../../lib/positionSelectors.js";
-import { findLeg, findPosition, ledgerRevision, legsOfPosition, rememberedForRevision, positionsOfSymbol, requirePosition, type LedgerLeg, type LedgerPosition, type SimulatedLedger } from "./simulatedLedger.js";
+import { easternIsoDate } from "../../../lib/easternIsoDate.js";
+import { cycleStartSplitFactor, findLeg, findPosition, ledgerRevision, legsOfPosition, rememberedForRevision, positionsOfSymbol, requirePosition, type LedgerLeg, type LedgerPosition, type SimulatedLedger } from "./simulatedLedger.js";
 
 // The simulated book's figures. They come from the functions the platform itself uses, fed with the ledger's rows:
 // position figures from positionSelectors.ts (tested against the positions SQL), cycles and the break-even through the
@@ -96,7 +97,7 @@ export function ledgerNetLiquidationValue(ledger: SimulatedLedger, priceByLegId:
   return openLegs(ledger).reduce((value, { leg }) => value + (priceByLegId.get(leg.id) ?? leg.entryPrice) * leg.quantity * leg.multiplier * (leg.side === "short" ? -1 : 1), ledger.cash);
 }
 
-function optionLegRows(ledger: SimulatedLedger, symbol: string, expiryCloseByDate: ReadonlyMap<string, number>): (CycleOptionLegRow & { positionCloseReason: string | null })[] {
+function optionLegRows(ledger: SimulatedLedger, symbol: string, expiryCloseByDate: ReadonlyMap<string, number>, splitFactorOn?: (dateIso: string) => number | null): (CycleOptionLegRow & { positionCloseReason: string | null })[] {
   const closingCommissionByLegId = closingCommissionDollarsByLegId(ledger);
   const legIdsWithClosingTrade = new Set(ledger.trades.filter((trade) => trade.isClosingTrade).map((trade) => trade.legId));
   // The timeline's figures from the fills, as the cycle loader reads them (a carved slice reads the leg it was carved from).
@@ -110,6 +111,12 @@ function optionLegRows(ledger: SimulatedLedger, symbol: string, expiryCloseByDat
     const fills = (tradesByLegId.get(legId) ?? []).filter((trade) => trade.isClosingTrade === closing);
     const quantity = fills.reduce((sum, trade) => sum + trade.quantity, 0);
     return { count: fills.length, quantity, price: quantity > 0 ? fills.reduce((sum, trade) => sum + trade.price * trade.quantity, 0) / quantity : null, commission: fills.reduce((sum, trade) => sum + trade.commission, 0) };
+  };
+  // A fill price on its cycle's scale, as traded on the day it filled (× F(day) ÷ the cycle's factor): the timeline's labels.
+  const asTradedOn = (leg: LedgerLeg, price: number | null, at: Date | null): number | null => {
+    const cycleFactor = splitFactorOn ? cycleStartSplitFactor(ledger, symbol, leg.entryAt) : null;
+    const dayFactor = cycleFactor === null || at === null ? null : splitFactorOn!(easternIsoDate(at));
+    return price === null || cycleFactor === null || dayFactor === null ? price : (price * dayFactor) / cycleFactor;
   };
   const rows: (CycleOptionLegRow & { positionCloseReason: string | null })[] = [];
   for (const position of cyclePositionsOfSymbol(ledger, symbol)) {
@@ -137,10 +144,10 @@ function optionLegRows(ledger: SimulatedLedger, symbol: string, expiryCloseByDat
         ...(() => {
           const opening = fillFiguresOf(leg.parentLegId ?? leg.id, false);
           return {
-            openingFillPrice: opening.price,
+            openingFillPrice: asTradedOn(leg, opening.price, leg.entryAt),
             openingFillCount: opening.count,
             openingCommission: opening.quantity > 0 ? (opening.commission / opening.quantity) * leg.quantity : null,
-            closingFillPrice: fillFiguresOf(leg.id, true).price,
+            closingFillPrice: asTradedOn(leg, fillFiguresOf(leg.id, true).price, leg.exitAt),
           };
         })(),
         ...(leg.enteredBy === "taken_from_kept" ? { openingRowLabel: `Put from the kept ones @ ${leg.entryPrice.toFixed(2)}` } : {}),
@@ -166,6 +173,8 @@ export interface LedgerCycleMarket {
   dailyCloses: readonly { date: string; close: number }[];
   /** Mark per share of open option legs, by leg id. A position missing one for any open option leg stays at its credit, as live does before a nightly mark. */
   optionMarkByLegId?: ReadonlyMap<string, number>;
+  /** F on a date (splitFactors.ts): with it, the timeline's fill prices read as traded on their day, not on the cycle's scale. */
+  splitFactorOn?: (dateIso: string) => number | null;
 }
 
 /** The open positions' option premium P&L at the marks given (none without marks), by position. */
@@ -184,7 +193,7 @@ export function ledgerCycleInputRows(ledger: SimulatedLedger, symbol: string, ma
   const symbolPositions = cyclePositionsOfSymbol(ledger, symbol);
   const openPositionPremiumPnl = openPositionPremiumPnlOf(ledger, symbolPositions, market);
   return {
-    optionRows: optionLegRows(ledger, symbol, new Map(market.dailyCloses.map((bar) => [bar.date, bar.close]))),
+    optionRows: optionLegRows(ledger, symbol, new Map(market.dailyCloses.map((bar) => [bar.date, bar.close])), market.splitFactorOn),
     stockLegRows: symbolPositions.flatMap((position) => legsOfPosition(ledger, position.id).filter((leg) => leg.legType === "stock" && leg.side === "long").map((leg) => ({ tickerId: symbol, positionId: position.id, quantity: leg.quantity, entryAt: leg.entryAt, exitAt: leg.exitAt }))),
     stockTradeRows: stockTradeRows(ledger, symbol),
     barRows: market.dailyCloses.map((bar) => ({ tickerId: symbol, date: bar.date, close: bar.close })),
@@ -216,15 +225,15 @@ function ledgerStockCostPriceByPositionId(ledger: SimulatedLedger, symbolPositio
  * ledgerCycleInput without the open positions' marked premium, per ledger, symbol and closes array, kept for one
  * ledger revision: most looks read the same book over the same day's closes, and only the marks move.
  */
-const cycleInputBookByLedger = new WeakMap<SimulatedLedger, Map<string, { revision: number; dailyCloses: LedgerCycleMarket["dailyCloses"]; input: CycleInput }>>();
+const cycleInputBookByLedger = new WeakMap<SimulatedLedger, Map<string, { revision: number; dailyCloses: LedgerCycleMarket["dailyCloses"]; splitFactorOn: LedgerCycleMarket["splitFactorOn"]; input: CycleInput }>>();
 
 export function ledgerCycleInput(ledger: SimulatedLedger, symbol: string, market: LedgerCycleMarket): CycleInput {
   let bySymbol = cycleInputBookByLedger.get(ledger);
   if (!bySymbol) cycleInputBookByLedger.set(ledger, (bySymbol = new Map()));
   const revision = ledgerRevision(ledger);
   let kept = bySymbol.get(symbol);
-  if (!kept || kept.revision !== revision || kept.dailyCloses !== market.dailyCloses) {
-    kept = { revision, dailyCloses: market.dailyCloses, input: buildCycleInputFromRows(symbol, ledgerCycleInputRows(ledger, symbol, { dailyCloses: market.dailyCloses })) };
+  if (!kept || kept.revision !== revision || kept.dailyCloses !== market.dailyCloses || kept.splitFactorOn !== market.splitFactorOn) {
+    kept = { revision, dailyCloses: market.dailyCloses, splitFactorOn: market.splitFactorOn, input: buildCycleInputFromRows(symbol, ledgerCycleInputRows(ledger, symbol, { dailyCloses: market.dailyCloses, ...(market.splitFactorOn ? { splitFactorOn: market.splitFactorOn } : {}) })) };
     bySymbol.set(symbol, kept);
   }
   return { ...kept.input, openPositionPremiumPnl: openPositionPremiumPnlOf(ledger, cyclePositionsOfSymbol(ledger, symbol), market) };

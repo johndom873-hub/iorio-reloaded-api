@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeSplitRatio, inferSplitSchedule, isStandardSplitRatio, niceSplitFactors, requireSplitFactors, snapToNiceSplitFactor, splitFactorOn, UnmatchedOptionsError, UnresolvedSplitScaleError, type DailySplitRatio } from "./splitFactors.js";
+import { describeSplitRatio, inferSplitSchedule, isStandardSplitRatio, niceSplitFactors, requireSplitFactors, snapToNiceSplitFactor, splitFactorForNewCycle, splitFactorOn, UnmatchedOptionsError, UnresolvedSplitScaleError, type DailySplitRatio } from "./splitFactors.js";
 import { weekdaysBetween } from "./testSupport/syntheticBacktestData.js";
 
 /** Ratios on consecutive weekdays from 2026-01-05, with ±1.5% deterministic noise unless given exactly. */
@@ -163,5 +163,26 @@ describe("changes of scale that are no standard split", () => {
     expect([4, 10, 0.1, 1 / 15, 1.5, 1.25, 0.8].map(isStandardSplitRatio)).toEqual([true, true, true, true, true, true, true]);
     expect([0.9, 0.933333, 1.05, 1.125, 1 / 24, 16].map(isStandardSplitRatio)).toEqual([false, false, false, false, false, false]);
     expect([10, 1.5, 0.9, 0.1, 1 / 24, 1.05].map(describeSplitRatio)).toEqual(["10-for-1", "3-for-2", "9-for-10", "1-for-10", "1-for-24", "21-for-20"]);
+  });
+});
+
+describe("the split factor a new cycle takes", () => {
+  it("keeps the day's when every later contract fits it, else the smallest factor every one fits", () => {
+    // WMT's 3-for-1 in Feb 2024: a cycle opened before it on F = 3 would hold 33⅓ shares a contract after it; on F = 1,
+    // 300 before and 100 after.
+    expect(splitFactorForNewCycle(3, [1])).toBe(1);
+    // A session that ends before the split, or a cycle that starts after it.
+    expect(splitFactorForNewCycle(3, [])).toBe(3);
+    expect(splitFactorForNewCycle(1, [])).toBe(1);
+    // A 2-for-1 fits: 50 shares a contract after it (XLE's in Dec 2025).
+    expect(splitFactorForNewCycle(2, [1])).toBe(2);
+    // TQQQ's 2-for-1s: from F = 4, 50 and 25 shares a contract; from F = 8 the third would give 12.5, so F = 1.
+    expect(splitFactorForNewCycle(4, [2, 1])).toBe(4);
+    expect(splitFactorForNewCycle(8, [4, 2, 1])).toBe(1);
+    // A 15-for-1 (SOXL's in 2021) and a 1-for-10 reverse split.
+    expect(splitFactorForNewCycle(15, [1])).toBe(1);
+    expect(splitFactorForNewCycle(0.1, [1])).toBe(0.1);
+    // None fits: the day's, whose options stop at the split.
+    expect(splitFactorForNewCycle(0.7, [0.3])).toBe(0.7);
   });
 });

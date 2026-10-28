@@ -96,10 +96,10 @@ Live: a limit at the mid rests up to 15 minutes; unfilled, it is cancelled and P
 ## 7. Formulas and rules needing sign-off
 
 1. **Assignment at expiry**: in the money by ≥ $0.01 at the expiry close → assigned (the exchange's automatic-exercise rule); at or out of the money → worthless. (Live infers assignment from ≥ $0.05 and sends the $0.00–0.05 band to manual review; a simulation needs one rule.)
-2. **Buyback fill**: mid + spread cost share × (ask − bid) ÷ 2, plus $0.68 per contract.
+2. **Buyback fill**: mid + spread cost share × (ask − bid) ÷ 2, plus $0.68 per contract. A Vol Farmer v2 LEAPS is bought and sold with its own share, 33⅓% by default (two-thirds of the way across the spread), and valued at its sale price while held (Marcelo 2026-10-28: short-dated Calls and Puts fill at the mid, LEAPS do not).
 3. **Stock fills**: no historical stock bid/ask in the plan. Buy and sell at the look's stock price itself (IBKR's price at the look since 2026-10-14; the $0.01 either way, set when the price was a parity mid, removed by Marcelo 2026-10-15), commission $0.005 per share (the live estimate).
 4. **Early assignment**: not modelled.
-5. **Splits while a cycle holds shares**: the whole cycle stays on the price scale of its first day.
+5. **Splits while a cycle holds shares**: the whole cycle stays on one price scale, the one it started on. That is its first day's, unless a split before the session's end would leave a contract a fraction of its shares (a 3-for-1 on that scale: 33⅓ shares a contract); then the smallest scale every contract up to the session's end fits whole, so its options can still be sold and the cycle can end (Marcelo 2026-10-28).
 6. **Dividends**: still excluded (no dividend history before 2026 in the DB); shares held through an ex-dividend date understate the result by the dividend.
 7. **Look grid**: every 30 minutes from the window start to its end (10:00 … 15:30 with the current settings, 12 looks; approved 2026-10-12). The 10:00 look stands for the opening look and uses the 10:00 capture's quotes.
 8. **Cycle statistics** (from the live cycle engine's own figures): % of put positions assigned; cycle P&L; recovery time = trading sessions from the assignment to the cycle's close, reported for closed cycles, with open cycles and their age listed apart; P&L and average traded DTE per ticker.

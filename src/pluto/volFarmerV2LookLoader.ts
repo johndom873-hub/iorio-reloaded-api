@@ -5,14 +5,14 @@ import { stepImpliedVolatilityLookbackSessions } from "../backtest/engine/volFar
 import { settlesAssigned } from "../lib/cycleBreakEven.js";
 import { orderFillsPendingSql } from "../lib/orderFills.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
-import type { VolFarmerV2Memory, VolFarmerV2OrderOutcome } from "./volFarmerV2LiveBook.js";
+import { volFarmerV2MemoryFromStored, type VolFarmerV2Memory, type VolFarmerV2OrderOutcome } from "./volFarmerV2LiveBook.js";
 
 // What Vol Farmer v2's look at a ticker reads from the database (volFarmerV2LiveBook.ts): its memory, how the orders it
 // sent ended, and the status of every leg its memory refers to.
 
 export async function loadVolFarmerV2Memory(tickerId: string, connection: Knex = db): Promise<VolFarmerV2Memory | null> {
   const row: { memory: VolFarmerV2Memory | null } | undefined = await connection("pluto_vol_farmer_v2_cycles").where({ ticker_id: tickerId }).first("memory");
-  return row?.memory ?? null;
+  return row?.memory ? volFarmerV2MemoryFromStored(row.memory) : null;
 }
 
 /** Saves the memory; the cash check the backtest's note reads is left out (it only grows). `adopted`: the first save of holdings v2 adopted. */

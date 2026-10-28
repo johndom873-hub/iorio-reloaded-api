@@ -5,12 +5,13 @@ import type { BacktestBarHistory } from "./backtestBarHistory.js";
 import type { BacktestAction, BacktestBreakEvenLevel } from "../backtestTypes.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { BacktestLookContext, BacktestLookResult, BacktestLookSymbol, BacktestOptionSale } from "./backtestLookTypes.js";
+import { markOfTwoSidedQuote } from "./backtestOptionMarks.js";
 import { captureLookTimeEt, lookInstantMs } from "./backtestTickerInputs.js";
 import { noteBaselineForwardAnchors, roundedStrike, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
 import { buyLeapsCall, expirySettlementInstant, openCashSecuredPut, openCoveredCall, sellLeapsCall } from "./ledger/ledgerEvents.js";
 import { optionCommissionDollars, stockCommissionDollars } from "./ledger/ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
-import { cycleSplitFactorFor, isSymbolFlat, legsOfPosition, positionsOfSymbol, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
+import { cycleSplitFactorFor, cycleStartSplitFactor, isSymbolFlat, legsOfPosition, positionsOfSymbol, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { newVolFarmerV2SymbolState, runVolFarmerV2Steps, stepImpliedVolatilityLookbackSessions, volFarmerV2BreakEven, type VolFarmerV2Book, type VolFarmerV2Market, type VolFarmerV2Position, type VolFarmerV2SymbolState } from "./volFarmerV2Steps.js";
 
 // Vol Farmer v2 in the backtest: the shared steps (volFarmerV2Steps.ts, where the rules are) on the simulated ledger, at
@@ -132,7 +133,10 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
     openOptionContracts: () => openOptionLegsOf(ledger, symbol).map((leg) => ({ expiry: leg.expiryDate!, strike: leg.strikePrice! })),
     leg(legId) {
       const leg = legById(legId);
-      return leg === undefined ? undefined : { closed: leg.exitAt !== null, assigned: leg.settledAs === "assigned", strike: leg.strikePrice, contracts: leg.quantity };
+      if (leg === undefined) return undefined;
+      // A leg of a cycle that has ended since (its shares called away) is on that cycle's scale, not the look's.
+      const legCycleFactor = isSymbolFlat(ledger, symbol) ? cycleStartSplitFactor(ledger, symbol, leg.entryAt) : null;
+      return { closed: leg.exitAt !== null, assigned: leg.settledAs === "assigned", strike: leg.strikePrice, contracts: leg.quantity, ...(legCycleFactor === null ? {} : { priceToCycleScale: legCycleFactor / lookSymbol.splitFactorToday }) };
     },
 
     sellCoveredCall(sale) {
@@ -214,7 +218,7 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
     buyLeaps(purchase) {
       const actionId = context.nextActionId();
       const opened = buyLeapsCall(ledger, { symbol, expiryDate: purchase.expiry, strike: purchase.strike * priceToCycleScale, contracts: purchase.contracts, fillPrice: purchase.fillPrice * priceToCycleScale, at, actionId, sharesPerContract: sharesPerContractOnCycleScale });
-      context.priceByLegId.set(opened.legId, ((purchase.bid + purchase.ask) / 2) * priceToCycleScale);
+      context.priceByLegId.set(opened.legId, markOfTwoSidedQuote(purchase, context.settings.volFarmerV2.leapsSpreadCostChargedPct / 100) * priceToCycleScale);
       actions.push({
         actionId,
         tradingDate: todayIso,

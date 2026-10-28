@@ -107,6 +107,13 @@ export interface SimulatedLedger {
    * as the platform's cycle derivation keeps one cycle there; later than that, a new cycle starts on that day's scale.
    */
   endedCycleBySymbol: Map<string, { splitFactor: number; flatSince: Date }>;
+  /**
+   * The split factor a cycle starting on the symbol today takes, set by the engine each day (splitFactorForNewCycle):
+   * today's, unless a split before the session's end gives contracts its share counts cannot hold whole.
+   */
+  newCycleSplitFactorBySymbol: Map<string, number>;
+  /** Every cycle start, with the split factor it took: the session's records put each cycle's rows on it. */
+  cycleStarts: { symbol: string; at: Date; splitFactor: number }[];
   nextRowNumber: number;
 }
 
@@ -114,7 +121,7 @@ export interface SimulatedLedger {
 export const cycleGroupingWindowMs = 120_000;
 
 export function createSimulatedLedger(startingCash: number, at: Date): SimulatedLedger {
-  const ledger: SimulatedLedger = { positions: [], legs: [], trades: [], shareSources: [], cash: 0, cashJournal: [], cycleSplitFactorBySymbol: new Map(), endedCycleBySymbol: new Map(), nextRowNumber: 1 };
+  const ledger: SimulatedLedger = { positions: [], legs: [], trades: [], shareSources: [], cash: 0, cashJournal: [], cycleSplitFactorBySymbol: new Map(), endedCycleBySymbol: new Map(), newCycleSplitFactorBySymbol: new Map(), cycleStarts: [], nextRowNumber: 1 };
   recordCash(ledger, { at, kind: "deposit", amount: startingCash, symbol: null, positionId: null, legId: null });
   return ledger;
 }
@@ -258,12 +265,20 @@ export function isSymbolFlat(ledger: SimulatedLedger, symbol: string): boolean {
 /**
  * The split factor the symbol's prices, strikes and share counts are on: its open cycle's; else, at an instant within
  * the grouping window of the moment it went flat, the factor of the cycle that just closed (a position opened now
- * continues it); else today's own (the next cycle starts on it). The engine puts a price traded today on that scale with
- * × this ÷ F(today), and a share count with × F(today) ÷ this, before any event sees it.
+ * continues it); else the one a new cycle takes today (the next cycle starts on it: today's own unless the engine set
+ * another). The engine puts a price traded today on that scale with × this ÷ F(today), and a share count with
+ * × F(today) ÷ this, before any event sees it.
  */
 export function cycleSplitFactorFor(ledger: SimulatedLedger, symbol: string, splitFactorToday: number, at: Date | null = null): number {
   const openCycleFactor = ledger.cycleSplitFactorBySymbol.get(symbol);
   if (openCycleFactor !== undefined) return openCycleFactor;
   const ended = ledger.endedCycleBySymbol.get(symbol);
-  return ended && at !== null && at.getTime() - ended.flatSince.getTime() <= cycleGroupingWindowMs ? ended.splitFactor : splitFactorToday;
+  return ended && at !== null && at.getTime() - ended.flatSince.getTime() <= cycleGroupingWindowMs ? ended.splitFactor : (ledger.newCycleSplitFactorBySymbol.get(symbol) ?? splitFactorToday);
+}
+
+/** The split factor the symbol's cycle starting at or last before `at` took; null before its first. */
+export function cycleStartSplitFactor(ledger: SimulatedLedger, symbol: string, at: Date): number | null {
+  let found: number | null = null;
+  for (const start of ledger.cycleStarts) if (start.symbol === symbol && start.at.getTime() <= at.getTime()) found = start.splitFactor;
+  return found;
 }

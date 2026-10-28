@@ -9,7 +9,7 @@ import { shareDirectionOf } from "../cycleCashBreakEven.js";
 import type { BacktestOptionSale } from "./backtestLookTypes.js";
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import { ledgerCapitalAtRisk, ledgerCapitalDeployed, ledgerCycles, ledgerRealizedPnl, ledgerUnrealizedPnl } from "./ledger/ledgerSelectors.js";
-import { legsOfPosition, positionsOfSymbol, requireLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
+import { cycleStartSplitFactor, legsOfPosition, positionsOfSymbol, requireLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 
 // What a finished session stores, built from its simulated ledger: the positions with their legs, the fills, the wheel
 // cycles (the platform's own derivation, deriveCycles) with their timelines and stock-only stretches, the gaps between
@@ -56,21 +56,21 @@ function closingCommissionByLegId(ledger: SimulatedLedger): Map<string, number> 
   return commissionByLegId;
 }
 
-/** Each cycle of the symbol, derived with the closes on that cycle's own scale, and the scale's split factor. */
+/** Each cycle of the symbol, derived with the closes on that cycle's own scale, and the scale's split factor (the one the ledger started it on). */
 export function deriveCyclesOnTheirOwnScales(inputs: Pick<SessionRecordInputs, "ledger" | "priceByLegId" | "adjustedDailyClosesBySymbol" | "splitFactorOn">, symbol: string): { cycle: Cycle; splitFactor: number }[] {
   const adjustedCloses = inputs.adjustedDailyClosesBySymbol.get(symbol) ?? [];
   const derivedByFactor = new Map<number, Cycle[]>();
   const derivedOnScale = (splitFactor: number): Cycle[] => {
     let derived = derivedByFactor.get(splitFactor);
     if (!derived) {
-      derived = ledgerCycles(inputs.ledger, symbol, { dailyCloses: adjustedCloses.map((bar) => ({ date: bar.date, close: bar.close * splitFactor })), optionMarkByLegId: inputs.priceByLegId });
+      derived = ledgerCycles(inputs.ledger, symbol, { dailyCloses: adjustedCloses.map((bar) => ({ date: bar.date, close: bar.close * splitFactor })), optionMarkByLegId: inputs.priceByLegId, splitFactorOn: (dateIso) => inputs.splitFactorOn(symbol, dateIso) });
       derivedByFactor.set(splitFactor, derived);
     }
     return derived;
   };
   // A cycle's boundaries come from the legs alone, so every derivation lists the same cycles in the same order.
   return derivedOnScale(1).map((cycle, index) => {
-    const splitFactor = inputs.splitFactorOn(symbol, easternIsoDate(cycle.startAt)) ?? 1;
+    const splitFactor = cycleStartSplitFactor(inputs.ledger, symbol, cycle.startAt) ?? inputs.splitFactorOn(symbol, easternIsoDate(cycle.startAt)) ?? 1;
     return { cycle: derivedOnScale(splitFactor)[index]!, splitFactor };
   });
 }

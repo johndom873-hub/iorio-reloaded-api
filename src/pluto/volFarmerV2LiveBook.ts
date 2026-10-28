@@ -7,6 +7,7 @@ import {
   type VolFarmerV2LeapsPurchase,
   type VolFarmerV2LeapsSale,
   type VolFarmerV2LegStatus,
+  type VolFarmerV2Position,
   type VolFarmerV2PutSale,
   type VolFarmerV2SymbolState,
 } from "../backtest/engine/volFarmerV2Steps.js";
@@ -39,6 +40,8 @@ export function volFarmerV2RulesOf(settings: PlutoSettings): { farmer: Pick<Back
       leapsMinDte: settings.volFarmerV2LeapsMinDte,
       leapsAbsDelta: settings.volFarmerV2LeapsAbsDelta,
       leapsMaxAccountPct: settings.volFarmerV2LeapsMaxAllocationPct,
+      // The LEAPS spread cost is the lab's (2026-10-28): Pluto's orders fill at the market, and its steps price a LEAPS at the mid.
+      leapsSpreadCostChargedPct: 0,
       looks: "every_look",
     },
   };
@@ -86,6 +89,23 @@ export interface VolFarmerV2OrderOutcome {
 /** No fill and no longer working: an order never sent, held, refused or cancelled unfilled. */
 export const unfilledVolFarmerV2Outcome: VolFarmerV2OrderOutcome = { working: false, filledContracts: 0, optionLegIds: [], optionNetDollars: 0, sharesBought: 0, sharesCostDollars: 0 };
 
+/**
+ * A settled option's premium in place of the one planned for it: its net fill and the shares it covers, under its leg;
+ * nothing filled, the premium goes. A position saved before premiums were kept per option (2026-10-28) has the planned
+ * premium in its total, which takes the difference instead.
+ */
+function settleVolFarmerV2Premium(position: VolFarmerV2Position, order: VolFarmerV2PendingOrder, fill: { dollars: number; shares: number; legId: string }, plannedDollars: number): void {
+  const index = position.premiums.findIndex((premium) => premium.legId === order.ref);
+  if (index >= 0) {
+    if (fill.shares === 0) position.premiums.splice(index, 1);
+    else position.premiums[index] = { legId: fill.legId, dollars: fill.dollars, shares: fill.shares };
+    return;
+  }
+  const savedTotal = position.premiums.find((premium) => premium.shares === 0);
+  if (savedTotal !== undefined) savedTotal.dollars += fill.dollars - plannedDollars;
+  else position.premiums.push({ legId: fill.legId, dollars: fill.dollars - plannedDollars, shares: 0 });
+}
+
 /** Replaces the plan of a settled order with its fills, in place; a still-working order is left as planned. Answers a note, or null. */
 export function settleVolFarmerV2Order(state: VolFarmerV2SymbolState, order: VolFarmerV2PendingOrder, outcome: VolFarmerV2OrderOutcome): string | null {
   if (outcome.working) return null;
@@ -113,7 +133,7 @@ export function settleVolFarmerV2Order(state: VolFarmerV2SymbolState, order: Vol
         if (got === 0) position.calls.splice(index, 1);
         else position.calls[index] = { legId: outcome.optionLegIds[0] ?? order.ref, shares: got * 100 };
       }
-      position.premiumDollars += (filled === 0 ? 0 : (outcome.optionNetDollars * got) / filled) - order.plannedPremiumByPosition[name];
+      settleVolFarmerV2Premium(position, order, { dollars: filled === 0 ? 0 : (outcome.optionNetDollars * got) / filled, shares: got * 100, legId: outcome.optionLegIds[0] ?? order.ref }, order.plannedPremiumByPosition[name]);
     }
     return filled === order.contracts ? null : `the Call order on ${order.strike}${shortBy}`;
   }
@@ -125,7 +145,7 @@ export function settleVolFarmerV2Order(state: VolFarmerV2SymbolState, order: Vol
         if (filled === 0) second.puts.splice(index, 1);
         else second.puts[index] = { legId: outcome.optionLegIds[0] ?? order.ref, shares: filled * 100 };
       }
-      second.premiumDollars += outcome.optionNetDollars - order.plannedPremiumByPosition.second;
+      settleVolFarmerV2Premium(second, order, { dollars: outcome.optionNetDollars, shares: filled * 100, legId: outcome.optionLegIds[0] ?? order.ref }, order.plannedPremiumByPosition.second);
     }
     return filled === order.contracts ? null : `the Put order on ${order.strike}${shortBy}`;
   }
@@ -149,11 +169,23 @@ export function settleVolFarmerV2Order(state: VolFarmerV2SymbolState, order: Vol
   return filled === order.contracts ? null : `the LEAPS sale${shortBy}: the rest is sold at the next look`;
 }
 
+/** A memory as saved: a position saved before premiums were kept per option (2026-10-28) has its premium total as one, counted in full. */
+export function volFarmerV2MemoryFromStored(memory: VolFarmerV2Memory): VolFarmerV2Memory {
+  for (const position of [memory.state.first, memory.state.second]) {
+    if (position === null || Array.isArray(position.premiums)) continue;
+    const saved = position as VolFarmerV2Position & { premiumDollars?: number };
+    const savedTotal = saved.premiumDollars ?? 0;
+    delete saved.premiumDollars;
+    position.premiums = savedTotal === 0 ? [] : [{ legId: "", dollars: savedTotal, shares: 0 }];
+  }
+  return memory;
+}
+
 /** Every leg reference `from` in the state becomes `to` (a planned order's, once it is sent). */
 export function replaceVolFarmerV2LegRef(state: VolFarmerV2SymbolState, from: string, to: string): void {
   for (const position of [state.first, state.second]) {
     if (position === null) continue;
-    for (const entry of [...position.calls, ...position.puts]) if (entry.legId === from) entry.legId = to;
+    for (const entry of [...position.calls, ...position.puts, ...position.premiums]) if (entry.legId === from) entry.legId = to;
   }
   if (state.leaps !== null) state.leaps.legIds = state.leaps.legIds.map((legId) => (legId === from ? to : legId));
 }
@@ -168,9 +200,9 @@ export function adoptVolFarmerV2Holdings(input: { positions: readonly PositionFi
   const state = newVolFarmerV2SymbolState();
   state.potDollars = input.allocationDollars;
   // The cycle's break-even already counts every premium of the cycle (its Puts' included): the positions add none.
-  state.first = { shares, costPerShare: input.cycleBreakEvenPerShare, premiumDollars: 0, calls: shortOptions("call"), puts: [] };
+  state.first = { shares, costPerShare: input.cycleBreakEvenPerShare, premiums: [], calls: shortOptions("call"), puts: [] };
   const puts = shortOptions("put");
-  if (puts.length > 0) state.second = { shares: 0, costPerShare: 0, premiumDollars: 0, calls: [], puts };
+  if (puts.length > 0) state.second = { shares: 0, costPerShare: 0, premiums: [], calls: [], puts };
   return { state };
 }
 

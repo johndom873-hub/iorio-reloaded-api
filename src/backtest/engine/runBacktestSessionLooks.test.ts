@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lookGridTimesEt, lookTimesInWindow, summarizeDayLooks, type DayLookSummary } from "./runBacktestSession.js";
+import { isZeroQuoteSnapshot, lookGridTimesEt, lookTimesInWindow, summarizeDayLooks, type DayLookSummary } from "./runBacktestSession.js";
 
 describe("the looks of a day", () => {
   it("are the half hours from the window's start through its end, never later than 30 minutes before the close", () => {
@@ -27,5 +27,15 @@ describe("the day's summary of its looks", () => {
     expect(summarizeDayLooks(looks, true)).toEqual(["10:00 SLV: first position: no Call at or above its break-even 31.20", "11:00 NVDA: Sell $150 Call · 7 Nov (10DTE) · 3× @ 1.20", "no action at the other 1 look"]);
     const quietFirstLook = [{ ...looks[0]!, summary: "No action" }, ...looks.slice(1)];
     expect(summarizeDayLooks(quietFirstLook, true)).toEqual(["11:00 NVDA: Sell $150 Call · 7 Nov (10DTE) · 3× @ 1.20", "no action at the other 2 looks"]);
+  });
+});
+
+describe("a snapshot of zeros", () => {
+  it("is quotes none of which has an ask above 0", () => {
+    const quote = (ask: number | null) => ({ ask });
+    expect(isZeroQuoteSnapshot([quote(0), quote(null), quote(0)])).toBe(true);
+    expect(isZeroQuoteSnapshot([quote(0), quote(0.05)])).toBe(false);
+    // No quotes at all is no snapshot: nothing listed, not missing data.
+    expect(isZeroQuoteSnapshot([])).toBe(false);
   });
 });

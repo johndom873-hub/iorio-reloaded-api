@@ -4,7 +4,7 @@ import { blackScholesPriceOnForward } from "../lib/impliedVolatilitySurface.js";
 import { contractKey } from "../lib/optionContractKey.js";
 import type { PositionFigures } from "../lib/positionSelectors.js";
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
-import { newVolFarmerV2SymbolState, runVolFarmerV2Steps, volFarmerV2BreakEven, type VolFarmerV2Market } from "../backtest/engine/volFarmerV2Steps.js";
+import { newVolFarmerV2SymbolState, runVolFarmerV2Steps, volFarmerV2BreakEven, type VolFarmerV2Market, type VolFarmerV2Position } from "../backtest/engine/volFarmerV2Steps.js";
 import { plutoLadderSettingsFixture, plutoVolFarmerV2SettingsFixture } from "./plutoSettingsFixture.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import {
@@ -14,6 +14,7 @@ import {
   replaceVolFarmerV2LegRef,
   settleVolFarmerV2Order,
   unfilledVolFarmerV2Outcome,
+  volFarmerV2MemoryFromStored,
   volFarmerV2RulesOf,
   type VolFarmerV2LiveSnapshot,
   type VolFarmerV2PendingOrder,
@@ -66,7 +67,7 @@ describe("Vol Farmer v2's live rules", () => {
   it("are Pluto's v2 settings, at every look, the LEAPS cap a share of the ticker's allocation", () => {
     const { farmer, v2 } = volFarmerV2RulesOf(settings);
     expect(farmer).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, maxSpreadPctOfMid: 50 });
-    expect(v2).toEqual({ putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 10, looks: "every_look" });
+    expect(v2).toEqual({ putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 0, looks: "every_look" });
   });
 });
 
@@ -83,9 +84,9 @@ describe("adopting a ticker's holdings", () => {
     const adopted = adoptVolFarmerV2Holdings({ positions, cycleBreakEvenPerShare: 105.42, allocationDollars: 64_007 });
     if (!("state" in adopted)) throw new Error(adopted.waiting);
     expect(adopted.state.potDollars).toBe(64_007);
-    expect(adopted.state.first).toEqual({ shares: 500, costPerShare: 105.42, premiumDollars: 0, calls: [{ legId: "c1", shares: 400 }, { legId: "c2", shares: 100 }], puts: [] });
+    expect(adopted.state.first).toEqual({ shares: 500, costPerShare: 105.42, premiums: [], calls: [{ legId: "c1", shares: 400 }, { legId: "c2", shares: 100 }], puts: [] });
     expect(volFarmerV2BreakEven(adopted.state.first!)).toBe(105.42);
-    expect(adopted.state.second).toEqual({ shares: 0, costPerShare: 0, premiumDollars: 0, calls: [], puts: [{ legId: "p1", shares: 200 }] });
+    expect(adopted.state.second).toEqual({ shares: 0, costPerShare: 0, premiums: [], calls: [], puts: [{ legId: "p1", shares: 200 }] });
   });
 
   it("waits while the ticker holds only Puts, or its cycle's break-even is unknown", () => {
@@ -133,7 +134,7 @@ describe("the live book and its orders", () => {
 
     // Filled: 2 of 3 lots, the shares at 100.10 with commission, the Calls for $250 net.
     expect(settleVolFarmerV2Order(state, pending, { working: false, filledContracts: 2, optionLegIds: ["leg-c"], optionNetDollars: 250, sharesBought: 200, sharesCostDollars: 20_020 })).toContain("2 of 3 filled");
-    expect(state.first).toMatchObject({ shares: 200, costPerShare: 100.1, premiumDollars: 250, calls: [{ legId: "leg-c", shares: 200 }] });
+    expect(state.first).toMatchObject({ shares: 200, costPerShare: 100.1, premiums: [{ legId: "leg-c", dollars: 250, shares: 200 }], calls: [{ legId: "leg-c", shares: 200 }] });
     expect(volFarmerV2BreakEven(state.first!)).toBeCloseTo(100.1 - 250 / 200, 10);
     expect(volFarmerV2BreakEven(state.first!)).not.toBeCloseTo(plannedBreakEven, 2);
   });
@@ -151,11 +152,27 @@ describe("the live book and its orders", () => {
   });
 
   it("takes an unfilled Put back out of the second position, its premium with it", () => {
-    const state = newVolFarmerV2SymbolState();
-    state.second = { shares: 0, costPerShare: 0, premiumDollars: 300, calls: [], puts: [{ legId: "action:p", shares: 500 }] };
     const order: VolFarmerV2PendingOrder = { ref: "action:p", actionId: "p", kind: "cash_secured_put", expiry: "2026-11-06", strike: 85, contracts: 5, startsCycle: false, contractsByPosition: { first: 0, second: 0 }, plannedPremiumByPosition: { first: 0, second: 296.75 }, leapsBeforeSale: null };
+    const state = newVolFarmerV2SymbolState();
+    state.second = { shares: 0, costPerShare: 0, premiums: [{ legId: "leg-p0", dollars: 3.25, shares: 100 }, { legId: "action:p", dollars: 296.75, shares: 500 }], calls: [], puts: [{ legId: "action:p", shares: 500 }] };
     settleVolFarmerV2Order(state, order, unfilledVolFarmerV2Outcome);
-    expect(state.second).toMatchObject({ puts: [], premiumDollars: 3.25 });
+    expect(state.second).toMatchObject({ puts: [], premiums: [{ legId: "leg-p0", dollars: 3.25, shares: 100 }] });
+
+    // Saved before premiums were kept per option: the planned premium is in the total, which loses it.
+    const saved = newVolFarmerV2SymbolState();
+    saved.second = { shares: 0, costPerShare: 0, premiums: [{ legId: "", dollars: 300, shares: 0 }], calls: [], puts: [{ legId: "action:p", shares: 500 }] };
+    settleVolFarmerV2Order(saved, order, unfilledVolFarmerV2Outcome);
+    expect(saved.second!.premiums).toEqual([{ legId: "", dollars: 3.25, shares: 0 }]);
+  });
+
+  it("reads a memory saved with a premium total as one premium counted in full", () => {
+    const memory = { state: newVolFarmerV2SymbolState(), pending: [] };
+    memory.state.first = { shares: 300, costPerShare: 50.01, premiumDollars: 328, calls: [], puts: [] } as unknown as VolFarmerV2Position;
+    memory.state.second = { shares: 0, costPerShare: 0, premiumDollars: 0, calls: [], puts: [] } as unknown as VolFarmerV2Position;
+    const read = volFarmerV2MemoryFromStored(memory);
+    expect(read.state.first).toEqual({ shares: 300, costPerShare: 50.01, premiums: [{ legId: "", dollars: 328, shares: 0 }], calls: [], puts: [] });
+    expect(read.state.second).toEqual({ shares: 0, costPerShare: 0, premiums: [], calls: [], puts: [] });
+    expect(volFarmerV2BreakEven(read.state.first!)).toBeCloseTo(50.01 - 328 / 300, 10);
   });
 
   it("keeps a LEAPS partly bought for its top-up, forgets one not bought at all, and gives back one not sold whole", () => {

@@ -30,21 +30,25 @@ import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchas
 //      the same next expiry with |delta| ≤ putMaxAbsDelta, struck ≤ the first break-even × (1 − stepBelowFirstBreak-
 //      EvenPct ÷ 100), spread and volume as the Calls', by premium yield; contracts = min(floor(P ÷ 2 ÷ (100 × strike)),
 //      floor(free cash ÷ (100 × strike)), the volume limit). Assigned, the Put's shares are the second position.
-//   4. LEAPS: the second position holds shares and no Call at or above its break-even passes 2's rules, and it has bought
-//      no LEAPS since it holds them: of the Calls of the first listed expiry at least leapsMinDte days out (spread within
-//      the limit, bid ≥ $0.05), the one whose |delta| (its own IV, on the forward) is nearest leapsAbsDelta; as many
-//      contracts as min(the free cash, leapsMaxAccountPct % of the book's cap base; 0: no cap) pays for (fill +
-//      commission): its intended count N, fixed then. The backtest buys no more than its ask offered; tried again at each
-//      look until one is bought (strategy "leaps", its own records: buy_leaps, sell_leaps). Bought short of N (the ask's
-//      size in the backtest, a partial fill live), it is topped up at the next looks with the same contract, N − held
-//      contracts, each top-up no more than the free cash then pays for (and its ask offers, in the backtest), until N are
-//      held or the second position is called away (Marcelo 2026-10-27). It is sold whole at the first look after the
-//      second position is called away (the session's fill rule); held to its expiry, the session settles it at its
-//      intrinsic value.
+//   4. LEAPS: the second position holds shares, the price is at or below B-E2 × (1 − the look's Step ÷ 200), half a Step
+//      below B-E2, the Step as stepRule sets it for the Puts (Marcelo 2026-10-28: a price test, so neither the weekday nor
+//      the Call rules decide it; never at or above B-E2, top-ups included), and it has bought no LEAPS since it holds
+//      them: of the Calls of the first listed expiry at least leapsMinDte days out (spread within the limit, bid ≥ $0.05),
+//      the one whose |delta| (its own IV, on the forward) is nearest leapsAbsDelta; as many contracts as min(the free
+//      cash, leapsMaxAccountPct % of the book's cap base; 0: no cap) pays for (fill + commission): its intended count N,
+//      fixed then. Its purchases and its sale fill leapsSpreadCostChargedPct of the half-spread past the mid (Marcelo
+//      2026-10-28; 33⅓: two-thirds of the way across the spread; Pluto: 0). The backtest buys no more than its ask
+//      offered; tried again at each look until one is bought (strategy "leaps", its own records: buy_leaps, sell_leaps).
+//      Bought short of N (the ask's size in the backtest, a partial fill live), it is topped up at the next looks with the
+//      same contract, N − held contracts, each top-up no more than the free cash then pays for (and its ask offers, in the
+//      backtest), until N are held or the second position is called away (Marcelo 2026-10-27). It is sold whole at the
+//      first look after the second position is called away (the session's fill rule); held to its expiry, the session
+//      settles it at its intrinsic value.
 // The first position's Calls are struck above the second's break-even (step 3's strike rule), so the second is called away
 // first or with it; a first position called away with the second's Puts open leaves them to their expiry, the same day.
 // When nothing is held, the next cycle starts at the next look (the backtest's next day when it decides at 10:00 only). A
-// cycle that spans a split whose contracts do not fit its share scale sells and buys no option until it ends.
+// cycle starts on a share scale every contract up to the session's end fits whole (splitFactorForNewCycle, Marcelo
+// 2026-10-28); one that still spans a split whose contracts do not fit it sells and buys no option until it ends.
 //
 // Example: P = $100,000 and S = $240: the first position buys floor(50,000 ÷ 24,000.50) = 2 lots (200 shares, $48,001)
 // and sells Calls at or above its break-even each week. With its break-even at $236 after a fall to $200, no Call at or
@@ -53,14 +57,24 @@ import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchas
 
 const percent = (fraction: number, digits = 1) => `${(fraction * 100).toFixed(digits)}%`;
 
+/** A premium one option brought a position. */
+export interface VolFarmerV2Premium {
+  /** The option's leg (a planned order's ref until the order is sent). */
+  legId: string;
+  /** Its premium for this position, net of commission, in dollars. */
+  dollars: number;
+  /** The shares it covered for this position, on the cycle's scale; 0: counted in full (a premium total saved before 2026-10-28). */
+  shares: number;
+}
+
 /** One of the two Covered Calls, on the cycle's scale. */
 export interface VolFarmerV2Position {
   /** Shares held; 0 for a second position still selling Puts. */
   shares: number;
   /** What each share cost: the first's fill plus the stock commission, the second's assigned strike. */
   costPerShare: number;
-  /** Premiums net of commissions, in dollars: its Calls' and, for the second, every Put's sold for it. */
-  premiumDollars: number;
+  /** Its Calls' premiums and, for the second, every Put's sold for it, one per option. */
+  premiums: VolFarmerV2Premium[];
   /** Its open Calls and the shares each covers (another position's Call can share the leg); one in the backtest, several on holdings Pluto adopted. */
   calls: { legId: string; shares: number }[];
   /** The second position's open Puts and the shares each would deliver; one in the backtest, several on holdings Pluto adopted. */
@@ -115,14 +129,30 @@ export function volFarmerV2LeapsBudget(freeCash: number, capBaseDollars: number,
   return leapsMaxAccountPct > 0 ? Math.min(freeCash, capBaseDollars * (leapsMaxAccountPct / 100)) : freeCash;
 }
 
-/** A position's break-even per share, on the cycle's scale; null without shares. */
-export function volFarmerV2BreakEven(position: Pick<VolFarmerV2Position, "shares" | "costPerShare" | "premiumDollars">): number | null {
-  return position.shares > 0 ? position.costPerShare - position.premiumDollars / position.shares : null;
+/**
+ * A position's break-even per share, on the cycle's scale; null without shares (Marcelo 2026-10-28): cost per share −
+ * Σ premium × min(1, shares held ÷ shares the option covered) ÷ shares held, so no option lowers it by more than its own
+ * premium a share. PCG: 100 shares assigned at $12 after Puts of 25, 4, 18, 44 and 1 contracts: $11.61, not $5.54.
+ */
+export function volFarmerV2BreakEven(position: Pick<VolFarmerV2Position, "shares" | "costPerShare" | "premiums">): number | null {
+  if (position.shares <= 0) return null;
+  const credited = position.premiums.reduce((sum, premium) => sum + premium.dollars * (premium.shares > 0 ? Math.min(1, position.shares / premium.shares) : 1), 0);
+  return position.costPerShare - credited / position.shares;
 }
 
 /** A position's premium from its share of a Call order: its contracts at the fill, less its share of the order's commission. */
 export function volFarmerV2CallPremiumShare(fillPrice: number, positionContracts: number, orderContracts: number, orderCommissionDollars: number): number {
   return fillPrice * sharesPerContract * positionContracts - (orderCommissionDollars * positionContracts) / orderContracts;
+}
+
+/** The Step at this look as stepRule sets it: the fixed Step, or the one-month implied move (the fixed Step without an IV). */
+function volFarmerV2StepAtLook(v2: BacktestVolFarmerV2Settings, market: Pick<VolFarmerV2Market, "stepImpliedVolatility">): VolFarmerV2Step {
+  return v2.stepRule === "implied_move_at_put_sale" ? volFarmerV2ImpliedMoveStep(v2.stepBelowFirstBreakEvenPct, market.stepImpliedVolatility()) : { stepPct: v2.stepBelowFirstBreakEvenPct, impliedVolatility: null };
+}
+
+/** The highest price the Step entry buys a LEAPS at, as traded today: B-E2 × (1 − Step ÷ 100) (Marcelo 2026-10-28). */
+export function volFarmerV2LeapsEntryPriceCap(secondBreakEvenAsTraded: number, stepPct: number): number {
+  return secondBreakEvenAsTraded * (1 - stepPct / 100);
 }
 
 /** The highest strike step 3 sells a Put at, as traded today: the first break-even × (1 − pct ÷ 100). */
@@ -237,6 +267,8 @@ export interface VolFarmerV2LegStatus {
   /** On the cycle's scale. */
   strike: number | null;
   contracts: number;
+  /** Its cycle's scale against today's (a price on it ÷ this is as traded today), when that cycle has ended since; absent: the look's. */
+  priceToCycleScale?: number;
 }
 
 /**
@@ -274,9 +306,10 @@ const contractKeyOf = (contract: { expiry: string; strike: number }) => `${contr
 /**
  * Updates the positions from what settled since the last look: Calls assigned or expired, Puts assigned or expired, the
  * LEAPS settled. A position whose last shares were called away ends; the second's Puts' premiums then start afresh and
- * its LEAPS is sold at this look.
+ * its LEAPS is sold at this look. Its notes give shares and strikes as traded today.
  */
-function reconcile(book: VolFarmerV2Book, state: VolFarmerV2SymbolState, notes: string[]): void {
+function reconcile(book: VolFarmerV2Book, state: VolFarmerV2SymbolState, notes: string[], priceToCycleScale: number): void {
+  const sharesAsTraded = (cycleShares: number, leg: VolFarmerV2LegStatus) => Math.round(cycleShares * (leg.priceToCycleScale ?? priceToCycleScale));
   const calledAway = new Set<"first" | "second">();
   for (const [name, position] of [["first", state.first], ["second", state.second]] as const) {
     if (position === null) continue;
@@ -285,7 +318,7 @@ function reconcile(book: VolFarmerV2Book, state: VolFarmerV2SymbolState, notes: 
       if (callLeg === undefined || !callLeg.closed) continue;
       if (callLeg.assigned) {
         position.shares = Math.max(0, position.shares - call.shares);
-        notes.push(`the ${name} position's Call was assigned: ${call.shares} shares called away${position.shares > 0 ? `, ${position.shares} left` : ""}`);
+        notes.push(`the ${name} position's Call was assigned: ${sharesAsTraded(call.shares, callLeg)} shares called away${position.shares > 0 ? `, ${sharesAsTraded(position.shares, callLeg)} left` : ""}`);
         if (position.shares === 0) calledAway.add(name);
       }
       position.calls.splice(position.calls.indexOf(call), 1);
@@ -297,7 +330,7 @@ function reconcile(book: VolFarmerV2Book, state: VolFarmerV2SymbolState, notes: 
         // Shares already held (several Puts assigned): the cost is the average of theirs and the strike's.
         position.costPerShare = position.shares === 0 ? putLeg.strike! : (position.shares * position.costPerShare + put.shares * putLeg.strike!) / (position.shares + put.shares);
         position.shares += put.shares;
-        notes.push(`the second position's Put was assigned: ${put.shares} shares at ${putLeg.strike!.toFixed(2)}`);
+        notes.push(`the second position's Put was assigned: ${sharesAsTraded(put.shares, putLeg)} shares at ${(putLeg.strike! / (putLeg.priceToCycleScale ?? priceToCycleScale)).toFixed(2)}`);
       }
       position.puts.splice(position.puts.indexOf(put), 1);
     }
@@ -339,9 +372,13 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
   const { state, market, farmer, v2, book } = input;
   const { symbol, todayIso, stockPrice, riskFreeRate, quotes, priceToCycleScale } = market;
   const parts: string[] = [];
-  reconcile(book, state, parts);
+  reconcile(book, state, parts, priceToCycleScale);
   const sharesPerContractOnCycleScale = Math.round(sharesPerContract / priceToCycleScale);
   const asTraded = (cyclePrice: number) => cyclePrice / priceToCycleScale;
+  const breakEvenAsTraded = (position: VolFarmerV2Position | null) => {
+    const breakEven = position === null ? null : volFarmerV2BreakEven(position);
+    return breakEven === null ? null : asTraded(breakEven);
+  };
   const say = (text: string) => parts.push(text);
   const finish = () => (parts.length === 0 ? null : `${symbol}: ${parts.join("; ")}`);
 
@@ -353,7 +390,7 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
 
   // 4b. The LEAPS of a second position called away goes first, at the look's fill.
   if (state.leapsToSell && state.leaps !== null) {
-    say(sellLeaps(input));
+    say(sellLeaps(input, "the second position was called away"));
     if (book.isFlat()) return finish();
   }
 
@@ -364,8 +401,9 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
   }
   const dte = daysToExpiry(nextExpiry, todayIso);
   const heldContracts = new Set(book.openOptionContracts().map((contract) => contractKeyOf({ expiry: contract.expiry, strike: asTraded(contract.strike) })));
-  const candidatesOf = (right: "C" | "P", limits: { minAbsDelta: number; maxAbsDelta: number; minimumStrike?: number; maximumStrike?: number; heldExcluded: boolean }) =>
-    selectBaselineCandidates({
+  /** The next expiry's candidates that `kept` keeps, and its rejections. */
+  const candidatesOf = (right: "C" | "P", limits: { minAbsDelta: number; maxAbsDelta: number; minimumStrike?: number; maximumStrike?: number; heldExcluded: boolean; kept?: (candidate: BaselineCandidate) => boolean }) => {
+    const selected = selectBaselineCandidates({
       quotes,
       forwardAnchors: market.forwardAnchors,
       commissions: market.commissions,
@@ -381,9 +419,11 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
       ...(limits.minimumStrike === undefined ? {} : { minimumStrike: limits.minimumStrike }),
       ...(limits.maximumStrike === undefined ? {} : { maximumStrike: limits.maximumStrike }),
     });
+    return { ...selected, candidates: limits.kept ? selected.candidates.filter(limits.kept) : selected.candidates };
+  };
   const callCandidates = (breakEvenAsTraded: number, heldExcluded: boolean) => {
-    const selected = candidatesOf("C", { minAbsDelta: farmer.callMinAbsDelta, maxAbsDelta: farmer.callMaxAbsDelta, minimumStrike: breakEvenAsTraded, heldExcluded });
-    return { calls: selected.candidates.filter((candidate) => candidate.strike > stockPrice), rejections: selected.rejections };
+    const selected = candidatesOf("C", { minAbsDelta: farmer.callMinAbsDelta, maxAbsDelta: farmer.callMaxAbsDelta, minimumStrike: breakEvenAsTraded, heldExcluded, kept: (candidate) => candidate.strike > stockPrice });
+    return { calls: selected.candidates, rejections: selected.rejections };
   };
 
   // 1. Flat: a new cycle, the first position's shares bought with its first Call.
@@ -412,20 +452,15 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
     Object.assign(state, { ...newVolFarmerV2SymbolState(), cash: state.cash, potDollars: pot });
     state.cash.cycles += 1;
     state.cash.firstHalfLeft.push(pot / 2 - spent);
-    state.first = { shares: lots * sharesPerContractOnCycleScale, costPerShare: spent / (lots * sharesPerContractOnCycleScale), premiumDollars: 0, calls: [], puts: [] };
+    state.first = { shares: lots * sharesPerContractOnCycleScale, costPerShare: spent / (lots * sharesPerContractOnCycleScale), premiums: [], calls: [], puts: [] };
     say(sellCalls(input, [{ name: "first", position: state.first, call, contracts: lots }]));
     return finish();
   }
 
   // 2. Calls on the positions holding shares with none open.
-  const breakEvenAsTraded = (position: VolFarmerV2Position | null) => {
-    const breakEven = position === null ? null : volFarmerV2BreakEven(position);
-    return breakEven === null ? null : asTraded(breakEven);
-  };
   const firstNeedsCall = state.first !== null && state.first.shares > 0 && state.first.calls.length === 0;
   const volumeUsed = new Map<string, number>();
   const orders: CallOrder[] = [];
-  let secondFindsNoCall = false;
   for (const [name, position] of [["first", state.first], ["second", state.second]] as const) {
     if (position === null || position.shares <= 0 || position.calls.length > 0) continue;
     const breakEven = breakEvenAsTraded(position)!;
@@ -438,7 +473,6 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
     const call = pickByVolume(calls, () => lots, capLeft);
     if (call === null) {
       say(`${name} position: no Call at or above its break-even ${breakEven.toFixed(2)} (${describeRejections(rejections) || "none listed"})`);
-      if (name === "second") secondFindsNoCall = true;
       continue;
     }
     const contracts = Math.min(lots, capLeft(call));
@@ -459,7 +493,7 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
     const bestCall = callCandidates(firstBreakEven, false).calls[0] ?? null;
     const bestYield = bestCall?.premiumYield ?? 0;
     if (bestYield * 100 < v2.putsStartCallYieldPct) {
-      const step: VolFarmerV2Step = v2.stepRule === "implied_move_at_put_sale" ? volFarmerV2ImpliedMoveStep(v2.stepBelowFirstBreakEvenPct, market.stepImpliedVolatility()) : { stepPct: v2.stepBelowFirstBreakEvenPct, impliedVolatility: null };
+      const step = volFarmerV2StepAtLook(v2, market);
       const strikeCap = volFarmerV2PutStrikeCap(firstBreakEven, step.stepPct);
       // The implied-move rule says which Step it used and records it with the Put; the fixed rule's records stay as they were.
       const stepNote =
@@ -479,7 +513,7 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
         const contracts = Math.min(wanted(put), put.volumeCap);
         if (contracts < 1) say(`no Put: ${trigger}, but the volume limit allows none`);
         else {
-          state.second ??= { shares: 0, costPerShare: 0, premiumDollars: 0, calls: [], puts: [] };
+          state.second ??= { shares: 0, costPerShare: 0, premiums: [], calls: [], puts: [] };
           state.cash.secondHalfLeft.push(state.potDollars / 2 - contracts * put.strike * sharesPerContract);
           say(sellPut(input, state.second, put, contracts, `${trigger}; strike at most ${strikeCap.toFixed(2)}${stepNote}`, firstBreakEven, stepScores));
         }
@@ -487,12 +521,13 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
     }
   }
 
-  // 4. The LEAPS, once the second position holds shares no Call at or above its break-even fits; one bought short of its
-  // intended count at an earlier look is topped up while the second position holds its shares.
-  if (secondFindsNoCall && state.second !== null && state.second.shares > 0 && state.leaps === null && !state.leapsBought) {
+  // 4. The LEAPS, one a holding, once the second position holds shares and the price is half a Step below its break-even;
+  // one bought short of its intended count at an earlier look is topped up while the second position holds its shares
+  // and the price is below B-E2.
+  if (state.second !== null && state.second.shares > 0 && state.leaps === null && !state.leapsBought) {
     say(buyLeaps(input, breakEvenAsTraded(state.second)!));
   } else if (state.leaps !== null && !state.leapsToSell && state.second !== null && state.second.shares > 0) {
-    const toppedUp = topUpLeaps(input);
+    const toppedUp = topUpLeaps(input, breakEvenAsTraded(state.second)!);
     if (toppedUp !== null) say(toppedUp);
   }
   return finish();
@@ -521,8 +556,11 @@ function sellCalls(input: VolFarmerV2LookInput, orders: readonly CallOrder[]): s
     // The break-even each position held this Call to, before its premium: the Wheel cycles' B-E¹ / B-E² of the sale.
     const breakEvensBefore = Object.fromEntries(group.map((order) => [order.name === "first" ? "breakEvenFirst" : "breakEvenSecond", volFarmerV2BreakEven(order.position)! / priceToCycleScale]));
     const whose: string[] = [];
+    const premiums: VolFarmerV2Premium[] = [];
     for (const order of group) {
-      order.position.premiumDollars += volFarmerV2CallPremiumShare(call.fillPrice, order.contracts, contracts, commission);
+      const premium = { legId: "", dollars: volFarmerV2CallPremiumShare(call.fillPrice, order.contracts, contracts, commission), shares: order.contracts * sharesPerContractOnCycleScale };
+      order.position.premiums.push(premium);
+      premiums.push(premium);
       whose.push(`${order.name} position ${order.contracts}×, break-even now ${(volFarmerV2BreakEven(order.position)! / priceToCycleScale).toFixed(2)}`);
     }
     const contractLabel = describeOptionContract({ strike: call.strike, right: "C", expiry: call.expiry, dte: call.dte });
@@ -537,6 +575,7 @@ function sellCalls(input: VolFarmerV2LookInput, orders: readonly CallOrder[]): s
       candidateScores: { premiumYield: call.premiumYield, delta: call.delta, impliedVolatility: call.impliedVolatility, timeValue: call.timeValue, dte: call.dte, bid: call.bid, ask: call.ask, volumeCap: call.volumeCap, stockPrice, ...breakEvensBefore },
     });
     for (const order of group) order.position.calls.push({ legId: callLegId, shares: order.contracts * sharesPerContractOnCycleScale });
+    for (const premium of premiums) premium.legId = callLegId;
     descriptions.push(description);
   }
   return descriptions.join(" · ");
@@ -546,7 +585,8 @@ function sellPut(input: VolFarmerV2LookInput, second: VolFarmerV2Position, put: 
   const { market, book, v2 } = input;
   const sharesPerContractOnCycleScale = Math.round(sharesPerContract / market.priceToCycleScale);
   const commission = market.optionCommissionDollars(contracts);
-  second.premiumDollars += put.fillPrice * sharesPerContract * contracts - commission;
+  const premium = { legId: "", dollars: put.fillPrice * sharesPerContract * contracts - commission, shares: contracts * sharesPerContractOnCycleScale };
+  second.premiums.push(premium);
   const contractLabel = describeOptionContract({ strike: put.strike, right: "P", expiry: put.expiry, dte: put.dte });
   const description = `${market.symbol} Sell ${contractLabel}${describeOrderSize(contracts, put.fillPrice)} (second position: delta ${Math.abs(put.delta).toFixed(2)}, IV ${percent(put.impliedVolatility)}, premium yield ${percent(put.premiumYield)}; ${why})`;
   const putLegId = book.sellCashSecuredPut({
@@ -557,12 +597,32 @@ function sellPut(input: VolFarmerV2LookInput, second: VolFarmerV2Position, put: 
     candidateScores: { premiumYield: put.premiumYield, delta: put.delta, impliedVolatility: put.impliedVolatility, timeValue: put.timeValue, dte: put.dte, bid: put.bid, ask: put.ask, volumeCap: put.volumeCap, stockPrice: market.stockPrice, breakEvenFirst: firstBreakEvenAsTraded, ...stepScores },
   });
   second.puts.push({ legId: putLegId, shares: contracts * sharesPerContractOnCycleScale });
+  premium.legId = putLegId;
   return description;
+}
+
+/**
+ * The LEAPS entry (Marcelo 2026-10-28): the price at or below B-E2 × (1 − Step ÷ 200), half a Step below B-E2, the Step as
+ * stepRule sets it for the Puts at this look, so neither the weekday nor the Call rules decide it; never at or above
+ * B-E2. Whether the look may buy, and why (the wait's note, or the purchase's reason). Tried again at each look.
+ */
+function leapsEntry(input: VolFarmerV2LookInput, secondBreakEvenAsTraded: number): { buys: boolean; reason: string } {
+  const { market, v2 } = input;
+  const { stockPrice } = market;
+  if (stockPrice >= secondBreakEvenAsTraded) return { buys: false, reason: `no LEAPS: the price ${stockPrice.toFixed(2)} is at or above B-E2 ${secondBreakEvenAsTraded.toFixed(2)}` };
+  const step = volFarmerV2StepAtLook(v2, market);
+  const priceCap = volFarmerV2LeapsEntryPriceCap(secondBreakEvenAsTraded, step.stepPct / 2);
+  const stepSource = step.impliedVolatility === null ? (v2.stepRule === "fixed" ? "the fixed Step" : `no IV in the last ${stepImpliedVolatilityLookbackSessions} sessions, the fixed Step`) : `IV ${percent(step.impliedVolatility)} × √(21 ÷ 252)`;
+  const halfStep = `less half the Step ${step.stepPct.toFixed(1)}% (${stepSource}): ${priceCap.toFixed(2)}`;
+  if (stockPrice <= priceCap) return { buys: true, reason: `the price ${stockPrice.toFixed(2)} is at or below the second position's break-even ${secondBreakEvenAsTraded.toFixed(2)} ${halfStep}` };
+  return { buys: false, reason: `no LEAPS: the price ${stockPrice.toFixed(2)} is above B-E2 ${secondBreakEvenAsTraded.toFixed(2)} ${halfStep}` };
 }
 
 function buyLeaps(input: VolFarmerV2LookInput, secondBreakEvenAsTraded: number): string {
   const { state, market, book, farmer, v2 } = input;
   const { todayIso, stockPrice } = market;
+  const entry = leapsEntry(input, secondBreakEvenAsTraded);
+  if (!entry.buys) return entry.reason;
   const freeCash = book.freeCash();
   if (state.leapsTrigger === null) {
     state.leapsTrigger = { dateIso: todayIso, freeCash, contractCost: null, boughtOn: null, contracts: 0 };
@@ -572,7 +632,7 @@ function buyLeaps(input: VolFarmerV2LookInput, secondBreakEvenAsTraded: number):
   const source = market.leapsCallQuotes;
   const expiry = source?.listedExpiries().find((listed) => daysToExpiry(listed, todayIso) >= v2.leapsMinDte) ?? null;
   if (!source || expiry === null) return `no LEAPS: no Call expiry listed ${v2.leapsMinDte} or more days out`;
-  const leaps = chooseVolFarmerV2Leaps({ quotes: source.quotesOf(expiry), expiry, stockPrice, yearsToExpiry: market.yearsToExpiry(expiry), riskFreeRate: market.riskFreeRate, absDelta: v2.leapsAbsDelta, maxSpreadPctOfMid: farmer.maxSpreadPctOfMid, spreadShareCharged: market.spreadShareCharged });
+  const leaps = chooseVolFarmerV2Leaps({ quotes: source.quotesOf(expiry), expiry, stockPrice, yearsToExpiry: market.yearsToExpiry(expiry), riskFreeRate: market.riskFreeRate, absDelta: v2.leapsAbsDelta, maxSpreadPctOfMid: farmer.maxSpreadPctOfMid, spreadShareCharged: v2.leapsSpreadCostChargedPct / 100 });
   if (leaps === null) return `no LEAPS: no Call of ${expiry} has a usable quote`;
   const contractCost = leaps.fillPrice * sharesPerContract + market.optionCommissionDollars(1);
   if (log.contractCost === null) log.contractCost = contractCost;
@@ -588,7 +648,7 @@ function buyLeaps(input: VolFarmerV2LookInput, secondBreakEvenAsTraded: number):
   const contracts = Math.min(affordable, offered);
   const dte = daysToExpiry(expiry, todayIso);
   const contractLabel = describeOptionContract({ strike: leaps.strike, right: "C", expiry, dte });
-  const description = `${market.symbol} Buy ${contractLabel}${describeOrderSize(contracts, leaps.fillPrice)} (LEAPS: delta ${leaps.delta.toFixed(2)}, IV ${percent(leaps.impliedVolatility)}; the second position has no Call at or above its break-even ${secondBreakEvenAsTraded.toFixed(2)}; ${cashText}${contracts < affordable ? `, which pays for ${affordable}: ${offered} offered at the ask` : ""})`;
+  const description = `${market.symbol} Buy ${contractLabel}${describeOrderSize(contracts, leaps.fillPrice)} (LEAPS: delta ${leaps.delta.toFixed(2)}, IV ${percent(leaps.impliedVolatility)}; ${entry.reason}; ${cashText}${contracts < affordable ? `, which pays for ${affordable}: ${offered} offered at the ask` : ""})`;
   const legId = book.buyLeaps({
     expiry,
     strike: leaps.strike,
@@ -597,7 +657,7 @@ function buyLeaps(input: VolFarmerV2LookInput, secondBreakEvenAsTraded: number):
     fillPrice: leaps.fillPrice,
     contracts,
     description,
-    chosenBecause: `vol farmer v2: the second position has no Call at or above its break-even; of the first expiry ${v2.leapsMinDte} or more days out, the Call whose |delta| is nearest ${v2.leapsAbsDelta}, with ${capped ? `the free cash up to the LEAPS cap (${v2.leapsMaxAccountPct}% of ${market.leapsCapBaseLabel})` : "all the free cash"}, up to the contracts offered at its ask`,
+    chosenBecause: `vol farmer v2: the price is half a Step below the second position's break-even; of the first expiry ${v2.leapsMinDte} or more days out, the Call whose |delta| is nearest ${v2.leapsAbsDelta}, with ${capped ? `the free cash up to the LEAPS cap (${v2.leapsMaxAccountPct}% of ${market.leapsCapBaseLabel})` : "all the free cash"}, up to the contracts offered at its ask`,
     candidateScores: { bid: leaps.bid, ask: leaps.ask, askSize: leaps.askSize, dte, stockPrice, impliedVolatility: leaps.impliedVolatility, delta: leaps.delta, freeCash, costDollars: leaps.fillPrice * sharesPerContract * contracts + market.optionCommissionDollars(contracts), ...(capped ? { accountValue: capBase, leapsBudget: budget } : {}) },
   });
   state.leaps = { legIds: [legId], expiry, strike: leaps.strike, intendedContracts: affordable };
@@ -607,17 +667,21 @@ function buyLeaps(input: VolFarmerV2LookInput, secondBreakEvenAsTraded: number):
   return description;
 }
 
-/** A LEAPS held short of its intended count: N − held more of the same contract, as the free cash (and, in the backtest, the ask) allows; null when none is due. */
-function topUpLeaps(input: VolFarmerV2LookInput): string | null {
-  const { state, market, book, farmer } = input;
+/**
+ * A LEAPS held short of its intended count: N − held more of the same contract, as the free cash (and, in the backtest,
+ * the ask) allows, never with the price at or above B-E2 (Marcelo 2026-10-28); null when none is due.
+ */
+function topUpLeaps(input: VolFarmerV2LookInput, secondBreakEvenAsTraded: number): string | null {
+  const { state, market, book, farmer, v2 } = input;
   const leaps = state.leaps!;
   const held = openLeapsLegs(book, leaps).reduce((sum, leg) => sum + leg.contracts, 0);
   const wanted = leaps.intendedContracts - held;
   if (held < 1 || wanted < 1) return null;
   const progress = `${held} of ${leaps.intendedContracts} held`;
+  if (market.stockPrice >= secondBreakEvenAsTraded) return `LEAPS top-up: waits, the price ${market.stockPrice.toFixed(2)} is at or above B-E2 ${secondBreakEvenAsTraded.toFixed(2)} (${progress})`;
   const quote = market.leapsCallQuotes?.quotesOf(leaps.expiry).find((candidate) => candidate.right === "C" && roundedStrike(candidate.strike) === roundedStrike(leaps.strike));
   if (!quote || baselineQuoteRejection(quote, farmer.maxSpreadPctOfMid) !== null) return `LEAPS top-up: no usable quote for the ${leaps.strike} Call (${progress})`;
-  const fillPrice = optionPurchaseFillPrice(quote.bid!, quote.ask!, market.spreadShareCharged);
+  const fillPrice = optionPurchaseFillPrice(quote.bid!, quote.ask!, v2.leapsSpreadCostChargedPct / 100);
   const freeCash = book.freeCash();
   const affordable = contractsAffordable(freeCash, fillPrice, market.optionCommissionDollars);
   if (affordable < 1) return `LEAPS top-up: one more ${leaps.strike} Call costs ${formatWholeDollars(fillPrice * sharesPerContract + market.optionCommissionDollars(1))}, more than the free cash (${formatWholeDollars(freeCash)}; ${progress})`;
@@ -643,8 +707,8 @@ function topUpLeaps(input: VolFarmerV2LookInput): string | null {
   return description;
 }
 
-function sellLeaps(input: VolFarmerV2LookInput): string {
-  const { state, market, book } = input;
+function sellLeaps(input: VolFarmerV2LookInput, reason: string): string {
+  const { state, market, book, v2 } = input;
   const leaps = state.leaps!;
   const legs = openLeapsLegs(book, leaps);
   if (legs.length === 0) {
@@ -654,11 +718,11 @@ function sellLeaps(input: VolFarmerV2LookInput): string {
   }
   const quote = market.leapsCallQuotes?.quotesOf(leaps.expiry).find((candidate) => candidate.right === "C" && roundedStrike(candidate.strike) === roundedStrike(leaps.strike));
   if (!quote || quote.ask === null || !(quote.ask > 0)) return `the LEAPS is kept: no quote to sell the ${leaps.strike} Call at`;
-  const fill = optionSaleFillPrice(quote.bid ?? 0, quote.ask, market.spreadShareCharged);
+  const fill = optionSaleFillPrice(quote.bid ?? 0, quote.ask, v2.leapsSpreadCostChargedPct / 100);
   const contracts = legs.reduce((sum, leg) => sum + leg.contracts, 0);
   const contractLabel = describeOptionContract({ strike: leaps.strike, right: "C", expiry: leaps.expiry, dte: daysToExpiry(leaps.expiry, market.todayIso) });
-  const description = `${market.symbol} Sell ${contractLabel}${describeOrderSize(contracts, fill)} (LEAPS: the second position was called away)`;
-  book.sellLeaps({ legIds: legs.map((leg) => leg.legId), expiry: leaps.expiry, strike: leaps.strike, contracts, fillPrice: fill, description, chosenBecause: "vol farmer v2: the second position was called away, so its LEAPS is sold", candidateScores: { bid: quote.bid, ask: quote.ask, stockPrice: market.stockPrice } });
+  const description = `${market.symbol} Sell ${contractLabel}${describeOrderSize(contracts, fill)} (LEAPS: ${reason})`;
+  book.sellLeaps({ legIds: legs.map((leg) => leg.legId), expiry: leaps.expiry, strike: leaps.strike, contracts, fillPrice: fill, description, chosenBecause: `vol farmer v2: ${reason}, so its LEAPS is sold`, candidateScores: { bid: quote.bid, ask: quote.ask, stockPrice: market.stockPrice } });
   state.leaps = null;
   state.leapsToSell = false;
   return description;

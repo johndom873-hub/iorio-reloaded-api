@@ -344,9 +344,9 @@ export const defaultBacktestVolFarmerSettings: BacktestVolFarmerSettings = { cal
  * the shares cost less its Calls' premiums). While the best of those Calls yields under putsStartCallYieldPct a year,
  * Puts are sold with the other half, struck at least stepBelowFirstBreakEvenPct (the Step) below that break-even; their shares,
  * once assigned, are the second position, with a break-even of its own (the strike less its Puts' and Calls' premiums).
- * When the second position finds no Call at or above its break-even, the free cash buys a LEAPS Call, sold when the second
- * position is called away. Calls and Puts on the next listed expiry, held to it; the Calls' |delta| range and the spread
- * limit are the Vol Farmer's settings (backtestVolFarmerV2Look.ts).
+ * Once the price is half a Step below the second position's break-even, the free cash buys a LEAPS Call, one a holding,
+ * sold when the second position is called away (Marcelo 2026-10-28). Calls and Puts on the next listed expiry, held to
+ * it; the Calls' |delta| range and the spread limit are the Vol Farmer's settings (backtestVolFarmerV2Look.ts).
  */
 export interface BacktestVolFarmerV2Settings {
   /** Puts start under: Puts are sold while the best Call the first position can sell yields under this, percent a year (no Call: 0%). */
@@ -371,6 +371,12 @@ export interface BacktestVolFarmerV2Settings {
    */
   leapsMaxAccountPct: number;
   /**
+   * LEAPS fills (Marcelo 2026-10-28): the share of the half-spread a LEAPS purchase or sale gives up, percent, and the price
+   * a held LEAPS is valued at, what selling it would bring. 33⅓ is two-thirds of the way across the spread: bid $10, ask
+   * $13 buys at $12 and sells (and values) at $11. Calls and Puts fill and are valued at trading.spreadCostChargedPct.
+   */
+  leapsSpreadCostChargedPct: number;
+  /**
    * When it decides (Marcelo 2026-10-27, as Pluto runs it): "first_look" at 10:00 only; "every_look" at every look (every
    * 30 minutes), on that look's quotes and price.
    */
@@ -382,7 +388,7 @@ export type VolFarmerV2StepRule = (typeof volFarmerV2StepRules)[number];
 export const volFarmerV2LooksChoices = ["first_look", "every_look"] as const;
 export type VolFarmerV2Looks = (typeof volFarmerV2LooksChoices)[number];
 
-export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 0, looks: "first_look" };
+export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 0, leapsSpreadCostChargedPct: 100 / 3, looks: "first_look" };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5), read by the retired rules

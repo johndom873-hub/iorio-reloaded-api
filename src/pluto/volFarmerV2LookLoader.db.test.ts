@@ -55,13 +55,18 @@ describe("Vol Farmer v2's live reads", () => {
   it("saves and reads back a ticker's memory, without the backtest's cash check", async () => {
     expect(await loadVolFarmerV2Memory(tickerId)).toBeNull();
     const state = newVolFarmerV2SymbolState();
-    state.first = { shares: 300, costPerShare: 50.01, premiumDollars: 328, calls: [{ legId: "action:a1", shares: 300 }], puts: [] };
+    state.first = { shares: 300, costPerShare: 50.01, premiums: [{ legId: "action:a1", dollars: 328, shares: 300 }], calls: [{ legId: "action:a1", shares: 300 }], puts: [] };
     state.cash.cycles = 4;
     await saveVolFarmerV2Memory(tickerId, { state, pending: [] }, true);
     const memory = await loadVolFarmerV2Memory(tickerId);
     expect(memory!.state.first).toEqual(state.first);
     expect(memory!.state.cash.cycles).toBe(0);
     expect((await testDb("pluto_vol_farmer_v2_cycles").where({ ticker_id: tickerId }).first("adopted_at")).adopted_at).not.toBeNull();
+
+    // A memory saved with a premium total (before 2026-10-28) reads as one premium counted in full.
+    const savedWithTotal = { ...memory!, state: { ...memory!.state, first: { shares: 300, costPerShare: 50.01, premiumDollars: 328, calls: [], puts: [] } } };
+    await testDb("pluto_vol_farmer_v2_cycles").where({ ticker_id: tickerId }).update({ memory: JSON.stringify(savedWithTotal) });
+    expect((await loadVolFarmerV2Memory(tickerId))!.state.first).toEqual({ shares: 300, costPerShare: 50.01, premiums: [{ legId: "", dollars: 328, shares: 0 }], calls: [], puts: [] });
   });
 
   it("tells a working order from a done one, and reads a done order's fills: contracts, legs, premium and shares", async () => {

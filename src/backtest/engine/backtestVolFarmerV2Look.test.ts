@@ -8,8 +8,9 @@ import { BacktestBarHistory } from "./backtestBarHistory.js";
 import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { describeVolFarmerV2Run, impliedVolatilityBefore, runVolFarmerV2Look } from "./backtestVolFarmerV2Look.js";
-import { chooseVolFarmerV2Leaps, contractsAffordable, volFarmerV2BreakEven, volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap } from "./volFarmerV2Steps.js";
-import { expirySettlementInstant, settleExpiry } from "./ledger/ledgerEvents.js";
+import { chooseVolFarmerV2Leaps, contractsAffordable, volFarmerV2BreakEven, volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2LeapsEntryPriceCap, volFarmerV2PutStrikeCap } from "./volFarmerV2Steps.js";
+import { alignOpenOptionLegsToSplitFactor, expirySettlementInstant, settleExpiry, settleLeapsCall } from "./ledger/ledgerEvents.js";
+import { optionPurchaseFillPrice, optionSaleFillPrice } from "./ledger/ledgerFills.js";
 import { ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
 import { createSimulatedLedger, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 
@@ -17,10 +18,21 @@ import { createSimulatedLedger, type LedgerLeg, type SimulatedLedger } from "./l
 const barsWithImpliedVolatility = (days: [string, number | null][]) => new BacktestBarHistory(days.map(([tradingDate, impliedVolatility]) => ({ tradingDate, open: 100, high: 100, low: 100, close: 100, volume: 1_000, impliedVolatility })));
 
 describe("the v2 formulas", () => {
-  it("puts a position's premiums against its shares' cost", () => {
-    // 200 shares at 250.01, Calls that brought in $540 net: 250.01 − 2.70 = 247.31 a share.
-    expect(volFarmerV2BreakEven({ shares: 200, costPerShare: 250.01, premiumDollars: 540 })).toBeCloseTo(247.31, 10);
-    expect(volFarmerV2BreakEven({ shares: 0, costPerShare: 0, premiumDollars: 120 })).toBeNull();
+  it("puts a position's premiums against its shares' cost, each option for at most the shares held", () => {
+    // 200 shares at 250.01, Calls on all of them that brought in $540 net: 250.01 − 2.70 = 247.31 a share.
+    expect(volFarmerV2BreakEven({ shares: 200, costPerShare: 250.01, premiums: [{ legId: "c", dollars: 540, shares: 200 }] })).toBeCloseTo(247.31, 10);
+    expect(volFarmerV2BreakEven({ shares: 0, costPerShare: 0, premiums: [{ legId: "p", dollars: 120, shares: 100 }] })).toBeNull();
+    // PCG, 16 May 2022: 100 shares assigned at $12 after Puts of 25, 4, 18, 44 and 1 contracts ($645.94 net). Each Put counts
+    // for the 100 shares held of those it covered: 12 − (145.50 ÷ 2,500 + 21.28 ÷ 400 + 167.76 ÷ 1,800 + 300.08 ÷ 4,400 +
+    // 11.32 ÷ 100) = 12 − 0.386 = $11.61, not 12 − 645.94 ÷ 100 = $5.54.
+    const pcgPuts = ([[25, 0.065], [4, 0.06], [18, 0.1], [44, 0.075], [1, 0.12]] as const).map(([contracts, fill], index) => ({ legId: `p${index}`, dollars: fill * 100 * contracts - 0.68 * contracts, shares: contracts * 100 }));
+    expect(volFarmerV2BreakEven({ shares: 100, costPerShare: 12, premiums: pcgPuts })).toBeCloseTo(11.614, 3);
+    // 2,800 shares at $50, $2,800 of Calls on all of them, then 2,300 called away: $49 on the 500 left, not 50 − 2,800 ÷ 500 = $44.40.
+    expect(volFarmerV2BreakEven({ shares: 500, costPerShare: 50, premiums: [{ legId: "c", dollars: 2_800, shares: 2_800 }] })).toBeCloseTo(49, 10);
+    // A Call on fewer shares than are held counts in full: 300 shares, a Call on 200 for $100: 50 − 100 ÷ 300.
+    expect(volFarmerV2BreakEven({ shares: 300, costPerShare: 50, premiums: [{ legId: "c", dollars: 100, shares: 200 }] })).toBeCloseTo(50 - 100 / 300, 10);
+    // A premium total saved before premiums were kept per option counts in full.
+    expect(volFarmerV2BreakEven({ shares: 100, costPerShare: 12, premiums: [{ legId: "", dollars: 645.94, shares: 0 }] })).toBeCloseTo(5.5406, 4);
   });
 
   it("caps the Puts' strike a set share below the first break-even", () => {
@@ -38,6 +50,11 @@ describe("the v2 formulas", () => {
     expect(impliedVolatilityBefore(bars, "2026-03-11")).toBe(0.5);
     expect(impliedVolatilityBefore(bars, "2026-03-12")).toBeNull();
     expect(impliedVolatilityBefore(bars, "2026-03-13")).toBe(0.7);
+  });
+
+  it("buys the LEAPS half a Step below B-E2", () => {
+    // B-E2 $100, IV 60%: Step 17.32%, so the LEAPS is bought at $91.34 or lower.
+    expect(volFarmerV2LeapsEntryPriceCap(100, volFarmerV2ImpliedMoveStep(15, 0.6).stepPct / 2)).toBeCloseTo(91.3397, 4);
   });
 
   it("caps what a LEAPS spends at a share of the account", () => {
@@ -234,6 +251,42 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(describeVolFarmerV2Run(ledger, [symbol])).toMatch(new RegExp(`1 LEAPS trigger\\(s\\), 1 bought \\(${affordable}× on 2026-03-23\\)`));
   });
 
+  it("buys and sells a LEAPS two-thirds of the way across the spread, and values it at what selling it would bring", async () => {
+    // The lab's default: bid $10, ask $13 buys at $12 and sells at $11.
+    const leapsShare = defaultBacktestVolFarmerV2Settings.leapsSpreadCostChargedPct / 100;
+    expect(optionPurchaseFillPrice(10, 13, leapsShare)).toBeCloseTo(12, 10);
+    expect(optionSaleFillPrice(10, 13, leapsShare)).toBeCloseTo(11, 10);
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    await look(ledger, "2026-03-09", 100, "2026-03-13");
+    settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
+    const put = (await look(ledger, "2026-03-16", 80, "2026-03-20")).actions[0]!;
+    settleExpiry(ledger, { legId: openOption(ledger, "put")[0]!.id, expiryClose: put.contract!.strike! - 3 });
+    // Monday 23 March at 55, quotes 2% either side of the mid: bought two-thirds of the way up from the bid, valued two-thirds
+    // of the way down from the ask.
+    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: defaultBacktestVolFarmerV2Settings } as unknown as EffectiveBacktestSettings;
+    const priceByLegId = new Map<string, number>();
+    const bought = await runVolFarmerV2Look({ todayIso: "2026-03-23", lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf("2026-03-23", 55, "2026-03-27", 100), bars: barsWithImpliedVolatility([]) }], settings, ledger, priceByLegId, nextActionId } as unknown as BacktestLookContext);
+    const purchase = bought.actions.find((action) => action.kind === "buy_leaps")!;
+    const purchaseQuote = purchase.candidateScores as { bid: number; ask: number };
+    expect(purchase.fillPrice).toBeCloseTo(purchaseQuote.bid + (2 / 3) * (purchaseQuote.ask - purchaseQuote.bid), 10);
+    expect(priceByLegId.get(openOption(ledger, "call", "long")[0]!.id)).toBeCloseTo(purchaseQuote.bid + (1 / 3) * (purchaseQuote.ask - purchaseQuote.bid), 10);
+    // The second position's Call is assigned at Friday's close at 90: the LEAPS sells two-thirds of the way down from the ask.
+    await look(ledger, "2026-03-30", 85, "2026-04-02");
+    settleExpiry(ledger, { legId: openOption(ledger, "call").find((leg) => leg.strikePrice! < 99)!.id, expiryClose: 90 });
+    const sale = (await look(ledger, "2026-04-06", 90, "2026-04-10")).actions.find((action) => action.kind === "sell_leaps")!;
+    const saleQuote = sale.candidateScores as { bid: number; ask: number };
+    expect(sale.fillPrice).toBeCloseTo(saleQuote.bid + (1 / 3) * (saleQuote.ask - saleQuote.bid), 10);
+    // At 0, a LEAPS fills at the mid.
+    const atMid = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    await look(atMid, "2026-03-09", 100, "2026-03-13", { leapsSpreadCostChargedPct: 0 });
+    settleExpiry(atMid, { legId: openOption(atMid, "call")[0]!.id, expiryClose: 99 });
+    const putAtMid = (await look(atMid, "2026-03-16", 80, "2026-03-20", { leapsSpreadCostChargedPct: 0 })).actions[0]!;
+    settleExpiry(atMid, { legId: openOption(atMid, "put")[0]!.id, expiryClose: putAtMid.contract!.strike! - 3 });
+    const purchaseAtMid = (await look(atMid, "2026-03-23", 55, "2026-03-27", { leapsSpreadCostChargedPct: 0 }, 100)).actions.find((action) => action.kind === "buy_leaps")!;
+    const quoteAtMid = purchaseAtMid.candidateScores as { bid: number; ask: number };
+    expect(purchaseAtMid.fillPrice).toBeCloseTo((quoteAtMid.bid + quoteAtMid.ask) / 2, 10);
+  });
+
   it("spends no more than the LEAPS cap's share of the account on the LEAPS", async () => {
     const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
     const cap = { leapsMaxAccountPct: 10 };
@@ -252,6 +305,68 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(leaps.quantity).toBeLessThan(contractsAffordable(freeCash, leaps.fillPrice!));
     expect((leaps.candidateScores as { accountValue: number }).accountValue).toBeCloseTo(accountValue, 6);
     expect(leaps.description).toContain(`LEAPS cap ${formatWholeDollars(accountValue * 0.1)} (10% of the account ${formatWholeDollars(accountValue)})`);
+  });
+
+  it("buys the LEAPS once the price is half a Step below B-E2, whatever the Calls, and one a holding", async () => {
+    // IV 60% on Friday 6 March: a Step of 17.32% for the Put and for the LEAPS entry, which waits for half of it.
+    const bars = barsWithImpliedVolatility([["2026-03-06", 0.6]]);
+    const more = { stepRule: "implied_move_at_put_sale" as const };
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    await look(ledger, "2026-03-09", 100, "2026-03-13", more, 10, bars);
+    settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
+    const put = (await look(ledger, "2026-03-16", 80, "2026-03-20", more, 10, bars)).actions[0]!;
+    settleExpiry(ledger, { legId: openOption(ledger, "put")[0]!.id, expiryClose: put.contract!.strike! - 3 });
+    const leapsBought = (result: Awaited<ReturnType<typeof look>>) => result.actions.filter((action) => action.kind === "buy_leaps");
+
+    // At 90, above B-E2, the second position sells a Call and buys no LEAPS.
+    const above = await look(ledger, "2026-03-23", 90, "2026-03-27", more, 100, bars);
+    expect(leapsBought(above)).toEqual([]);
+    const secondBreakEven = Number(/no LEAPS: the price 90\.00 is at or above B-E2 (\d+\.\d+)/.exec(above.summary)![1]);
+    const expectedCap = volFarmerV2LeapsEntryPriceCap(secondBreakEven, volFarmerV2ImpliedMoveStep(15, 0.6).stepPct / 2);
+    // Between B-E2 less half the Step and B-E2 it waits, and the note gives the price it waits for.
+    const waiting = await look(ledger, "2026-03-24", Math.round((expectedCap + secondBreakEven) * 50) / 100, "2026-03-27", more, 100, bars);
+    expect(leapsBought(waiting)).toEqual([]);
+    const priceCap = Number(/is above B-E2 \d+\.\d+ less half the Step 17\.3% \(IV 60\.0% × √\(21 ÷ 252\)\): (\d+\.\d+)/.exec(waiting.summary)![1]);
+    expect(priceCap).toBeCloseTo(expectedCap, 1);
+    // Under it the LEAPS is bought beside the second position's open Call, the reason in its description; a lower price
+    // later buys no other for the same holding.
+    const bought = leapsBought(await look(ledger, "2026-03-25", Math.floor(priceCap) - 1, "2026-03-27", more, 100, bars));
+    expect(bought).toHaveLength(1);
+    expect(bought[0]!.description).toContain(`at or below the second position's break-even ${secondBreakEven.toFixed(2)} less half the Step 17.3%`);
+    expect(leapsBought(await look(ledger, "2026-03-26", Math.floor(priceCap) - 10, "2026-03-27", more, 100, bars))).toEqual([]);
+  });
+
+  it("never buys or tops up a LEAPS with the price at or above B-E2, even when no Call fits", async () => {
+    const withSecondPosition = async () => {
+      const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+      await look(ledger, "2026-03-09", 100, "2026-03-13");
+      settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
+      const put = (await look(ledger, "2026-03-16", 80, "2026-03-20")).actions[0]!;
+      settleExpiry(ledger, { legId: openOption(ledger, "put")[0]!.id, expiryClose: put.contract!.strike! - 3 });
+      return ledger;
+    };
+    // A look whose next expiry's Calls all bid $0.01, under the $0.05 a Call needs: neither position finds one, whatever the price.
+    const lookWithoutCalls = (ledger: SimulatedLedger, todayIso: string, stockPrice: number, expiry: string) => {
+      const symbolLook = lookSymbolOf(todayIso, stockPrice, expiry);
+      const market = { ...symbolLook.market, quotes: symbolLook.market.quotes.map((quote) => (quote.right === "C" && quote.expiry === expiry ? { ...quote, bid: 0.01 } : quote)) };
+      const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: defaultBacktestVolFarmerV2Settings } as unknown as EffectiveBacktestSettings;
+      return runVolFarmerV2Look({ todayIso, lookTimeEt: "10:00", symbols: [{ ...symbolLook, market, bars: barsWithImpliedVolatility([]) }], settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
+    };
+
+    // At 80, above B-E2 (the Put was struck at most 85 and kept its premium), no Call fits but no LEAPS is bought.
+    const ledger = await withSecondPosition();
+    const aboveBreakEven = await lookWithoutCalls(ledger, "2026-03-23", 80, "2026-03-27");
+    expect(aboveBreakEven.actions.filter((action) => action.kind === "buy_leaps")).toEqual([]);
+    expect(aboveBreakEven.summary).toMatch(/no LEAPS: the price 80\.00 is at or above B-E2 \d+\.\d+/);
+    expect((await lookWithoutCalls(ledger, "2026-03-24", 60, "2026-03-27")).actions.filter((action) => action.kind === "buy_leaps")).toHaveLength(1);
+
+    // Bought short of its count at 55 (5 offered), the top-up waits while the price is at or above B-E2, then goes ahead below it.
+    const shortLedger = await withSecondPosition();
+    expect((await look(shortLedger, "2026-03-23", 55, "2026-03-27", {}, 5)).actions.filter((action) => action.kind === "buy_leaps").map((action) => action.quantity)).toEqual([5]);
+    const recovered = await look(shortLedger, "2026-03-24", 85, "2026-03-27");
+    expect(recovered.actions.filter((action) => action.kind === "buy_leaps")).toEqual([]);
+    expect(recovered.summary).toMatch(/LEAPS top-up: waits, the price 85\.00 is at or above B-E2 \d+\.\d+ \(5 of \d+ held\)/);
+    expect((await look(shortLedger, "2026-03-25", 60, "2026-03-27")).actions.filter((action) => action.kind === "buy_leaps").map((action) => action.description)).toEqual([expect.stringContaining("LEAPS top-up: 5 of")]);
   });
 
   it("buys no LEAPS while its ask shows no size, and buys it at a later look that shows one", async () => {
@@ -294,5 +409,63 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(result.actions[0]!.lookTimeEt).toBe("10:30");
     expect(result.actions[0]!.at).toBe(easternInstant("2026-03-09", 10, 30).toISOString());
     expect(result.breakEvenLevels![0]!.lookTimeEt).toBe("10:30");
+  });
+
+  /** A 10:00 look with the Calls and Puts of `strikes` on each of `expiries`, at the day's split factor. */
+  function lookWithExpiries(ledger: SimulatedLedger, input: { todayIso: string; stockPrice: number; expiries: string[]; strikes: number[]; splitFactorToday?: number; more?: Partial<BacktestVolFarmerV2Settings> }) {
+    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings, ...input.more } } as unknown as EffectiveBacktestSettings;
+    const quotes = input.expiries.flatMap((expiry) => (["C", "P"] as const).flatMap((right) => quotesAt({ todayIso: input.todayIso, stockPrice: input.stockPrice, expiry, strikes: input.strikes, right })));
+    const lookSymbol = lookSymbolOf(input.todayIso, input.stockPrice, input.expiries[0]!);
+    const market = { ...lookSymbol.market, quotes, previousSessionVolumeByContract: new Map(quotes.map((quote) => [contractKey(quote), 1_000])) };
+    return runVolFarmerV2Look({ todayIso: input.todayIso, lookTimeEt: "10:00", symbols: [{ ...lookSymbol, market, splitFactorToday: input.splitFactorToday ?? 1, bars: barsWithImpliedVolatility([]) }], settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
+  }
+
+  it("trades on through a 3-for-1 split, its cycle started on the scale every contract fits", async () => {
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    // The session sets it each day: with a 3-for-1 ahead, a cycle started at F = 3 takes F = 1.
+    ledger.newCycleSplitFactorBySymbol.set(symbol, 1);
+    // Before the split, at 150: 3 lots (300 shares), 900 of the cycle's shares, 300 of them a contract.
+    const opened = await lookWithExpiries(ledger, { todayIso: "2026-03-09", stockPrice: 150, expiries: ["2026-03-13"], strikes: range(120, 200), splitFactorToday: 3 });
+    expect(opened.actions.map((action) => action.kind)).toEqual(["open_covered_call"]);
+    expect(opened.actions[0]!.description).toContain("with 300 shares bought @ 150.00");
+    const firstBreakEven = breakEvenIn(opened.actions[0]!.description, "first");
+    const call = openOption(ledger, "call")[0]!;
+    expect([call.quantity, call.multiplier]).toEqual([3, 300]);
+    // It expires worthless on the last day before the split (the close on the cycle's scale: 149 as traded ÷ 3).
+    settleExpiry(ledger, { legId: call.id, expiryClose: 149 / 3 });
+    // The split: a contract is now 100 of the cycle's shares, a whole number.
+    expect(alignOpenOptionLegsToSplitFactor(ledger, symbol, 1).representable).toBe(true);
+    // After it, at 50: a Call on each of the 9 lots the 900 shares now make, 100 shares a contract.
+    const after = await lookWithExpiries(ledger, { todayIso: "2026-03-16", stockPrice: 50, expiries: ["2026-03-20"], strikes: range(40, 70) });
+    expect(after.actions.map((action) => action.kind)).toEqual(["open_covered_call"]);
+    expect(after.actions[0]!.description).toContain("on held shares");
+    const newCall = openOption(ledger, "call")[0]!;
+    expect([newCall.quantity, newCall.multiplier]).toEqual([9, 100]);
+    // B-E¹ as traded is the one before the split ÷ 3 (before the new Call's premium; the description's has 2 decimals).
+    expect((after.actions[0]!.candidateScores as { breakEvenFirst: number }).breakEvenFirst).toBeCloseTo(firstBreakEven / 3, 2);
+    expect(`${opened.summaryOfActions} ${after.summaryOfActions}`).not.toContain("split");
+  });
+
+  it("tells the shares called away as traded, on a cycle whose scale is not the day's", async () => {
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    ledger.newCycleSplitFactorBySymbol.set(symbol, 1);
+    await lookWithExpiries(ledger, { todayIso: "2026-03-09", stockPrice: 150, expiries: ["2026-03-13"], strikes: range(120, 200), splitFactorToday: 3 });
+    // Assigned at a 160 close (160 ÷ 3 on the cycle's scale): 300 shares as traded, 900 of the cycle's.
+    settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 160 / 3 });
+    // The cycle has ended: a new one would start on today's scale, but the note reads the ended cycle's.
+    ledger.newCycleSplitFactorBySymbol.set(symbol, 3);
+    const next = await lookWithExpiries(ledger, { todayIso: "2026-03-16", stockPrice: 160, expiries: ["2026-03-20"], strikes: range(120, 200), splitFactorToday: 3 });
+    expect(next.summaryOfActions).toContain("the first position's Call was assigned: 300 shares called away");
+  });
+
+  it("sells on the next expiry only: with no Call there that passes, the Puts start though a later expiry has one", async () => {
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    await look(ledger, "2026-03-09", 100, "2026-03-13");
+    settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 92 });
+    // Wednesday 18 March at 90: the Calls of Friday 20 March at or above B-E¹ (about 99) have |delta| under 0.05; those of
+    // Friday 3 April, 16 days out, do not, and are not sold.
+    const result = await lookWithExpiries(ledger, { todayIso: "2026-03-18", stockPrice: 90, expiries: ["2026-03-20", "2026-04-03"], strikes: range(40, 140) });
+    expect(result.summaryOfActions).toContain("first position: no Call at or above its break-even");
+    expect(result.actions.map((action) => `${action.kind} ${action.contract?.expiry}`)).toEqual(["open_cash_secured_put 2026-03-20"]);
   });
 });

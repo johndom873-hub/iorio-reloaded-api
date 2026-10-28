@@ -3,6 +3,7 @@ import { optionExpiryCloseHourEastern } from "../../../lib/optionExpiryClock.js"
 import { sharesPerContract as standardSharesPerContract } from "../backtestBook.js";
 import { optionCommissionDollars, stockCommissionDollars } from "./ledgerFills.js";
 import {
+  cycleGroupingWindowMs,
   cycleSplitFactorFor,
   isSymbolFlat,
   changingLedger,
@@ -76,10 +77,14 @@ function recordTrade(ledger: SimulatedLedger, leg: LedgerLeg, trade: { side: "bu
   ledger.trades.push({ id: nextLedgerId(ledger, "trade"), legId: leg.id, side: trade.side, quantity: trade.quantity, price: trade.price, commission: trade.commission, executedAt: trade.at, isClosingTrade: trade.isClosingTrade, actionId: trade.actionId });
 }
 
-/** A position opened on a flat symbol starts a cycle on today's scale, or continues the one that closed within the grouping window. */
+/** A position opened on a flat symbol starts a cycle on the scale a new cycle takes today, or continues the one that closed within the grouping window. */
 function startCycleIfFlat(ledger: SimulatedLedger, symbol: string, splitFactorToday: number, at: Date): void {
   if (!isSymbolFlat(ledger, symbol)) return;
-  ledger.cycleSplitFactorBySymbol.set(symbol, cycleSplitFactorFor(ledger, symbol, splitFactorToday, at));
+  const ended = ledger.endedCycleBySymbol.get(symbol);
+  const continuesEnded = ended !== undefined && at.getTime() - ended.flatSince.getTime() <= cycleGroupingWindowMs;
+  const splitFactor = cycleSplitFactorFor(ledger, symbol, splitFactorToday, at);
+  ledger.cycleSplitFactorBySymbol.set(symbol, splitFactor);
+  if (!continuesEnded) ledger.cycleStarts.push({ symbol, at, splitFactor });
   ledger.endedCycleBySymbol.delete(symbol);
 }
 

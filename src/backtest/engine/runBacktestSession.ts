@@ -1,5 +1,6 @@
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
+import { easternIsoDate } from "../../lib/easternIsoDate.js";
 import { describeOptionContract } from "../../lib/optionContractLabel.js";
 import { contractKey } from "../../lib/optionContractKey.js";
 import { addCalendarDays } from "../../lib/calendarDays.js";
@@ -16,7 +17,7 @@ import type { BacktestLookSymbol, BacktestNoCandidateNote, BacktestNoSaleNote, B
 import { buildCycleGapRecords, buildCycleRecords, buildFillRecords, buildOptionTrades, buildPositionRecords, withPositionCycle, type BacktestCycleRecord, type SimulatedTrade } from "./backtestSessionRecords.js";
 import type { NoSaleRecords } from "./backtestIdleStretches.js";
 import { captureLookTimeEt, decisionInstantMs, type BacktestTickerProfile } from "./backtestTickerInputs.js";
-import { firstTwoSidedMids, markKey, markMidByContract, roundedStrike } from "./backtestOptionMarks.js";
+import { firstTwoSidedQuotes, markKey, markOfTwoSidedQuote, roundedStrike, twoSidedQuoteByContract, type TwoSidedQuote } from "./backtestOptionMarks.js";
 import { BacktestSymbolFile, type SymbolFileDayIssue, type SymbolFileEndOfDayRow, type SymbolFileQuote } from "./backtestSymbolFile.js";
 import { describeDaysWithoutIntradayQuotes } from "../jobs/backtestSessionRequest.js";
 import { loadMarketStressPrices, marketStressSymbol } from "../marketStressBars.js";
@@ -26,7 +27,7 @@ import { alignOpenOptionLegsToSplitFactor, creditInterest, settleExpiry, settleH
 import { ledgerCommittedDollars, ledgerHedgeLegsDueForSettlement, ledgerLeapsLegsDueForSettlement, ledgerLegsDueForSettlement, ledgerNetLiquidationValue, ledgerSharesValue } from "./ledger/ledgerSelectors.js";
 import { describeHedgeTotals, hedgeIsOn, summarizeHedge, type HedgePutQuoteSource } from "./backtestBaselineHedge.js";
 import { createSimulatedLedger, cycleSplitFactorFor, rememberedForRevision, requirePosition, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
-import { loadOrInferSplitSchedule, requireSplitFactors, splitFactorOn, type SplitSchedule } from "./splitFactors.js";
+import { loadOrInferSplitSchedule, requireSplitFactors, splitFactorForNewCycle, splitFactorOn, type SplitSchedule } from "./splitFactors.js";
 import { BacktestTradingCalendar, loadMarketCalendarRowsFrom } from "./backtestTradingCalendar.js";
 import { BacktestDayDataReader, type PrefetchedSymbolDay } from "./backtestDayDataReader.js";
 import { loadTreasuryBillRates } from "./treasuryBillRates.js";
@@ -57,7 +58,9 @@ import { describeVolFarmerV2Run, runVolFarmerV2Look } from "./backtestVolFarmerV
 //      reads the 09:30 bar), and the look's quotes re-mark its legs; a symbol whose file has no intraday quotes that day
 //      is looked at only at 10:00, and one without quotes or a bar at a look is left out of that look. The decision
 //      maker (the baseline wheel, the Steady Stake, the Vol Farmer, Vol Farmer v2) then decides the look on the shared
-//      book; the Steady Stake and Vol Farmer v2 decide at 10:00 only, the baseline at 10:00 only when its looks say so
+//      book; the Steady Stake and Vol Farmer v2 decide at 10:00 only, the baseline at 10:00 only when its looks say so.
+//      Vol Farmer v2 reads a symbol's snapshot of zeros (quotes, none with an ask above 0) as missing data: the symbol
+//      sits that look out and is decided at the day's next look whose quotes have one (Marcelo 2026-10-28)
 //   e. the buy-and-hold baselines, for comparison only: the starting value split equally between the symbols, each
 //      share bought whole on the first day its symbol has a price and never rebalanced, the rest in cash at the same
 //      interest; and the starting value in whole SPY shares at SPY's 10:00 price (spyBuyAndHold.ts)
@@ -163,6 +166,11 @@ async function loadTickerProfile(symbol: string, connection: Knex): Promise<Back
 export const lookGridTimesEt: readonly string[] = ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30", "13:00", "13:30", "14:00", "14:30", "15:00", "15:30"];
 /** A look's quotes are read for the strikes from this share of the 10:00 stock price to that multiple of it (the capture's widest window at any price the day can reach), and for the held legs' strikes. */
 const lookStrikeRangeOfStockPrice = { lowest: 0.45, highest: 2.2 };
+
+/** A snapshot of zeros: quotes, none with an ask above 0. Missing data in the files, not a market with no bid. */
+export function isZeroQuoteSnapshot(quotes: readonly Pick<SymbolFileQuote, "ask">[]): boolean {
+  return quotes.length > 0 && !quotes.some((quote) => quote.ask !== null && quote.ask > 0);
+}
 
 const clockTime = (minutesOfDay: number) => `${String(Math.floor(minutesOfDay / 60)).padStart(2, "0")}:${String(minutesOfDay % 60).padStart(2, "0")}`;
 
@@ -340,6 +348,8 @@ interface SessionSymbol {
   unavailableDaysInPeriod: string[];
   /** F on each of the symbol's own session days. */
   splitFactorByDay: Map<string, number>;
+  /** The session days F changes on (the first day included), in date order. */
+  splitFactorChanges: { fromDateIso: string; factor: number }[];
   /** How many of the adjusted closes are dated before the day being replayed. */
   closesBeforeTodayCount: number;
   /** The last 10:00 price on the split-adjusted scale (× F(D) gives any day's traded scale); null before the first. */
@@ -469,6 +479,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         lastCompleteDay: completeDays.at(-1)!,
         unavailableDaysInPeriod,
         splitFactorByDay,
+        splitFactorChanges: [...splitFactorByDay.entries()].sort(([a], [b]) => a.localeCompare(b)).filter(([, factor], index, all) => index === 0 || factor !== all[index - 1]![1]).map(([fromDateIso, factor]) => ({ fromDateIso, factor })),
         closesBeforeTodayCount: 0,
         lastAdjustedStockPrice: null,
         baseline: { shares: 0, splitFactorAtPurchase: 1, bought: false },
@@ -556,6 +567,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     let baselineCash = startingValue;
     const baselineDollarsOf = (symbol: string) => session.symbolSettings?.[symbol]?.potDollars ?? startingValue / symbols.length;
     const symbolOfLeg = (leg: LedgerLeg) => symbolByName.get(requirePosition(ledger, leg.positionId).symbol)!;
+    /** A held option's mark from its two-sided quote: the mid; a LEAPS at what selling it would bring (backtestOptionMarks.ts). */
+    const markOfLeg = (leg: LedgerLeg, quote: TwoSidedQuote) => markOfTwoSidedQuote(quote, requirePosition(ledger, leg.positionId).strategyKey === "leaps" ? settings.volFarmerV2.leapsSpreadCostChargedPct / 100 : 0);
     /** A note about one symbol: named when the session has several. */
     const noteFor = (entry: SessionSymbol, text: string) => (severalSymbols ? `${entry.symbol}: ${text}` : text);
     let lastProgressAtMs = 0;
@@ -654,7 +667,9 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
               : `${contractLabel} expired worthless at the ${closeAsTraded} close${outcome === "call_worthless" ? `, ${sharesAsTraded} shares kept` : ""}`,
         );
         if (settlementClose.source === "intraday_bar") notes.push(noteFor(owner, `settled ${settlementDate} at the close of IBKR's last 30-minute bar (no daily bar)`));
-        if (tradedScale !== 1) notes.push(`${contractLabel} was held across a split (×${Number(tradedScale.toFixed(4))}): settled on its cycle's scale at ${settlementClose.close.toFixed(2)}`);
+        // Held across a split: F on the day it was sold ÷ F at its expiry (2: a 2-for-1).
+        const splitFactorAtEntry = splitFactorOn(owner.schedule, easternIsoDate(leg.entryAt));
+        if (splitFactorAtEntry !== null && splitFactorAtExpiry !== null && splitFactorAtEntry !== splitFactorAtExpiry) notes.push(`${contractLabel} was held across a split (×${Number((splitFactorAtEntry / splitFactorAtExpiry).toFixed(4))}): settled on its cycle's scale at ${settlementClose.close.toFixed(2)}`);
       }
       // A hedge Put still held at its expiry (no quote let the hedge sell it before), or a LEAPS Call held to its expiry:
       // settled on the same close.
@@ -731,9 +746,9 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           const source = leg.optionType === "call" ? leapsCallQuotesAt(entry, captureLookTimeEt) : hedgePutQuotesAt(entry, captureLookTimeEt);
           if (!source) return true;
           const strikeAsTraded = leg.strikePrice! / priceToCycleScale;
-          const mid = markMidByContract(source.quotesOf(leg.expiryDate!), new Set([roundedStrike(strikeAsTraded)])).get(markKey(leg.expiryDate!, strikeAsTraded, leg.optionType === "call" ? "C" : "P"));
-          if (mid === undefined) return true;
-          priceByLegId.set(leg.id, mid * priceToCycleScale);
+          const quote = twoSidedQuoteByContract(source.quotesOf(leg.expiryDate!), new Set([roundedStrike(strikeAsTraded)])).get(markKey(leg.expiryDate!, strikeAsTraded, leg.optionType === "call" ? "C" : "P"));
+          if (quote === undefined) return true;
+          priceByLegId.set(leg.id, markOfLeg(leg, quote) * priceToCycleScale);
           return false;
         });
       };
@@ -747,13 +762,13 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       const markLegs = (entry: SessionSymbol, legsOfSymbol: readonly LedgerLeg[], stockPrice: number, quotes: readonly SymbolFileQuote[], splitFactor: number): LedgerLeg[] => {
         if (legsOfSymbol.length === 0) return [];
         const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
-        const midByContract = markMidByContract(quotes, new Set(legsOfSymbol.flatMap((leg) => (leg.legType === "stock" ? [] : [roundedStrike(leg.strikePrice! / priceToCycleScale)]))));
+        const quoteByContract = twoSidedQuoteByContract(quotes, new Set(legsOfSymbol.flatMap((leg) => (leg.legType === "stock" ? [] : [roundedStrike(leg.strikePrice! / priceToCycleScale)]))));
         const unmarked: LedgerLeg[] = [];
         for (const leg of legsOfSymbol) {
           if (leg.legType === "stock") priceByLegId.set(leg.id, stockPrice * priceToCycleScale);
           else {
-            const mid = midByContract.get(markKey(leg.expiryDate!, leg.strikePrice! / priceToCycleScale, leg.optionType === "call" ? "C" : "P"));
-            if (mid !== undefined) priceByLegId.set(leg.id, mid * priceToCycleScale);
+            const quote = quoteByContract.get(markKey(leg.expiryDate!, leg.strikePrice! / priceToCycleScale, leg.optionType === "call" ? "C" : "P"));
+            if (quote !== undefined) priceByLegId.set(leg.id, markOfLeg(leg, quote) * priceToCycleScale);
             else unmarked.push(leg);
           }
         }
@@ -774,12 +789,12 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const snapshots = entry.intradayDays.has(todayIso) ? (entry.prefetchedDays.get(todayIso)?.intradayQuotes(captureLookTimeEt, closeEt, lowestStrike, highestStrike) ?? entry.file.loadIntradayQuotes(todayIso, captureLookTimeEt, closeEt, lowestStrike, highestStrike)) : new Map<string, SymbolFileQuote[]>();
         const quoteSets = [...[...snapshots.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, quotes]) => quotes), entry.endOfDayRows(todayIso)];
         const contractOf = (leg: LedgerLeg) => ({ expiry: leg.expiryDate!, strike: leg.strikePrice! / priceToCycleScale, right: leg.optionType === "call" ? ("C" as const) : ("P" as const) });
-        const midByContract = firstTwoSidedMids(quoteSets, legs.map(contractOf));
+        const quoteByContract = firstTwoSidedQuotes(quoteSets, legs.map(contractOf));
         const marks = new Map<string, number>();
         for (const leg of legs) {
           const contract = contractOf(leg);
-          const mid = midByContract.get(markKey(contract.expiry, contract.strike, contract.right));
-          if (mid !== undefined) marks.set(leg.id, mid * priceToCycleScale);
+          const quote = quoteByContract.get(markKey(contract.expiry, contract.strike, contract.right));
+          if (quote !== undefined) marks.set(leg.id, markOfLeg(leg, quote) * priceToCycleScale);
         }
         return marks;
       };
@@ -794,6 +809,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         while (entry.closesBeforeTodayCount < entry.adjustedDailyCloses.length && entry.adjustedDailyCloses[entry.closesBeforeTodayCount]!.date < todayIso) entry.closesBeforeTodayCount += 1;
         const hasFileDay = entry.completeDays.has(todayIso);
         const splitFactor = splitFactorToday(entry);
+        // A cycle starting today takes a scale every contract up to the session's end fits whole (splitFactorForNewCycle).
+        ledger.newCycleSplitFactorBySymbol.set(entry.symbol, splitFactorForNewCycle(splitFactor, entry.splitFactorChanges.filter((change) => change.fromDateIso > todayIso).map((change) => change.factor)));
         // A split since the open cycle began: its open options become today's contracts on the cycle's share scale.
         const aligned = alignOpenOptionLegsToSplitFactor(ledger, entry.symbol, splitFactor);
         if (!aligned.representable) notes.push(noteFor(entry, "the open cycle spans a split whose contracts do not fit its share scale: no option order until it ends"));
@@ -911,6 +928,9 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       const decidesAtCaptureLookOnly =
         settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" : settings.decisionMaker === "vol_farmer_v2" ? settings.volFarmerV2.looks === "first_look" : settings.decisionMaker === "steady_stake";
       const runLook = settings.decisionMaker === "baseline" ? runBaselineLook : settings.decisionMaker === "steady_stake" ? runSteadyStakeLook : settings.decisionMaker === "vol_farmer_v2" ? runVolFarmerV2Look : runVolFarmerLook;
+      // Vol Farmer v2 reads a symbol's snapshot of zeros as missing data, not as no bid (Marcelo 2026-10-28): the symbol sits
+      // that look out and is decided at the day's next look whose quotes have an ask above 0.
+      const symbolsWaitingForQuotes = new Set<string>();
       for (const lookTimeEt of lookTimes) {
         const isCaptureLook = lookTimeEt === captureLookTimeEt;
         scanVolFarmerCrossings(lookTimeEt);
@@ -933,8 +953,21 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           }
         }
         if (lookSymbols.length === 0) continue;
-        if (decidesAtCaptureLookOnly && !isCaptureLook) continue;
-        const look = await runLook({ todayIso, lookTimeEt, symbols: lookSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
+        let decidingSymbols = lookSymbols;
+        if (settings.decisionMaker === "vol_farmer_v2") {
+          const withQuotes = lookSymbols.filter((lookSymbol) => !isZeroQuoteSnapshot(lookSymbol.intraday?.quotes ?? lookSymbol.market.quotes));
+          if (isCaptureLook) {
+            for (const { entry, lookSymbol } of daySymbols) {
+              if (withQuotes.includes(lookSymbol)) continue;
+              symbolsWaitingForQuotes.add(entry.symbol);
+              notes.push(noteFor(entry, "every 10:00 quote is zero (missing data): decided at the day's next look with a quote"));
+            }
+          }
+          decidingSymbols = decidesAtCaptureLookOnly && !isCaptureLook ? withQuotes.filter((lookSymbol) => symbolsWaitingForQuotes.has(lookSymbol.profile.symbol)) : withQuotes;
+          for (const lookSymbol of decidingSymbols) symbolsWaitingForQuotes.delete(lookSymbol.profile.symbol);
+        } else if (decidesAtCaptureLookOnly && !isCaptureLook) continue;
+        if (decidingSymbols.length === 0) continue;
+        const look = await runLook({ todayIso, lookTimeEt, symbols: decidingSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
         actions.push(...look.actions);
         optionSales.push(...look.optionSales);
         if (look.shortfalls) keepShortfalls(look.shortfalls);
@@ -947,6 +980,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         looksOfDay.push({ lookTimeEt, summary: look.summaryOfActions, filledCount: filledAtLook, refusedCount: look.actions.length - filledAtLook, opensStopped: look.opensStopped });
         if (!isCaptureLook) lookedAfterCapture = true;
       }
+      for (const { entry } of daySymbols) if (symbolsWaitingForQuotes.has(entry.symbol)) notes.push(noteFor(entry, "no look today had a quote with an ask above 0: no decision"));
       scanVolFarmerCrossings(clockTime(closeMinutesByDay.get(todayIso) ?? regularCloseMinutesEt));
       if (lookedAfterCapture) runStatistics.daysWithIntradayLooks += 1;
       runStatistics.looksRun += looksOfDay.length;

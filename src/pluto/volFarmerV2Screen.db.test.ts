@@ -49,8 +49,8 @@ describe("the Vol Farmer v2 card", () => {
     const leapsLeg = await legOf({ side: "long", quantity: 3, strike_price: 90, expiry_date: "2027-12-17" });
     const state = newVolFarmerV2SymbolState();
     state.potDollars = 64_007;
-    state.first = { shares: 500, costPerShare: 110, premiumDollars: 1_000, calls: [{ legId: callLeg, shares: 400 }], puts: [] };
-    state.second = { shares: 0, costPerShare: 0, premiumDollars: 150, calls: [], puts: [{ legId: "action:a7", shares: 200 }] };
+    state.first = { shares: 500, costPerShare: 110, premiums: [{ legId: callLeg, dollars: 1_000, shares: 500 }], calls: [{ legId: callLeg, shares: 400 }], puts: [] };
+    state.second = { shares: 0, costPerShare: 0, premiums: [{ legId: "action:a7", dollars: 150, shares: 200 }], calls: [], puts: [{ legId: "action:a7", shares: 200 }] };
     state.leaps = { legIds: [leapsLeg, "action:a8"], expiry: "2027-12-17", strike: 90, intendedContracts: 5 };
     const put: VolFarmerV2PendingOrder = { ref: "action:a7", actionId: "a7", kind: "cash_secured_put", expiry: "2026-11-06", strike: 95, contracts: 2, startsCycle: false, contractsByPosition: { first: 0, second: 0 }, plannedPremiumByPosition: { first: 0, second: 150 }, leapsBeforeSale: null };
     await saveVolFarmerV2Memory(adoptedId, { state, pending: [put] }, true);
