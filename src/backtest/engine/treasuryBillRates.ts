@@ -84,6 +84,15 @@ export function treasuryBillCachePath(dataDirectory: string): string {
   return path.join(dataDirectory, `fred-${treasuryBillSeriesId}.json`);
 }
 
+/** The rates for a session's days from the cache alone (reading a session must not call FRED); null when it does not cover them. */
+export function cachedTreasuryBillRates(dataDirectory: string | null, firstDateIso: string, lastDateIso: string): TreasuryBillRates | null {
+  if (dataDirectory === null) return null;
+  const cachePath = treasuryBillCachePath(dataDirectory);
+  if (!existsSync(cachePath)) return null;
+  const cached = JSON.parse(readFileSync(cachePath, "utf8")) as TreasuryBillCache;
+  return treasuryBillCacheCovers(cached, firstDateIso, lastDateIso) ? new TreasuryBillRates(cached.observations) : null;
+}
+
 /** The rates for a session's days: the cache when it covers them, else one FRED request that rewrites the cache. */
 export async function loadTreasuryBillRates(dataDirectory: string, firstDateIso: string, lastDateIso: string, fetchSeries: () => Promise<TreasuryBillObservation[]> = fetchTreasuryBillSeriesFromFred, now: Date = new Date()): Promise<TreasuryBillRates> {
   const cachePath = treasuryBillCachePath(dataDirectory);

@@ -44,7 +44,9 @@ import { optionCommissionDollars } from "../engine/ledger/ledgerFills.js";
 import { loadLadderRungs } from "../analysis/analysisBacktest.js";
 import { loadSessionFreeCash } from "../analysis/sessionFreeCash.js";
 import { backtestCaptureLookTimeEt, backtestEngineVersion } from "../backtestTypes.js";
-import { computeCycleAccuracyBands, computeDrawdowns, computeMonthlyReturns, computePnlSources, computeTradeAccuracyBands, cycleFiguresOf, type ClosedTradeFigures } from "../sessionAnalytics.js";
+import { computeCycleAccuracyBands, computeDaysWithNoOptions, computeDrawdowns, computeMonthlyReturns, computePnlSources, computeTradeAccuracyBands, cycleFiguresOf, type ClosedTradeFigures } from "../sessionAnalytics.js";
+import { excessCalmarOf, treasuryBillCagr } from "../analysis/analysisSessions.js";
+import { cachedTreasuryBillRates } from "../engine/treasuryBillRates.js";
 import { computeAllSymbolsStatistics, computeTickerStatistics } from "../tickerStatistics.js";
 import { BacktestRequestError, insertQueuedBacktestJob, kickBacktestQueue, loadBacktestJobView, loadLatestJobViewForSession, loadLatestSessionRunStates, stopJobsOfSession } from "./backtestJobStore.js";
 import type { BacktestBookPageFilters, BacktestSessionsPageFilters, ValidatedBacktestSessionRequest } from "./backtestSessionRequest.js";
@@ -1035,6 +1037,7 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
     };
   });
   const cycleGaps = ofSymbol(everyCycleGap).map((gap) => ({ ...gap, freeCashShareAtStart: freeCash?.shareAtMark(gap.firstIdleDay) ?? null }));
+  const treasuryBillRates = cachedTreasuryBillRates(readBacktestDataDirectory(), row.start_date, row.end_date);
   return {
     session: {
       ...toSessionListItem(row),
@@ -1070,6 +1073,8 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
     allSymbolsStatistics: computeAllSymbolsStatistics(positions, cycles),
     // The whole account's, like the metrics, whichever symbol is shown.
     pnlSources: row.metrics ? computePnlSources({ metrics: row.metrics, tradingDates: days.map((day) => day.tradingDate), cycles: everyCycle, positions: everyPositionRecord, ...quotedYields }) : null,
+    excessCalmar: row.metrics && treasuryBillRates ? excessCalmarOf(Number(row.metrics.cagr), Number(row.metrics.maxDrawdown), treasuryBillCagr(treasuryBillRates, row.start_date, row.end_date)) : null,
+    daysWithNoOptions: row.metrics ? computeDaysWithNoOptions(sessionDates, everyPositionRecord) : null,
     bookCounts,
   };
 }

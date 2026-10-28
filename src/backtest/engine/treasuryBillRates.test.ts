@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { loadTreasuryBillRates, parseFredObservations, TreasuryBillRates, treasuryBillCacheCovers, treasuryBillCachePath, type TreasuryBillCache } from "./treasuryBillRates.js";
+import { cachedTreasuryBillRates, loadTreasuryBillRates, parseFredObservations, TreasuryBillRates, treasuryBillCacheCovers, treasuryBillCachePath, type TreasuryBillCache } from "./treasuryBillRates.js";
 
 const directory = mkdtempSync(path.join(tmpdir(), "backtest-dtb3-"));
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
@@ -48,5 +48,21 @@ describe("loadTreasuryBillRates", () => {
     expect(first.ratePercentOnOrBefore("2026-10-09")).toBe(4.05);
     expect(second.ratePercentOnOrBefore("2016-01-04")).toBe(0.1);
     expect(JSON.parse(readFileSync(treasuryBillCachePath(directory), "utf8")).seriesId).toBe("DTB3");
+  });
+});
+
+describe("cachedTreasuryBillRates", () => {
+  it("reads the cache when it covers the period, and never fetches", () => {
+    const cacheDirectory = mkdtempSync(path.join(tmpdir(), "backtest-dtb3-cached-"));
+    try {
+      expect(cachedTreasuryBillRates(null, "2016-01-04", "2026-10-09")).toBeNull();
+      expect(cachedTreasuryBillRates(cacheDirectory, "2016-01-04", "2026-10-09")).toBeNull();
+      const cache: TreasuryBillCache = { seriesId: "DTB3", fetchedAtIso: "2026-10-12T00:00:00.000Z", observations: [{ dateIso: "2010-01-04", ratePercent: 0.1 }, { dateIso: "2026-10-08", ratePercent: 4.05 }] };
+      writeFileSync(treasuryBillCachePath(cacheDirectory), JSON.stringify(cache));
+      expect(cachedTreasuryBillRates(cacheDirectory, "2016-01-04", "2026-10-09")!.ratePercentOnOrBefore("2026-10-09")).toBe(4.05);
+      expect(cachedTreasuryBillRates(cacheDirectory, "2009-01-02", "2026-10-09")).toBeNull();
+    } finally {
+      rmSync(cacheDirectory, { recursive: true, force: true });
+    }
   });
 });

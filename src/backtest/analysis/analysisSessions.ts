@@ -96,6 +96,11 @@ export function treasuryBillCagr(rates: TreasuryBillRates, startIso: string, end
   return calendarDays > 0 ? value ** (365.25 / calendarDays) - 1 : 0;
 }
 
+/** Excess Calmar = (CAGR − the period's T-bill CAGR) ÷ |Max drawdown|; null with no drawdown. */
+export function excessCalmarOf(cagr: number, maxDrawdown: number, treasuryBillCagrOverPeriod: number): number | null {
+  return maxDrawdown === 0 ? null : (cagr - treasuryBillCagrOverPeriod) / Math.abs(maxDrawdown);
+}
+
 export async function listAnalysisSessions(symbol: string, connection: Knex = db): Promise<AnalysisSessionRow[]> {
   const rows: {
     id: string;
@@ -149,9 +154,9 @@ export async function listAnalysisSessions(symbol: string, connection: Knex = db
         totalReturn: Number(row.metrics.totalReturn),
         buyAndHoldCagr: row.baseline_metrics ? Number(row.baseline_metrics.cagr) : null,
         buyAndHoldMaxDrawdown: row.baseline_metrics ? Number(row.baseline_metrics.maxDrawdown) : null,
-        excessCalmar: maxDrawdown === 0 ? null : (Number(row.metrics.cagr) - cashCagr) / Math.abs(maxDrawdown),
+        excessCalmar: excessCalmarOf(Number(row.metrics.cagr), maxDrawdown, cashCagr),
         treasuryBillCagr: cashCagr,
-        buyAndHoldExcessCalmar: row.baseline_metrics && buyAndHoldMaxDrawdown !== 0 ? (Number(row.baseline_metrics.cagr) - cashCagr) / Math.abs(buyAndHoldMaxDrawdown!) : null,
+        buyAndHoldExcessCalmar: row.baseline_metrics ? excessCalmarOf(Number(row.baseline_metrics.cagr), buyAndHoldMaxDrawdown!, cashCagr) : null,
         engineVersion: row.engine_version,
         ladderSettings: ladder ? ladderSettingsOf(baseline as BacktestBaselineSettings, potDollars) : null,
         createdAt: new Date(row.created_at).toISOString(),

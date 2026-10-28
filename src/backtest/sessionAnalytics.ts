@@ -1,6 +1,6 @@
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { median } from "../lib/statistics.js";
-import type { BacktestAccuracyBand, BacktestCycle, BacktestMetrics, BacktestMonthlyReturn, BacktestPnlSource, BacktestPnlSources, BacktestPosition } from "./backtestTypes.js";
+import type { BacktestAccuracyBand, BacktestCycle, BacktestDaysWithNoOptions, BacktestMetrics, BacktestMonthlyReturn, BacktestPnlSource, BacktestPnlSources, BacktestPosition } from "./backtestTypes.js";
 
 // The backtest's headline figures, exactly as approved in docs/backtesting/FORMULAS.md (Marcelo 2026-10-12). Pure.
 
@@ -170,8 +170,8 @@ export function computeBacktestMetrics(days: readonly AccountDay[], book: Sessio
   };
 }
 
-/** The trading days (ascending) on which any of the legs was held at any time: each from its entry's Eastern date to its exit's, both included (an open one to the last day). */
-function daysHeldBy(legs: readonly { entryAt: string; exitAt: string | null }[], tradingDates: readonly string[]): number {
+/** The indexes of the trading days (ascending) on which any of the legs was held at any time: each from its entry's Eastern date to its exit's, both included (an open one to the last day). */
+function heldDayIndexes(legs: readonly { entryAt: string; exitAt: string | null }[], tradingDates: readonly string[]): Set<number> {
   const held = new Set<number>();
   for (const leg of legs) {
     const from = easternIsoDate(new Date(leg.entryAt));
@@ -185,7 +185,31 @@ function daysHeldBy(legs: readonly { entryAt: string; exitAt: string | null }[],
     }
     for (let index = low; index < tradingDates.length && (to === null || tradingDates[index]! <= to); index++) held.add(index);
   }
-  return held.size;
+  return held;
+}
+
+const daysHeldBy = (legs: readonly { entryAt: string; exitAt: string | null }[], tradingDates: readonly string[]): number => heldDayIndexes(legs, tradingDates).size;
+
+/**
+ * The session's trading days with no short Call or Put open at any time (Marcelo 2026-10-28), every symbol together, and
+ * the longest run of them. Each option sold counts from its sale's Eastern date to its exit's, both included; LEAPS and
+ * hedge Puts are bought, so they don't count.
+ */
+export function computeDaysWithNoOptions(tradingDates: readonly string[], positions: readonly Pick<BacktestPosition, "legs">[]): BacktestDaysWithNoOptions | null {
+  if (tradingDates.length === 0) return null;
+  const held = heldDayIndexes(positions.flatMap((position) => position.legs.filter((leg) => leg.legType === "option" && leg.side === "short")), tradingDates);
+  let longestRun: BacktestDaysWithNoOptions["longestRun"] = null;
+  let runStart: number | null = null;
+  for (let index = 0; index <= tradingDates.length; index++) {
+    if (index < tradingDates.length && !held.has(index)) {
+      runStart ??= index;
+      continue;
+    }
+    if (runStart !== null && (longestRun === null || index - runStart > longestRun.days)) longestRun = { days: index - runStart, from: tradingDates[runStart]!, to: tradingDates[index - 1]! };
+    runStart = null;
+  }
+  const dayCount = tradingDates.length - held.size;
+  return { dayCount, tradingDayCount: tradingDates.length, share: dayCount / tradingDates.length, longestRun };
 }
 
 /**

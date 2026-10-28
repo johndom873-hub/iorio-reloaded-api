@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeBacktestMetrics, computeCycleAccuracyBands, computeDailyReturns, computeDrawdowns, computeMonthlyReturns, computePnlSources, computeSortino, computeTradeAccuracyBands, cycleFiguresOf, type AccountDay, type ClosedTradeFigures, type CycleFigures } from "./sessionAnalytics.js";
+import { computeBacktestMetrics, computeCycleAccuracyBands, computeDailyReturns, computeDaysWithNoOptions, computeDrawdowns, computeMonthlyReturns, computePnlSources, computeSortino, computeTradeAccuracyBands, cycleFiguresOf, type AccountDay, type ClosedTradeFigures, type CycleFigures } from "./sessionAnalytics.js";
 import type { BacktestCycle, BacktestPositionLeg } from "./backtestTypes.js";
 
 const day = (tradingDate: string, value: number, exposureDollars = 0, interestDollars = 0): AccountDay => ({ tradingDate, value, exposureDollars, interestDollars });
@@ -204,5 +204,29 @@ describe("computePnlSources", () => {
     expect(sources.hedge).toBeNull();
     // The shares are the rest after interest and every option's: 20,000 - 1,000 - (1,000 - 3,000).
     expect(sources.shares!.pnlDollars).toBe(21_000);
+  });
+});
+
+describe("computeDaysWithNoOptions", () => {
+  const leg = (overrides: Partial<BacktestPositionLeg>): BacktestPositionLeg => ({ legId: "leg", parentLegId: null, legType: "option", side: "short", quantity: 1, optionType: "call", strike: 10, expiry: null, multiplier: 100, entryPrice: 1, entryAt: "2026-03-03T15:00:00.000Z", exitPrice: null, exitAt: null, settledAs: null, expiryClose: null, dteAtEntry: null, realizedPnlDollars: null, priceScale: 1, ...overrides });
+  const tradingDates = ["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06", "2026-03-09", "2026-03-10", "2026-03-11"];
+
+  it("counts the days no Call or Put sold was open, every symbol together, with the longest run of them", () => {
+    const positions = [
+      // A Put sold Tuesday that expired Wednesday at 16:00 ET, then shares and a hedge Put and a LEAPS bought, which don't count.
+      { legs: [leg({ optionType: "put", exitAt: "2026-03-04T21:00:00.000Z" })] },
+      { legs: [leg({ legType: "stock", side: "long", optionType: null, quantity: 100, multiplier: 1, entryAt: "2026-03-04T21:00:00.000Z" })] },
+      { legs: [leg({ optionType: "put", side: "long", entryAt: "2026-03-05T15:00:00.000Z" }), leg({ side: "long", entryAt: "2026-03-05T15:00:00.000Z" })] },
+      // Another symbol's Call sold the second Tuesday, still open.
+      { legs: [leg({ entryAt: "2026-03-10T15:00:00.000Z" })] },
+    ];
+    // Free: Monday the 2nd, and Thursday the 5th to Monday the 9th.
+    expect(computeDaysWithNoOptions(tradingDates, positions)).toEqual({ dayCount: 4, tradingDayCount: 8, share: 0.5, longestRun: { days: 3, from: "2026-03-05", to: "2026-03-09" } });
+  });
+
+  it("runs to the last day when no option is open at the end, and has no run when one always was", () => {
+    expect(computeDaysWithNoOptions(tradingDates, [{ legs: [leg({ entryAt: "2026-03-02T15:00:00.000Z", exitAt: "2026-03-06T21:00:00.000Z" })] }])!.longestRun).toEqual({ days: 3, from: "2026-03-09", to: "2026-03-11" });
+    expect(computeDaysWithNoOptions(tradingDates, [{ legs: [leg({ entryAt: "2026-03-02T15:00:00.000Z" })] }])).toEqual({ dayCount: 0, tradingDayCount: 8, share: 0, longestRun: null });
+    expect(computeDaysWithNoOptions([], [])).toBeNull();
   });
 });

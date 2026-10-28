@@ -1639,6 +1639,16 @@ export interface BacktestPnlSources {
   leaps: BacktestPnlSource | null;
 }
 
+/** The session's trading days with no short Call or Put open at any time (approved 2026-10-28), every symbol together. */
+export interface BacktestDaysWithNoOptions {
+  dayCount: number;
+  tradingDayCount: number;
+  /** dayCount ÷ tradingDayCount. */
+  share: number;
+  /** The longest run of consecutive such trading days; null when there was none. */
+  longestRun: { days: number; from: string; to: string } | null;
+}
+
 /** Per-ticker figures over the session's positions, option sales and cycles. */
 export interface BacktestTickerStatistics {
   symbol: string;
@@ -1710,6 +1720,10 @@ export interface BacktestSessionDetail {
   allSymbolsStatistics: BacktestTickerStatistics | null;
   /** What the shares, the Covered Calls and the hedge each made, the whole account's, worked out when the session is read. */
   pnlSources: BacktestPnlSources | null;
+  /** (CAGR − the period's T-bill CAGR) ÷ |Max drawdown|; null before a run, with no drawdown, or when the T-bill cache does not cover the period. */
+  excessCalmar: number | null;
+  /** The whole account's days with no short option open; null before a run. */
+  daysWithNoOptions: BacktestDaysWithNoOptions | null;
   /** How many actions and fills the session stored; they are read page by page (BacktestActionsPage, BacktestFillsPage). */
   bookCounts: { filledActions: number; blockedActions: number; fills: number };
 }
