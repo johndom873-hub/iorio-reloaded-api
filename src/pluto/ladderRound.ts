@@ -4,7 +4,7 @@ import { accountContextFromTotalCash } from "../lib/accountContext.js";
 import { frozenSymbolSet } from "../lib/tickerFreeze.js";
 import { loadInFlightNotionalsBySymbol, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
 import { executePlutoOrder, watchPlutoOrder } from "./executor.js";
-import { defaultLadderBandPlannerDependencies } from "./ladderBandPlanLoader.js";
+import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
 import { saveLadderCycleMemory } from "./ladderCycleMemory.js";
 import { runLadderLook } from "./ladderLook.js";
 import { loadLadderLookInput } from "./ladderLookLoader.js";
@@ -52,7 +52,7 @@ export async function runLadderRound(input: LadderRoundInput): Promise<LadderRou
   const [enabled, frozen, clock, optionCommissions, stockCommissions, account, lastFilledAtBySymbol] = await Promise.all([
     loadEnabledPlutoTickerSettings(),
     frozenSymbolSet(),
-    defaultLadderBandPlannerDependencies.loadClock(input.todayIso),
+    defaultOptionQuoteBandPlannerDependencies.loadClock(input.todayIso),
     loadCommissionEstimator(),
     loadStockCommissionEstimator(),
     accountContextFromTotalCash(input.totalCashValue),

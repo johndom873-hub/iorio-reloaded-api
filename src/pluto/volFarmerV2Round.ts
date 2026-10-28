@@ -1,5 +1,6 @@
 import { db } from "../db/connection.js";
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
+import { sharesPerContract } from "../backtest/engine/backtestBook.js";
 import { baselineQuoteRejection } from "../backtest/engine/baselineSaleSteps.js";
 import { newVolFarmerV2SymbolState, runVolFarmerV2Turn, volFarmerV2TurnOrder, type VolFarmerV2Market, type VolFarmerV2SymbolState } from "../backtest/engine/volFarmerV2Steps.js";
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
@@ -12,7 +13,7 @@ import { summarizeOpenCycleFromRows } from "../lib/cycleInputRows.js";
 import { blackScholesDelta, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import type { InternalApiClient } from "../lib/internalApiClient.js";
 import { ladderDeltaVerdict, type LadderDeltaContext } from "../lib/ladderOrderGates.js";
-import { daysToExpiry } from "../lib/optionContractLabel.js";
+import { daysToExpiry, describeExpiry } from "../lib/optionContractLabel.js";
 import { optionMidLimitPrice } from "../lib/optionLimitPrice.js";
 import { ladderBookCapitalVerdict, loadCommittedCapitalOnSymbols } from "../lib/orderLimits.js";
 import { computeTickerExposure } from "../lib/positionExposure.js";
@@ -20,8 +21,9 @@ import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { frozenSymbolSet } from "../lib/tickerFreeze.js";
 import { loadInFlightNotionals, loadInFlightNotionalsBySymbol, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
 import { executePlutoOrder, watchPlutoOrder, type ExecuteInput } from "./executor.js";
-import { defaultLadderBandPlannerDependencies } from "./ladderBandPlanLoader.js";
-import { loadLadderBandQuotes } from "./ladderBandQuotes.js";
+import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
+import { nextListedExpiryAfter, optionQuoteBandDayUniverse } from "./optionQuoteBandPlan.js";
+import { loadOptionQuoteBandQuotes, type OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
 import { latestCycleQuotes } from "./ladderLook.js";
 import { loadOpenPositionFigures } from "./ladderLookSnapshot.js";
 import { ladderOrdersSentToday, loadLadderBookOrderCounts } from "./ladderOrders.js";
@@ -57,6 +59,31 @@ import { loadVolFarmerV2LegStatuses, loadVolFarmerV2Memory, loadVolFarmerV2Order
 // (alphabetical, starting one ticker further each day), a new cycle buys no more lots than the free cash pays for, and
 // the LEAPS go last: a second pass looks again at the tickers whose LEAPS purchase or top-up is due and sends only those,
 // on the free cash every ticker's first pass left. What the free cash cut is in the ticker's notes.
+
+/**
+ * Why the option quote band has no Call after today for v2 to look at (it quotes v2's next listed expiry,
+ * optionQuoteBandPlan.ts). Example: AAPL enabled at 09:48 SGT on 28 Oct, after the 27 Oct close's volume capture, has no
+ * previous-session volume, so none of its 30 Oct (2DTE) options is quoted that day.
+ */
+export function volFarmerV2NoCallQuotedReason(input: {
+  todayIso: string;
+  /** The stored chain's expiries, YYYYMMDD. */
+  expirations: readonly string[];
+  strikesByExpiry: ReadonlyMap<string, readonly number[]>;
+  previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
+  /** Every band quote of the ticker today, from any cycle. */
+  bandQuotes: readonly OptionQuoteBandQuote[];
+}): string {
+  const nextExpiry = nextListedExpiryAfter(input.expirations, input.todayIso);
+  if (nextExpiry === null) return "no Call expiry listed after today";
+  const expiry = describeExpiry(nextExpiry, input.todayIso);
+  if (input.previousSessionVolumeByContract === null) return `no ${expiry} option is quoted today: no option volume was captured after the previous session's close (the capture covers the tickers enabled then), so none can be sold before the next session`;
+  const universe = optionQuoteBandDayUniverse({ expirations: input.expirations, strikesByExpiry: input.strikesByExpiry, sessionIso: input.todayIso, expiryRule: { kind: "next_listed_expiry" }, previousSessionVolumeByContract: input.previousSessionVolumeByContract });
+  if (!universe.some((contract) => contract.right === "C")) return `no ${expiry} Call traded enough in the previous session to sell one (the 20% volume rule needs a volume of 5 or more)`;
+  if (input.bandQuotes.length === 0) return `no ${expiry} option is quoted yet today`;
+  if (input.bandQuotes.some((quote) => quote.right === "C" && quote.expiry === nextExpiry)) return `the latest quotes have no ${expiry} Call yet`;
+  return `no ${expiry} Call is near v2's Call |delta| range at this price, so none is quoted`;
+}
 
 export interface VolFarmerV2RoundInput {
   passId: string;
@@ -100,7 +127,7 @@ export async function runVolFarmerV2Round(input: VolFarmerV2RoundInput): Promise
   const [enabled, frozen, clock, optionCommissions, stockCommissions, account, lastFilledAtBySymbol] = await Promise.all([
     loadEnabledPlutoTickerSettings(),
     frozenSymbolSet(),
-    defaultLadderBandPlannerDependencies.loadClock(input.todayIso),
+    defaultOptionQuoteBandPlannerDependencies.loadClock(input.todayIso),
     loadCommissionEstimator(),
     loadStockCommissionEstimator(),
     accountContextFromTotalCash(input.totalCashValue),
@@ -183,7 +210,7 @@ type RoundState = {
  * answering whether its LEAPS (a purchase or a top-up) is due; "leaps" looks again, after every ticker's first pass, and
  * sends only the LEAPS, on the free cash left then.
  */
-async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: PlutoTickerSettings; potDollars: number; clock: Awaited<ReturnType<typeof defaultLadderBandPlannerDependencies.loadClock>>; round: RoundState; summary: VolFarmerV2RoundSummary; lastRound: LastRound; pass: "cycles_calls_puts" | "leaps" }): Promise<{ leapsDue: boolean }> {
+async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: PlutoTickerSettings; potDollars: number; clock: Awaited<ReturnType<typeof defaultOptionQuoteBandPlannerDependencies.loadClock>>; round: RoundState; summary: VolFarmerV2RoundSummary; lastRound: LastRound; pass: "cycles_calls_puts" | "leaps" }): Promise<{ leapsDue: boolean }> {
   const { input, ticker, potDollars, clock, round, summary, lastRound, pass } = context;
   const { settings, now } = input;
   const { symbol, tickerId } = ticker;
@@ -222,16 +249,25 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
       }
       memory = { state: adoption.state, pending: [] };
       adopted = true;
-      await recordPlutoEvent("warning", { passId: input.passId, symbol, message: `Vol Farmer v2 adopted ${symbol}'s holdings: ${adoption.state.first!.shares} shares at the cycle's break-even ${adoption.state.first!.costPerShare.toFixed(2)}, ${adoption.state.first!.calls.length} open Call leg(s), ${adoption.state.second?.puts.length ?? 0} open Put leg(s)` });
+      const contractsOf = (entries: readonly { shares: number }[]) => Math.round(entries.reduce((sum, entry) => sum + entry.shares, 0) / sharesPerContract);
+      await recordPlutoEvent("holdings_adopted", {
+        passId: input.passId,
+        symbol,
+        strategy: "vol_farmer_v2",
+        shares: adoption.state.first!.shares,
+        breakEvenPerShare: adoption.state.first!.costPerShare,
+        callContracts: contractsOf(adoption.state.first!.calls),
+        putContracts: contractsOf(adoption.state.second?.puts ?? []),
+      });
     }
   }
 
   // 3. The market and the book at this round.
   const [prices, bandQuotes, forwardAnchors, previousSessionVolumeByContract, stepImpliedVolatility, chain, inFlight, tickerExposure] = await Promise.all([
     fetchPricesPoolFirst([{ key: "stock", legType: "stock", symbol }]),
-    loadLadderBandQuotes(tickerId, clock.todayIso),
-    defaultLadderBandPlannerDependencies.loadForwardAnchors(tickerId, clock.todayIso),
-    defaultLadderBandPlannerDependencies.loadPreviousSessionVolume(tickerId, clock.todayIso),
+    loadOptionQuoteBandQuotes(tickerId, clock.todayIso),
+    defaultOptionQuoteBandPlannerDependencies.loadForwardAnchors(tickerId, clock.todayIso),
+    defaultOptionQuoteBandPlannerDependencies.loadPreviousSessionVolume(tickerId, clock.todayIso),
     loadVolFarmerV2StepImpliedVolatility(tickerId, clock.todayIso),
     loadStoredOptionChain(tickerId),
     loadInFlightNotionals(symbol),
@@ -270,6 +306,9 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
     .filter((expiry) => expiry >= clock.todayIso)
     .sort();
   const { farmer, v2 } = volFarmerV2RulesOf(settings);
+  const noCallQuotedReason = quotes.some((quote) => quote.right === "C" && quote.expiry > clock.todayIso)
+    ? undefined
+    : volFarmerV2NoCallQuotedReason({ todayIso: clock.todayIso, expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, previousSessionVolumeByContract, bandQuotes });
   const marketWith = (leapsQuotesByExpiry: ReadonlyMap<string, SymbolFileQuote[]>, missing: Set<string>): VolFarmerV2Market => ({
     symbol,
     todayIso: clock.todayIso,
@@ -297,6 +336,7 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
     stockCommissionDollars: round.stockCommissionDollars,
     leapsCapBaseLabel: "the ticker's pot",
     capsLeapsAtAskSize: false,
+    noCallQuotedReason,
   });
   // The first pass says what steps 1 to 3 did and leaves the LEAPS to the second, which says what only the LEAPS did (and
   // the free cash cut).

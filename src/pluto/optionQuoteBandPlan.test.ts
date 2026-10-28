@@ -1,30 +1,40 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
-import type { LadderBandQuote } from "./ladderBandQuotes.js";
-import { bandQuoteOwnImpliedVolatility, ladderDayUniverse, lastSeenImpliedVolatilities, planLadderBand, type LadderClock } from "./ladderBandPlan.js";
+import type { OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
+import { bandQuoteOwnImpliedVolatility, lastSeenImpliedVolatilities, nextListedExpiryAfter, optionQuoteBandDayUniverse, planOptionQuoteBand, type LadderClock } from "./optionQuoteBandPlan.js";
 
 const clock: LadderClock = { todayIso: "2026-10-20", closeMinutesEt: 16 * 60, riskFreeRate: 0.04 };
 const expiry = "2026-11-20";
 const years = yearsBetweenIsoDates(clock.todayIso, expiry);
 // Pluto's 10:00 fit: the 20 Nov forward 100.10 with the stock at 100.
 const anchors = new Map([[expiry, { forward: 100.1, spotPrice: 100 }]]);
-const settings = { ladderMinDte: 1, ladderMaxDte: 45, ladderMinAbsDelta: 0.05, ladderMaxAbsDelta: 0.3 };
+const ladderExpiryRule = { kind: "days_to_expiry_range", minDte: 1, maxDte: 45 } as const;
+const callDeltaRange = { minAbsDelta: 0.05, maxAbsDelta: 0.3 };
 
 /** A quote at 50% IV with the stock at `stockPrice`, the forward moved with it (100.10 × price ÷ 100). */
-function quoteAt(strike: number, right: "C" | "P", stockPrice: number, impliedVolatility = 0.5): LadderBandQuote {
+function quoteAt(strike: number, right: "C" | "P", stockPrice: number, impliedVolatility = 0.5): OptionQuoteBandQuote {
   const mid = blackScholesPriceOnForward(100.1 * (stockPrice / 100), strike, years, clock.riskFreeRate, impliedVolatility, right === "C");
   return { expiry, strike, right, bid: mid - 0.02, ask: mid + 0.02, stockPrice, errorCode: null, quotedAt: new Date("2026-10-20T15:00:00Z"), cycleNumber: 1 };
 }
 
-describe("ladderDayUniverse", () => {
-  it("keeps the 1–45 DTE expiries' contracts that the previous session's volume can sell one of (5 or more under the 20% rule)", () => {
-    const chain = { expirations: ["20261020", "20261120", "20261231"], strikesByExpiry: new Map([["20261020", [100]], ["20261120", [90, 110]], ["20261231", [100]]]) };
-    const volume = new Map([["2026-11-20|90|P", 5], ["2026-11-20|110|C", 4], ["2026-11-20|90|C", 500]]);
-    // 20 Oct is 0 DTE and 31 Dec is 72 DTE: outside. Of 20 Nov: the $90 Put (5 → 1 contract) and $90 Call (500), not the $110 Call (4 → 0) or the unquoted ones.
-    expect(ladderDayUniverse({ ...chain, todayIso: clock.todayIso, settings, previousSessionVolumeByContract: volume })).toEqual([
+describe("optionQuoteBandDayUniverse", () => {
+  const chain = { expirations: ["20261020", "20261120", "20261231", "20261023"], strikesByExpiry: new Map([["20261020", [100]], ["20261120", [90, 110]], ["20261231", [100]], ["20261023", [95]]]) };
+  const volume = new Map([["2026-11-20|90|P", 5], ["2026-11-20|110|C", 4], ["2026-11-20|90|C", 500], ["2026-10-23|95|C", 40], ["2026-10-20|100|C", 900]]);
+
+  it("the ladder: keeps the 1–45 DTE expiries' contracts that the previous session's volume can sell one of (5 or more under the 20% rule)", () => {
+    // 20 Oct is 0 DTE and 31 Dec is 72 DTE: outside. Of 20 Nov: the $90 Put (5 → 1 contract) and $90 Call (500), not the $110 Call (4 → 0) or the unquoted ones; 23 Oct's $95 Call (40).
+    expect(optionQuoteBandDayUniverse({ ...chain, sessionIso: clock.todayIso, expiryRule: ladderExpiryRule, previousSessionVolumeByContract: volume })).toEqual([
       { expiry, strike: 90, right: "C" },
       { expiry, strike: 90, right: "P" },
+      { expiry: "2026-10-23", strike: 95, right: "C" },
     ]);
+  });
+
+  it("Vol Farmer v2: only the next listed expiry after the session, whatever the ladder's range", () => {
+    // On Tue 20 Oct: 20 Oct expires that session, so the next listed expiry is Fri 23 Oct (the chain lists it last).
+    expect(optionQuoteBandDayUniverse({ ...chain, sessionIso: clock.todayIso, expiryRule: { kind: "next_listed_expiry" }, previousSessionVolumeByContract: volume })).toEqual([{ expiry: "2026-10-23", strike: 95, right: "C" }]);
+    expect(nextListedExpiryAfter(chain.expirations, "2026-10-20")).toBe("2026-10-23");
+    expect(nextListedExpiryAfter(chain.expirations, "2026-12-31")).toBeNull();
   });
 });
 
@@ -50,7 +60,7 @@ describe("the last-seen implied volatility", () => {
   });
 });
 
-describe("planLadderBand", () => {
+describe("planOptionQuoteBand", () => {
   const putStrikes = [60, 70, 80, 85, 90, 95, 100];
   const callStrikes = [100, 105, 110, 120, 130, 140, 160];
   const universe = [...putStrikes.map((strike) => ({ expiry, strike, right: "P" as const })), ...callStrikes.map((strike) => ({ expiry, strike, right: "C" as const }))];
@@ -60,10 +70,10 @@ describe("planLadderBand", () => {
   const strikesOf = (contracts: { strike: number; right: "C" | "P" }[], right: "C" | "P") => contracts.filter((contract) => contract.right === right).map((contract) => contract.strike);
 
   it("the Calls' band: the first look of the day (no band quote yet) widens to 0.02–0.45, later looks 0.03–0.40; every Put below the price, any |delta|", () => {
-    const first = planLadderBand({ universe, todaysQuotes: [], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 100, deltaRange: settings });
+    const first = planOptionQuoteBand({ universe, todaysQuotes: [], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 100, callDeltaRange });
     expect(first.firstLookOfDay).toBe(true);
     expect(strikesOf(first.contracts, "C")).toEqual(callStrikes.filter((strike) => callAbsDeltaAt(strike) >= 0.02 && callAbsDeltaAt(strike) <= 0.45));
-    const later = planLadderBand({ universe, todaysQuotes: [quoteAt(60, "P", 100)], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 100, deltaRange: settings });
+    const later = planOptionQuoteBand({ universe, todaysQuotes: [quoteAt(60, "P", 100)], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 100, callDeltaRange });
     expect(later.firstLookOfDay).toBe(false);
     expect(strikesOf(later.contracts, "C")).toEqual(callStrikes.filter((strike) => callAbsDeltaAt(strike) >= 0.03 && callAbsDeltaAt(strike) <= 0.4));
     // The ladder's Puts have no |delta| range: the $60 Put (|delta| about 0.01) is quoted; the $100 Put, at the price, is not.
@@ -71,12 +81,12 @@ describe("planLadderBand", () => {
   });
 
   it("quotes every Call whose IV is unknown and every Put below the price, and follows the live price", () => {
-    const unknown = planLadderBand({ universe, todaysQuotes: [], overnightImpliedVolatilityByContract: new Map(), anchors, clock, now, stockPrice: 100, deltaRange: settings });
+    const unknown = planOptionQuoteBand({ universe, todaysQuotes: [], overnightImpliedVolatilityByContract: new Map(), anchors, clock, now, stockPrice: 100, callDeltaRange });
     expect(strikesOf(unknown.contracts, "C")).toEqual(callStrikes);
     expect(strikesOf(unknown.contracts, "P")).toEqual([60, 70, 80, 85, 90, 95]);
     expect(unknown.unknownImpliedVolatilityCount).toBe(universe.length);
     // The stock falls 10% to $90: the Puts at $90 and above leave, the Calls' band moves down with the forward.
-    const fallen = planLadderBand({ universe, todaysQuotes: [quoteAt(60, "P", 100)], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 90, deltaRange: settings });
+    const fallen = planOptionQuoteBand({ universe, todaysQuotes: [quoteAt(60, "P", 100)], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 90, callDeltaRange });
     expect(strikesOf(fallen.contracts, "P")).toEqual([60, 70, 80, 85]);
     expect(strikesOf(fallen.contracts, "C")).toEqual(callStrikes.filter((strike) => callAbsDeltaAt(strike, 100.1 * 0.9) >= 0.03 && callAbsDeltaAt(strike, 100.1 * 0.9) <= 0.4));
   });

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { describeSessionVolumeCaptureOutcome, isSessionVolumeQuoteSettled, planSessionVolumeContracts } from "./runOptionSessionVolumeCapture.js";
-import { ladderRequoteBand } from "../pluto/ladderRequoteBand.js";
+import { optionRequoteBand } from "../pluto/optionRequoteBand.js";
 import type { CapturedOptionQuote } from "./captureOptionQuoteBatch.js";
 
-const settings = { ladderMinDte: 1, ladderMaxDte: 45 };
-const band = ladderRequoteBand({ ladderMinAbsDelta: 0.05, ladderMaxAbsDelta: 0.3 }, true);
+const expiryRule = { kind: "days_to_expiry_range", minDte: 1, maxDte: 45 } as const;
+const band = optionRequoteBand({ minAbsDelta: 0.05, maxAbsDelta: 0.3 }, true);
 // Captured on Wed 14 Oct 2026 after the close, for Thu 15 Oct.
 const nextSessionIso = "2026-10-15";
 const expirations = ["20261015", "20261016", "20261120", "20261130", "20261218"];
@@ -18,7 +18,7 @@ const strikesByExpiry = new Map<string, number[]>([
 
 describe("planSessionVolumeContracts", () => {
   it("with no IV known (the first night), quotes every Call and every Put below the price in the ladder's days to expiry, counted from the next session", () => {
-    const plan = planSessionVolumeContracts({ expirations, strikesByExpiry, nextSessionIso, settings, band, stockPrice: 100, riskFreeRate: 0.04, lastSeenImpliedVolatilityByContract: new Map() });
+    const plan = planSessionVolumeContracts({ expirations, strikesByExpiry, nextSessionIso, expiryRule, band, stockPrice: 100, riskFreeRate: 0.04, lastSeenImpliedVolatilityByContract: new Map() });
     // 15 Oct is 0 DTE and 18 Dec is 64 DTE on 15 Oct: out. 16 Oct (1), 20 Nov (36), 30 Nov (46): 30 Nov is out too.
     expect(plan.contracts.map((contract) => contract.expiry)).toEqual(expect.arrayContaining(["20261016", "20261120"]));
     expect(new Set(plan.contracts.map((contract) => contract.expiry))).toEqual(new Set(["20261016", "20261120"]));
@@ -33,7 +33,7 @@ describe("planSessionVolumeContracts", () => {
     const iv = 0.5;
     const lastSeen = new Map<string, number>();
     for (const strike of [80, 95, 100, 105, 130]) for (const right of ["C", "P"]) lastSeen.set(`2026-10-16|${strike}|${right}`, iv);
-    const plan = planSessionVolumeContracts({ expirations, strikesByExpiry, nextSessionIso, settings, band, stockPrice: 100, riskFreeRate: 0.04, lastSeenImpliedVolatilityByContract: lastSeen });
+    const plan = planSessionVolumeContracts({ expirations, strikesByExpiry, nextSessionIso, expiryRule, band, stockPrice: 100, riskFreeRate: 0.04, lastSeenImpliedVolatilityByContract: lastSeen });
     const tomorrow = plan.contracts.filter((contract) => contract.expiry === "20261016").map((contract) => `${contract.strike}${contract.right}`).sort();
     // 1 DTE at 50% IV: the $105 Call sits near |delta| 0.2, the $100 and $130 Calls are out of the band; the Puts have no
     // |delta| range, so the $80 (far out, ~0) and $95 Puts are quoted, not the $100 and $105 at or above the price.
@@ -43,9 +43,16 @@ describe("planSessionVolumeContracts", () => {
     expect(plan.unknownIvCount).toBe(2);
   });
 
+  it("for a Vol Farmer v2 ticker, covers only the next listed expiry after the next session", () => {
+    // On Thu 15 Oct, the next listed expiry after the session is Fri 16 Oct; 15 Oct itself expires that session.
+    const plan = planSessionVolumeContracts({ expirations, strikesByExpiry, nextSessionIso, expiryRule: { kind: "next_listed_expiry" }, band, stockPrice: 100, riskFreeRate: 0.04, lastSeenImpliedVolatilityByContract: new Map() });
+    expect(new Set(plan.contracts.map((contract) => contract.expiry))).toEqual(new Set(["20261016"]));
+    expect(plan.universeCount).toBe(10);
+  });
+
   it("without a stock price, quotes the whole universe", () => {
     const lastSeen = new Map([["2026-10-16|130|C", 0.5]]);
-    const plan = planSessionVolumeContracts({ expirations, strikesByExpiry, nextSessionIso, settings, band, stockPrice: null, riskFreeRate: 0.04, lastSeenImpliedVolatilityByContract: lastSeen });
+    const plan = planSessionVolumeContracts({ expirations, strikesByExpiry, nextSessionIso, expiryRule, band, stockPrice: null, riskFreeRate: 0.04, lastSeenImpliedVolatilityByContract: lastSeen });
     expect(plan.contracts).toHaveLength(12);
   });
 });

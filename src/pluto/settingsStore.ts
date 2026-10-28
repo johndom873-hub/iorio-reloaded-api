@@ -18,12 +18,12 @@ export interface PlutoSettings {
   windowEndEt: string;
   dailyLossBreakerPct: number;
   // Execution
-  /** A ladder band quote older than this is left out of the look. */
+  /** An option quote band quote older than this is left out of the look. */
   maxQuoteAgeMinutes: number;
   /** A fill this far (% of the reference price) past the reference trips the fill_slippage breaker. */
   maxFillSlippagePct: number;
   // Real-time
-  /** How often the loop checks the ladder's band quotes for contracts quoted since Pluto last analysed them. */
+  /** How often the loop checks the option quote band's quotes for contracts quoted since Pluto last analysed them. */
   bandQuotePollSeconds: number;
   burstLines: number;
   burstSettleSeconds: number;

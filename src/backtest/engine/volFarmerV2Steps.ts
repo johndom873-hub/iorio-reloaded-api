@@ -198,6 +198,8 @@ export interface VolFarmerV2Market {
   leapsCapBaseLabel: string;
   /** The backtest buys a LEAPS no larger than its ask's size; live, the order fills what the market offers. */
   capsLeapsAtAskSize: boolean;
+  /** Why no Call after today is quoted, when the caller knows more than the quotes (live: the option quote band's state). */
+  noCallQuotedReason?: string;
 }
 
 /** A Call the look sells: on held shares, or with the shares a new cycle buys. */
@@ -410,7 +412,7 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
 
   const nextExpiry = quotes.reduce<string | null>((next, quote) => (quote.right === "C" && quote.expiry > todayIso && (next === null || quote.expiry < next) ? quote.expiry : next), null);
   if (nextExpiry === null) {
-    say("no Call expiry listed after today");
+    say(market.noCallQuotedReason ?? "no Call expiry listed after today");
     return finish();
   }
   const dte = daysToExpiry(nextExpiry, todayIso);

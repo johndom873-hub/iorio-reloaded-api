@@ -38,11 +38,11 @@ describe("loadTodaysBandQuoteStamps (audit A)", () => {
     expect(stamps.map((stamp) => stamp.strike)).toEqual([31]);
   });
 
-  it("reads only the CC + Put Ladder's band quotes", async () => {
+  it("reads only the option quote band's quotes", async () => {
     harness.tables = [];
     harness.rows = [{ symbol: "LADR", expiry: "2026-11-20", strike: "45", right: "P", quotedAt: "2026-10-07T14:01:00Z" }];
     expect(findNewlyQuotedContracts(await loadTodaysBandQuoteStamps(new Date("2026-10-07T15:00:00Z")), new Map()).symbols).toEqual(["LADR"]);
-    expect(harness.tables).toEqual(["ladder_band_quotes as q"]);
+    expect(harness.tables).toEqual(["option_quote_band_quotes as q"]);
   });
 
   it("a strike stored as '30.0' and one as '30' are the same contract key once loaded", async () => {

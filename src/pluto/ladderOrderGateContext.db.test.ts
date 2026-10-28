@@ -10,8 +10,8 @@ vi.mock("../db/connection.js", async () => {
   const { createIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
   return { db: await createIsolatedTestDatabase() };
 });
-vi.mock("./ladderBandPlanLoader.js", () => ({
-  defaultLadderBandPlannerDependencies: {
+vi.mock("./optionQuoteBandPlanLoader.js", () => ({
+  defaultOptionQuoteBandPlannerDependencies: {
     loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 960, riskFreeRate: 0.04 }),
     loadForwardAnchors: async () => new Map([["2026-11-20", { forward: 50.2, spotPrice: 50 }]]),
   },

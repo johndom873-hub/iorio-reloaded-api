@@ -66,14 +66,14 @@ vi.mock("./executor.js", () => ({
   }),
   watchPlutoOrder: vi.fn(async () => ({})),
 }));
-vi.mock("./ladderBandPlanLoader.js", () => ({
-  defaultLadderBandPlannerDependencies: {
+vi.mock("./optionQuoteBandPlanLoader.js", () => ({
+  defaultOptionQuoteBandPlannerDependencies: {
     loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 960, riskFreeRate: 0.04 }),
     loadForwardAnchors: async () => new Map(),
     loadPreviousSessionVolume: async () => new Map((harness.quotes as SymbolFileQuote[]).map((quote) => [contractKey(quote), 1_000])),
   },
 }));
-vi.mock("./ladderBandQuotes.js", () => ({ loadLadderBandQuotes: async () => [] }));
+vi.mock("./optionQuoteBandQuotes.js", () => ({ loadOptionQuoteBandQuotes: async () => [] }));
 vi.mock("./ladderLook.js", () => ({ latestCycleQuotes: () => ({ quotes: harness.quotes, stale: false }) }));
 vi.mock("./ladderLookSnapshot.js", () => ({ loadOpenPositionFigures: async (tickerId: string) => harness.positionsByTickerId.get(tickerId) ?? harness.positions }));
 vi.mock("./ladderOrders.js", () => ({ loadLadderBookOrderCounts: async () => ({ ...harness.bookCounts }), ladderOrdersSentToday: async () => ({ count: 0 }) }));
@@ -97,7 +97,7 @@ vi.mock("./volFarmerV2LookLoader.js", () => ({
   loadVolFarmerV2StepImpliedVolatility: async () => null,
 }));
 
-const { runVolFarmerV2Round } = await import("./volFarmerV2Round.js");
+const { runVolFarmerV2Round, volFarmerV2NoCallQuotedReason } = await import("./volFarmerV2Round.js");
 
 const settings = { ...plutoLadderSettingsFixture, ...plutoVolFarmerV2SettingsFixture, capitalBudgetPct: 50, excessAllowancePct: 0, maxQuoteAgeMinutes: 10, burstLines: 10, telegramVerbosity: "actions" };
 
@@ -213,7 +213,7 @@ describe("runVolFarmerV2Round", () => {
     expect(harness.saves).toEqual([{ tickerId: "t-VFT", adopted: true }]);
     const memory = harness.memory.get("t-VFT") as VolFarmerV2Memory;
     expect(memory.state.first).toMatchObject({ shares: 200, costPerShare: 104.5, calls: [{ legId: "c1", shares: 200 }] });
-    expect(harness.events.some((event) => String(event.detail.message).startsWith("Vol Farmer v2 adopted VFT's holdings: 200 shares at the cycle's break-even 104.50"))).toBe(true);
+    expect(harness.events.filter((event) => event.type === "holdings_adopted").map((event) => event.detail)).toEqual([{ passId: expect.any(String), symbol: "VFT", strategy: "vol_farmer_v2", shares: 200, breakEvenPerShare: 104.5, callContracts: 2, putContracts: 0 }]);
     // Its Call is open: nothing to sell, and the Puts wait until the first position needs a new Call.
     expect(harness.executed).toEqual([]);
   });
@@ -282,5 +282,30 @@ describe("runVolFarmerV2Round", () => {
     const contracts = Math.floor(10_000 / leapsContractCost(leaps!));
     expect(leaps!.quantity).toBe(contracts);
     expect(harness.lastRounds.get("t-VFT")!.notes).toContain(`the free cash ($10,000) held the LEAPS to ${contracts} of the ${Math.floor(25_000 / leapsContractCost(leaps!))} contracts its cap allows`);
+  });
+});
+
+describe("volFarmerV2NoCallQuotedReason", () => {
+  // Wed 28 Oct 2026: the next listed expiry is Fri 30 Oct (2DTE).
+  const base = { todayIso: "2026-10-28", expirations: ["20261106", "20261030", "20261028"], strikesByExpiry: new Map([["20261030", [95, 105]], ["20261106", [105]], ["20261028", [105]]]) };
+  const bandQuote = (expiry: string, strike: number, right: "C" | "P") => ({ expiry, strike, right, bid: 1, ask: 1.1, stockPrice: 100, errorCode: null, quotedAt: new Date(), cycleNumber: 1 });
+
+  it("names the missing previous-session volume when the ticker was enabled after the capture", () => {
+    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: null, bandQuotes: [] })).toBe(
+      "no 30 Oct (2DTE) option is quoted today: no option volume was captured after the previous session's close (the capture covers the tickers enabled then), so none can be sold before the next session",
+    );
+  });
+
+  it("tells the 20% volume rule, quotes not in yet, and the |delta| band apart", () => {
+    const volume = new Map([["2026-10-30|105|C", 4], ["2026-10-30|95|P", 50]]);
+    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: volume, bandQuotes: [] })).toBe("no 30 Oct (2DTE) Call traded enough in the previous session to sell one (the 20% volume rule needs a volume of 5 or more)");
+    const traded = new Map([["2026-10-30|105|C", 40]]);
+    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: traded, bandQuotes: [] })).toBe("no 30 Oct (2DTE) option is quoted yet today");
+    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: traded, bandQuotes: [bandQuote("2026-10-30", 105, "C")] })).toBe("the latest quotes have no 30 Oct (2DTE) Call yet");
+    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: traded, bandQuotes: [bandQuote("2026-10-30", 95, "P")] })).toBe("no 30 Oct (2DTE) Call is near v2's Call |delta| range at this price, so none is quoted");
+  });
+
+  it("keeps the plain note when the chain lists no expiry after today", () => {
+    expect(volFarmerV2NoCallQuotedReason({ ...base, expirations: ["20261028"], previousSessionVolumeByContract: null, bandQuotes: [] })).toBe("no Call expiry listed after today");
   });
 });

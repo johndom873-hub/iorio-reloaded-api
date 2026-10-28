@@ -37,7 +37,7 @@ vi.mock("./book.js", () => ({
   loadLastFilledPlutoActionAtBySymbol: async () => new Map(),
 }));
 vi.mock("./executor.js", () => ({ executePlutoOrder: vi.fn(), watchPlutoOrder: vi.fn() }));
-vi.mock("./ladderBandPlanLoader.js", () => ({ defaultLadderBandPlannerDependencies: { loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 960, riskFreeRate: 0.04 }) } }));
+vi.mock("./optionQuoteBandPlanLoader.js", () => ({ defaultOptionQuoteBandPlannerDependencies: { loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 960, riskFreeRate: 0.04 }) } }));
 vi.mock("./ladderCycleMemory.js", () => ({ saveLadderCycleMemory: vi.fn(async () => {}) }));
 vi.mock("./ladderLookLoader.js", () => ({
   loadLadderLookInput: async (ticker: { symbol: string; tickerWeight: number }, options: { freeCash: number }) => {

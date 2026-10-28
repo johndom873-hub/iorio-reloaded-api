@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { LadderBandQuote } from "./ladderBandQuotes.js";
+import type { OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
 import { forwardAnchorsFromBandQuotes } from "./ladderForwardAnchors.js";
 
 const clock = { todayIso: "2026-10-27", yearsToTodaysClose: 0.0005, riskFreeRate: 0.04 };
 const at = (minute: number) => new Date(`2026-10-27T15:${String(minute).padStart(2, "0")}:00Z`);
-const quote = (expiry: string, strike: number, right: "C" | "P", bid: number, ask: number, stockPrice: number, minute = 0): LadderBandQuote => ({ expiry, strike, right, bid, ask, stockPrice, errorCode: null, quotedAt: at(minute), cycleNumber: 1 });
+const quote = (expiry: string, strike: number, right: "C" | "P", bid: number, ask: number, stockPrice: number, minute = 0): OptionQuoteBandQuote => ({ expiry, strike, right, bid, ask, stockPrice, errorCode: null, quotedAt: at(minute), cycleNumber: 1 });
 
 describe("forwardAnchorsFromBandQuotes", () => {
   it("takes put-call parity where the band has a Call and a Put at a strike near the money", () => {

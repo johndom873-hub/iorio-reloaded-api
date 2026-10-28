@@ -28,7 +28,7 @@ vi.mock("./lib/stalePendingOrders.js", () => ({ startStalePendingOrderSweep: cal
 vi.mock("./genosuke/bot.js", () => ({ startGenosuke: calls.startGenosuke }));
 vi.mock("./lib/notificationBroadcaster.js", () => ({ startNotificationBroadcaster: calls.startNotificationBroadcaster }));
 vi.mock("./lib/marketQuoteLoop.js", () => ({ startMarketQuoteLoop: calls.startMarketQuoteLoop }));
-vi.mock("./pluto/ladderBandPlanLoader.js", () => ({ createLadderQuoteConsumer: () => ({ consumer: "ladder" }) }));
+vi.mock("./pluto/optionQuoteBandPlanLoader.js", () => ({ createLadderQuoteConsumer: () => ({ consumer: "ladder" }) }));
 vi.mock("./lib/assignmentRiskConsumer.js", () => ({ createAssignmentRiskConsumer: () => ({ consumer: "assignment risk" }) }));
 vi.mock("./lib/volatilityConsumer.js", () => ({ createVolatilityConsumer: () => ({ consumer: "volatility" }) }));
 vi.mock("./backtest/backtestDataDirectory.js", () => ({ readBacktestDataDirectory: () => null }));

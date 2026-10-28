@@ -3,7 +3,7 @@ import { db } from "../db/connection.js";
 import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import type { LadderOrderGateContext } from "../lib/ladderOrderGates.js";
-import { defaultLadderBandPlannerDependencies } from "./ladderBandPlanLoader.js";
+import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
 import { loadPlutoSettings } from "./settingsStore.js";
 import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, tickerPotFraction } from "./tickerSettingsStore.js";
 
@@ -24,12 +24,12 @@ export async function loadLadderOrderGateContext(orderRequest: { pluto_action_id
   const isLeaps = orderRequest.payload.strategyKey === "leaps";
   const symbol = orderRequest.payload.symbol.trim().toUpperCase();
   const todayIso = easternIsoDate(now);
-  const [settings, enabledTickers, clock] = await Promise.all([loadPlutoSettings(connection), loadEnabledPlutoTickerSettings(connection), defaultLadderBandPlannerDependencies.loadClock(todayIso)]);
+  const [settings, enabledTickers, clock] = await Promise.all([loadPlutoSettings(connection), loadEnabledPlutoTickerSettings(connection), defaultOptionQuoteBandPlannerDependencies.loadClock(todayIso)]);
   const ticker = enabledTickers.find((entry) => entry.symbol === symbol);
   const allocationPct = effectiveAllocationPctBySymbol(enabledTickers).get(symbol) ?? 0;
   const optionLeg = orderRequest.payload.legs.find((leg) => leg.role === "option");
   const expiryIso = optionLeg?.expiry ? `${optionLeg.expiry.slice(0, 4)}-${optionLeg.expiry.slice(4, 6)}-${optionLeg.expiry.slice(6, 8)}` : null;
-  const anchors = ticker && expiryIso ? await defaultLadderBandPlannerDependencies.loadForwardAnchors(ticker.tickerId, todayIso) : new Map();
+  const anchors = ticker && expiryIso ? await defaultOptionQuoteBandPlannerDependencies.loadForwardAnchors(ticker.tickerId, todayIso) : new Map();
   const potFraction = tickerPotFraction(allocationPct, settings);
   if (isVolFarmerV2) {
     const isPut = optionLeg?.right === "P";

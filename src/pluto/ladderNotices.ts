@@ -15,7 +15,7 @@ export type LadderBookNoticeReason = "book_committed_capital" | "book_open_posit
 const tickerNoticeTexts: Record<LadderTickerNoticeReason, (symbol: string) => string> = {
   no_previous_session_volume: (symbol) => `${symbol} can't trade today: no previous-session option volume was captured, so no sale passes the volume rule.`,
   no_shock: (symbol) => `${symbol} can't trade: it has no shock (no override, and no daily closes for a recommended one).`,
-  stale_band_quotes: (symbol) => `${symbol} can't trade for now: the ladder band's latest quotes are older than Pluto's quote-age limit.`,
+  stale_band_quotes: (symbol) => `${symbol} can't trade for now: its latest option quotes are older than Pluto's quote-age limit.`,
   split_guard: (symbol) => `${symbol} is stopped: its price is about a split's factor away from the previous close with no split recorded. A person needs to look.`,
   held_by_ticker_cap: (symbol) => `${symbol}: sales wait for a later look, held by the ticker's caps (working orders, orders a day or open positions).`,
   blocked_on_live_check: (symbol) => `${symbol}: a sale was blocked on its live re-check (quote, spread, expiry, yield or delta); it is planned again at a later look.`,

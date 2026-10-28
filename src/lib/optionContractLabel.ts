@@ -27,6 +27,11 @@ export function daysToExpiry(expiryIso: string, todayIso: string): number {
   return Math.round((Date.parse(`${expiryIso.slice(0, 10)}T00:00:00Z`) - Date.parse(`${todayIso}T00:00:00Z`)) / 86_400_000);
 }
 
+/** "30 Oct (2DTE)": an expiry as the contract label writes it, both dates YYYY-MM-DD. */
+export function describeExpiry(expiryIso: string, todayIso: string): string {
+  return `${formatDayMonth(expiryIso)} (${daysToExpiry(expiryIso, todayIso)}DTE)`;
+}
+
 export interface OptionContractLabelInput {
   symbol?: string;
   strike: number;

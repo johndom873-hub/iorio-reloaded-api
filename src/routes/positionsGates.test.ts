@@ -43,8 +43,8 @@ vi.mock("../lib/deltaBandGate.js", () => ({ evaluateDeltaBandForOrderRequest: (.
 const evaluateLadderDeltaMock = vi.fn();
 vi.mock("../lib/ladderOrderGates.js", () => ({ evaluateLadderDeltaForOrderRequest: (...args: unknown[]) => evaluateLadderDeltaMock(...args) }));
 // The ladder's gate context reads today's close and 10:00 forwards through the band planner's readers.
-vi.mock("../pluto/ladderBandPlanLoader.js", () => ({
-  defaultLadderBandPlannerDependencies: { loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 16 * 60, riskFreeRate: 0.04 }), loadForwardAnchors: async () => new Map() },
+vi.mock("../pluto/optionQuoteBandPlanLoader.js", () => ({
+  defaultOptionQuoteBandPlannerDependencies: { loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 16 * 60, riskFreeRate: 0.04 }), loadForwardAnchors: async () => new Map() },
 }));
 
 const evaluateCloseGateForPositionMock = vi.fn();
