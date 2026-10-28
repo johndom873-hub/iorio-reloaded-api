@@ -15,6 +15,11 @@ import { loadUndeliveredAlerts } from "./undeliveredAlerts.js";
 import { loadTradingSettingsForEditing } from "./tradingSettingsStore.js";
 import { fetchTradingHalt, type TradingHalt } from "./platformControls.js";
 import { easternIsoDate } from "./easternIsoDate.js";
+import { computeCashLockedInCsps } from "./positionExposure.js";
+import { loadCommittedCapitalOnSymbols } from "./orderLimits.js";
+import { loadPlutoSettings } from "../pluto/settingsStore.js";
+import { loadEnabledPlutoTickerSettings } from "../pluto/tickerSettingsStore.js";
+import { loadInFlightNotionalsBySymbol } from "../pluto/book.js";
 import type { JobRunStatus } from "./jobRunStatus.js";
 import {
   configurationExpectationsFor,
@@ -27,6 +32,7 @@ import {
   evaluateMarketData,
   evaluateOrderHygiene,
   evaluateOrderPath,
+  evaluatePlutoCash,
   evaluateSettings,
   evaluateTodaysChainStructure,
   evaluateTradingHalt,
@@ -37,6 +43,7 @@ import {
   type LatestJobRun,
   type MarketDataFigures,
   type OrderPathProbeResult,
+  type PlutoCashFigures,
   readinessQuoteWaitMs,
   type QuoteProbe,
   type ReadinessCheck,
@@ -70,6 +77,8 @@ export interface ReadinessDependencies {
   loadSettings(): Promise<TradingSettingsFigures>;
   loadTradingHalt(): Promise<TradingHalt>;
   loadAccount(): Promise<AccountFigures>;
+  /** Pluto's budget and book: what its free cash is measured from, with the account figures. */
+  loadPlutoCash(): Promise<PlutoCashFigures>;
   /** A real listed option from the latest stored chain: the contract the order path and the live option quote are probed with. */
   loadProbeContract(): Promise<ProbeContract | null>;
   probeOrderPath(contract: ProbeContract | null): Promise<OrderPathProbeResult>;
@@ -122,6 +131,7 @@ export async function collectReadinessChecks(stage: ReadinessStage, now: Date, d
 
   const settingsPromise = dependencies.loadSettings().then((settings) => settings as TradingSettingsFigures | null, () => null);
   const probeContractPromise = dependencies.loadProbeContract().catch(() => null);
+  const accountPromise = withTimeout(dependencies.loadAccount(), "the IBKR account summary").catch(() => null);
 
   const groups = await Promise.all([
     guarded("Configuration", async () => (expectations ? evaluateConfiguration(dependencies.readEnvironment(), expectations) : { name: "Configuration", status: "warn", detail: `no expected values are defined for the ${dependencies.appEnvironment} environment` })),
@@ -129,10 +139,11 @@ export async function collectReadinessChecks(stage: ReadinessStage, now: Date, d
     guarded("Trading halt", async () => evaluateTradingHalt(await dependencies.loadTradingHalt(), now)),
     guarded("Trading settings", async () => evaluateSettings(await settingsPromise)),
     guarded("Account", async () => {
-      const account = await withTimeout(dependencies.loadAccount(), "the IBKR account summary").catch(() => null);
       const settings = await settingsPromise;
-      return evaluateAccount(account, settings?.maxOrderPctOfPortfolio ?? null);
+      return evaluateAccount(await accountPromise, settings?.maxOrderPctOfPortfolio ?? null);
     }),
+    // A warning at worst (Marcelo 2026-10-28): a reading that fails is "could not be measured", not a failing check.
+    guarded("Pluto cash", async () => evaluatePlutoCash(await accountPromise, await withTimeout(dependencies.loadPlutoCash(), "Pluto's book").catch(() => null))),
     guarded("Order path", async () => {
       const contract = await probeContractPromise;
       return evaluateOrderPath(await withTimeout(dependencies.probeOrderPath(contract), "the IBKR what-if probe").catch((error): OrderPathProbeResult => ({ ok: false, reason: error instanceof Error ? error.message : String(error) })));
@@ -233,8 +244,23 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
     loadProbeContract: () => loadProbeContractFromStoredChain(),
     probeOrderPath: async (contract) => {
       if (!contract) return { ok: false, reason: "no stored option contract to probe with (no chain structure or daily close yet)" };
-      await fetchWhatIfCommissionRange([probeOptionLeg(contract)]);
-      return { ok: true, probe: `${contract.symbol} $${contract.strike} put ${contract.expiryYyyymmdd}` };
+      const probe = `${contract.symbol} $${contract.strike} put ${contract.expiryYyyymmdd}`;
+      try {
+        await fetchWhatIfCommissionRange([probeOptionLeg(contract)]);
+      } catch (error) {
+        return { ok: false, probe, reason: error instanceof Error ? error.message : String(error) };
+      }
+      return { ok: true, probe };
+    },
+    loadPlutoCash: async () => {
+      const [settings, enabledTickers, cashLockedInCsps, inFlight] = await Promise.all([loadPlutoSettings(), loadEnabledPlutoTickerSettings(), computeCashLockedInCsps(), loadInFlightNotionalsBySymbol()]);
+      return {
+        capitalBudgetPct: settings.capitalBudgetPct,
+        enabledTickerCount: enabledTickers.length,
+        committedOnPlutoTickers: await loadCommittedCapitalOnSymbols(enabledTickers.map((ticker) => ticker.symbol)),
+        cashLockedInCsps,
+        inFlightNotional: inFlight.totalNotional,
+      };
     },
     loadActiveOrders: async () => {
       const rows = await db("order_requests").whereIn("status", ["pending_confirmation", "confirmed", "submitted", "partially_filled", "cancel_requested"]).select("status", "created_at", db.raw("payload->>'symbol' as symbol"));
