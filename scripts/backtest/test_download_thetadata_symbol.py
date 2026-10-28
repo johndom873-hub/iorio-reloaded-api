@@ -621,7 +621,7 @@ INSERT INTO day_issues VALUES ('2024-03-25', 'eod', '2024-04-05', 'INTERNAL: Cor
             part_results = {"quotes": downloader.DayPartResult([repeated_quote, repeated_quote]), "eod": downloader.DayPartResult([]),
                             "open_interest": downloader.DayPartResult([]), "intraday_quotes": downloader.DayPartResult([])}
             with self.assertRaises(sqlite3.IntegrityError):
-                downloader.store_day(connection, downloader.DayPlan(datetime.date(2024, 3, 25), True, True), part_results, None, datetime.datetime.now(datetime.timezone.utc))
+                downloader.store_day(connection, downloader.DayPlan(datetime.date(2024, 3, 25), True, True), part_results, None, datetime.datetime.now(datetime.timezone.utc), datetime.date.max)
             self.assertEqual(connection.execute("SELECT (SELECT count(*) FROM quotes) + (SELECT count(*) FROM days)").fetchone()[0], 0)
             self.assertFalse(connection.in_transaction)
         finally:
@@ -637,9 +637,9 @@ INSERT INTO day_issues VALUES ('2024-03-25', 'eod', '2024-04-05', 'INTERNAL: Cor
                 return {"quotes": downloader.DayPartResult([quote[:4] + (bid,) + quote[5:]]), "eod": downloader.DayPartResult([]),
                         "open_interest": downloader.DayPartResult([]), "intraday_quotes": downloader.DayPartResult([])}
 
-            downloader.store_day(connection, day_plan, part_results(0.5), None, datetime.datetime.now(datetime.timezone.utc))
+            downloader.store_day(connection, day_plan, part_results(0.5), None, datetime.datetime.now(datetime.timezone.utc), datetime.date.max)
             connection.execute("DELETE FROM days WHERE trading_date = '2024-03-25'")
-            downloader.store_day(connection, day_plan, part_results(0.6), None, datetime.datetime.now(datetime.timezone.utc))
+            downloader.store_day(connection, day_plan, part_results(0.6), None, datetime.datetime.now(datetime.timezone.utc), datetime.date.max)
             self.assertEqual(connection.execute("SELECT bid FROM quotes").fetchall(), [(0.6,)])
             self.assertEqual(connection.execute("SELECT status, look_count, quote_rows FROM intraday_days").fetchall(), [("no_data", 0, 0)])
         finally:
@@ -692,11 +692,12 @@ class DownloadRunTests(unittest.TestCase):
     def tearDown(self):
         self.temporary_directory.cleanup()
 
-    def run_downloader(self, service, stop_requested=None, start="2024-03-25", end="2024-03-29", extra_arguments=()):
+    def run_downloader(self, service, stop_requested=None, start="2024-03-25", end="2024-03-29", extra_arguments=(), now=None):
         events = []
         exit_code = downloader.run_download(
             ["--symbol", "intc", "--start", start, "--end", end, "--data-dir", str(self.data_directory), *extra_arguments],
-            events.append, stop_requested or threading.Event(), service.log_in, NO_RETRY_DELAYS, NO_EXPIRATION_BY_EXPIRATION_RETRY_DELAYS, NO_WAITS_BEFORE_LOGIN)
+            events.append, stop_requested or threading.Event(), service.log_in, NO_RETRY_DELAYS, NO_EXPIRATION_BY_EXPIRATION_RETRY_DELAYS, NO_WAITS_BEFORE_LOGIN,
+            **({"clock": lambda: now} if now else {}))
         return exit_code, events
 
     def read_database(self, query, parameters=()):
@@ -1198,6 +1199,38 @@ class DownloadRunTests(unittest.TestCase):
         self.assertEqual((exit_code, events[-1]), (0, {"type": "done", "daysDone": 5, "daysTotal": 5, "unavailableDays": 0, "daysWithIssues": 0}))
         self.assertEqual(service.calls, [("quotes", corrupt_day, far_expiry(corrupt_day))])
         self.assertEqual(self.stored_days()[1][2], CONTRACTS_PER_DAY // 2)
+
+    def test_a_recent_day_with_no_data_in_any_part_is_asked_for_again_until_it_is_seven_days_old(self):
+        # Monday 1 April: Friday 29 March is the last finished session and is under 7 days old.
+        exit_code, events = self.run_downloader(FakeThetaData(self.frames_by_date), now=eastern_time(2024, 4, 1, 12))
+        self.assertEqual((exit_code, events[-1]), (0, {"type": "done", "daysDone": 4, "daysTotal": 5, "unavailableDays": 1, "daysWithIssues": 0}))
+        self.assertEqual([day[0] for day in self.stored_days()], ["2024-03-25", "2024-03-26", "2024-03-27", "2024-03-28"])
+        self.assertEqual(self.read_database("SELECT trading_date, attempts, reason FROM unavailable_days"), [("2024-03-29", 1, downloader.NOT_PUBLISHED_YET_REASON)])
+        self.assert_every_stored_day_is_whole()
+
+        # Still not published on Thursday 4 April (6 days old): asked for again, nothing else is.
+        service = FakeThetaData(self.frames_by_date)
+        exit_code, events = self.run_downloader(service, now=eastern_time(2024, 4, 4, 12))
+        self.assertEqual((exit_code, events[-1]), (0, {"type": "done", "daysDone": 4, "daysTotal": 5, "unavailableDays": 1, "daysWithIssues": 0}))
+        self.assertEqual(sorted({trading_date for _, trading_date, _ in service.calls if trading_date}), [self.holiday])
+        self.assertEqual(self.read_database("SELECT attempts FROM unavailable_days"), [(2,)])
+
+        # Friday 5 April (7 days old): no data is now final, a no_data day that is not asked for again.
+        exit_code, events = self.run_downloader(FakeThetaData(self.frames_by_date), now=eastern_time(2024, 4, 5, 12))
+        self.assertEqual((exit_code, events[-1]), (0, {"type": "done", "daysDone": 5, "daysTotal": 5, "unavailableDays": 0, "daysWithIssues": 0}))
+        self.assertEqual(self.stored_days()[4], ("2024-03-29", "no_data", 0, 0, 0, None, None, None))
+        self.assertEqual(self.read_database("SELECT count(*) FROM unavailable_days"), [(0,)])
+
+    def test_a_recent_day_with_no_data_yet_is_stored_once_thetadata_publishes_it(self):
+        self.run_downloader(FakeThetaData(self.frames_by_date), now=eastern_time(2024, 4, 1, 12))
+        self.frames_by_date[self.holiday] = frames_for_trading_day(self.holiday)
+        service = FakeThetaData(self.frames_by_date)
+        exit_code, events = self.run_downloader(service, now=eastern_time(2024, 4, 2, 12))
+        self.assertEqual((exit_code, events[-1]), (0, {"type": "done", "daysDone": 5, "daysTotal": 5, "unavailableDays": 0, "daysWithIssues": 0}))
+        self.assertEqual(sorted({trading_date for _, trading_date, _ in service.calls if trading_date}), [self.holiday])
+        self.assertEqual(self.stored_days()[4], ("2024-03-29",) + self.whole_day)
+        self.assertEqual(self.read_database("SELECT count(*) FROM unavailable_days"), [(0,)])
+        self.assert_every_stored_day_is_whole()
 
     def test_a_part_answered_with_no_data_is_asked_for_again_and_stored_when_it_arrives(self):
         day_without_end_of_day = self.trading_dates[1]

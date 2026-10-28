@@ -58,6 +58,11 @@ ALL_EXPIRATIONS = "*"
 MAX_REQUESTS_IN_FLIGHT = 2
 DAYS_FETCHED_AHEAD = 2
 SESSION_FINISHED_HOUR_EASTERN = 18
+# ThetaData publishes a session's data some hours after it ends and, until then, answers no data for it, as for a
+# holiday. So a weekday with no data in any part is final (a 'no_data' day) only once it is this many days old; until
+# then it is recorded as unavailable and asked for again on each run.
+NO_DATA_IS_FINAL_AFTER_CALENDAR_DAYS = 7
+NOT_PUBLISHED_YET_REASON = f"no data in any part yet: ThetaData may not have published this day; asked for again until it is {NO_DATA_IS_FINAL_AFTER_CALENDAR_DAYS} days old"
 EASTERN_TIME_ZONE = ZoneInfo("America/New_York")
 API_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 API_ENV_FILE_PATH = API_REPOSITORY_ROOT / ".env"
@@ -593,7 +598,7 @@ def keep_intraday_quotes_within_strike_window(connection: sqlite3.Connection, tr
 
 
 def store_day_in_open_transaction(connection: sqlite3.Connection, day_plan: DayPlan, part_results: dict[str, DayPartResult],
-                                  strike_window_pct: float | None, stored_at_text: str) -> DayOutcome:
+                                  strike_window_pct: float | None, stored_at_text: str, no_data_is_final_through: datetime.date) -> DayOutcome:
     trading_date_text = day_plan.trading_date.isoformat()
     outcome = DayOutcome(day_done=False)
     ten_o_clock_quote_rows = None
@@ -607,6 +612,11 @@ def store_day_in_open_transaction(connection: sqlite3.Connection, day_plan: DayP
                 return outcome
         quotes, end_of_day, open_interest = morning_results["quotes"], morning_results["eod"], morning_results["open_interest"]
         outcome.status = "complete" if (quotes.rows or end_of_day.rows or open_interest.rows) else "no_data"
+        if outcome.status == "no_data" and day_plan.trading_date > no_data_is_final_through:
+            outcome.status = None
+            outcome.unavailable_reason = NOT_PUBLISHED_YET_REASON
+            record_unavailable_day(connection, trading_date_text, outcome.unavailable_reason, stored_at_text)
+            return outcome
         for part_name, part_result in morning_results.items():
             connection.execute(f"DELETE FROM {part_name} WHERE trading_date = ?", (trading_date_text,))
             insert_part_rows(connection, part_name, part_result.rows)
@@ -684,16 +694,16 @@ def store_day_in_open_transaction(connection: sqlite3.Connection, day_plan: DayP
 
 
 def store_day(connection: sqlite3.Connection, day_plan: DayPlan, part_results: dict[str, DayPartResult], strike_window_pct: float | None,
-              stored_at_utc: datetime.datetime) -> DayOutcome:
+              stored_at_utc: datetime.datetime, no_data_is_final_through: datetime.date) -> DayOutcome:
     """Stores what was retrieved for one day in one transaction: the rows of each part fetched, their `days` and
     `intraday_days` rows and what was left out (day_issues). A day with a part that could not be retrieved at all (its
     10:00 quotes, end of day or open interest; or its intraday quotes) gets an unavailable_days row instead: nothing of
     its morning parts is stored (the intraday quotes alone leave them as they are), and it is asked for again on the
-    next run. A part being completed that could not be retrieved at all leaves the day as it was: it is completed on a
-    later run."""
+    next run. So does a day with no data in any part that is after no_data_is_final_through (not published yet). A part
+    being completed that could not be retrieved at all leaves the day as it was: it is completed on a later run."""
     connection.execute("BEGIN IMMEDIATE")
     try:
-        outcome = store_day_in_open_transaction(connection, day_plan, part_results, strike_window_pct, format_utc_timestamp(stored_at_utc))
+        outcome = store_day_in_open_transaction(connection, day_plan, part_results, strike_window_pct, format_utc_timestamp(stored_at_utc), no_data_is_final_through)
         connection.execute("COMMIT")
     except BaseException:
         connection.execute("ROLLBACK")
@@ -1096,7 +1106,7 @@ def describe_day_outcome(outcome: DayOutcome) -> str:
 
 def download_days(session: ThetaDataSession, connection: sqlite3.Connection, symbol: str, day_plans: list[DayPlan], days_total: int, days_done: int,
                   expiration_dates: list[datetime.date], strike_window_pct: float | None, emit_event, stop_requested: threading.Event,
-                  retry_delays_seconds=RETRY_DELAYS_SECONDS,
+                  no_data_is_final_through: datetime.date, retry_delays_seconds=RETRY_DELAYS_SECONDS,
                   expiration_by_expiration_retry_delays_seconds=EXPIRATION_BY_EXPIRATION_RETRY_DELAYS_SECONDS) -> int:
     """Fetches and stores each planned day in date order with at most MAX_REQUESTS_IN_FLIGHT requests running; returns days done."""
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_REQUESTS_IN_FLIGHT, thread_name_prefix="thetadata-request")
@@ -1130,7 +1140,7 @@ def download_days(session: ThetaDataSession, connection: sqlite3.Connection, sym
                     whole_part_failure_dates[part_name].append(day_plan.trading_date)
                 else:
                     whole_part_failure_dates[part_name].clear()
-            outcome = store_day(connection, day_plan, part_results, strike_window_pct, datetime.datetime.now(datetime.timezone.utc))
+            outcome = store_day(connection, day_plan, part_results, strike_window_pct, datetime.datetime.now(datetime.timezone.utc), no_data_is_final_through)
             for part_name, expiry_text in outcome.reference_expiry_by_part_name.items():
                 references.set([part_name], day_plan.trading_date, expiry_text)
             days_processed += 1
@@ -1218,7 +1228,8 @@ def redact_thetadata_api_key(message: str) -> str:
 def run_download(argv: list[str] | None, emit_event, stop_requested: threading.Event, client_factory=create_client_from_api_env_file,
                  retry_delays_seconds=RETRY_DELAYS_SECONDS,
                  expiration_by_expiration_retry_delays_seconds=EXPIRATION_BY_EXPIRATION_RETRY_DELAYS_SECONDS,
-                 waits_before_login_after_session_loss_seconds=WAITS_BEFORE_LOGIN_AFTER_SESSION_LOSS_SECONDS) -> int:
+                 waits_before_login_after_session_loss_seconds=WAITS_BEFORE_LOGIN_AFTER_SESSION_LOSS_SECONDS,
+                 clock=lambda: datetime.datetime.now(datetime.timezone.utc)) -> int:
     """Runs one download and reports through emit_event; returns the process exit code."""
     connection = None
     symbol_file_path = None
@@ -1237,8 +1248,11 @@ def run_download(argv: list[str] | None, emit_event, stop_requested: threading.E
         data_directory.mkdir(parents=True, exist_ok=True)
         symbol_file_path = data_directory / f"{symbol}.sqlite"
         symbol_file_created_by_this_run = not symbol_file_path.exists()
-        connection = open_symbol_file(symbol_file_path, symbol, datetime.datetime.now(datetime.timezone.utc))
-        days_in_range, day_plans = plan_days(start_date, end_date, datetime.datetime.now(EASTERN_TIME_ZONE), read_stored_days(connection))
+        now_utc = clock()
+        now_eastern = now_utc.astimezone(EASTERN_TIME_ZONE)
+        connection = open_symbol_file(symbol_file_path, symbol, now_utc)
+        days_in_range, day_plans = plan_days(start_date, end_date, now_eastern, read_stored_days(connection))
+        no_data_is_final_through = now_eastern.date() - datetime.timedelta(days=NO_DATA_IS_FINAL_AFTER_CALENDAR_DAYS)
         day_issues_to_retry = read_day_issues_to_retry(connection, days_in_range, day_plans)
         days_total = len(days_in_range)
         days_done = days_total - len(day_plans)
@@ -1256,7 +1270,7 @@ def run_download(argv: list[str] | None, emit_event, stop_requested: threading.E
                         sum(1 for day_plan in day_plans if day_plan.fetch_intraday_quotes and not day_plan.fetch_morning_parts), symbol_file_path)
             expiration_dates = load_symbol_expirations(session, symbol, retry_delays_seconds)
             days_done = download_days(session, connection, symbol, day_plans, days_total, days_done, expiration_dates, strike_window_pct, emit_event,
-                                      stop_requested, retry_delays_seconds, expiration_by_expiration_retry_delays_seconds)
+                                      stop_requested, no_data_is_final_through, retry_delays_seconds, expiration_by_expiration_retry_delays_seconds)
         unavailable_days, days_with_issues = count_days_needing_attention(connection, days_in_range[0], days_in_range[-1]) if days_in_range else (0, 0)
         if unavailable_days or days_with_issues:
             logger.warning("%s: %d days unavailable (asked for again on the next run), %d days stored with something left out (asked for again on up to %d later runs)",
