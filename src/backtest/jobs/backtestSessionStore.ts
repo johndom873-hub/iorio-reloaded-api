@@ -55,7 +55,7 @@ import { cachedSplitsBetween, readSplitScheduleCache, splitFactorOn } from "../e
 import { withPositionCycle, type BacktestPositionRecord } from "../engine/backtestSessionRecords.js";
 import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment, sharesHeldAtInstant, sharesHeldAtMarks, type CashBreakEvenOptions, type SplitFactorOfDay } from "../cycleCashBreakEven.js";
 import { withHedgeMarkedAtHandOvers, type HedgePutMarkOf } from "../cycleHedgeHandOvers.js";
-import { cycleNoCallDays, recordedRunReasons, volFarmerNoteOn, volFarmerRunReasons } from "../cycleNoCallDays.js";
+import { cycleNoCallDays, recordedRunReasons, volFarmerNoteOn, volFarmerRunReasons, volFarmerV2NoteOn, volFarmerV2RunReasons } from "../cycleNoCallDays.js";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 
 const spyBaselineLabel = "Buy and hold · SPY";
@@ -556,9 +556,9 @@ const cycleSummaryColumns = ["symbol", "cycle_number", "status", "opened_at", "c
 
 /** Whether a session counts its hedge's realized P&L in its cycles' break-even (baseline hedgeInBreakEven "included"). */
 /** True for a session run by the Vol Farmer: its cycles mark the hedge at every hand-over of the shares (cycleHedgeHandOvers.ts). */
-async function isVolFarmerSession(sessionId: string): Promise<boolean> {
+async function sessionDecisionMaker(sessionId: string): Promise<BacktestSettings["decisionMaker"] | null> {
   const row: { settings_snapshot: BacktestSettings; overrides: BacktestSettingsOverrides | null } | undefined = await db("backtest_sessions").where({ id: sessionId }).first("settings_snapshot", "overrides");
-  return row !== undefined && applyBacktestOverrides(row.settings_snapshot, row.overrides ?? {}).decisionMaker === "vol_farmer";
+  return row === undefined ? null : applyBacktestOverrides(row.settings_snapshot, row.overrides ?? {}).decisionMaker;
 }
 
 /** A symbol's Put prices from its data file's end-of-day quotes: the closing mid, else the last trade, else the intrinsic value at the stock's close. Close it when done. */
@@ -665,7 +665,8 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
   // A Vol Farmer cycle shows its hedge marked at every hand-over of the shares; what the cycle reads per moment (break-even,
   // shares held) stays the stored timeline's, through each shown row's source row.
   let shown: { rows: BacktestCycleDetail["timeline"]; sourceIndexes: number[] } = { rows: row.timeline, sourceIndexes: row.timeline.map((_, index) => index) };
-  const volFarmer = await isVolFarmerSession(sessionId);
+  const decisionMaker = await sessionDecisionMaker(sessionId);
+  const volFarmer = decisionMaker === "vol_farmer";
   if (volFarmer) {
     const marks = hedgePutMarksFromFile(symbol);
     try {
@@ -700,16 +701,16 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
       noCandidate: stretch.noCandidate ?? null,
       freeCashShareAtStart: freeCash?.shareAtMark(stretch.firstIdleDay) ?? null,
     })),
-    noCallRuns: await loadCycleNoCallRuns({ sessionId, symbol, cycleNumber, volFarmer, timeline: row.timeline, stretches, splitFactorOf }),
+    noCallRuns: await loadCycleNoCallRuns({ sessionId, symbol, cycleNumber, notedBy: decisionMaker === "vol_farmer" || decisionMaker === "vol_farmer_v2" ? decisionMaker : null, timeline: row.timeline, stretches, splitFactorOf }),
   };
 }
 
 /**
  * A cycle's No Call runs (cycleNoCallDays.ts): its days with shares and no Call from its positions' legs, the shares from
- * its own trades, and why no Call was sold from a Vol Farmer's day summaries, else the session's records of the calls on
- * the free shares and the cycle's stock-only stretches.
+ * its own trades, and why no Call was sold from the day summaries of a Vol Farmer or Vol Farmer v2 session (`notedBy`), else
+ * the session's records of the calls on the free shares and the cycle's stock-only stretches.
  */
-async function loadCycleNoCallRuns(input: { sessionId: string; symbol: string; cycleNumber: number; volFarmer: boolean; timeline: readonly BacktestCycleTimelineRow[]; stretches: BacktestCycleDetail["stockOnlyStretches"]; splitFactorOf: SplitFactorOfDay }): Promise<BacktestNoCallRun[]> {
+async function loadCycleNoCallRuns(input: { sessionId: string; symbol: string; cycleNumber: number; notedBy: "vol_farmer" | "vol_farmer_v2" | null; timeline: readonly BacktestCycleTimelineRow[]; stretches: BacktestCycleDetail["stockOnlyStretches"]; splitFactorOf: SplitFactorOfDay }): Promise<BacktestNoCallRun[]> {
   const { sessionId, symbol, cycleNumber } = input;
   const cycleRows: Record<string, unknown>[] = await db("backtest_cycles").where({ session_id: sessionId, symbol }).select("cycle_number", "opened_at", "closed_at", db.raw("opened_on::text as opened_on"), db.raw("closed_on::text as closed_on"));
   const cycles = cycleRows.map((row) => ({ symbol, cycleNumber: Number(row.cycle_number), openedAt: isoTime(row.opened_at as Date)!, closedAt: isoTime(row.closed_at as Date | null), openedOn: row.opened_on as string, closedOn: (row.closed_on as string | null) ?? null }));
@@ -729,9 +730,10 @@ async function loadCycleNoCallRuns(input: { sessionId: string; symbol: string; c
   const runDays = coverage.runs.flat();
   if (runDays.length === 0) return [];
   let reasonsOf: (days: string[]) => BacktestNoCallRun["reasons"];
-  if (input.volFarmer) {
+  if (input.notedBy !== null) {
     const summaryOn = new Map(dayRows.map((day) => [day.trading_date, day.decision_summary]));
-    reasonsOf = (days) => volFarmerRunReasons(days.map((date) => ({ date, note: volFarmerNoteOn(summaryOn.get(date) ?? null, symbol) })));
+    const [noteOn, runReasons] = input.notedBy === "vol_farmer_v2" ? [volFarmerV2NoteOn, volFarmerV2RunReasons] : [volFarmerNoteOn, volFarmerRunReasons];
+    reasonsOf = (days) => runReasons(days.map((date) => ({ date, note: noteOn(summaryOn.get(date) ?? null, symbol) })));
   } else {
     const recorded = await loadHeldCallReasonsByDay(sessionId, symbol, runDays[0]!, runDays.at(-1)!);
     reasonsOf = (days) => recordedRunReasons({ days, stretches: input.stretches, reasonsOn: (date) => [...(recorded.get(date) ?? [])] });

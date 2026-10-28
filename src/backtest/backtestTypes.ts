@@ -1578,8 +1578,11 @@ export interface BacktestNoCallReason {
   reason: string;
   /** The run's days it was seen on; a day counts under every reason seen at any of its looks. */
   days: number;
-  /** A Vol Farmer hedge-rule reason's figure on the first day it was seen: the shares' break-even under the rule where the look stated it, else what they cost. */
-  figure: { kind: "breakEven" | "shareCost"; dollars: number } | null;
+  /**
+   * A reason's figure on the first day it was seen: a Vol Farmer hedge-rule reason's shares' break-even under the rule
+   * where the look stated it, else what they cost; a Vol Farmer v2 reason's position break-even (B-E¹ or B-E², "level").
+   */
+  figure: { kind: "breakEven" | "shareCost" | "level"; dollars: number } | null;
   /** A Vol Farmer reason: the look's note on the symbol on the first day it was seen, as written. */
   firstNote: { date: string; text: string } | null;
 }

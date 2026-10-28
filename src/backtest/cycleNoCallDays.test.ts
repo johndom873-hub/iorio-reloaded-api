@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BacktestNoSaleDays, BacktestPositionLeg } from "./backtestTypes.js";
-import { cycleNoCallDays, recordedRunReasons, volFarmerNoCallReason, volFarmerNoteOn, volFarmerRunReasons } from "./cycleNoCallDays.js";
+import { cycleNoCallDays, recordedRunReasons, volFarmerNoCallReason, volFarmerNoteOn, volFarmerRunReasons, volFarmerV2NoCallReasons, volFarmerV2NoteOn, volFarmerV2RunReasons } from "./cycleNoCallDays.js";
 
 type Leg = Pick<BacktestPositionLeg, "legType" | "optionType" | "side" | "entryAt" | "exitAt">;
 const stock = (entryAt: string, exitAt: string | null): Leg => ({ legType: "stock", optionType: null, side: "long", entryAt, exitAt });
@@ -96,6 +96,49 @@ describe("volFarmerRunReasons", () => {
       { reason: "no Call passed the hedge rule", days: 2, figure: { kind: "shareCost", dollars: 50.1 }, firstNote: { date: "2026-09-18", text: hedgeRule("50.10") } },
       { reason: "no Call within the rules", days: 1, figure: null, firstNote: { date: "2026-09-17", text: "no Call within the rules (delta 12)" } },
       { reason: "no reason recorded", days: 1, figure: null, firstNote: null },
+    ]);
+  });
+});
+
+describe("Vol Farmer v2's No Call reasons", () => {
+  // The notes as backtestVolFarmerV2Look.ts writes them, one per position, the Puts' after them.
+  const first = "first position: no Call at or above its break-even 14.20 (expiry 130, below cost 20, quote 9)";
+  const second = "second position: no Call at or above its break-even 8.35 (below cost 12, delta 4)";
+  const noPut = "no Put: no Call at or above the first break-even 14.20, but none qualifies at or below 11.42 (Step 19.6%: IV 67.8% × √(21 ÷ 252)) (quote 10)";
+
+  it("reads the symbol's whole note, past its own orders' labels, up to the next symbol's note", () => {
+    // AAOI on 15 Mar 2021: the LEAPS sale's label comes before the first position's note.
+    const leapsSold = "AAOI Sell $7.5 Call · 21 Jan (312DTE) · 18× @ 3.33 (LEAPS: the second position was called away)";
+    const day = `AAOI: the second position's Call was assigned: 100 shares called away; ${leapsSold}; ${first} · AAOI $8.5 Call · 12 Mar assigned at the 8.62 close: 100 shares called away at the strike`;
+    expect(volFarmerV2NoteOn(day, "AAOI")).toBe(`the second position's Call was assigned: 100 shares called away; ${leapsSold}; ${first} · AAOI $8.5 Call · 12 Mar assigned at the 8.62 close: 100 shares called away at the strike`);
+    expect(volFarmerV2NoCallReasons(volFarmerV2NoteOn(day, "AAOI")!).map((entry) => entry.reason)).toEqual(["no Call at or above B-E¹"]);
+    // Another symbol's note ends it; the look's time before the symbol is dropped; no note on the symbol: null.
+    expect(volFarmerV2NoteOn(`10:00 AAOI: ${first} · MSTR: ${second}`, "AAOI")).toBe(first);
+    expect(volFarmerV2NoteOn(`MSTR: ${second}`, "AAOI")).toBeNull();
+  });
+
+  it("reads each position's note as its reason with its break-even, and leaves the Puts' note out", () => {
+    expect(volFarmerV2NoCallReasons(`${first}; ${noPut}`)).toEqual([{ reason: "no Call at or above B-E¹", figure: { kind: "level", dollars: 14.2 }, text: first }]);
+    expect(volFarmerV2NoCallReasons(`${first}; ${second}`).map((entry) => entry.reason)).toEqual(["no Call at or above B-E¹", "no Call at or above B-E²"]);
+    expect(volFarmerV2NoCallReasons("first position: no Call sold: the volume limit allows none")).toEqual([{ reason: "the volume limit", figure: null, text: "first position: no Call sold: the volume limit allows none" }]);
+    expect(volFarmerV2NoCallReasons("no option orders while the open cycle spans a split")[0]!.reason).toBe("a split inside the cycle");
+    expect(volFarmerV2NoCallReasons(noPut)).toEqual([]);
+    // Premiums past the shares' cost: a break-even below zero.
+    expect(volFarmerV2NoCallReasons("the second position's Call was assigned: 300 shares called away, 7700 left; second position: no Call at or above its break-even -0.53 (quote 21)")[0]!.figure).toEqual({ kind: "level", dollars: -0.53 });
+  });
+
+  it("counts a day under every reason its note gives, most days first; a day with none under no reason recorded", () => {
+    expect(
+      volFarmerV2RunReasons([
+        { date: "2021-03-22", note: `${first}; ${noPut}` },
+        { date: "2021-03-23", note: `${first}; ${second}` },
+        { date: "2021-03-24", note: noPut },
+        { date: "2021-03-25", note: null },
+      ]),
+    ).toEqual([
+      { reason: "no Call at or above B-E¹", days: 2, figure: { kind: "level", dollars: 14.2 }, firstNote: { date: "2021-03-22", text: first } },
+      { reason: "no reason recorded", days: 2, figure: null, firstNote: null },
+      { reason: "no Call at or above B-E²", days: 1, figure: { kind: "level", dollars: 8.35 }, firstNote: { date: "2021-03-23", text: second } },
     ]);
   });
 });

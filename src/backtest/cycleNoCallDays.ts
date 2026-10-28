@@ -132,6 +132,53 @@ export function volFarmerNoCallReason(note: string): Pick<BacktestNoCallReason, 
   return { reason, figure };
 }
 
+/**
+ * A Vol Farmer v2 day's note on a symbol: from "SYMBOL: " (after the look's time when the day names it) up to the next
+ * symbol's note or the summary's end. Its own orders' labels hold " · " ("Sell $7.5 Call · 21 Jan (312DTE) · 18× @ 3.33"),
+ * so it is not cut at the first one as volFarmerNoteOn's note is; null when the day has no note on the symbol.
+ */
+export function volFarmerV2NoteOn(daySummary: string | null, symbol: string): string | null {
+  if (daySummary === null) return null;
+  const parts = daySummary.split(" · ");
+  const start = parts.findIndex((part) => part.replace(/^\d{1,2}:\d{2} /, "").startsWith(`${symbol}: `));
+  if (start < 0) return null;
+  const next = parts.findIndex((part, index) => index > start && /^(?:\d{1,2}:\d{2} )?[A-Z][A-Z0-9.]*: /.test(part));
+  return parts
+    .slice(start, next < 0 ? undefined : next)
+    .join(" · ")
+    .replace(/^(?:\d{1,2}:\d{2} )?[^:]+: /, "");
+}
+
+/**
+ * Vol Farmer v2's notes on a position's shares with no Call sold (backtestVolFarmerV2Look.ts): each part of the symbol's
+ * note ("first position: no Call at or above its break-even 14.20 (expiry 130, below cost 20)"; parts are joined by "; ")
+ * as a reason ("no Call at or above B-E¹"), its break-even the figure; the split note as the Vol Farmer's. Parts about
+ * other orders are left out.
+ */
+export function volFarmerV2NoCallReasons(note: string): (Pick<BacktestNoCallReason, "reason" | "figure"> & { text: string })[] {
+  return note.split("; ").flatMap((text): (Pick<BacktestNoCallReason, "reason" | "figure"> & { text: string })[] => {
+    const belowBreakEven = /^(first|second) position: no Call at or above its break-even (-?\d+(?:\.\d+)?)/.exec(text);
+    if (belowBreakEven) return [{ reason: `no Call at or above B-E${belowBreakEven[1] === "first" ? "¹" : "²"}`, figure: { kind: "level" as const, dollars: Number(belowBreakEven[2]) }, text }];
+    if (/^(first|second) position: no Call sold: the volume limit/.test(text)) return [{ reason: "the volume limit", figure: null, text }];
+    const known = volFarmerNoCallReasons.find((entry) => entry.pattern.test(text));
+    return known ? [{ reason: known.reason, figure: null, text }] : [];
+  });
+}
+
+/** A Vol Farmer v2 run's reasons, most days first: a day counts under every reason its note gives (none: no reason recorded). */
+export function volFarmerV2RunReasons(days: readonly { date: string; note: string | null }[]): BacktestNoCallReason[] {
+  const byReason = new Map<string, BacktestNoCallReason>();
+  for (const { date, note } of days) {
+    const reasons = note === null ? [] : volFarmerV2NoCallReasons(note);
+    for (const { reason, figure, text } of reasons.length > 0 ? reasons : [{ reason: noSaleReasonLabels.unrecorded, figure: null, text: null }]) {
+      const seen = byReason.get(reason);
+      if (seen) seen.days += 1;
+      else byReason.set(reason, { reason, days: 1, figure, firstNote: text === null ? null : { date, text } });
+    }
+  }
+  return mostDaysFirst([...byReason.values()]);
+}
+
 /** A Vol Farmer run's reasons, most days first: each day's note on the symbol (none: no reason recorded). */
 export function volFarmerRunReasons(days: readonly { date: string; note: string | null }[]): BacktestNoCallReason[] {
   const byReason = new Map<string, BacktestNoCallReason>();
