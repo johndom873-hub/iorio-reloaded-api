@@ -1,10 +1,11 @@
 import { db } from "../db/connection.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 
-// What drives Pluto's loop (Marcelo, 2026-10-06; the band's quotes since Signals was retired 2026-10-27): the CC + Put
-// Ladder's band quotes the market quote loop writes, one row per contract, each with its own quoted_at. Pluto remembers the quoted_at it last analysed per contract and only analyses a ticker again when at
-// least one of its contracts carries a newer one, so the same quote is never analysed twice. In memory: after a
-// restart every contract quoted today counts as new once.
+// What drives Pluto's loop (Marcelo, 2026-10-06; the band's quotes since Signals was retired 2026-10-27): the option
+// quote band's quotes the market quote loop writes for both strategies, one row per contract, each with its own
+// quoted_at. Pluto remembers the quoted_at it last analysed per contract and only analyses a ticker again when at least
+// one of its contracts carries a newer one, so the same quote is never analysed twice. In memory: after a restart every
+// contract quoted today counts as new once.
 
 export interface BandQuoteStamp {
   symbol: string;
@@ -39,7 +40,7 @@ export function rememberAnalysed(stamps: BandQuoteStamp[], lastAnalysedQuotedAtM
 
 /** Today's (US/Eastern) error-free band quotes the market quote loop wrote for the tickers Pluto may trade. */
 export async function loadTodaysBandQuoteStamps(now: Date = new Date()): Promise<BandQuoteStamp[]> {
-  const rows: { symbol: string; expiry: string; strike: string; right: string; quotedAt: Date | string }[] = await db("ladder_band_quotes as q")
+  const rows: { symbol: string; expiry: string; strike: string; right: string; quotedAt: Date | string }[] = await db("option_quote_band_quotes as q")
     .join("shortlist_entries as se", "se.ticker_id", "q.ticker_id")
     .join("tickers as t", "t.id", "q.ticker_id")
     .whereNull("se.removed_at")

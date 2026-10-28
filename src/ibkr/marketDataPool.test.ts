@@ -410,6 +410,36 @@ describe("tick handling", () => {
     expect(pool.peekPooledQuote(stockAlpha)?.volume).toBeNull();
   });
 
+  it("reads bid and ask sizes from real-time (0, 3) and delayed (69, 70) size ticks", async () => {
+    const { pool, reqId } = await subscribedStock();
+    ib.emit(EventName.tickSize, reqId, 0, 6);
+    ib.emit(EventName.tickSize, reqId, 3, 10);
+    expect(pool.peekPooledQuote(stockAlpha)).toMatchObject({ bidSize: 6, askSize: 10, volume: null });
+    ib.emit(EventName.tickSize, reqId, 69, 7);
+    ib.emit(EventName.tickSize, reqId, 70, 11);
+    expect(pool.peekPooledQuote(stockAlpha)).toMatchObject({ bidSize: 7, askSize: 11 });
+    ib.emit(EventName.tickSize, reqId, 0, -1);
+    expect(pool.peekPooledQuote(stockAlpha)?.bidSize).toBeNull();
+  });
+
+  it("tells only the subscribers that asked for sizes about a size-only change, and every subscriber about a price change", async () => {
+    const { pool, onUpdate, reqId } = await subscribedStock();
+    const onSizedUpdate = vi.fn();
+    await pool.subscribeToPooledQuote(stockAlpha, onSizedUpdate, { includeSizes: true });
+    onSizedUpdate.mockClear();
+
+    ib.emit(EventName.tickSize, reqId, 0, 6);
+    ib.emit(EventName.tickSize, reqId, 0, 6);
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(onSizedUpdate).toHaveBeenCalledTimes(1);
+    expect(onSizedUpdate).toHaveBeenLastCalledWith(expect.objectContaining({ bidSize: 6 }));
+
+    ib.emit(EventName.tickPrice, reqId, 1, 10);
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(onUpdate).toHaveBeenLastCalledWith(expect.objectContaining({ bid: 10, bidSize: 6 }));
+    expect(onSizedUpdate).toHaveBeenCalledTimes(2);
+  });
+
   it("merges option computation ticks (13, 83), keeping a field the tick left out, and ignores other computation types", async () => {
     const pool = await loadPool();
     await pool.subscribeToPooledQuote(optionAlpha, () => {});

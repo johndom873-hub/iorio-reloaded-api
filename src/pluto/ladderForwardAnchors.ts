@@ -1,14 +1,14 @@
 import type { BaselineForwardAnchor } from "../backtest/engine/baselineSaleSteps.js";
 import { parityImpliedForward, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
-import type { LadderBandQuote } from "./ladderBandQuotes.js";
+import type { OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
 
 /**
  * Each expiry's forward from the ladder's own band quotes (Marcelo 2026-10-27, replacing the 10:00 surface fit's): put-call
  * parity on the expiry's quotes, else the stock price grown at the risk-free rate; anchored at the stock price of the
  * expiry's latest quote. The same rule the backtest applies to its looks (noteBaselineForwardAnchors in baselineSaleSteps.ts).
  */
-export function forwardAnchorsFromBandQuotes(quotes: readonly LadderBandQuote[], clock: { todayIso: string; yearsToTodaysClose: number; riskFreeRate: number }): Map<string, BaselineForwardAnchor> {
-  const quotesByExpiry = new Map<string, LadderBandQuote[]>();
+export function forwardAnchorsFromBandQuotes(quotes: readonly OptionQuoteBandQuote[], clock: { todayIso: string; yearsToTodaysClose: number; riskFreeRate: number }): Map<string, BaselineForwardAnchor> {
+  const quotesByExpiry = new Map<string, OptionQuoteBandQuote[]>();
   for (const quote of quotes) {
     if (quote.expiry < clock.todayIso || quote.stockPrice === null || !(quote.stockPrice > 0)) continue;
     const expiryQuotes = quotesByExpiry.get(quote.expiry) ?? quotesByExpiry.set(quote.expiry, []).get(quote.expiry)!;

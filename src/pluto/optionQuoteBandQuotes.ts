@@ -1,10 +1,10 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 
-// The CC + Put Ladder's live band quotes (ladder_band_quotes): written by the Day Signals loop, read by the ladder's
+// The CC + Put Ladder's live band quotes (option_quote_band_quotes): written by the Day Signals loop, read by the ladder's
 // look and by the band's next selection (each contract's last-seen implied volatility).
 
-export interface LadderBandQuoteWrite {
+export interface OptionQuoteBandQuoteWrite {
   tickerId: string;
   tradingDateIso: string;
   expiry: string;
@@ -18,19 +18,19 @@ export interface LadderBandQuoteWrite {
   cycleNumber: number;
 }
 
-export type LadderBandQuote = Omit<LadderBandQuoteWrite, "tickerId" | "tradingDateIso">;
+export type OptionQuoteBandQuote = Omit<OptionQuoteBandQuoteWrite, "tickerId" | "tradingDateIso">;
 
-export async function upsertLadderBandQuotes(writes: readonly LadderBandQuoteWrite[], connection: Knex = db): Promise<void> {
+export async function upsertOptionQuoteBandQuotes(writes: readonly OptionQuoteBandQuoteWrite[], connection: Knex = db): Promise<void> {
   if (writes.length === 0) return;
-  await connection("ladder_band_quotes")
+  await connection("option_quote_band_quotes")
     .insert(writes.map((write) => ({ ticker_id: write.tickerId, trading_date: write.tradingDateIso, expiry: write.expiry, strike: write.strike, option_right: write.right, bid: write.bid, ask: write.ask, stock_price: write.stockPrice, error_code: write.errorCode, quoted_at: write.quotedAt, cycle_number: write.cycleNumber })))
     .onConflict(["ticker_id", "trading_date", "expiry", "strike", "option_right"])
     .merge();
 }
 
 /** The ticker's latest quote of each contract today. */
-export async function loadLadderBandQuotes(tickerId: string, tradingDateIso: string, connection: Knex = db): Promise<LadderBandQuote[]> {
-  const rows: { expiry: string; strike: string; right: "C" | "P"; bid: string | null; ask: string | null; stockPrice: string | null; errorCode: number | null; quotedAt: Date; cycleNumber: number }[] = await connection("ladder_band_quotes")
+export async function loadOptionQuoteBandQuotes(tickerId: string, tradingDateIso: string, connection: Knex = db): Promise<OptionQuoteBandQuote[]> {
+  const rows: { expiry: string; strike: string; right: "C" | "P"; bid: string | null; ask: string | null; stockPrice: string | null; errorCode: number | null; quotedAt: Date; cycleNumber: number }[] = await connection("option_quote_band_quotes")
     .where({ ticker_id: tickerId })
     .whereRaw("trading_date::text = ?", [tradingDateIso])
     .select(connection.raw("expiry::text as expiry"), "strike", connection.raw('option_right as "right"'), "bid", "ask", "stock_price as stockPrice", "error_code as errorCode", "quoted_at as quotedAt", "cycle_number as cycleNumber");

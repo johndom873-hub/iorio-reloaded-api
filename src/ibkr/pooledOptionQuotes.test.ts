@@ -4,18 +4,18 @@ import type { PooledQuote } from "./marketDataPool.js";
 import type { OptionQuote } from "./fetchOptionChain.js";
 
 const pool = vi.hoisted(() => {
-  const emptyPooledQuote = { last: null, bid: null, ask: null, delta: null, gamma: null, vega: null, theta: null, impliedVolatility: null, underlyingPrice: null, open: null, high: null, low: null, previousClose: null, volume: null };
+  const emptyPooledQuote = { last: null, bid: null, ask: null, bidSize: null, askSize: null, delta: null, gamma: null, vega: null, theta: null, impliedVolatility: null, underlyingPrice: null, open: null, high: null, low: null, previousClose: null, volume: null };
   return {
     emptyPooledQuote,
     graceMs: 1_000,
-    subscriptions: [] as { contract: Record<string, unknown>; push: (quote: PooledQuote) => void; unsubscribe: ReturnType<typeof vi.fn> }[],
+    subscriptions: [] as { contract: Record<string, unknown>; push: (quote: PooledQuote) => void; unsubscribe: ReturnType<typeof vi.fn>; options: { includeSizes?: boolean } | undefined }[],
   };
 });
 vi.mock("./marketDataPool.js", () => ({
   emptyPooledQuote: pool.emptyPooledQuote,
-  subscribeToPooledQuote: async (contract: Record<string, unknown>, push: (quote: PooledQuote) => void) => {
+  subscribeToPooledQuote: async (contract: Record<string, unknown>, push: (quote: PooledQuote) => void, options?: { includeSizes?: boolean }) => {
     const unsubscribe = vi.fn();
-    pool.subscriptions.push({ contract, push, unsubscribe });
+    pool.subscriptions.push({ contract, push, unsubscribe, options });
     return unsubscribe;
   },
   // Same contract as the real one: settles when the predicate holds or after the grace.
@@ -66,10 +66,19 @@ describe("streamPooledOptionQuotes", () => {
     await result;
   });
 
+  it("asks the pool for size-only changes only when the caller wants sizes", async () => {
+    const withoutSizes = streamPooledOptionQuotes([call(100)], vi.fn(), new AbortController().signal);
+    const withSizes = streamPooledOptionQuotes([call(105)], vi.fn(), new AbortController().signal, { includeSizes: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pool.subscriptions.map((subscription) => subscription.options)).toEqual([{ includeSizes: undefined }, { includeSizes: true }]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await Promise.all([withoutSizes, withSizes]);
+  });
+
   it("resolves as soon as every contract has a price and a delta, with each contract's own reading", async () => {
     const result = streamPooledOptionQuotes([call(100), call(105)], vi.fn(), new AbortController().signal);
     await vi.advanceTimersByTimeAsync(0);
-    pool.subscriptions[0]!.push(reading({ delta: 0.5, bid: 2, ask: 2.2 }));
+    pool.subscriptions[0]!.push(reading({ delta: 0.5, bid: 2, ask: 2.2, bidSize: 6, askSize: 10 }));
     let settled = false;
     void result.then(() => (settled = true));
     await vi.advanceTimersByTimeAsync(10);
@@ -77,8 +86,8 @@ describe("streamPooledOptionQuotes", () => {
     pool.subscriptions[1]!.push(reading({ delta: 0.3, bid: null, ask: null, last: 0.9 }));
     const quotes = await result;
     expect(quotes).toEqual([
-      { expiry: "20261016", strike: 100, right: OptionType.Call, bid: 2, ask: 2.2, last: 1.1, impliedVolatility: 0.4, delta: 0.5, gamma: 0.02, vega: 0.1, theta: -0.05 },
-      { expiry: "20261016", strike: 105, right: OptionType.Call, bid: null, ask: null, last: 0.9, impliedVolatility: 0.4, delta: 0.3, gamma: 0.02, vega: 0.1, theta: -0.05 },
+      { expiry: "20261016", strike: 100, right: OptionType.Call, bid: 2, ask: 2.2, bidSize: 6, askSize: 10, last: 1.1, impliedVolatility: 0.4, delta: 0.5, gamma: 0.02, vega: 0.1, theta: -0.05 },
+      { expiry: "20261016", strike: 105, right: OptionType.Call, bid: null, ask: null, bidSize: null, askSize: null, last: 0.9, impliedVolatility: 0.4, delta: 0.3, gamma: 0.02, vega: 0.1, theta: -0.05 },
     ]);
   });
 
@@ -102,7 +111,7 @@ describe("streamPooledOptionQuotes", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     const quotes = await result;
     expect(quotes[0]).toMatchObject({ strike: 100, delta: 0.3 });
-    expect(quotes[1]).toEqual({ expiry: "20261016", strike: 105, right: OptionType.Call, bid: null, ask: null, last: null, impliedVolatility: null, delta: null, gamma: null, vega: null, theta: null });
+    expect(quotes[1]).toEqual({ expiry: "20261016", strike: 105, right: OptionType.Call, bid: null, ask: null, bidSize: null, askSize: null, last: null, impliedVolatility: null, delta: null, gamma: null, vega: null, theta: null });
   });
 
   it("pushes later updates through onUpdate, coalescing a burst into one call with every contract's latest reading", async () => {

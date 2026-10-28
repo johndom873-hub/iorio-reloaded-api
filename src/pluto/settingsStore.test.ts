@@ -7,6 +7,7 @@ const current: PlutoSettings = {
   ...plutoLadderSettingsFixture,
   ...plutoVolFarmerV2SettingsFixture,
   capitalBudgetPct: 30,
+  excessAllowancePct: 0,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2,
   maxQuoteAgeMinutes: 10, maxFillSlippagePct: 25,
   bandQuotePollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, maxEnabledTickers: 15,

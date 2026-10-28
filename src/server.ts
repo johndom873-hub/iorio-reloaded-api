@@ -9,7 +9,7 @@ import { startNotificationBroadcaster } from "./lib/notificationBroadcaster.js";
 import { startMarketQuoteLoop } from "./lib/marketQuoteLoop.js";
 import { createAssignmentRiskConsumer } from "./lib/assignmentRiskConsumer.js";
 import { createVolatilityConsumer } from "./lib/volatilityConsumer.js";
-import { createLadderQuoteConsumer } from "./pluto/ladderBandPlanLoader.js";
+import { createLadderQuoteConsumer } from "./pluto/optionQuoteBandPlanLoader.js";
 import { startOpsMonitor } from "./lib/opsMonitor.js";
 import { startOrderTelegramNotices } from "./lib/orderTelegramNotices.js";
 import { announceWebDynoStart } from "./lib/webDynoStartNotice.js";

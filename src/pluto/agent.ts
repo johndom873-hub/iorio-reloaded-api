@@ -30,7 +30,7 @@ import { easternIsoDate, easternMinutesOfDay } from "../lib/easternIsoDate.js";
 //   - a 45 s heartbeat row (worker_health, process_name "pluto_agent") for the screen;
 //   - a 60 s housekeeping tick: settings, state, the watched stock lines, the opening analysis;
 //   - a 60 s readiness tick: the pre-open check (readiness.ts) on the platform readiness timetable;
-//   - one continuous loop: every bandQuotePollSeconds it reads the ladder band quotes and analyses the tickers whose
+//   - one continuous loop: every bandQuotePollSeconds it reads the option quote band's quotes and analyses the tickers whose
 //     contracts carry a quote newer than the one Pluto last analysed; events that change a decision without a new
 //     quote (an order ending, a cooldown ending, a position closing, a settings change) queue a forced round;
 //   - rounds run one at a time, never overlapping; order watches outlive their round.
@@ -397,10 +397,10 @@ export class PlutoAgent {
   private async completeOpeningLook(pending: { todayIso: string; decision: OpeningLookDecision }): Promise<void> {
     this.openingLook = advanceOpeningLook(this.openingLook, pending.todayIso, pending.decision);
     const quietly = (step: Promise<unknown>) => step.catch((error) => console.warn(`Pluto: opening-look message failed — ${error instanceof Error ? error.message : error}`));
-    if (pending.decision === "run_after_late_seed") await quietly(notifyPlutoTelegram("✅ Pluto: today's ladder quotes are in now, and Pluto has run its full opening analysis."));
+    if (pending.decision === "run_after_late_seed") await quietly(notifyPlutoTelegram("✅ Pluto: today's option quotes are in now, and Pluto has run its full opening analysis."));
     if (pending.decision === "run_incomplete") {
       await quietly(recordPlutoEvent("warning", { message: "opening look on incomplete data: the market quote loop had not quoted today's band by 10:30 ET; one more full round follows once it does" }));
-      await quietly(notifyPlutoTelegram("⚠️ Pluto: today's ladder quotes were not in by 10:30 ET, so Pluto's opening analysis ran on incomplete data. Check the market quote loop on System Health. Pluto runs a full analysis once the quotes are in."));
+      await quietly(notifyPlutoTelegram("⚠️ Pluto: today's option quotes were not in by 10:30 ET, so Pluto's opening analysis ran on incomplete data. Check the market quote loop on System Health. Pluto runs a full analysis once the quotes are in."));
     }
   }
 

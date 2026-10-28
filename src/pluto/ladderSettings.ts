@@ -5,7 +5,7 @@ import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { ensurePlutoSettingsVersion } from "./settingsVersions.js";
 import { loadLadderRecommendedShock, type LadderRecommendedShock } from "./ladderRecommendedShock.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
-import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, type PlutoStrategy, type PlutoTickerSettings } from "./tickerSettingsStore.js";
+import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, tickerPotFraction, type PlutoStrategy, type PlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // The CC + Put Ladder's settings for one ticker, in the backtest's names and units, so the live ladder, the ticker
 // configuration screen and the Backtesting screen's Analyse modal read the same values and can hand them straight to
@@ -67,9 +67,10 @@ export interface LadderTickerSettings {
   /** The ticker's set allocation, % of Pluto's capital budget; null = an equal share (effectiveAllocationPctBySymbol). */
   allocationPct: number | null;
   /**
-   * The ticker's pot in dollars, while it is enabled in Pluto: allocation (effective) × Pluto's capital budget at last
-   * night's account value. Null when the ticker is not enabled or no account value is recorded. Pots are percentages,
-   * recomputed from the account value, with no ledger of their own (Marcelo 2026-10-15).
+   * The ticker's pot in dollars, while it is enabled in Pluto: allocation (effective) × (1 + the excess allowance) ×
+   * Pluto's capital budget at last night's account value (tickerPotFraction). Null when the ticker is not enabled or no
+   * account value is recorded. Pots are percentages, recomputed from the account value, with no ledger of their own
+   * (Marcelo 2026-10-15).
    */
   potDollars: number | null;
   /** The user's shock; null = the recommended one (computed from the stock's Max drawdown by the backtest's rule). */
@@ -134,7 +135,7 @@ function ladderTickerSettingsFrom(symbol: string, context: LadderSettingsContext
   };
   const enabledInPluto = enabledTickers.some((ticker) => ticker.symbol === symbol);
   const allocationEffectivePct = effectiveAllocationPctBySymbol(enabledTickers).get(symbol);
-  const potDollars = enabledInPluto && allocationEffectivePct !== undefined && accountValue !== null ? (accountValue * (settings.capitalBudgetPct / 100) * allocationEffectivePct) / 100 : null;
+  const potDollars = enabledInPluto && allocationEffectivePct !== undefined && accountValue !== null ? accountValue * tickerPotFraction(allocationEffectivePct, settings) : null;
   return {
     symbol,
     source: "live",

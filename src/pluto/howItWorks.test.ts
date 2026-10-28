@@ -11,7 +11,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 const settings: PlutoSettings = {
   ...plutoLadderSettingsFixture,
   ...plutoVolFarmerV2SettingsFixture,
-  capitalBudgetPct: 50, 
+  capitalBudgetPct: 50, excessAllowancePct: 0,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2,
   maxQuoteAgeMinutes: 10, maxFillSlippagePct: 5,
   bandQuotePollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, maxEnabledTickers: 15,
@@ -23,7 +23,7 @@ const figures = { unfilledOrderCancelMinutes: 15 };
 describe("buildPlutoHowItWorks", () => {
   it("quotes every number the tab shows, at today's defaults and constants", () => {
     const { ladder, volFarmerV2: _volFarmerV2, ...rest } = buildPlutoHowItWorks(settings, figures);
-    expect(rest).toEqual({ shared: { windowStartEt: "10:45", windowEndEt: "15:30", windowEndMinutesBeforeCloseAtLeast: 30, capitalBudgetPct: 50, dailyLossBreakerPct: 2, unfilledOrderCancelMinutes: 15 } });
+    expect(rest).toEqual({ shared: { windowStartEt: "10:45", windowEndEt: "15:30", windowEndMinutesBeforeCloseAtLeast: 30, capitalBudgetPct: 50, excessAllowancePct: 0, dailyLossBreakerPct: 2, unfilledOrderCancelMinutes: 15 } });
     const { example: ladderExample, ...ladderValues } = ladder;
     expect(ladderValues).toEqual({
       minAbsDelta: 0.05, maxAbsDelta: 0.3, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 50, minimumBid: 0.05, maxVolumeSharePct: 20,
@@ -65,5 +65,13 @@ describe("buildPlutoHowItWorks", () => {
     expect(example).toMatchObject({ pot: 160_000, sharesBudget: 48_000, reserve: 112_000, rungCollateral: 28_000, shockPct: 75 });
     expect(example.rungs).toHaveLength(4);
     expect(example.rungs[3]!.strikeCap).toBeCloseTo(example.floor, 10);
+  });
+
+  it("raises both examples' pots by the excess allowance", () => {
+    const values = buildPlutoHowItWorks({ ...settings, excessAllowancePct: 20 }, figures);
+    // Pot 2,000,000 × 20% × (1 + 20%) × 50% = 240,000: floor(120,000 ÷ 10,000.50) = 11 lots; the LEAPS cap 10% of 240,000.
+    expect(values.shared.excessAllowancePct).toBe(20);
+    expect(values.ladder.example).toMatchObject({ pot: 240_000, sharesBudget: 120_000, reserve: 120_000 });
+    expect(values.volFarmerV2.example).toMatchObject({ pot: 240_000, lots: 11, leapsCap: 24_000 });
   });
 });

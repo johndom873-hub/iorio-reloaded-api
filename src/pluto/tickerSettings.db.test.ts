@@ -215,3 +215,54 @@ describe("ladder settings screen reads", () => {
     await call("PUT", `/ticker-settings/${enabledSymbol}`, { ladderMaxAbsDelta: null });
   });
 });
+
+describe("the Tickers tab's allocations save", () => {
+  const allocationOf = async (symbol: string) => (await call("GET", `/ticker-settings/${symbol}`)).json.allocationPct as number | null;
+  const allowanceNow = async () => Number((await testDb("pluto_settings").where({ id: 1 }).first("excess_allowance_pct")).excess_allowance_pct);
+
+  it("saves the allocations and the excess allowance together, audited, with one event per ticker and one for the allowance; the pot includes the allowance", async () => {
+    const [enabledBefore, otherBefore, allowanceBefore] = [await allocationOf(enabledSymbol), await allocationOf(otherSymbol), await allowanceNow()];
+    try {
+      const saved = await call("PUT", "/allocations", { allocations: { [enabledSymbol]: 20, [otherSymbol]: 5 }, excessAllowancePct: 26.3158 });
+      expect(saved.status).toBe(200);
+      expect(saved.json).toEqual({ allocations: [{ symbol: enabledSymbol, from: enabledBefore, to: 20 }, { symbol: otherSymbol, from: otherBefore, to: 5 }], excessAllowance: { from: allowanceBefore, to: 26.3158 } });
+      expect([await allocationOf(enabledSymbol), await allocationOf(otherSymbol), await allowanceNow()]).toEqual([20, 5, 26.3158]);
+      const tickerAudit = await testDb("pluto_ticker_settings_audit").whereIn("ticker_id", tickerIds).where({ field: "allocationPct" }).orderBy("id", "desc").limit(2).select("new_value");
+      expect(tickerAudit.map((row) => row.new_value).sort()).toEqual(["20", "5"]);
+      expect(await testDb("pluto_settings_audit").where({ user_id: userId, field: "excessAllowancePct" }).orderBy("id", "desc").first("new_value")).toEqual({ new_value: "26.3158" });
+      const events = await testDb("pluto_events").where({ type: "settings_changed" }).whereRaw("payload->>'by' = ?", ["Ticker Settings Tester"]).orderBy("id", "desc").limit(3).select("payload");
+      expect(events.map((event) => event.payload)).toEqual(
+        expect.arrayContaining([
+          { by: "Ticker Settings Tester", symbol: enabledSymbol, fields: [{ field: "allocationPct", from: enabledBefore, to: 20 }] },
+          { by: "Ticker Settings Tester", symbol: otherSymbol, fields: [{ field: "allocationPct", from: otherBefore, to: 5 }] },
+          { by: "Ticker Settings Tester", fields: [{ field: "excessAllowancePct", from: allowanceBefore, to: 26.3158 }] },
+        ]),
+      );
+      // The pot: last night's account value × 20% × (1 + 26.3158%) × Pluto's budget.
+      const snapshot = await testDb("account_pnl_snapshots").whereNotNull("net_liquidation_value").orderBy("snapshot_date", "desc").first("net_liquidation_value");
+      const budgetPct = Number((await testDb("pluto_settings").where({ id: 1 }).first("capital_budget_pct")).capital_budget_pct);
+      if (snapshot) expect((await call("GET", `/ladder-settings/${enabledSymbol}`)).json.potDollars).toBeCloseTo((Number(snapshot.net_liquidation_value) * 20 * 126.3158 * budgetPct) / 1_000_000, 6);
+    } finally {
+      await testDb("pluto_ticker_settings").where({ ticker_id: tickerIds[0] }).update({ allocation_pct: enabledBefore });
+      await testDb("pluto_ticker_settings").where({ ticker_id: tickerIds[1] }).update({ allocation_pct: otherBefore });
+      await testDb("pluto_settings").where({ id: 1 }).update({ excess_allowance_pct: allowanceBefore });
+      await testDb("pluto_events").where({ type: "settings_changed" }).whereRaw("payload->>'by' = ?", ["Ticker Settings Tester"]).del();
+    }
+  });
+
+  it("changes nothing when any part is refused: a total above 100%, an unknown ticker, an allowance out of range, a bad body", async () => {
+    const [enabledBefore, otherBefore, allowanceBefore] = [await allocationOf(enabledSymbol), await allocationOf(otherSymbol), await allowanceNow()];
+    const othersRow = await testDb("pluto_ticker_settings").whereNotIn("ticker_id", tickerIds).sum({ total: "allocation_pct" }).first();
+    const room = 100 - Number(othersRow?.total ?? 0);
+    const overTotal = await call("PUT", "/allocations", { allocations: { [enabledSymbol]: room - 1, [otherSymbol]: 2 }, excessAllowancePct: 10 });
+    expect(overTotal.status).toBe(400);
+    expect(overTotal.json.error).toMatch(/at most 100%/);
+    expect((await call("PUT", "/allocations", { allocations: { [enabledSymbol]: 1, NOSUCHTICKERZ: 1 }, excessAllowancePct: 10 })).status).toBe(404);
+    expect((await call("PUT", "/allocations", { allocations: { [enabledSymbol]: 1 }, excessAllowancePct: 1001 })).status).toBe(400);
+    expect((await call("PUT", "/allocations", { allocations: { [enabledSymbol]: 1 }, excessAllowancePct: -1 })).status).toBe(400);
+    expect((await call("PUT", "/allocations", { allocations: { [enabledSymbol]: 0 } })).status).toBe(400);
+    expect((await call("PUT", "/allocations", { allocations: [] })).status).toBe(400);
+    expect((await call("PUT", "/allocations", { allocations: {}, budget: 5 })).status).toBe(400);
+    expect([await allocationOf(enabledSymbol), await allocationOf(otherSymbol), await allowanceNow()]).toEqual([enabledBefore, otherBefore, allowanceBefore]);
+  });
+});

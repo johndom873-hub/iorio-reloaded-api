@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { blackScholesPriceOnForward, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import { contractKey } from "../lib/optionContractKey.js";
-import type { LadderBandQuote } from "./ladderBandQuotes.js";
+import type { OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
 import { latestCycleQuotes, runLadderLook, type LadderLookInput } from "./ladderLook.js";
 import { ladderBaselineFromPlutoSettings } from "./ladderSettings.js";
 import { plutoLadderSettingsFixture } from "./plutoSettingsFixture.js";
@@ -14,7 +14,7 @@ const expiry = "2026-11-20";
 const years = yearsBetweenIsoDates(todayIso, expiry);
 
 /** A band quote priced at 50% IV with the stock at $50, 4% wide. */
-function bandQuote(strike: number, right: "C" | "P", cycleNumber = 7): LadderBandQuote {
+function bandQuote(strike: number, right: "C" | "P", cycleNumber = 7): OptionQuoteBandQuote {
   const mid = blackScholesPriceOnForward(50 * Math.exp(0.04 * years), strike, years, 0.04, 0.5, right === "C");
   return { expiry, strike, right, bid: Math.round(mid * 0.98 * 100) / 100, ask: Math.round(mid * 1.02 * 100) / 100, stockPrice: 50, errorCode: null, quotedAt: now, cycleNumber };
 }

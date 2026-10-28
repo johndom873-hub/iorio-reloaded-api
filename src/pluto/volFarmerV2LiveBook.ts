@@ -11,6 +11,7 @@ import {
   type VolFarmerV2PutSale,
   type VolFarmerV2SymbolState,
 } from "../backtest/engine/volFarmerV2Steps.js";
+import { formatWholeDollars } from "../lib/formatWholeDollars.js";
 import type { PositionFigures } from "../lib/positionSelectors.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
@@ -20,9 +21,9 @@ import type { PlutoSettings } from "./settingsStore.js";
 //             steps count an order as filled at its planned price when they place it; at a later look, once the order
 //             is done, its fills replace the plan: its legs, the contracts that filled and the premium they brought.
 //             An order that never filled (blocked, held by a cap, cancelled) is undone as if it was never placed.
-//   pot       a new cycle's pot P and the LEAPS cap's base are the ticker's allocation in dollars (allocation × Pluto's
-//             capital budget × the account's net liquidation value); the free cash is what Pluto's budget has free
-//             (Marcelo 2026-10-27).
+//   pot       a new cycle's pot P and the LEAPS cap's base are the ticker's pot in dollars (tickerPotFraction: its
+//             allocation × (1 + the excess allowance) × Pluto's capital budget × the account's net liquidation value); the
+//             free cash is what Pluto's budget has free (Marcelo 2026-10-27, the allowance 2026-10-28).
 //   adoption  a ticker holding shares when v2 first looks at it (Marcelo 2026-10-27): every share is the first
 //             position's, its break-even the open cycle's (the Wheel cycles' B-E, its premiums counted there), its open
 //             Calls the first position's and its open Puts the second's; a ticker holding only Puts waits for them.
@@ -43,6 +44,9 @@ export function volFarmerV2RulesOf(settings: PlutoSettings): { farmer: Pick<Back
       // The LEAPS spread cost is the lab's (2026-10-28): Pluto's orders fill at the market, and its steps price a LEAPS at the mid.
       leapsSpreadCostChargedPct: 0,
       looks: "every_look",
+      // The lab's way of sharing its account: live, the round gives each ticker its pot (tickerPotFraction).
+      tickerAllocationPct: {},
+      excessAllowancePct: settings.excessAllowancePct,
     },
   };
 }
@@ -191,14 +195,14 @@ export function replaceVolFarmerV2LegRef(state: VolFarmerV2SymbolState, from: st
 }
 
 /** The first look at a ticker that holds something: its holdings as v2's positions, or why it waits. */
-export function adoptVolFarmerV2Holdings(input: { positions: readonly PositionFigures[]; cycleBreakEvenPerShare: number | null; allocationDollars: number }): { state: VolFarmerV2SymbolState } | { waiting: string } {
+export function adoptVolFarmerV2Holdings(input: { positions: readonly PositionFigures[]; cycleBreakEvenPerShare: number | null; potDollars: number }): { state: VolFarmerV2SymbolState } | { waiting: string } {
   const openLegs = input.positions.filter((position) => position.status === "open").flatMap((position) => position.legs.filter((leg) => leg.exitAt === null));
   const shares = openLegs.filter((leg) => leg.legType === "stock" && leg.side === "long").reduce((sum, leg) => sum + leg.quantity, 0);
   if (shares === 0) return { waiting: "holds no shares yet: its open Puts are left to expire or be assigned before v2 adopts it" };
   if (input.cycleBreakEvenPerShare === null) return { waiting: "holds shares but its cycle's break-even cannot be worked out, so v2 cannot adopt it yet" };
   const shortOptions = (optionType: "call" | "put") => openLegs.filter((leg) => leg.legType === "option" && leg.side === "short" && leg.optionType === optionType).map((leg) => ({ legId: leg.id, shares: leg.quantity * leg.multiplier }));
   const state = newVolFarmerV2SymbolState();
-  state.potDollars = input.allocationDollars;
+  state.potDollars = input.potDollars;
   // The cycle's break-even already counts every premium of the cycle (its Puts' included): the positions add none.
   state.first = { shares, costPerShare: input.cycleBreakEvenPerShare, premiums: [], calls: shortOptions("call"), puts: [] };
   const puts = shortOptions("put");
@@ -216,8 +220,8 @@ export interface VolFarmerV2LiveSnapshot {
   flat: boolean;
   /** What Pluto's budget has free for the ticker: its free cash, less what other orders tie up. */
   freeCash: number;
-  /** The ticker's allocation in dollars: a new cycle's pot and the LEAPS cap's base. */
-  allocationDollars: number;
+  /** The ticker's pot in dollars (its allocation raised by the excess allowance): a new cycle's pot and the LEAPS cap's base. */
+  potDollars: number;
   stockPrice: number;
   optionCommissionDollars(contracts: number): number;
   stockCommissionDollars(shares: number): number;
@@ -232,10 +236,13 @@ export type VolFarmerV2PlannedOrder =
 /**
  * The book the steps run on at one look: the snapshot, the orders still working (open, as planned) and the orders the
  * look places, each applied at once to the free cash and the contracts held, and collected with a reference of its own.
+ * The tickers share Pluto's budget (Marcelo 2026-10-28), so an order the free cash cut is noted: the steps word a new
+ * cycle's and a Put's in the look's note, and a LEAPS held below its cap is worded here (`cashCutNotes`).
  */
-export function createVolFarmerV2LiveBook(input: { state: VolFarmerV2SymbolState; pending: readonly VolFarmerV2PendingOrder[]; snapshot: VolFarmerV2LiveSnapshot }): { book: VolFarmerV2Book; planned: VolFarmerV2PlannedOrder[] } {
+export function createVolFarmerV2LiveBook(input: { state: VolFarmerV2SymbolState; pending: readonly VolFarmerV2PendingOrder[]; snapshot: VolFarmerV2LiveSnapshot }): { book: VolFarmerV2Book; planned: VolFarmerV2PlannedOrder[]; cashCutNotes: string[] } {
   const { state, pending, snapshot } = input;
   const planned: VolFarmerV2PlannedOrder[] = [];
+  const cashCutNotes: string[] = [];
   let freeCash = snapshot.freeCash;
   const openStatus = (strike: number, contracts: number): VolFarmerV2LegStatus => ({ closed: false, assigned: false, strike, contracts });
   const statusOfPlanned = (ref: string): VolFarmerV2LegStatus | undefined => {
@@ -251,8 +258,8 @@ export function createVolFarmerV2LiveBook(input: { state: VolFarmerV2SymbolState
   const book: VolFarmerV2Book = {
     isFlat: () => snapshot.flat && pending.length === 0 && planned.length === 0,
     freeCash: () => Math.max(0, freeCash),
-    potForNewCycle: () => snapshot.allocationDollars,
-    leapsCapBaseDollars: () => snapshot.allocationDollars,
+    potForNewCycle: () => snapshot.potDollars,
+    leapsCapBaseDollars: () => snapshot.potDollars,
     openOptionContracts: () => [...snapshot.openOptionContracts, ...pending.filter((order) => order.kind !== "sell_leaps").map((order) => ({ expiry: order.expiry, strike: order.strike })), ...plannedContracts()],
     leg(legId) {
       const working = pending.find((order) => order.ref === legId);
@@ -282,8 +289,12 @@ export function createVolFarmerV2LiveBook(input: { state: VolFarmerV2SymbolState
     sellLeaps(sale) {
       planned.push({ ref: nextRef(), kind: "sell_leaps", sale, leapsBeforeSale: state.leaps === null ? null : structuredClone(state.leaps) });
     },
+    // A LEAPS the free cash pays for no contract of is the steps' "no LEAPS" note.
+    noteCashCut(cut) {
+      if (cut.order === "leaps" && cut.filledContracts > 0) cashCutNotes.push(`the free cash (${formatWholeDollars(cut.freeCash)}) held the LEAPS to ${cut.filledContracts} of the ${cut.filledContracts + cut.unsoldContracts} contracts its cap allows`);
+    },
   };
-  return { book, planned };
+  return { book, planned, cashCutNotes };
 }
 
 /** What a planned order is counted as until it settles, with the action that sent it. */

@@ -8,7 +8,7 @@ import { ensurePlutoSettingsVersion } from "./settingsVersions.js";
 // routes read.
 
 /**
- * What started an analysis round: new ladder band quotes (band_quotes_update), or, without a new quote, the day's first
+ * What started an analysis round: new option quote band quotes (band_quotes_update), or, without a new quote, the day's first
  * analysis, a settings change, an order ending, a ticker's cooldown ending, a position closing. Rounds stored before
  * Signals was retired (2026-10-27) may carry day_signals_update, grade_crossing or held_leg.
  */
@@ -171,6 +171,7 @@ export type PlutoEventType =
   | "connection_restored"
   | "stress_override_changed"
   | "order_adopted"
+  | "holdings_adopted"
   | "readiness_check"
   | "warning";
 
@@ -189,6 +190,7 @@ export const plutoEventCategoryByType: Record<PlutoEventType | LegacyPlutoEventT
   resumed: "system",
   mode_changed: "system",
   readiness_check: "system",
+  holdings_adopted: "system",
   warning: "system",
   lines_changed: "system",
   window_opened: "system",

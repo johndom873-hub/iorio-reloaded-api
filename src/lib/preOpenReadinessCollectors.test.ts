@@ -52,6 +52,11 @@ const mocks = vi.hoisted(() => {
     findDeadlineProblems: vi.fn(),
     loadOptionDataUniverse: vi.fn(),
     loadStoredOptionChain: vi.fn(),
+    loadPlutoSettings: vi.fn(),
+    loadEnabledPlutoTickerSettings: vi.fn(),
+    computeCashLockedInCsps: vi.fn(),
+    loadInFlightNotionalsBySymbol: vi.fn(),
+    loadCommittedCapitalOnSymbols: vi.fn(),
   };
 });
 
@@ -74,6 +79,11 @@ vi.mock("./tradingSettingsStore.js", () => ({ loadTradingSettingsForEditing: moc
 vi.mock("./platformControls.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("./platformControls.js")>()), fetchTradingHalt: mocks.fetchTradingHalt }));
 vi.mock("./opsMonitor.js", () => ({ loadLatestRunPerExpectedJob: mocks.loadLatestRunPerExpectedJob, findDeadlineProblems: mocks.findDeadlineProblems }));
 vi.mock("./optionDataUniverse.js", () => ({ loadOptionDataUniverse: mocks.loadOptionDataUniverse }));
+vi.mock("../pluto/settingsStore.js", () => ({ loadPlutoSettings: mocks.loadPlutoSettings }));
+vi.mock("../pluto/tickerSettingsStore.js", () => ({ loadEnabledPlutoTickerSettings: mocks.loadEnabledPlutoTickerSettings }));
+vi.mock("../pluto/book.js", () => ({ loadInFlightNotionalsBySymbol: mocks.loadInFlightNotionalsBySymbol }));
+vi.mock("./positionExposure.js", () => ({ computeCashLockedInCsps: mocks.computeCashLockedInCsps }));
+vi.mock("./orderLimits.js", () => ({ loadCommittedCapitalOnSymbols: mocks.loadCommittedCapitalOnSymbols }));
 vi.mock("../ibkr/fetchOptionChain.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("../ibkr/fetchOptionChain.js")>()), loadStoredOptionChain: mocks.loadStoredOptionChain }));
 
 const now = new Date("2026-10-05T10:00:00Z");
@@ -91,6 +101,7 @@ function healthyDependencies(overrides: Partial<ReadinessDependencies> = {}): Re
     loadSettings: async () => ({ maxOrderPctOfPortfolio: 15, maxConcentrationPerTickerPct: 20, minCashReservePct: 5, deltaTargetMin: 0.2, deltaTargetMax: 0.4, recoveryDteMin: 1, recoveryDteMax: 14, minAnnualizedYieldPct: 50, commissionWarnSharePctOfPremium: 5 }),
     loadTradingHalt: async () => ({ enabled: false, reason: null, setByUserId: null, setByDisplayName: null, setAt: null }),
     loadAccount: async () => ({ netLiquidationValue: 100_000, totalCashValue: 60_000, buyingPower: 200_000, excessLiquidity: 50_000 }),
+    loadPlutoCash: async () => ({ capitalBudgetPct: 50, enabledTickerCount: 2, committedOnPlutoTickers: 20_000, cashLockedInCsps: 10_000, inFlightNotional: 0 }),
     loadProbeContract: async () => probeContract,
     probeOrderPath: async (contract) => {
       calls.push(`probeOrderPath:${contract?.symbol}`);
@@ -120,7 +131,7 @@ describe("collectReadinessChecks", () => {
   it("produces a check for every area, all green for a healthy production before the open", async () => {
     const checks = await collectReadinessChecks("pre_open", now, healthyDependencies());
     expect(checks.filter((entry) => entry.status !== "ok")).toEqual([]);
-    for (const name of ["Configuration", "Trading worker", "Trading halt", "Trading settings", "Account", "Order path", "Open orders", "Scheduled jobs", "Gateway health check", "Data", "Market data", "Live stock quote", "Telegram", "Database", "Release"]) {
+    for (const name of ["Configuration", "Trading worker", "Trading halt", "Trading settings", "Account", "Pluto cash", "Order path", "Open orders", "Scheduled jobs", "Gateway health check", "Data", "Market data", "Live stock quote", "Telegram", "Database", "Release"]) {
       expect(byName(checks, name).length, name).toBeGreaterThan(0);
     }
     expect(checks.some((entry) => entry.name === "Live option quote")).toBe(false);
@@ -193,6 +204,37 @@ describe("collectReadinessChecks", () => {
     );
     expect(checks.find((entry) => entry.name === "Account")).toMatchObject({ status: "fail" });
     expect(checks.find((entry) => entry.name === "Trading settings")).toMatchObject({ status: "fail" });
+    expect(checks.find((entry) => entry.name === "Pluto cash")).toMatchObject({ status: "warn" });
+  });
+
+  it("reads the account summary once for the Account and Pluto cash checks", async () => {
+    let accountReads = 0;
+    const checks = await collectReadinessChecks(
+      "pre_open",
+      now,
+      healthyDependencies({
+        loadAccount: async () => {
+          accountReads += 1;
+          return { netLiquidationValue: 100_000, totalCashValue: 11_000, buyingPower: 11_000, excessLiquidity: 11_000 };
+        },
+      }),
+    );
+    expect(accountReads).toBe(1);
+    // $11,000 − $10,000 held by Puts = $1,000 free, 2% of the $50,000 budget.
+    expect(checks.find((entry) => entry.name === "Pluto cash")).toMatchObject({ status: "warn", detail: expect.stringContaining("free cash $1,000 is 2.0%") });
+  });
+
+  it("only warns when Pluto's book cannot be read", async () => {
+    const checks = await collectReadinessChecks(
+      "pre_open",
+      now,
+      healthyDependencies({
+        loadPlutoCash: async () => {
+          throw new Error("no row");
+        },
+      }),
+    );
+    expect(checks.find((entry) => entry.name === "Pluto cash")).toMatchObject({ status: "warn", detail: expect.stringContaining("could not be measured") });
   });
 
   it("reports an order path that IBKR refuses, with IBKR's reason, and one with nothing to probe", async () => {
@@ -266,7 +308,7 @@ describe("collectReadinessChecks timeouts", () => {
 });
 
 function quote(overrides: Partial<PooledQuote> = {}): PooledQuote {
-  return { last: null, bid: null, ask: null, delta: null, gamma: null, vega: null, theta: null, impliedVolatility: null, underlyingPrice: null, open: null, high: null, low: null, previousClose: null, volume: null, ...overrides };
+  return { last: null, bid: null, ask: null, bidSize: null, askSize: null, delta: null, gamma: null, vega: null, theta: null, impliedVolatility: null, underlyingPrice: null, open: null, high: null, low: null, previousClose: null, volume: null, ...overrides };
 }
 
 function queriesOn(table: string) {
@@ -411,9 +453,21 @@ describe("createDefaultReadinessDependencies", () => {
       expect(await createDefaultReadinessDependencies().probeOrderPath({ ...contract, symbol: "QQQ", strike: 52.5 })).toEqual({ ok: true, probe: "QQQ $52.5 put 20261120" });
     });
 
-    it("lets IBKR's refusal reach the caller", async () => {
+    it("returns IBKR's refusal with the probed contract", async () => {
       mocks.fetchWhatIfCommissionRange.mockRejectedValue(new Error("IBKR what-if rejected (201): no permissions"));
-      await expect(createDefaultReadinessDependencies().probeOrderPath(contract)).rejects.toThrow("IBKR what-if rejected (201): no permissions");
+      expect(await createDefaultReadinessDependencies().probeOrderPath(contract)).toEqual({ ok: false, probe: "SPY $500 put 20261120", reason: "IBKR what-if rejected (201): no permissions" });
+    });
+  });
+
+  describe("loadPlutoCash", () => {
+    it("reads Pluto's budget, its enabled tickers' committed capital, the Puts' held cash and every working order", async () => {
+      mocks.loadPlutoSettings.mockResolvedValue({ capitalBudgetPct: 60 });
+      mocks.loadEnabledPlutoTickerSettings.mockResolvedValue([{ symbol: "AAA" }, { symbol: "BBB" }]);
+      mocks.computeCashLockedInCsps.mockResolvedValue(10_000);
+      mocks.loadInFlightNotionalsBySymbol.mockResolvedValue({ totalNotional: 700, managedNotional: 500, tickerNotionalBySymbol: new Map() });
+      mocks.loadCommittedCapitalOnSymbols.mockResolvedValue(40_000);
+      expect(await createDefaultReadinessDependencies().loadPlutoCash()).toEqual({ capitalBudgetPct: 60, enabledTickerCount: 2, committedOnPlutoTickers: 40_000, cashLockedInCsps: 10_000, inFlightNotional: 700 });
+      expect(mocks.loadCommittedCapitalOnSymbols).toHaveBeenCalledWith(["AAA", "BBB"]);
     });
   });
 

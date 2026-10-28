@@ -1,5 +1,5 @@
 import { subscribeToPooledQuote } from "../ibkr/marketDataPool.js";
-import { streamOptionQuotes } from "../ibkr/streamOptionQuotes.js";
+import { streamOptionQuotes, type StreamedOptionQuote } from "../ibkr/streamOptionQuotes.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { impliedVolatilityFromPrice } from "../lib/impliedVolatilitySurface.js";
 import { loadTradingSessionsBetween } from "../lib/marketSessionStatus.js";
@@ -11,7 +11,7 @@ import { StreamRequestError } from "./streamProtocol.js";
 
 // The Ticker modal's `optionQuotes` stream (2026-10-27, replacing `signalsQuotes`): live quotes for exactly the contracts
 // the modal has on screen, plus any pinned ones (an order under review), from the shared market-data pool, with the
-// stock's live price. Each quote carries its own delta and implied volatility read from its mid on the forward
+// stock's live price and each quote's bid and ask sizes. Each quote carries its own delta and implied volatility read from its mid on the forward
 // spot × e^(rT) (quoteOwnDelta.ts, the platform's delta), else IBKR's delta. Frames carry full state, at most once a second.
 
 export const optionQuotesMaxContracts = 64;
@@ -22,6 +22,9 @@ const frameIntervalMs = 1_000;
 export interface LiveContractQuote {
   bid: number | null;
   ask: number | null;
+  /** Contracts at the bid and at the ask, as IBKR's chain shows them. */
+  bidSize: number | null;
+  askSize: number | null;
   delta: number | null;
   impliedVolatility: number | null;
 }
@@ -69,7 +72,7 @@ export const optionQuotesProducer: StreamProducer = {
     const closeMinutesEt = sessions[0]?.closeMinutesEt ?? 16 * 60;
 
     let spotPrice: number | null = null;
-    let latest: { expiry: string; strike: number; right: "C" | "P"; bid: number | null; ask: number | null; delta: number | null }[] = [];
+    let latest: StreamedOptionQuote[] = [];
     let lastEmitAtMs = 0;
     let pending: ReturnType<typeof setTimeout> | null = null;
     const emitFrame = () => {
@@ -80,7 +83,7 @@ export const optionQuotesProducer: StreamProducer = {
       for (const quote of latest) {
         const daysToExpiry = calendarDaysUntilExpiry(todayIso, quote.expiry.replaceAll("-", ""));
         const greeks = readOwnGreeks({ bid: quote.bid, ask: quote.ask, ibkrDelta: quote.delta, spotPrice, strike: quote.strike, isCall: quote.right === "C", yearsToExpiry: daysToExpiry <= 0 ? yearsToTodaysClose : daysToExpiry / 365, riskFreeRate: riskFreeRate ?? 0 });
-        quotes[`${quote.expiry}|${quote.strike}|${quote.right}`] = { bid: quote.bid, ask: quote.ask, ...greeks };
+        quotes[`${quote.expiry}|${quote.strike}|${quote.right}`] = { bid: quote.bid, ask: quote.ask, bidSize: quote.bidSize, askSize: quote.askSize, ...greeks };
       }
       emit({ type: "optionQuotes", at: new Date().toISOString(), spotPrice, quotes } satisfies OptionQuotesFrame);
     };

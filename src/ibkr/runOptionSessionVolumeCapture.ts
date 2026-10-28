@@ -11,22 +11,24 @@ import { getRiskFreeRateForJob } from "../lib/riskFreeRate.js";
 import { addCalendarDays } from "../lib/calendarDays.js";
 import { contractKey } from "../lib/optionContractKey.js";
 import { loadLastSeenImpliedVolatilityByContract, saveOptionSessionVolumes, type OptionSessionVolumeRow } from "../lib/optionSessionVolumeStore.js";
-import { loadPlutoSettings, type PlutoSettings } from "../pluto/settingsStore.js";
+import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { loadEnabledPlutoTickerSettings } from "../pluto/tickerSettingsStore.js";
-import { ladderRequoteBand, selectLadderRequoteContracts, type LadderRequoteBand } from "../pluto/ladderRequoteBand.js";
-import { ladderDteRangeContracts } from "../pluto/ladderBandPlan.js";
+import { optionRequoteBand, selectOptionRequoteContracts, type OptionRequoteBand } from "../pluto/optionRequoteBand.js";
+import { optionQuoteBandExpiryContracts, type OptionQuoteBandExpiryRule } from "../pluto/optionQuoteBandPlan.js";
+import { optionQuoteBandScopeOf } from "../pluto/optionQuoteBandPlanLoader.js";
 
 // The after-close option volume capture (Marcelo 2026-10-15): for every ticker Pluto is enabled on, whichever strategy is
 // active, each contract's full-session volume (IBKR tick 8, read under FROZEN after the close: it holds the whole day
 // then and resets overnight, measured 2026-10-14/15) and its IBKR implied volatility, stored as the previous session's
-// volume for the next day's ladder (its 20% rule) and as each contract's last-seen IV.
+// volume for the next day's option quote band and both strategies' 20% rule, and as each contract's last-seen IV.
 //
-// Which contracts: the ladder's universe for the next session (every listed strike, both rights, of the expiries in its
-// days-to-expiry range counted from that session) narrowed to the first-look re-quoting band (ladderRequoteBand.ts) at
-// today's last price, from each contract's last-seen IV: the Calls inside it, every Put below the price; a Call whose IV
-// is unknown is always quoted. The first night
-// knows no IV, so it quotes the whole universe (about 21,000 contracts, ~35 min for 20 tickers); later nights quote the
-// band (~3,200, ~5 min), and learn the IVs of what they quote.
+// Which contracts: the option quote band's universe for the next session under the ticker's strategy (every listed
+// strike, both rights, of the expiries it sells counted from that session: the CC + Put Ladder's days-to-expiry range,
+// Vol Farmer v2's next listed expiry; optionQuoteBandPlan.ts) narrowed to the first-look re-quoting band around the
+// strategy's Call |delta| range (optionRequoteBand.ts) at today's last price, from each contract's last-seen IV: the
+// Calls inside it, every Put below the price; a Call whose IV is unknown is always quoted. The first night knows no IV,
+// so it quotes the whole universe (about 21,000 contracts, ~35 min for 20 tickers); later nights quote the band (~3,200,
+// ~5 min), and learn the IVs of what they quote.
 
 export const optionSessionVolumeCaptureJobName = "option_session_volume_capture";
 const lineHolder = "optionSessionVolumeCapture";
@@ -56,21 +58,21 @@ export function planSessionVolumeContracts(input: {
   expirations: readonly string[];
   strikesByExpiry: ReadonlyMap<string, readonly number[]>;
   nextSessionIso: string;
-  settings: Pick<PlutoSettings, "ladderMinDte" | "ladderMaxDte">;
-  band: LadderRequoteBand;
+  expiryRule: OptionQuoteBandExpiryRule;
+  band: OptionRequoteBand;
   /** Null when IBKR gave no price: every contract is quoted. */
   stockPrice: number | null;
   riskFreeRate: number;
   lastSeenImpliedVolatilityByContract: ReadonlyMap<string, number>;
 }): SessionVolumePlan {
-  // The universe here is the days-to-expiry range only: the volume floor is what this capture measures.
-  const universe = ladderDteRangeContracts({ expirations: input.expirations, strikesByExpiry: input.strikesByExpiry, todayIso: input.nextSessionIso, settings: input.settings }).map((contract) => ({ ...contract, lastSeenImpliedVolatility: input.lastSeenImpliedVolatilityByContract.get(contractKey(contract)) ?? null }));
+  // The universe here is the strategy's expiries only: the volume floor is what this capture measures.
+  const universe = optionQuoteBandExpiryContracts({ expirations: input.expirations, strikesByExpiry: input.strikesByExpiry, sessionIso: input.nextSessionIso, expiryRule: input.expiryRule }).map((contract) => ({ ...contract, lastSeenImpliedVolatility: input.lastSeenImpliedVolatilityByContract.get(contractKey(contract)) ?? null }));
   const unknownIvCount = universe.filter((contract) => contract.lastSeenImpliedVolatility === null).length;
   const stockPrice = input.stockPrice;
   const selected =
     stockPrice === null || !(stockPrice > 0)
       ? universe
-      : selectLadderRequoteContracts({ universe, band: input.band, stockPrice, todayIso: input.nextSessionIso, yearsToTodaysClose: firstLookYearsToClose, riskFreeRate: input.riskFreeRate, forwardFor: (_expiry, years) => stockPrice * Math.exp(input.riskFreeRate * years) }).toQuote;
+      : selectOptionRequoteContracts({ universe, band: input.band, stockPrice, todayIso: input.nextSessionIso, yearsToTodaysClose: firstLookYearsToClose, riskFreeRate: input.riskFreeRate, forwardFor: (_expiry, years) => stockPrice * Math.exp(input.riskFreeRate * years) }).toQuote;
   return { universeCount: universe.length, unknownIvCount, contracts: selected.map((contract) => ({ expiry: contract.expiry.replaceAll("-", ""), strike: contract.strike, right: contract.right })) };
 }
 
@@ -164,8 +166,9 @@ export async function runOptionSessionVolumeCapture(dependencies: SessionVolumeC
           const chain = await loadStoredOptionChain(ticker.tickerId);
           if (!chain || chain.expirations.length === 0) throw new Error("no stored option chain");
           const lastSeen = await loadLastSeenImpliedVolatilityByContract(ticker.tickerId, nextSessionIso);
-          const band = ladderRequoteBand({ ladderMinAbsDelta: ticker.ladderMinAbsDelta ?? settings.ladderMinAbsDelta, ladderMaxAbsDelta: ticker.ladderMaxAbsDelta ?? settings.ladderMaxAbsDelta }, true);
-          const plan = planSessionVolumeContracts({ expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, nextSessionIso, settings, band, stockPrice, riskFreeRate, lastSeenImpliedVolatilityByContract: lastSeen });
+          const scope = optionQuoteBandScopeOf(ticker, settings);
+          const band = optionRequoteBand(scope.callDeltaRange, true);
+          const plan = planSessionVolumeContracts({ expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, nextSessionIso, expiryRule: scope.expiryRule, band, stockPrice, riskFreeRate, lastSeenImpliedVolatilityByContract: lastSeen });
           Object.assign(result, { universe: plan.universeCount, requested: plan.contracts.length, unknownIv: plan.unknownIvCount });
           if (plan.contracts.length === 0) return;
           const quotes = await quoteWindow.capture(ticker.symbol, plan.contracts);

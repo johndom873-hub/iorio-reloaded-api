@@ -167,7 +167,7 @@ describe("PlutoAgent opening look (audit A)", () => {
     expect(agent.forcedRounds[0]).toMatchObject({ trigger: "opening_analysis", detail: { dataIncomplete: true } });
     await agent.loopIteration();
     expect(harness.events.some((event) => event.type === "warning" && String(event.payload.message).startsWith("opening look on incomplete data"))).toBe(true);
-    expect(harness.telegrams.filter((message) => message.startsWith("⚠️ Pluto: today's ladder quotes were not in"))).toHaveLength(1);
+    expect(harness.telegrams.filter((message) => message.startsWith("⚠️ Pluto: today's option quotes were not in"))).toHaveLength(1);
     // Opens are allowed once the incomplete look has run.
     agent.queueForcedRound("settings_changed", {}, null);
     await agent.loopIteration();
@@ -180,7 +180,7 @@ describe("PlutoAgent opening look (audit A)", () => {
     await agent.housekeeping();
     expect(agent.forcedRounds[0]).toMatchObject({ trigger: "opening_analysis", detail: { afterLateSeed: true } });
     await agent.loopIteration();
-    expect(harness.telegrams.filter((message) => message.startsWith("✅ Pluto: today's ladder quotes are in now"))).toHaveLength(1);
+    expect(harness.telegrams.filter((message) => message.startsWith("✅ Pluto: today's option quotes are in now"))).toHaveLength(1);
     await agent.housekeeping();
     expect(agent.forcedRounds).toEqual([]);
   });

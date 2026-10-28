@@ -14,6 +14,7 @@ import {
   evaluateMarketData,
   evaluateOrderHygiene,
   evaluateOrderPath,
+  evaluatePlutoCash,
   evaluateSettings,
   evaluateTodaysChainStructure,
   evaluateUndeliveredAlerts,
@@ -167,6 +168,52 @@ describe("evaluateOrderPath", () => {
     expect(refused.detail).not.toContain("Read-Only");
     expect(evaluateOrderPath({ ok: false, reason: "IBKR what-if timed out." }).detail).toBe("IBKR refused or did not answer a what-if order: IBKR what-if timed out.");
     expect(evaluateOrderPath({ ok: false, reason: "order id 13210 rejected" }).detail).not.toContain("Read-Only");
+  });
+
+  it("passes a refusal for margin, since IBKR answered on the order channel, and names the probed contract", () => {
+    const reason = "IBKR what-if rejected (201): Order rejected - reason:YOUR ORDER IS NOT ACCEPTED. IN ORDER TO OBTAIN THE DESIRED POSITION YOUR EQUITY WITH LOAN VALUE [4376.83 USD] MUST EXCEED THE INITIAL MARGIN [8000.00 USD]";
+    const result = evaluateOrderPath({ ok: false, probe: "XYZ $80 put 20261106", reason });
+    expect(result.status).toBe("ok");
+    expect(result.detail).toContain("(XYZ $80 put 20261106) and refused it for margin");
+    expect(result.detail).toContain("the Gateway is not in Read-Only mode");
+  });
+
+  it("names the probed contract in a failure when it is known", () => {
+    expect(evaluateOrderPath({ ok: false, probe: "SPY $500 put 20261120", reason: "IBKR what-if rejected (201): no permissions" }).detail).toBe("IBKR refused or did not answer a what-if order (SPY $500 put 20261120): IBKR what-if rejected (201): no permissions");
+  });
+});
+
+describe("evaluatePlutoCash", () => {
+  // Net liquidation $100,000 and a 60% budget: a $60,000 budget, warned below $3,000 free.
+  const account = { netLiquidationValue: 100_000, totalCashValue: 50_000, buyingPower: 50_000, excessLiquidity: 50_000 };
+  const pluto = { capitalBudgetPct: 60, enabledTickerCount: 3, committedOnPlutoTickers: 40_000, cashLockedInCsps: 10_000, inFlightNotional: 0 };
+
+  it("measures the free cash as the budget left when the account has more ($60,000 − $40,000 = $20,000 < $50,000 − $10,000)", () => {
+    expect(evaluatePlutoCash(account, pluto)).toEqual({ name: "Pluto cash", status: "ok", detail: "free cash $20,000 is 33.3% of Pluto's $60,000 budget (60% of net liquidation), limited by the budget left" });
+  });
+
+  it("measures it as the account's free cash when that is smaller ($12,000 − $10,000 − $500 working = $1,500), and warns below 5% of the budget", () => {
+    const result = evaluatePlutoCash({ ...account, totalCashValue: 12_000 }, { ...pluto, inFlightNotional: 500 });
+    expect(result.status).toBe("warn");
+    expect(result.detail).toBe("free cash $1,500 is 2.5% of Pluto's $60,000 budget (60% of net liquidation), limited by the account's free cash; the budget has $20,000 left. Below 5%: Pluto's new Puts and cycles will be cut or skipped");
+  });
+
+  it("warns at none free when the budget is overcommitted, and passes at exactly 5% ($3,000 of $60,000)", () => {
+    expect(evaluatePlutoCash(account, { ...pluto, committedOnPlutoTickers: 65_000 })).toMatchObject({ status: "warn", detail: expect.stringContaining("free cash $0 is 0.0%") });
+    expect(evaluatePlutoCash(account, { ...pluto, committedOnPlutoTickers: 57_000 }).status).toBe("ok");
+    expect(evaluatePlutoCash(account, { ...pluto, committedOnPlutoTickers: 57_001 }).status).toBe("warn");
+  });
+
+  it("passes when Pluto has no tickers or no budget, whatever the cash", () => {
+    expect(evaluatePlutoCash({ ...account, totalCashValue: 0 }, { ...pluto, enabledTickerCount: 0 })).toMatchObject({ status: "ok", detail: "Pluto has no tickers or no capital budget" });
+    expect(evaluatePlutoCash({ ...account, totalCashValue: 0 }, { ...pluto, capitalBudgetPct: 0 }).status).toBe("ok");
+  });
+
+  it("only warns when it cannot be measured", () => {
+    expect(evaluatePlutoCash(account, null)).toMatchObject({ status: "warn", detail: expect.stringContaining("could not be measured") });
+    expect(evaluatePlutoCash(null, pluto).status).toBe("warn");
+    expect(evaluatePlutoCash({ ...account, totalCashValue: null }, pluto).status).toBe("warn");
+    expect(evaluatePlutoCash({ ...account, netLiquidationValue: 0 }, pluto).status).toBe("warn");
   });
 });
 

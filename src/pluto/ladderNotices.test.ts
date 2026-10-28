@@ -29,7 +29,7 @@ describe("ladder notices", () => {
     expect(await noticeLadderTicker("HOOD", "stale_band_quotes", { telegramVerbosity: "actions" }, afternoon, log)).toBe(true);
     expect(await noticeLadderTicker("SMCI", "stale_band_quotes", { telegramVerbosity: "actions" }, nextDay, log)).toBe(true);
     expect(log.sent).toHaveLength(4);
-    expect(log.sent[0]).toBe("⚠️ Pluto (CC + Put Ladder): SMCI can't trade for now: the ladder band's latest quotes are older than Pluto's quote-age limit.");
+    expect(log.sent[0]).toBe("⚠️ Pluto (CC + Put Ladder): SMCI can't trade for now: its latest option quotes are older than Pluto's quote-age limit.");
     expect(log.sent.every((text) => !/\d/.test(text))).toBe(true);
     expect(log.recorded[0]).toEqual({ key: "stale_band_quotes:SMCI", symbol: "SMCI" });
   });

@@ -967,7 +967,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           for (const lookSymbol of decidingSymbols) symbolsWaitingForQuotes.delete(lookSymbol.profile.symbol);
         } else if (decidesAtCaptureLookOnly && !isCaptureLook) continue;
         if (decidingSymbols.length === 0) continue;
-        const look = await runLook({ todayIso, lookTimeEt, symbols: decidingSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
+        const look = await runLook({ todayIso, lookTimeEt, symbols: decidingSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, sessionDayIndex: dayIndex, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
         actions.push(...look.actions);
         optionSales.push(...look.optionSales);
         if (look.shortfalls) keepShortfalls(look.shortfalls);

@@ -10,8 +10,8 @@ vi.mock("../db/connection.js", async () => {
   const { createIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
   return { db: await createIsolatedTestDatabase() };
 });
-vi.mock("./ladderBandPlanLoader.js", () => ({
-  defaultLadderBandPlannerDependencies: {
+vi.mock("./optionQuoteBandPlanLoader.js", () => ({
+  defaultOptionQuoteBandPlannerDependencies: {
     loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 960, riskFreeRate: 0.04 }),
     loadForwardAnchors: async () => new Map([["2026-11-20", { forward: 50.2, spotPrice: 50 }]]),
   },
@@ -88,5 +88,16 @@ describe("loadLadderOrderGateContext", () => {
     const leaps = await action("vol_farmer_v2", { strategyKey: "leaps" });
     const leapsPayload = { symbol: "GATE", strategyKey: "leaps", legs: [{ role: "option", action: "BUY", symbol: "GATE", quantity: 1, unitPrice: 12, strike: 40, expiry: "20271217", right: "C" }] } as never;
     expect(await loadLadderOrderGateContext({ pluto_action_id: leaps, payload: leapsPayload }, testDb, now)).toMatchObject({ potFraction: null, deltaChecked: false, book: { symbols: ["GATE", "OTHR"], budgetFraction: 0.4 } });
+  });
+
+  it("raises the ticker's pot by the excess allowance; the book's cap stays Pluto's budget", async () => {
+    await testDb("pluto_settings").where({ id: 1 }).update({ excess_allowance_pct: 25 });
+    try {
+      // 50% × (1 + 25%) × 40% = a 25% pot.
+      const put = await action("vol_farmer_v2", { strategyKey: "cash_secured_put" });
+      expect(await loadLadderOrderGateContext({ pluto_action_id: put, payload: putPayload(45) }, testDb, now)).toMatchObject({ potFraction: 0.25, book: { budgetFraction: 0.4 } });
+    } finally {
+      await testDb("pluto_settings").where({ id: 1 }).update({ excess_allowance_pct: 0 });
+    }
   });
 });

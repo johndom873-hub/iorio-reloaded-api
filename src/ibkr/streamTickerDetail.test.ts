@@ -75,7 +75,7 @@ import { streamTickerDetail, type TickerDetailStreamEvent } from "./streamTicker
 
 const fakeIb = { id: "fake-ib" };
 const quote = (overrides: Partial<PooledQuote> = {}): PooledQuote => ({
-  last: 190, bid: 189.9, ask: 190.1, delta: null, gamma: null, vega: null, theta: null, impliedVolatility: null, underlyingPrice: null, open: 188, high: 191, low: 187, previousClose: 186, volume: 1_000_000, ...overrides,
+  last: 190, bid: 189.9, ask: 190.1, bidSize: null, askSize: null, delta: null, gamma: null, vega: null, theta: null, impliedVolatility: null, underlyingPrice: null, open: 188, high: 191, low: 187, previousClose: 186, volume: 1_000_000, ...overrides,
 });
 const bar = (time: number, close: number): PriceBar => ({ time, open: close, high: close, low: close, close, volume: 1 });
 const nowSeconds = () => Date.now() / 1000;

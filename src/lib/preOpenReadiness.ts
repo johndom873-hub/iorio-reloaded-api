@@ -157,18 +157,28 @@ export function evaluateWorker(row: WorkerHealthRow | null, now: Date, expected:
 
 // --- The order path: IBKR's what-if for a real contract, from the web process ---
 
-export type OrderPathProbeResult = { ok: true; probe: string } | { ok: false; reason: string };
+/** `probe` names the contract when the what-if was sent; a probe that timed out or had no contract has none. */
+export type OrderPathProbeResult = { ok: true; probe: string } | { ok: false; reason: string; probe?: string };
 
 // Verified on the paper Gateway (2026-10-05): with the Read-Only API setting on, IBKR rejects a what-if order, for options and for stock,
 // with code 321 "The API interface is currently in Read-Only mode". So an answered what-if also proves the Gateway is not read-only.
 const readOnlyRejection = /\b321\b|read-only/i;
 
+// IBKR refuses a what-if the account lacks the cash for with "YOUR EQUITY WITH LOAN VALUE [...] MUST EXCEED THE INITIAL MARGIN
+// [...]" (Marcelo 2026-10-28): it found the contract, read the account and answered on the order channel, so the path works and
+// only the cash is short, which the Account and Pluto cash checks report.
+const marginRejection = /initial margin/i;
+
 export function evaluateOrderPath(result: OrderPathProbeResult): ReadinessCheck {
   if (result.ok) return check("Order path", "ok", `IBKR answered a what-if order (${result.probe}): the account, the contract lookup and the order channel work, and the Gateway is not in Read-Only mode`);
+  const probed = result.probe ? ` (${result.probe})` : "";
   if (readOnlyRejection.test(result.reason)) {
     return check("Order path", "fail", `the Gateway is in Read-Only API mode, so every order would be refused (${result.reason}). Turn it off in the Gateway's API settings (READ_ONLY_API) and log in again`);
   }
-  return check("Order path", "fail", `IBKR refused or did not answer a what-if order: ${result.reason}`);
+  if (marginRejection.test(result.reason)) {
+    return check("Order path", "ok", `IBKR answered a what-if order${probed} and refused it for margin, as the account lacks the cash for one Put on it: the account, the contract lookup and the order channel work, and the Gateway is not in Read-Only mode`);
+  }
+  return check("Order path", "fail", `IBKR refused or did not answer a what-if order${probed}: ${result.reason}`);
 }
 
 // --- The account ---
@@ -193,6 +203,47 @@ export function evaluateAccount(account: AccountFigures | null, maxOrderPctOfPor
     parts.push(`largest cash-secured put the ${maxOrderPctOfPortfolio}% max order size allows: strike $${Math.floor(largestSingleContractStrike)} (1 contract)`);
   }
   return check("Account", account.buyingPower === null || account.totalCashValue === null ? "warn" : "ok", parts.join(", "));
+}
+
+// --- Pluto's cash (Marcelo 2026-10-28): a warning, never a stop ---
+
+/** Pluto's free cash below this share of its capital budget cuts or skips its new Puts and cycles. */
+export const plutoLowCashWarningPctOfBudget = 5;
+
+export interface PlutoCashFigures {
+  capitalBudgetPct: number;
+  enabledTickerCount: number;
+  /** EXP $ of the open positions on Pluto's tickers plus the orders working on them. */
+  committedOnPlutoTickers: number;
+  /** The strikes the account's open cash-secured Puts hold. */
+  cashLockedInCsps: number;
+  /** Every order still working on the account. */
+  inFlightNotional: number;
+}
+
+/**
+ * Pluto's free cash as its rounds measure it (volFarmerV2Round.ts), the smaller of
+ *   budget left   = capital budget % × net liquidation value − committed on Pluto's tickers
+ *   account free  = cash − the open Puts' strikes − the orders working
+ * judged against plutoLowCashWarningPctOfBudget of the budget.
+ */
+export function evaluatePlutoCash(account: AccountFigures | null, pluto: PlutoCashFigures | null): ReadinessCheck {
+  const name = "Pluto cash";
+  if (!pluto) return check(name, "warn", "could not be measured: Pluto's settings or book could not be read");
+  if (pluto.enabledTickerCount === 0 || !(pluto.capitalBudgetPct > 0)) return check(name, "ok", "Pluto has no tickers or no capital budget");
+  if (!account || account.netLiquidationValue === null || !(account.netLiquidationValue > 0) || account.totalCashValue === null) {
+    return check(name, "warn", "could not be measured: the account's net liquidation value or cash is missing");
+  }
+  const budget = (pluto.capitalBudgetPct / 100) * account.netLiquidationValue;
+  const budgetLeft = budget - pluto.committedOnPlutoTickers;
+  const accountFree = Math.max(0, account.totalCashValue - pluto.cashLockedInCsps) - pluto.inFlightNotional;
+  const freeCash = Math.max(0, Math.min(budgetLeft, accountFree));
+  const limitedBy = accountFree < budgetLeft ? `the account's free cash; the budget has ${formatWholeDollars(Math.max(0, budgetLeft))} left` : "the budget left";
+  const detail = `free cash ${formatWholeDollars(freeCash)} is ${((freeCash / budget) * 100).toFixed(1)}% of Pluto's ${formatWholeDollars(budget)} budget (${pluto.capitalBudgetPct}% of net liquidation), limited by ${limitedBy}`;
+  if ((freeCash / budget) * 100 < plutoLowCashWarningPctOfBudget) {
+    return check(name, "warn", `${detail}. Below ${plutoLowCashWarningPctOfBudget}%: Pluto's new Puts and cycles will be cut or skipped`);
+  }
+  return check(name, "ok", detail);
 }
 
 // --- The operator kill switch ---
