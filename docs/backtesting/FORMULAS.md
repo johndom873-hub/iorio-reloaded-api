@@ -100,7 +100,7 @@ Example: 5 puts $97 sold at 3.545, close 95.40 → assigned, 500 shares in at 97
 **Fills and commissions**
 
 - option sold: mid − spread cost share × (ask − bid) ÷ 2. Option bought back: mid + spread cost share × (ask − bid) ÷ 2. $0.68 per contract each way.
-- a Vol Farmer v2 LEAPS (Marcelo 2026-10-28): the same with its own share, `leapsSpreadCostChargedPct` (the lab's default 33⅓%, two-thirds of the way across the spread; Pluto 0), bought at mid + share × (ask − bid) ÷ 2 and sold at mid − share × (ask − bid) ÷ 2. Example: bid 10, ask 13 (mid 11.50): bought at 12, sold at 11.
+- a Vol Farmer v2 LEAPS (Marcelo 2026-10-28): the same with its own share, `leapsSpreadCostChargedPct` (the lab's default 33%, about two-thirds of the way across the spread; Pluto 0), bought at mid + share × (ask − bid) ÷ 2 and sold at mid − share × (ask − bid) ÷ 2. Example: bid 10, ask 13 (mid 11.50): bought at 11.50 + 0.33 × 1.50 = 11.995, sold at 11.005.
 - shares bought and sold at the look's stock price itself (IBKR's price at the look; the $0.01 either way removed by Marcelo 2026-10-15), plus $0.005 per share. Wherever a rule reads the stock's bid and ask, both are that price.
 - every fill is at the quotes of the look it happens at; an option the look has no two-sided quote for is not bought back at that look.
 

@@ -38,7 +38,7 @@ import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchas
 //      the one whose |delta| (its own IV, on the forward) is nearest leapsAbsDelta; as many contracts as min(the free
 //      cash, leapsMaxAccountPct % of the book's cap base; 0: no cap) pays for (fill + commission): its intended count N,
 //      fixed then. Its purchases and its sale fill leapsSpreadCostChargedPct of the half-spread past the mid (Marcelo
-//      2026-10-28; 33⅓: two-thirds of the way across the spread; Pluto: 0). The backtest buys no more than its ask
+//      2026-10-28; the lab's 33: about two-thirds of the way across the spread; Pluto: 0). The backtest buys no more than its ask
 //      offered; tried again at each look until one is bought (strategy "leaps", its own records: buy_leaps, sell_leaps).
 //      Bought short of N (the ask's size in the backtest, a partial fill live), it is topped up at the next looks with the
 //      same contract, N − held contracts, each top-up no more than the free cash then pays for (and its ask offers, in the

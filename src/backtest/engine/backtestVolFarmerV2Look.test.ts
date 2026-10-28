@@ -274,31 +274,32 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(describeVolFarmerV2Run(ledger, [symbol])).toMatch(new RegExp(`1 LEAPS trigger\\(s\\), 1 bought \\(${affordable}× on 2026-03-23\\)`));
   });
 
-  it("buys and sells a LEAPS two-thirds of the way across the spread, and values it at what selling it would bring", async () => {
-    // The lab's default: bid $10, ask $13 buys at $12 and sells at $11.
+  it("buys and sells a LEAPS 33% of the half-spread past the mid, and values it at what selling it would bring", async () => {
+    // The lab's default 33, about two-thirds of the way across the spread: bid $10, ask $13 buys at $11.995 and sells at $11.005.
     const leapsShare = defaultBacktestVolFarmerV2Settings.leapsSpreadCostChargedPct / 100;
-    expect(optionPurchaseFillPrice(10, 13, leapsShare)).toBeCloseTo(12, 10);
-    expect(optionSaleFillPrice(10, 13, leapsShare)).toBeCloseTo(11, 10);
+    expect(optionPurchaseFillPrice(10, 13, leapsShare)).toBeCloseTo(11.995, 10);
+    expect(optionSaleFillPrice(10, 13, leapsShare)).toBeCloseTo(11.005, 10);
+    const pastTheMid = (quote: { bid: number; ask: number }, side: 1 | -1) => (quote.bid + quote.ask) / 2 + (side * leapsShare * (quote.ask - quote.bid)) / 2;
     const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
     await look(ledger, "2026-03-09", 100, "2026-03-13");
     settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
     const put = (await look(ledger, "2026-03-16", 80, "2026-03-20")).actions[0]!;
     settleExpiry(ledger, { legId: openOption(ledger, "put")[0]!.id, expiryClose: put.contract!.strike! - 3 });
-    // Monday 23 March at 55, quotes 2% either side of the mid: bought two-thirds of the way up from the bid, valued two-thirds
-    // of the way down from the ask.
+    // Monday 23 March at 55, quotes 2% either side of the mid: bought 33% of the half-spread above the mid, valued 33% of it
+    // below.
     const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: defaultBacktestVolFarmerV2Settings } as unknown as EffectiveBacktestSettings;
     const priceByLegId = new Map<string, number>();
     const bought = await runVolFarmerV2Look({ todayIso: "2026-03-23", lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf("2026-03-23", 55, "2026-03-27", 100), bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId, nextActionId } as unknown as BacktestLookContext);
     const purchase = bought.actions.find((action) => action.kind === "buy_leaps")!;
     const purchaseQuote = purchase.candidateScores as { bid: number; ask: number };
-    expect(purchase.fillPrice).toBeCloseTo(purchaseQuote.bid + (2 / 3) * (purchaseQuote.ask - purchaseQuote.bid), 10);
-    expect(priceByLegId.get(openOption(ledger, "call", "long")[0]!.id)).toBeCloseTo(purchaseQuote.bid + (1 / 3) * (purchaseQuote.ask - purchaseQuote.bid), 10);
-    // The second position's Call is assigned at Friday's close at 90: the LEAPS sells two-thirds of the way down from the ask.
+    expect(purchase.fillPrice).toBeCloseTo(pastTheMid(purchaseQuote, 1), 10);
+    expect(priceByLegId.get(openOption(ledger, "call", "long")[0]!.id)).toBeCloseTo(pastTheMid(purchaseQuote, -1), 10);
+    // The second position's Call is assigned at Friday's close at 90: the LEAPS sells 33% of the half-spread below the mid.
     await look(ledger, "2026-03-30", 85, "2026-04-02");
     settleExpiry(ledger, { legId: openOption(ledger, "call").find((leg) => leg.strikePrice! < 99)!.id, expiryClose: 90 });
     const sale = (await look(ledger, "2026-04-06", 90, "2026-04-10")).actions.find((action) => action.kind === "sell_leaps")!;
     const saleQuote = sale.candidateScores as { bid: number; ask: number };
-    expect(sale.fillPrice).toBeCloseTo(saleQuote.bid + (1 / 3) * (saleQuote.ask - saleQuote.bid), 10);
+    expect(sale.fillPrice).toBeCloseTo(pastTheMid(saleQuote, -1), 10);
     // At 0, a LEAPS fills at the mid.
     const atMid = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
     await look(atMid, "2026-03-09", 100, "2026-03-13", { leapsSpreadCostChargedPct: 0 });

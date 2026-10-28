@@ -373,8 +373,9 @@ export interface BacktestVolFarmerV2Settings {
   leapsMaxAccountPct: number;
   /**
    * LEAPS fills (Marcelo 2026-10-28): the share of the half-spread a LEAPS purchase or sale gives up, percent, and the price
-   * a held LEAPS is valued at, what selling it would bring. 33⅓ is two-thirds of the way across the spread: bid $10, ask
-   * $13 buys at $12 and sells (and values) at $11. Calls and Puts fill and are valued at trading.spreadCostChargedPct.
+   * a held LEAPS is valued at, what selling it would bring. The lab's 33 is about two-thirds of the way across the spread:
+   * bid $10, ask $13 buys at $11.995 and sells (and values) at $11.005. Calls and Puts fill and are valued at
+   * trading.spreadCostChargedPct.
    */
   leapsSpreadCostChargedPct: number;
   /**
@@ -401,7 +402,7 @@ export type VolFarmerV2StepRule = (typeof volFarmerV2StepRules)[number];
 export const volFarmerV2LooksChoices = ["first_look", "every_look"] as const;
 export type VolFarmerV2Looks = (typeof volFarmerV2LooksChoices)[number];
 
-export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 0, leapsSpreadCostChargedPct: 100 / 3, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 0 };
+export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 0, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 0 };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5), read by the retired rules

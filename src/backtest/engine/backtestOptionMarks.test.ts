@@ -11,9 +11,9 @@ describe("twoSidedQuoteByContract", () => {
 });
 
 describe("markOfTwoSidedQuote", () => {
-  it("marks at the mid with no spread cost, and a LEAPS two-thirds of the way down from the ask at a third of the half-spread", () => {
+  it("marks at the mid with no spread cost, and a LEAPS at the lab's 33% of the half-spread below the mid", () => {
     expect(markOfTwoSidedQuote({ bid: 0.1, ask: 0.12 }, 0)).toBeCloseTo(0.11, 10);
-    expect(markOfTwoSidedQuote({ bid: 10, ask: 13 }, 1 / 3)).toBeCloseTo(11, 10);
+    expect(markOfTwoSidedQuote({ bid: 10, ask: 13 }, 0.33)).toBeCloseTo(11.005, 10);
   });
 });
 
