@@ -15,7 +15,7 @@ import { recordPlutoAction, recordPlutoEvent } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { tickerCooldownStatus } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
-import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings } from "./tickerSettingsStore.js";
+import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // One Pluto round under the CC + Put Ladder (Marcelo 2026-10-14/15): rules only, no model. Every enabled ticker gets a
 // look (ladderLook.ts) on its live book and the Day Signals loop's band quotes, and the sales it plans go out within the
@@ -68,6 +68,8 @@ export async function runLadderRound(input: LadderRoundInput): Promise<LadderRou
   let committedThisRound = 0;
   for (const ticker of enabled) {
     if (input.symbols.length > 0 && !input.symbols.includes(ticker.symbol)) continue;
+    // A ticker under Vol Farmer v2 is volFarmerV2Round.ts's; it still counts in the book above.
+    if (effectivePlutoStrategy(ticker) !== "cc_put_ladder") continue;
     if (frozen.has(ticker.symbol)) {
       summary.notes.push(`${ticker.symbol}: frozen (a split is pending), not traded`);
       continue;

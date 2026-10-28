@@ -40,14 +40,17 @@ export interface LadderOrderCounts {
   openPositions: number;
 }
 
-/** The ladder's open-order rows (open_* order requests of actions taken under the ladder) still working or not yet confirmed. */
+/** Pluto's strategies, whose orders the caps count together (Marcelo 2026-10-27: Vol Farmer v2's under the ladder's caps). */
+const plutoStrategiesUnderCaps = ["cc_put_ladder", "vol_farmer_v2"];
+
+/** Pluto's open-order rows (open_* order requests of actions taken under its strategies) still working or not yet confirmed. */
 function workingLadderOrderRows(connection: Knex) {
-  return connection("order_requests as orq").join("pluto_actions as pa", "pa.id", "orq.pluto_action_id").where("pa.execution_strategy", "cc_put_ladder").whereIn("orq.status", [...activeOrderRequestStatuses]).whereRaw("orq.request_type like 'open_%'");
+  return connection("order_requests as orq").join("pluto_actions as pa", "pa.id", "orq.pluto_action_id").whereIn("pa.execution_strategy", plutoStrategiesUnderCaps).whereIn("orq.status", [...activeOrderRequestStatuses]).whereRaw("orq.request_type like 'open_%'");
 }
 
-/** Ladder orders sent on the Eastern date of `now`, on `symbol` or (null) across the book: every order built counts. */
-function ladderOrdersSentToday(now: Date, symbol: string | null, connection: Knex) {
-  const query = connection("pluto_actions").where({ execution_strategy: "cc_put_ladder" }).whereNotNull("order_request_id").whereRaw("(created_at at time zone 'America/New_York')::date = ?::date", [easternIsoDate(now)]);
+/** Pluto's orders sent on the Eastern date of `now`, under either strategy, on `symbol` or (null) across the book: every order built counts. */
+export function ladderOrdersSentToday(now: Date, symbol: string | null, connection: Knex = db) {
+  const query = connection("pluto_actions").whereIn("execution_strategy", plutoStrategiesUnderCaps).whereNotNull("order_request_id").whereRaw("(created_at at time zone 'America/New_York')::date = ?::date", [easternIsoDate(now)]);
   return (symbol === null ? query : query.where({ symbol })).count({ count: "*" }).first();
 }
 

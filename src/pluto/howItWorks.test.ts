@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildPlutoHowItWorks } from "./howItWorks.js";
-import { plutoLadderSettingsFixture } from "./plutoSettingsFixture.js";
+import { plutoLadderSettingsFixture, plutoVolFarmerV2SettingsFixture } from "./plutoSettingsFixture.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 // The "How it works" tab quotes these numbers to its readers. This test pins every one at today's defaults: when a
@@ -10,6 +10,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 /** Pluto's settings at their migration defaults. */
 const settings: PlutoSettings = {
   ...plutoLadderSettingsFixture,
+  ...plutoVolFarmerV2SettingsFixture,
   capitalBudgetPct: 50, 
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2,
   maxQuoteAgeMinutes: 10, maxFillSlippagePct: 5,
@@ -21,7 +22,7 @@ const figures = { unfilledOrderCancelMinutes: 15 };
 
 describe("buildPlutoHowItWorks", () => {
   it("quotes every number the tab shows, at today's defaults and constants", () => {
-    const { ladder, ...rest } = buildPlutoHowItWorks(settings, figures);
+    const { ladder, volFarmerV2: _volFarmerV2, ...rest } = buildPlutoHowItWorks(settings, figures);
     expect(rest).toEqual({ shared: { windowStartEt: "10:45", windowEndEt: "15:30", windowEndMinutesBeforeCloseAtLeast: 30, capitalBudgetPct: 50, dailyLossBreakerPct: 2, unfilledOrderCancelMinutes: 15 } });
     const { example: ladderExample, ...ladderValues } = ladder;
     expect(ladderValues).toEqual({
@@ -38,6 +39,22 @@ describe("buildPlutoHowItWorks", () => {
     expect(example.floor).toBeCloseTo(31.2, 10);
     expect(example.rungs.map((entry) => entry.rung)).toEqual([1, 2, 3, 4, 5]);
     expect(example.rungs.map((entry) => Math.round(entry.strikeCap * 100) / 100)).toEqual([86.24, 72.48, 58.72, 44.96, 31.2]);
+  });
+
+  it("quotes Vol Farmer v2's settings and works its example with the strategy's own functions", () => {
+    const { example, ...values } = buildPlutoHowItWorks(settings, figures).volFarmerV2;
+    expect(values).toEqual({
+      callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, maxSpreadPctOfMid: 50, minimumBid: 0.05, maxVolumeSharePct: 20,
+      putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepRule: "implied_move_at_put_sale", stepBelowFirstBreakEvenPct: 15, stepLookbackSessions: 10,
+      leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAllocationPct: 10,
+    });
+    // Pot 2,000,000 × 20% × 50% = 200,000: floor(100,000 ÷ 10,000.50) = 9 lots. Step 60% × √(21 ÷ 252) = 17.32%, so the
+    // Puts are struck at most 96 × (1 − 17.32%) = 79.37. The LEAPS spends at most 10% of the 200,000.
+    expect(example).toMatchObject({ accountValue: 2_000_000, allocationPct: 20, pot: 200_000, stockPrice: 100, lots: 9, firstBreakEven: 96, impliedVolatilityPct: 60, leapsCap: 20_000 });
+    expect(example.stepPct).toBeCloseTo(17.3205, 4);
+    expect(example.putStrikeCap).toBeCloseTo(79.3723, 4);
+    // The fixed Step rule quotes the fixed Step.
+    expect(buildPlutoHowItWorks({ ...settings, volFarmerV2StepRule: "fixed" }, figures).volFarmerV2.example).toMatchObject({ stepPct: 15, putStrikeCap: 81.6 });
   });
 
   it("follows the live settings: the example's pot, rungs and shock move with them", () => {

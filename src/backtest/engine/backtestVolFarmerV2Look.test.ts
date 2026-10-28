@@ -7,7 +7,8 @@ import { defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, t
 import { BacktestBarHistory } from "./backtestBarHistory.js";
 import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
-import { chooseVolFarmerV2Leaps, contractsAffordable, describeVolFarmerV2Run, impliedVolatilityBefore, runVolFarmerV2Look, volFarmerV2BreakEven, volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap } from "./backtestVolFarmerV2Look.js";
+import { describeVolFarmerV2Run, impliedVolatilityBefore, runVolFarmerV2Look } from "./backtestVolFarmerV2Look.js";
+import { chooseVolFarmerV2Leaps, contractsAffordable, volFarmerV2BreakEven, volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap } from "./volFarmerV2Steps.js";
 import { expirySettlementInstant, settleExpiry } from "./ledger/ledgerEvents.js";
 import { ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
 import { createSimulatedLedger, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
@@ -192,7 +193,7 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(withoutIv.put.description).toContain("(Step 15.0%: no IV in the last 10 sessions, the fixed Step)");
   });
 
-  it("buys a LEAPS with the free cash, up to the contracts its ask offers, when the second position finds no Call, and sells it once that position is called away", async () => {
+  it("buys a LEAPS with the free cash, up to the contracts its ask offers, tops it up to the count intended, and sells it whole once the second position is called away", async () => {
     const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
     await look(ledger, "2026-03-09", 100, "2026-03-13");
     settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
@@ -211,18 +212,26 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(leaps.description).toContain(`which pays for ${affordable}: 5 offered at the ask`);
     expect(openOption(ledger, "call", "long")).toHaveLength(1);
     expect(ledger.positions.find((position) => position.id === leaps.positionIds![0])!.strategyKey).toBe("leaps");
-    // Not again for the same holding.
-    expect((await look(ledger, "2026-03-24", 54, "2026-03-27")).actions.filter((action) => action.kind === "buy_leaps")).toEqual([]);
+    // The next look tops it up with the same contract to the count the cash paid for at the purchase (its ask offers 10);
+    // no new LEAPS is chosen for the same holding, and none is bought once the count is held.
+    const topUp = (await look(ledger, "2026-03-24", 54, "2026-03-27")).actions.filter((action) => action.kind === "buy_leaps");
+    expect(topUp.map((action) => action.quantity)).toEqual([affordable - 5]);
+    expect(topUp[0]!.contract).toEqual(leaps.contract);
+    expect(topUp[0]!.description).toContain(`LEAPS top-up: 5 of ${affordable} held`);
+    expect(openOption(ledger, "call", "long").reduce((sum, leg) => sum + leg.quantity, 0)).toBe(affordable);
+    expect((await look(ledger, "2026-03-25", 54, "2026-03-27")).actions.filter((action) => action.kind === "buy_leaps")).toEqual([]);
 
     // Back up to 85 on Monday 30 March: the second position sells a Call, assigned at Friday's close at 90.
     const recovered = await look(ledger, "2026-03-30", 85, "2026-04-02");
     expect(recovered.actions.some((action) => action.description.includes("second position"))).toBe(true);
     const secondCallLeg = openOption(ledger, "call").find((leg) => leg.strikePrice! < 99)!;
     settleExpiry(ledger, { legId: secondCallLeg.id, expiryClose: 90 });
+    // Both purchases are sold as one order.
     const afterCallAway = await look(ledger, "2026-04-06", 90, "2026-04-10");
-    expect(afterCallAway.actions[0]).toMatchObject({ kind: "sell_leaps", contract: { strategyKey: "leaps", right: "C" } });
+    expect(afterCallAway.actions[0]).toMatchObject({ kind: "sell_leaps", quantity: affordable, contract: { strategyKey: "leaps", right: "C" } });
+    expect(afterCallAway.actions.filter((action) => action.kind === "sell_leaps")).toHaveLength(1);
     expect(openOption(ledger, "call", "long")).toEqual([]);
-    expect(describeVolFarmerV2Run(ledger, [symbol])).toMatch(/1 LEAPS trigger\(s\), 1 bought \(\d+× on 2026-03-23\)/);
+    expect(describeVolFarmerV2Run(ledger, [symbol])).toMatch(new RegExp(`1 LEAPS trigger\\(s\\), 1 bought \\(${affordable}× on 2026-03-23\\)`));
   });
 
   it("spends no more than the LEAPS cap's share of the account on the LEAPS", async () => {
@@ -269,5 +278,21 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.quantity).toBe(4 + put.quantity!);
     expect(calls[0]!.description).toMatch(/first position 4×.*second position \d+×/);
+  });
+
+  it("decides at a later look on that look's quotes and price, and records the look's time", async () => {
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings, looks: "every_look" } } as unknown as EffectiveBacktestSettings;
+    // The 10:00 capture at 100; the 10:30 look's own quotes at 90.
+    const tenOClock = lookSymbolOf("2026-03-09", 100, "2026-03-13");
+    const later = lookSymbolOf("2026-03-09", 90, "2026-03-13");
+    const lookSymbol = { ...tenOClock, bars: barsWithImpliedVolatility([]), intraday: { quotes: later.market.quotes, stockPrice: 90 } } as BacktestLookSymbol;
+    const result = await runVolFarmerV2Look({ todayIso: "2026-03-09", lookTimeEt: "10:30", symbols: [lookSymbol], settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
+    expect(result.actions.map((action) => action.kind)).toEqual(["open_covered_call"]);
+    // Half the pot at 90: floor(50,000 ÷ 9,000.50) = 5 lots, bought at the look's price.
+    expect(result.actions[0]!.description).toContain("with 500 shares bought @ 90.00");
+    expect(result.actions[0]!.lookTimeEt).toBe("10:30");
+    expect(result.actions[0]!.at).toBe(easternInstant("2026-03-09", 10, 30).toISOString());
+    expect(result.breakEvenLevels![0]!.lookTimeEt).toBe("10:30");
   });
 });

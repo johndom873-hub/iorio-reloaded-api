@@ -27,7 +27,7 @@ const gateId = randomUUID();
 const otherId = randomUUID();
 const now = new Date("2026-10-20T15:00:00Z");
 
-async function action(executionStrategy: "cc_put_ladder" | "edge_margin", contract: Record<string, unknown>): Promise<string> {
+async function action(executionStrategy: "cc_put_ladder" | "edge_margin" | "vol_farmer_v2", contract: Record<string, unknown>): Promise<string> {
   const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: "{}", model_called: false }).returning("id");
   const [row] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: "GATE", outcome: "validated", execution_strategy: executionStrategy, contract: JSON.stringify(contract) }).returning("id");
   return row.id as string;
@@ -60,6 +60,7 @@ describe("loadLadderOrderGateContext", () => {
     expect(await loadLadderOrderGateContext({ pluto_action_id: ladderPut, payload: putPayload(45) }, testDb, now)).toEqual({
       potFraction: 0.2,
       book: { symbols: ["GATE", "OTHR"], budgetFraction: 0.4 },
+      deltaChecked: true,
       isEntryPut: false,
       minAbsDelta: 0.05,
       maxAbsDelta: 0.25,
@@ -75,5 +76,17 @@ describe("loadLadderOrderGateContext", () => {
     expect(await loadLadderOrderGateContext({ pluto_action_id: entryPut, payload: putPayload(45) }, testDb, now)).toMatchObject({ isEntryPut: true });
     const older = await action("cc_put_ladder", { strategyKey: "cash_secured_put" });
     expect(await loadLadderOrderGateContext({ pluto_action_id: older, payload: putPayload(45) }, testDb, now)).toMatchObject({ isEntryPut: false });
+  });
+
+  it("holds Vol Farmer v2's Puts to |delta| at most its Put |delta| and its Calls to its Calls' range, and gives its LEAPS the book's cap alone", async () => {
+    // The migration's defaults: Put |delta| 0.30, the Calls 0.05–0.30.
+    const put = await action("vol_farmer_v2", { strategyKey: "cash_secured_put" });
+    expect(await loadLadderOrderGateContext({ pluto_action_id: put, payload: putPayload(45) }, testDb, now)).toMatchObject({ potFraction: 0.2, deltaChecked: true, isEntryPut: true, minAbsDelta: 0, maxAbsDelta: 0.3 });
+    const call = await action("vol_farmer_v2", { strategyKey: "covered_call" });
+    const callPayload = { symbol: "GATE", strategyKey: "covered_call", legs: [{ role: "option", action: "SELL", symbol: "GATE", quantity: 1, unitPrice: 0.8, strike: 55, expiry: "20261120", right: "C" }] } as never;
+    expect(await loadLadderOrderGateContext({ pluto_action_id: call, payload: callPayload }, testDb, now)).toMatchObject({ potFraction: 0.2, deltaChecked: true, isEntryPut: false, minAbsDelta: 0.05, maxAbsDelta: 0.3 });
+    const leaps = await action("vol_farmer_v2", { strategyKey: "leaps" });
+    const leapsPayload = { symbol: "GATE", strategyKey: "leaps", legs: [{ role: "option", action: "BUY", symbol: "GATE", quantity: 1, unitPrice: 12, strike: 40, expiry: "20271217", right: "C" }] } as never;
+    expect(await loadLadderOrderGateContext({ pluto_action_id: leaps, payload: leapsPayload }, testDb, now)).toMatchObject({ potFraction: null, deltaChecked: false, book: { symbols: ["GATE", "OTHR"], budgetFraction: 0.4 } });
   });
 });

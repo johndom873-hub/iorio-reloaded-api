@@ -374,11 +374,20 @@ describe("POST /positions/orders: LEAPS", () => {
     expect(fetchPricesPoolFirstMock).not.toHaveBeenCalled();
   });
 
-  it("refuses a LEAPS sent for Pluto, and builds nothing", async () => {
+  it("builds a LEAPS sent for Pluto under Vol Farmer v2", async () => {
+    const ticker = await createTicker();
+    const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: "{}", model_called: false }).returning("id");
+    const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "buy_leaps", symbol: ticker.symbol, outcome: "validated", execution_strategy: "vol_farmer_v2" }).returning("id");
+    const response = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "leaps", option: optionBody, plutoActionId: action.id });
+    expect(response.status).toBe(201);
+    expect((await orderRow(response.json.id)).request_type).toBe("open_leaps");
+  });
+
+  it("refuses a LEAPS sent for Pluto under any strategy but Vol Farmer v2, and builds nothing", async () => {
     const ticker = await createTicker();
     const response = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "leaps", option: optionBody, plutoActionId: "00000000-0000-0000-0000-000000000001" });
     expect(response.status).toBe(400);
-    expect(response.json.error).toBe("Pluto does not buy LEAPS.");
+    expect(response.json.error).toBe("Pluto buys LEAPS only under Vol Farmer v2.");
     expect(await orderCount()).toBe(0);
   });
 });

@@ -1054,9 +1054,14 @@ positionsRouter.post("/orders", async (request, response) => {
     return;
   }
   const isLeaps = strategyKey === "leaps";
-  if (isLeaps && (request.body as { plutoActionId?: unknown }).plutoActionId) {
-    response.status(400).json({ error: "Pluto does not buy LEAPS." });
-    return;
+  // Pluto buys LEAPS for Vol Farmer v2 only (Marcelo 2026-10-27): an action taken under any other strategy is refused.
+  const leapsPlutoActionId = (request.body as { plutoActionId?: unknown }).plutoActionId;
+  if (isLeaps && leapsPlutoActionId) {
+    const action = typeof leapsPlutoActionId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(leapsPlutoActionId) ? await db("pluto_actions").where({ id: leapsPlutoActionId }).first("execution_strategy") : undefined;
+    if (action?.execution_strategy !== "vol_farmer_v2") {
+      response.status(400).json({ error: "Pluto buys LEAPS only under Vol Farmer v2." });
+      return;
+    }
   }
   if (!option || !Number.isInteger(option.quantity) || option.quantity <= 0) {
     response.status(400).json({ error: "A positive whole number of option contracts is required." });

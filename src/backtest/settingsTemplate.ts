@@ -190,7 +190,7 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
       { value: "none", label: "None" },
     ],
   },
-  { path: "volFarmerV2.putsStartCallYieldPct", label: "Puts start under", unit: "percent", editable: true, note: "% a year: Puts start while the first position's Calls yield under this. At each 10:00 look where the first position needs a new Call (none open), the best Call the first position can sell (at or above its break-even, the Vol Farmer's |delta| range, the next expiry) is measured by its premium yield; under this (no Call: 0%), Puts are sold with the other half of the pot, beside the Calls" },
+  { path: "volFarmerV2.putsStartCallYieldPct", label: "Puts start under", unit: "percent", editable: true, note: "% a year: Puts start while the first position's Calls yield under this. At each look where the first position needs a new Call (none open), the best Call the first position can sell (at or above its break-even, the Vol Farmer's |delta| range, the next expiry) is measured by its premium yield; under this (no Call: 0%), Puts are sold with the other half of the pot, beside the Calls" },
   { path: "volFarmerV2.putMaxAbsDelta", label: "Put |delta|", unit: "number", editable: true, note: "the Puts' highest |delta|: the Put sold is the one with the highest premium yield of the next expiry up to this |delta|, struck far enough below the first position's break-even (next row); as many contracts as half the pot secures (strike × 100 each)" },
   { path: "volFarmerV2.stepBelowFirstBreakEvenPct", label: "Step", unit: "percent", editable: true, note: "% at least below the first break-even: a Put's strike ≤ the first position's break-even × (1 − this ÷ 100), so the second position opens lower than the first (0 to 90); the Step with the Fixed Step rule, and the implied-move rule's Step when no IV is found" },
   {
@@ -206,7 +206,18 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
   },
   { path: "volFarmerV2.leapsMinDte", label: "LEAPS expiry from", unit: "days", editable: true, note: "when the second position finds no Call at or above its break-even, the free cash (up to the LEAPS cap) buys a LEAPS Call of the first listed expiry at least this many days out (30 to 1000), sold when the second position is called away" },
   { path: "volFarmerV2.leapsAbsDelta", label: "LEAPS |delta|", unit: "number", editable: true, note: "of that expiry's Calls, the one whose |delta| (from its own implied volatility) is nearest this" },
-  { path: "volFarmerV2.leapsMaxAccountPct", label: "LEAPS cap", unit: "percent", editable: true, note: "% of the account's value at the 10:00 look (positions marked) a LEAPS purchase spends at most, never more than the free cash. 0: no cap, all the free cash (0 to 100)" },
+  { path: "volFarmerV2.leapsMaxAccountPct", label: "LEAPS cap", unit: "percent", editable: true, note: "% of the account's value at the look (positions marked) a LEAPS purchase spends at most, never more than the free cash. 0: no cap, all the free cash (0 to 100)" },
+  {
+    path: "volFarmerV2.looks",
+    label: "Decides",
+    unit: "choice",
+    editable: true,
+    note: "Once a day: every rule at the 10:00 look only. At every look: every rule at each 30-minute look, on that look's quotes and price, as Pluto runs it",
+    choices: [
+      { value: "first_look", label: "Once a day, at 10:00" },
+      { value: "every_look", label: "At every look (every 30 minutes)" },
+    ],
+  },
   { path: "steadyStake.stakePct", label: "Stake", unit: "percent", editable: true, note: "% of the pot: the share of each ticker's pot held in its shares. At the 10:00 look, whole shares are bought or sold back to it when their value drifts out of the band" },
   { path: "steadyStake.rebalanceBandPct", label: "Rebalancing band", unit: "percent", editable: true, note: "% of the pot: shares are traded back to the stake once their value is off it by more than this. A $100,000 pot at 80% ± 5 holds shares worth $75,000 to $85,000" },
   { path: "steadyStake.callCoveragePct", label: "Calls on expiry days", unit: "percent", editable: true, note: "% of the free round lots: at 10:00 on a day the ticker has an expiry, Calls expiring at that day's close, the contract nearest the Calls' |delta| first, then the next nearest while the volume limit leaves lots uncovered. 0 = no Calls" },
@@ -738,7 +749,7 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
   {
     group: "Vol Farmer v2",
     section: "vol_farmer_v2",
-    rows: ["volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta", "volFarmerV2.leapsMaxAccountPct"].map((path) => ({
+    rows: ["volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta", "volFarmerV2.leapsMaxAccountPct", "volFarmerV2.looks"].map((path) => ({
       path,
       appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v2"] }], explanation: "Applies only with Vol Farmer v2 as decision maker." },
     })),

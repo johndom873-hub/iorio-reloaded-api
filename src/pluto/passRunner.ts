@@ -7,9 +7,11 @@ import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState, recordPlutoPass, tripPlutoBreaker } from "./stateStore.js";
 import { runPlutoSystemChecks } from "./systemChecks.js";
 import { runLadderRound } from "./ladderRound.js";
+import { runVolFarmerV2Round } from "./volFarmerV2Round.js";
 
-// One round (design rounds 3–4, 2026-09-28; the CC + Put Ladder only since Signals was retired, 2026-10-27): system
-// checks → the ladder's rules on its band quotes → the real order routes. Everything is written to the ledger as it happens.
+// One round (design rounds 3–4, 2026-09-28; rules only since Signals was retired, 2026-10-27): system checks → each
+// ticker's strategy on its band quotes (the CC + Put Ladder's round, then Vol Farmer v2's, Marcelo 2026-10-27) → the real
+// order routes. Everything is written to the ledger as it happens.
 
 export interface PassRunnerContext {
   api: InternalApiClient;
@@ -109,14 +111,26 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     detail: `${spyDayChangePct === null ? "SPY day change unknown" : `SPY ${spyDayChangePct.toFixed(2)}% (the ladder stops at -${settings.ladderSpyStressBreakerPct}%)`}${stressOverridden ? ` — override on for today${checks.context.state.stressOverrideByDisplayName ? ` by ${checks.context.state.stressOverrideByDisplayName}` : ""}` : ""}`,
   };
 
-  // 2. The CC + Put Ladder (Marcelo 2026-10-14/15): rules only. Its sales wait for today's opening look.
-  if (request.heldPositionsOnly) return skip("the ladder's sales wait for today's opening look", checks.checks);
-  if (ladderStress) return skip("market stress: the ladder sells nothing while SPY is down", checks.checks);
-  if (checks.context.netLiquidationValue === null) return skip("no net liquidation value for the ladder's pots", checks.checks);
-  const ladder = await runLadderRound({ passId, settings, api: context.api, marketWatch: context.marketWatch, trackWatch: context.trackWatch, now, todayIso: checks.context.todayEasternIso, totalCashValue: checks.context.totalCashValue, netLiquidationValue: checks.context.netLiquidationValue, cancelByMs: checks.context.session.cancelByMs, symbols: request.symbols });
-  const sent = ladder.outcomes.filter((outcome) => outcome.outcome === "confirmed").length;
-  const skippedReason = sent > 0 ? null : ladder.planned === 0 ? `the ladder planned no sale (${ladder.looked.length} ticker(s) looked at${ladder.notes.length > 0 ? `; ${ladder.notes.join("; ")}` : ""})` : `none of the ladder's ${ladder.planned} planned sale(s) was sent`;
-  await finishPass({ candidateCount: ladder.planned, systemChecks: checks.checks, skippedReason });
+  // 2. The strategies (Marcelo 2026-10-14/15 and 2026-10-27): rules only. Their orders wait for today's opening look. Under
+  // market stress the ladder sells nothing and Vol Farmer v2 opens nothing, a LEAPS sale still going.
+  if (request.heldPositionsOnly) return skip("the strategies' orders wait for today's opening look", checks.checks);
+  if (checks.context.netLiquidationValue === null) return skip("no net liquidation value for the strategies' pots", checks.checks);
+  const roundInput = { passId, settings, api: context.api, marketWatch: context.marketWatch, trackWatch: context.trackWatch, now, todayIso: checks.context.todayEasternIso, totalCashValue: checks.context.totalCashValue, netLiquidationValue: checks.context.netLiquidationValue, cancelByMs: checks.context.session.cancelByMs, symbols: request.symbols };
+  const ladder = ladderStress ? null : await runLadderRound(roundInput);
+  const volFarmerV2 = await runVolFarmerV2Round({ ...roundInput, stressed: ladderStress });
+  const sent = (ladder?.outcomes.filter((outcome) => outcome.outcome === "confirmed").length ?? 0) + volFarmerV2.sent;
+  const planned = (ladder?.planned ?? 0) + volFarmerV2.planned;
+  const looked = (ladder?.looked.length ?? 0) + volFarmerV2.looked.length;
+  const notes = [...(ladder?.notes ?? []), ...volFarmerV2.notes];
+  const skippedReason =
+    sent > 0
+      ? null
+      : ladderStress && planned === 0
+        ? "market stress: Pluto opens nothing while SPY is down"
+        : planned === 0
+          ? `no order planned (${looked} ticker(s) looked at${notes.length > 0 ? `; ${notes.join("; ")}` : ""})`
+          : `none of the ${planned} planned order(s) was sent${notes.length > 0 ? ` (${notes.join("; ")})` : ""}`;
+  await finishPass({ candidateCount: planned, systemChecks: checks.checks, skippedReason });
   if (skippedReason) await recordPlutoEvent("pass_skipped", { passId, trigger: request.trigger, reason: skippedReason });
   await recordPlutoPass();
   return { passId, skippedReason, outcome: sent > 0 ? "trade" : null };

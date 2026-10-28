@@ -32,7 +32,7 @@ vi.mock("./ladderLook.js", () => ({ runLadderLook: (input: { symbol: string }) =
 vi.mock("./ledger.js", () => ({ recordPlutoAction: vi.fn(), recordPlutoEvent: vi.fn(async () => {}) }));
 vi.mock("./tickerSettingsStore.js", async (original) => ({
   ...(await original<object>()),
-  loadEnabledPlutoTickerSettings: async () => ["AAA", "BBB", "FRZN"].map((symbol) => ({ tickerId: `t-${symbol}`, symbol, allocationPct: null })),
+  loadEnabledPlutoTickerSettings: async () => ["AAA", "BBB", "FRZN"].map((symbol) => ({ tickerId: `t-${symbol}`, symbol, strategy: "cc_put_ladder", allocationPct: null })),
 }));
 vi.mock("../lib/orderLimits.js", async (original) => ({ ...(await original<object>()), loadCommittedCapitalOnSymbols: async () => harness.committed }));
 vi.mock("./ladderNotices.js", () => ({

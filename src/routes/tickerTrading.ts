@@ -2,7 +2,8 @@ import { formatExpiryAsIsoDate } from "../lib/expiryFormat.js";
 import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { db } from "../db/connection.js";
-import { loadStoredOptionChain, lookupExpiryStrikes, lookupOptionParams } from "../ibkr/fetchOptionChain.js";
+import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
+import { liveExpiryStrikes, liveListedExpirations } from "../ibkr/liveOptionChainLookups.js";
 import { peekPooledQuote } from "../ibkr/marketDataPool.js";
 import { fetchDividendOutlook, type DividendOutlook } from "../ibkr/fetchDividendOutlook.js";
 import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } from "../ibkr/sharedReadConnection.js";
@@ -101,18 +102,6 @@ tickerTradingRouter.get("/:symbol/valuation-inputs", async (request, response) =
   response.json({ symbol: ticker.symbol, nextTwelveMonthsDividends: outlook?.nextTwelveMonths ?? null, nextDividendDate: outlook?.nextDate ?? null, riskFreeRate });
 });
 
-// Strike grids looked up live, kept for the trading day (an expiry's listed strikes rarely change within a day).
-const liveStrikesCache = new Map<string, number[]>();
-const liveExpirationsCache = new Map<string, string[]>();
-
-async function withIbkr<T>(label: string, run: (ib: Parameters<typeof lookupExpiryStrikes>[0]) => Promise<T>): Promise<T> {
-  const connection = await borrowSharedConnectionOrConnect(sharedReadConnection, label);
-  try {
-    return await run(connection.ib);
-  } finally {
-    connection.disconnect();
-  }
-}
 
 tickerTradingRouter.get("/:symbol/option-chain", async (request, response) => {
   const ticker = await loadTicker(request.params.symbol);
@@ -135,12 +124,7 @@ tickerTradingRouter.get("/:symbol/option-chain", async (request, response) => {
         response.status(409).json({ error: `${ticker.symbol} has no IBKR contract id stored, so its option chain cannot be looked up.` });
         return;
       }
-      const cacheKey = `${ticker.id}|${todayIso}`;
-      let live = liveExpirationsCache.get(cacheKey);
-      if (!live) {
-        live = (await withIbkr("ticker-option-chain", (ib) => lookupOptionParams(ib, ticker.symbol, ticker.contractId!))).expirations;
-        liveExpirationsCache.set(cacheKey, live);
-      }
+      const live = await liveListedExpirations({ id: ticker.id, symbol: ticker.symbol, contractId: ticker.contractId }, todayIso, "ticker-option-chain");
       expirations = live.filter((expiry) => expiry >= todayYyyymmdd).sort();
     }
     const selected = requestedExpiry !== null && expirations.includes(requestedExpiry) ? requestedExpiry : (expirations[0] ?? null);
@@ -152,13 +136,7 @@ tickerTradingRouter.get("/:symbol/option-chain", async (request, response) => {
         strikes = storedStrikes;
         strikesSource = "stored";
       } else {
-        const cacheKey = `${ticker.id}|${selected}|${todayIso}`;
-        let live = liveStrikesCache.get(cacheKey);
-        if (!live) {
-          live = (await withIbkr("ticker-option-chain", (ib) => lookupExpiryStrikes(ib, ticker.symbol, selected))).strikes;
-          if (live.length > 0) liveStrikesCache.set(cacheKey, live);
-        }
-        strikes = live;
+        strikes = await liveExpiryStrikes(ticker, selected, todayIso, "ticker-option-chain");
         strikesSource = "live";
       }
     }

@@ -180,7 +180,7 @@ export function lookTimesInWindow(windowStartEt: string, windowEndEt: string, cl
 }
 
 /** One look of a day, for the day's summary. */
-interface DayLookSummary {
+export interface DayLookSummary {
   lookTimeEt: string;
   /** The look in one line, without where opens were stopped. */
   summary: string;
@@ -193,20 +193,24 @@ interface DayLookSummary {
 /**
  * The day in one line. A day of one look at 10:00 reads as that look. Otherwise every look that filled an order is
  * named with its time; of the looks that only had choices refused, the first is told in full and the others are named;
- * the looks with nothing to tell are counted, and when no look did anything the first one says why. Where opens were
- * stopped for lack of room is said once for the day.
+ * the looks with nothing to tell are counted, and when no look did anything the first one says why. With
+ * `firstLookNoted` (Vol Farmer v2, whose look notes why a position sold no Call), a first look that did nothing but noted
+ * something is told in full too. Where opens were stopped for lack of room is said once for the day.
  */
-function summarizeDayLooks(looks: readonly DayLookSummary[]): string[] {
+export function summarizeDayLooks(looks: readonly DayLookSummary[], firstLookNoted = false): string[] {
   if (looks.length === 0) return [];
   const opensStopped = [...new Set(looks.flatMap((look) => look.opensStopped))];
   if (looks.length === 1 && looks[0]!.lookTimeEt === captureLookTimeEt) return [looks[0]!.summary, ...opensStopped];
   const withFills = looks.filter((look) => look.filledCount > 0);
   const onlyRefused = looks.filter((look) => look.filledCount === 0 && look.refusedCount > 0);
   if (withFills.length + onlyRefused.length === 0) return [`${looks[0]!.lookTimeEt} ${looks[0]!.summary}`, ...(looks.length > 1 ? [`no action at the ${looks.length - 1} later look${looks.length === 2 ? "" : "s"} either`] : [])];
-  const quietCount = looks.length - withFills.length - onlyRefused.length;
+  const firstLook = looks[0]!;
+  const firstLookTold = firstLookNoted && firstLook.filledCount + firstLook.refusedCount === 0 && firstLook.summary !== "No action";
+  const quietCount = looks.length - withFills.length - onlyRefused.length - (firstLookTold ? 1 : 0);
   const laterRefusedLooks = onlyRefused.slice(1);
   const laterRefusedCount = laterRefusedLooks.reduce((sum, look) => sum + look.refusedCount, 0);
   return [
+    ...(firstLookTold ? [`${firstLook.lookTimeEt} ${firstLook.summary}`] : []),
     ...withFills.map((look) => `${look.lookTimeEt} ${look.summary}`),
     ...(onlyRefused.length > 0 ? [`${onlyRefused[0]!.lookTimeEt} ${onlyRefused[0]!.summary}`] : []),
     ...(laterRefusedLooks.length > 0 ? [`${laterRefusedCount} more choice${laterRefusedCount === 1 ? "" : "s"} refused at ${laterRefusedLooks.map((look) => look.lookTimeEt).join(", ")}`] : []),
@@ -686,19 +690,20 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       const spyBaselineDay = spyBuyAndHold?.markDay(todayIso, spyPriceAtTen(todayIso), interestPeriod) ?? null;
 
       const hedgePutQuotesByKey = new Map<string, HedgePutQuoteSource>();
-      const leapsCallQuotesBySymbol = new Map<string, HedgePutQuoteSource>();
-      /** A symbol's 10:00 Calls of every listed expiry, for Vol Farmer v2's LEAPS (each read once a day and expiry); undefined for any other decision maker. */
-      const leapsCallQuotesOf = (entry: SessionSymbol): HedgePutQuoteSource | undefined => {
+      const leapsCallQuotesByKey = new Map<string, HedgePutQuoteSource>();
+      const listedCallExpiriesBySymbol = new Map<string, string[]>();
+      /** A symbol's Calls of every listed expiry at a look, for Vol Farmer v2's LEAPS (each read once a day, look and expiry); undefined for any other decision maker. */
+      const leapsCallQuotesAt = (entry: SessionSymbol, lookTimeEt: string): HedgePutQuoteSource | undefined => {
         if (!leapsOn) return undefined;
-        let source = leapsCallQuotesBySymbol.get(entry.symbol);
+        const key = `${entry.symbol}|${lookTimeEt}`;
+        let source = leapsCallQuotesByKey.get(key);
         if (!source) {
-          let expiries: string[] | null = null;
           const quotesByExpiry = new Map<string, SymbolFileQuote[]>();
           source = {
-            listedExpiries: () => (expiries ??= entry.file.loadCallExpiries(todayIso)),
-            quotesOf: (expiry) => quotesByExpiry.get(expiry) ?? quotesByExpiry.set(expiry, entry.file.loadCallQuotesOfExpiry(todayIso, expiry)).get(expiry)!,
+            listedExpiries: () => listedCallExpiriesBySymbol.get(entry.symbol) ?? listedCallExpiriesBySymbol.set(entry.symbol, entry.file.loadCallExpiries(todayIso)).get(entry.symbol)!,
+            quotesOf: (expiry) => quotesByExpiry.get(expiry) ?? quotesByExpiry.set(expiry, lookTimeEt === captureLookTimeEt ? entry.file.loadCallQuotesOfExpiry(todayIso, expiry) : entry.file.loadIntradayCallQuotesOfExpiry(todayIso, lookTimeEt, expiry)).get(expiry)!,
           };
-          leapsCallQuotesBySymbol.set(entry.symbol, source);
+          leapsCallQuotesByKey.set(key, source);
         }
         return source;
       };
@@ -723,7 +728,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
         return legs.filter((leg) => {
           if (leg.side !== "long" || leg.legType !== "option") return true;
-          const source = leg.optionType === "call" ? leapsCallQuotesOf(entry) : hedgePutQuotesAt(entry, captureLookTimeEt);
+          const source = leg.optionType === "call" ? leapsCallQuotesAt(entry, captureLookTimeEt) : hedgePutQuotesAt(entry, captureLookTimeEt);
           if (!source) return true;
           const strikeAsTraded = leg.strikePrice! / priceToCycleScale;
           const mid = markMidByContract(source.quotesOf(leg.expiryDate!), new Set([roundedStrike(strikeAsTraded)])).get(markKey(leg.expiryDate!, strikeAsTraded, leg.optionType === "call" ? "C" : "P"));
@@ -836,7 +841,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const previousSessionVolumeByContract = capture!.previousSessionVolumeByContract;
         notes.push(...describeDataGaps(entry.file, todayIso, previousFileDay, previousSessionVolumeByContract).map((note) => noteFor(entry, note)));
         const hedgePutQuotes = hedgePutQuotesAt(entry, captureLookTimeEt);
-        const leapsCallQuotes = leapsCallQuotesOf(entry);
+        const leapsCallQuotes = leapsCallQuotesAt(entry, captureLookTimeEt);
         const nextSessionIso = sessionDays[dayIndex + 1];
         daySymbols.push({
           entry,
@@ -901,9 +906,10 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           looksOfDay.push({ lookTimeEt: crossing.lookTimeEt, summary: crossing.summary, filledCount: crossing.actions.length, refusedCount: crossing.actions.length === 0 ? 1 : 0, opensStopped: [] });
         }
       };
-      // The Steady Stake and Vol Farmer v2 decide at 10:00 only, the Vol Farmer too but reads every look's quotes (the IVs
-      // a crossing is priced on), the baseline at every look unless its looks say the first only.
-      const decidesAtCaptureLookOnly = settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" : settings.decisionMaker === "steady_stake" || settings.decisionMaker === "vol_farmer_v2";
+      // The Steady Stake decides at 10:00 only, the Vol Farmer too but reads every look's quotes (the IVs a crossing is
+      // priced on), the baseline and Vol Farmer v2 at every look unless their looks say the first only.
+      const decidesAtCaptureLookOnly =
+        settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" : settings.decisionMaker === "vol_farmer_v2" ? settings.volFarmerV2.looks === "first_look" : settings.decisionMaker === "steady_stake";
       const runLook = settings.decisionMaker === "baseline" ? runBaselineLook : settings.decisionMaker === "steady_stake" ? runSteadyStakeLook : settings.decisionMaker === "vol_farmer_v2" ? runVolFarmerV2Look : runVolFarmerLook;
       for (const lookTimeEt of lookTimes) {
         const isCaptureLook = lookTimeEt === captureLookTimeEt;
@@ -922,7 +928,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
             markLegs(entry, openLegsAtLook.filter((leg) => symbolOfLeg(leg) === entry), lookPrice, quotes, splitFactor);
             entry.lastAdjustedStockPrice = lookPrice / splitFactor;
             const hedgePutQuotes = hedgePutQuotesAt(entry, lookTimeEt);
-            lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: lookPrice }, ...(hedgePutQuotes ? { hedgePutQuotes } : {}) });
+            const leapsCallQuotes = leapsCallQuotesAt(entry, lookTimeEt);
+            lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: lookPrice }, ...(hedgePutQuotes ? { hedgePutQuotes } : {}), ...(leapsCallQuotes ? { leapsCallQuotes } : {}) });
           }
         }
         if (lookSymbols.length === 0) continue;
@@ -943,7 +950,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       scanVolFarmerCrossings(clockTime(closeMinutesByDay.get(todayIso) ?? regularCloseMinutesEt));
       if (lookedAfterCapture) runStatistics.daysWithIntradayLooks += 1;
       runStatistics.looksRun += looksOfDay.length;
-      const summaryParts = looksOfDay.length > 0 ? summarizeDayLooks(looksOfDay) : [`No action: ${daySymbols.length > 0 ? `no look inside the trading window ${pluto.windowStartEt}–${pluto.windowEndEt} ET has quotes` : nothingScoredReason}`];
+      const summaryParts = looksOfDay.length > 0 ? summarizeDayLooks(looksOfDay, settings.decisionMaker === "vol_farmer_v2") : [`No action: ${daySymbols.length > 0 ? `no look inside the trading window ${pluto.windowStartEt}–${pluto.windowEndEt} ET has quotes` : nothingScoredReason}`];
       // The day is recorded as marked at 10:00, before its looks: an action's cash and exposure show from the next day.
       days.push({ tradingDate: todayIso, accountValue, cash: cashAtMark, exposureDollars, sharesValueDollars, interestDollars, baselineValue, baselineExposureDollars: baselineSharesValue, baselineInterestDollars, spyBaselineValue: spyBaselineDay?.value ?? null, spyBaselineExposureDollars: spyBaselineDay?.exposureDollars ?? null, spyBaselineInterestDollars: spyBaselineDay?.interestDollars ?? null, decisionSummary: [...summaryParts, ...notes].join(" · "), looksRun: looksOfDay.length, actionsTaken: filledActionsToday });
 

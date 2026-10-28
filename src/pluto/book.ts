@@ -7,8 +7,8 @@ import { positionSelect } from "../lib/positionQueries.js";
 import { daysToExpiry, describeOptionContract, formatDayMonth, formatStrike } from "../lib/optionContractLabel.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 
-// Pluto's book (Marcelo, 2026-10-07): every open position on a ticker Pluto is enabled on, whoever opened it, except hedges and
-// LEAPS (Pluto has no way to act on a long option). An enabled ticker is Pluto's to manage (2026-10-06), so all of it counts toward
+// Pluto's book (Marcelo, 2026-10-07): every open position on a ticker Pluto is enabled on, whoever opened it, except hedges
+// (protective Puts; LEAPS count since Vol Farmer v2 buys and sells them, 2026-10-27). An enabled ticker is Pluto's to manage (2026-10-06), so all of it counts toward
 // Pluto's capital budget and its position cap; switching a ticker off hands every position on it, Pluto's own included, back
 // to people. Also the per-symbol facts the post-model gates need (last filled action for the cooldown, symbols with a working
 // Pluto order).
@@ -50,8 +50,8 @@ export const plutoOpenedPositionIdsCte = `pluto_opened_position_ids(id) AS (
   JOIN pluto_opened_position_ids known ON known.id = pss.source_position_id
 )`;
 
-/** Strategies that never count in Pluto's book. */
-export const strategiesOutsidePlutoBook = ["hedge", "leaps"];
+/** Strategies that never count in Pluto's book: protective Puts. A LEAPS counts since Vol Farmer v2 buys them (Marcelo 2026-10-27). */
+export const strategiesOutsidePlutoBook = ["hedge"];
 
 /** When the last Pluto action per symbol whose order filled (fully or partly) was taken: the ticker cooldown's clock. */
 export async function loadLastFilledPlutoActionAtBySymbol(): Promise<Map<string, Date>> {

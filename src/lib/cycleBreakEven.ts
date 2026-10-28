@@ -122,7 +122,7 @@ function inTheMoneyBy(leg: CycleOptionLeg, settlementClose: number): number {
 }
 
 /** Whether the ledger books the leg as assigned: settled without a trade, assigned by its explicit settlement, else in the money by the threshold at the settlement close. */
-function settlesAssigned(leg: CycleOptionLeg): boolean {
+export function settlesAssigned(leg: CycleOptionLeg): boolean {
   if (!isSettledWithoutTrade(leg)) return false;
   if (leg.settledAs !== undefined) return leg.settledAs === "assigned";
   return leg.expiryClose !== null && inTheMoneyBy(leg, leg.expiryClose) >= marginalThreshold;

@@ -227,19 +227,19 @@ describe("backtest routes", () => {
       ...Array(18).fill("baseline_wheel · Hedge"),
       ...Array(8).fill("steady_stake · Steady Stake"),
       ...Array(25).fill("vol_farmer · Vol Farmer"),
-      ...Array(7).fill("vol_farmer_v2 · Vol Farmer v2"),
+      ...Array(8).fill("vol_farmer_v2 · Vol Farmer v2"),
     ]);
     // Every row once, and every condition on a row that is there.
     const paths = template.rows.map((row) => row.path);
-    expect(new Set(paths).size).toBe(107);
-    expect(paths.length).toBe(107);
+    expect(new Set(paths).size).toBe(108);
+    expect(paths.length).toBe(108);
     expect(paths.filter((path) => path.startsWith("pluto.") || path.startsWith("policy.") || path === "kellyFraction")).toEqual(["pluto.windowStartEt", "pluto.windowEndEt"]);
     const conditionPaths = template.rows.flatMap((row) => [...(row.appliesWhen?.allOf ?? []), ...(row.appliesWhen?.anyOf ?? [])].map((condition) => condition.path));
     expect(conditionPaths.filter((path) => !paths.includes(path))).toEqual([]);
     expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", hedgePutTenorDays: 0, hedgePutExpiry: "nearest", hedgePutStrikeFrom: "stock_price", hedgePutBelowPricePct: 0, hedgePutSize: "share_level", hedgePutCoveragePct: 100, hedgePutRollDaysLeft: 7, hedgePutCovers: "entries", hedgePutStaggeredExpiries: 3, hedgePutStrikeBy: "price", hedgePutAbsDelta: 0.25, hedgePutPriceGate: "off", hedgePutCostFallShare: 0.3, hedgePutIvMultiple: 1.3, hedgeInBreakEven: "excluded", hedgePutTurnover: "sell_when_shares_leave", hedgePutTurnoverDays: 30, hedgePutFarBelowPct: 10 });
     expect(template.rows.find((row) => row.path === "decisionMaker")?.choices?.map((choice) => choice.value)).toEqual(["baseline", "steady_stake", "vol_farmer", "vol_farmer_v2"]);
     // Vol Farmer v2 reads the Vol Farmer's Calls' |delta| range and spread limit; its own rows apply to it alone.
-    expect(template.settings.volFarmerV2).toEqual({ putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 0 });
+    expect(template.settings.volFarmerV2).toEqual({ putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 0, looks: "first_look" });
     expect(template.rows.find((row) => row.path === "volFarmer.callMaxAbsDelta")?.appliesWhen?.allOf).toEqual([{ path: "decisionMaker", oneOf: ["vol_farmer", "vol_farmer_v2"] }]);
     expect(template.rows.find((row) => row.path === "volFarmer.hedge")?.appliesWhen?.allOf).toEqual([{ path: "decisionMaker", oneOf: ["vol_farmer"] }]);
     expect(template.rows.find((row) => row.path === "volFarmerV2.leapsAbsDelta")?.appliesWhen?.allOf).toEqual([{ path: "decisionMaker", oneOf: ["vol_farmer_v2"] }]);

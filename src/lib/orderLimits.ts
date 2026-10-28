@@ -68,7 +68,7 @@ export interface OrderLimitsInput {
    * cash reserve stays), and a covered call's shares are those its stock leg buys (the ladder can buy every share even
    * with uncovered ones held), not the shortfall against the uncovered shares.
    */
-  ladder?: { potFraction: number; stockSharesBought: number; book: LadderBookInput };
+  ladder?: { potFraction: number | null; stockSharesBought: number; book: LadderBookInput };
   /** A built covered-call open with a stock leg: the shares that leg buys, counted in place of the shortfall against uncovered shares held. */
   stockSharesBought?: number;
   /** A trader's order: loads the capital cap's figures (capitalOutsidePluto.ts's loadTraderCapitalFigures). */
@@ -238,7 +238,7 @@ export function ladderBookCapitalVerdict(input: { committedBeforeDollars: number
 
 /** The refusal's wording, for the order gate and the ladder's notes. */
 export function describeLadderBookCapitalRefusal(verdict: LadderBookCapitalVerdict, budgetFraction: number): string {
-  return `The CC + Put Ladder's tickers would commit ${formatWholeDollars(verdict.committedAfterDollars)} together, above Pluto's capital budget of ${formatWholeDollars(verdict.capDollars)} (${formatPct(budgetFraction)} of portfolio value); ${formatWholeDollars(verdict.committedBeforeDollars)} is already committed, counting orders still working.`;
+  return `Pluto's tickers would commit ${formatWholeDollars(verdict.committedAfterDollars)} together, above Pluto's capital budget of ${formatWholeDollars(verdict.capDollars)} (${formatPct(budgetFraction)} of portfolio value); ${formatWholeDollars(verdict.committedBeforeDollars)} is already committed, counting orders still working.`;
 }
 
 async function computeOrderNotionalForInput(input: OrderLimitsInput, spotPrice: number): Promise<number> {
@@ -296,8 +296,11 @@ export interface OrderLimitFigures {
   existingTickerExposure: number;
   inFlight: InFlightTotals;
   settings: Pick<TradingSettings, "maxOrderPctOfPortfolio" | "maxConcentrationPerTickerPct" | "minCashReservePct">;
-  /** A CC + Put Ladder order's pot as a share of the account: the pot cap replaces the max order size and concentration limits. */
-  ladderPotFraction?: number;
+  /**
+   * A Pluto strategy's order (the CC + Put Ladder's, Vol Farmer v2's): its pot as a share of the account, the pot cap in
+   * place of the max order size and concentration limits; null for an order with no pot cap (a v2 LEAPS), which gets the book's alone.
+   */
+  ladderPotFraction?: number | null;
   /** A CC + Put Ladder order: what the ladder's tickers commit before it (counting orders still working) and Pluto's capital budget as a share of the account. */
   ladderBook?: { committedBeforeDollars: number; budgetFraction: number };
   /** A trader's order: the traders' capital cap applies on top of the other limits. */
@@ -319,11 +322,11 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
   const orderSharePct = orderNotional / totalPortfolioValue;
   const tickerExposureAfter = existingTickerExposure + inFlight.tickerNotional + orderNotional;
   const concentrationAfterPct = tickerExposureAfter / totalPortfolioValue;
-  const ladderPotDollars = figures.ladderPotFraction === undefined ? undefined : figures.ladderPotFraction * totalPortfolioValue;
+  const ladderPotDollars = figures.ladderPotFraction === undefined || figures.ladderPotFraction === null ? undefined : figures.ladderPotFraction * totalPortfolioValue;
   const ladderBook = figures.ladderBook && ladderBookCapitalVerdict({ ...figures.ladderBook, orderNotional, netLiquidationValue: totalPortfolioValue });
-  if (ladderPotDollars !== undefined) {
-    if (tickerExposureAfter > ladderPotDollars) {
-      reasons.push(`${figures.symbol} would be ${formatWholeDollars(tickerExposureAfter)}, above its CC + Put Ladder pot of ${formatWholeDollars(ladderPotDollars)} (${formatPct(figures.ladderPotFraction!)} of portfolio value)${workingOrdersNote}.`);
+  if (figures.ladderPotFraction !== undefined) {
+    if (ladderPotDollars !== undefined && tickerExposureAfter > ladderPotDollars) {
+      reasons.push(`${figures.symbol} would be ${formatWholeDollars(tickerExposureAfter)}, above its Pluto pot of ${formatWholeDollars(ladderPotDollars)} (${formatPct(figures.ladderPotFraction!)} of portfolio value)${workingOrdersNote}.`);
     }
     if (ladderBook && !ladderBook.fits) reasons.push(describeLadderBookCapitalRefusal(ladderBook, figures.ladderBook!.budgetFraction));
   } else {

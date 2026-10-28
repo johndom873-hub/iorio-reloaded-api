@@ -22,3 +22,17 @@ export const plutoLadderSettingsFixture = {
   ladderMaxOpenPositions: 120,
   ladderMaxOrdersPerDay: 100,
 } as const satisfies Partial<PlutoSettings>;
+
+// Vol Farmer v2's settings at their migration defaults (20261027900001, the lab's values of 2026-10-27).
+export const plutoVolFarmerV2SettingsFixture = {
+  volFarmerV2PutsStartCallYieldPct: 5,
+  volFarmerV2PutMaxAbsDelta: 0.3,
+  volFarmerV2StepBelowFirstBreakEvenPct: 15,
+  volFarmerV2StepRule: "implied_move_at_put_sale",
+  volFarmerV2LeapsMinDte: 365,
+  volFarmerV2LeapsAbsDelta: 0.7,
+  volFarmerV2LeapsMaxAllocationPct: 10,
+  volFarmerV2CallMinAbsDelta: 0.05,
+  volFarmerV2CallMaxAbsDelta: 0.3,
+  volFarmerV2MaxSpreadPctOfMid: 50,
+} as const satisfies Partial<PlutoSettings>;
