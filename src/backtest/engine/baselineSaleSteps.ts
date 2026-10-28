@@ -144,7 +144,22 @@ export interface BaselineCandidateInput {
   ranking?: "premium_yield" | "time_value" | "premium_dollars" | "premium_per_day";
   /** Candidates of the nearest expiry first, then the next expiry's, each in the ranking's order. */
   nearestExpiryFirst?: boolean;
+  /** The look's figures shared by its selections (makeBaselineSelector); absent: worked out for this selection alone. */
+  lookFigures?: BaselineLookFigures;
 }
+
+/**
+ * What a look's selections work out the same way whatever they select: each expiry's days and years to it, and each
+ * quote's volume limit, forward, implied volatility and delta. Each is worked out the first time a selection reaches it,
+ * so a contract still drops out at the first check it fails. Valid for one look's quotes, stock price, rate, anchors,
+ * volumes and earnings only.
+ */
+export interface BaselineLookFigures {
+  byExpiry: Map<string, { dte: number; yearsToExpiry: number; spansEarnings?: boolean }>;
+  byQuote: Map<SymbolFileQuote, { volumeCap?: number; forward?: number; impliedVolatility?: number | null; delta?: number }>;
+}
+
+const newBaselineLookFigures = (): BaselineLookFigures => ({ byExpiry: new Map(), byQuote: new Map() });
 
 /** The expiry rule: DTE within minDte–maxDte. */
 export function baselineExpiryInRange(dte: number, settings: Pick<BacktestBaselineSettings, "minDte" | "maxDte">): boolean {
@@ -206,19 +221,25 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
     const anchor = input.forwardAnchors.get(expiry);
     return anchor ? forwardAtSpot(anchor.forward, anchor.spotPrice, input.stockPrice) : input.stockPrice * Math.exp(input.riskFreeRate * yearsToExpiry);
   };
+  const lookFigures = input.lookFigures ?? newBaselineLookFigures();
   const candidates: BaselineCandidate[] = [];
   for (const quote of input.quotes) {
     if (quote.right !== input.right) continue;
-    const dte = daysToExpiry(quote.expiry, input.todayIso);
+    let expiryFigures = lookFigures.byExpiry.get(quote.expiry);
+    if (!expiryFigures) {
+      const expiryDte = daysToExpiry(quote.expiry, input.todayIso);
+      expiryFigures = { dte: expiryDte, yearsToExpiry: expiryDte === 0 ? input.yearsToTodaysClose : yearsBetweenIsoDates(input.todayIso, quote.expiry) };
+      lookFigures.byExpiry.set(quote.expiry, expiryFigures);
+    }
+    const { dte, yearsToExpiry } = expiryFigures;
     if (!baselineExpiryInRange(dte, input.settings)) {
       rejections.outsideExpiryRange++;
       continue;
     }
-    if (input.earningsDatesIso && input.earningsDatesIso.some((dateIso) => dateIso >= input.todayIso && dateIso <= quote.expiry)) {
+    if (input.earningsDatesIso && (expiryFigures.spansEarnings ??= input.earningsDatesIso.some((dateIso) => dateIso >= input.todayIso && dateIso <= quote.expiry))) {
       rejections.spansEarnings++;
       continue;
     }
-    const yearsToExpiry = dte === 0 ? input.yearsToTodaysClose : yearsBetweenIsoDates(input.todayIso, quote.expiry);
     if (input.minimumStrike !== undefined && input.minimumStrike !== null && quote.strike < input.minimumStrike - 1e-9) {
       rejections.belowCost++;
       continue;
@@ -235,19 +256,25 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
     const bid = quote.bid!;
     const ask = quote.ask!;
     const mid = (bid + ask) / 2;
-    const volume = input.previousSessionVolumeByContract?.get(contractKey(quote)) ?? null;
-    const volumeCap = volume === null ? 0 : Math.floor(volume * baselineMaxVolumeShare);
+    let quoteFigures = lookFigures.byQuote.get(quote);
+    if (!quoteFigures) lookFigures.byQuote.set(quote, (quoteFigures = {}));
+    if (quoteFigures.volumeCap === undefined) {
+      const volume = input.previousSessionVolumeByContract?.get(contractKey(quote)) ?? null;
+      quoteFigures.volumeCap = volume === null ? 0 : Math.floor(volume * baselineMaxVolumeShare);
+    }
+    const volumeCap = quoteFigures.volumeCap;
     if (volumeCap < 1) {
       rejections.tooLittleVolume++;
       continue;
     }
-    const forward = forwardOf(quote.expiry, yearsToExpiry);
-    const impliedVolatility = impliedVolatilityFromPrice(mid, forward, quote.strike, yearsToExpiry, input.riskFreeRate, isCall);
+    const forward = (quoteFigures.forward ??= forwardOf(quote.expiry, yearsToExpiry));
+    if (quoteFigures.impliedVolatility === undefined) quoteFigures.impliedVolatility = impliedVolatilityFromPrice(mid, forward, quote.strike, yearsToExpiry, input.riskFreeRate, isCall);
+    const impliedVolatility = quoteFigures.impliedVolatility;
     if (impliedVolatility === null) {
       rejections.noImpliedVolatility++;
       continue;
     }
-    const delta = blackScholesDelta(forward, quote.strike, yearsToExpiry, input.riskFreeRate, impliedVolatility, isCall);
+    const delta = (quoteFigures.delta ??= blackScholesDelta(forward, quote.strike, yearsToExpiry, input.riskFreeRate, impliedVolatility, isCall));
     if (Math.abs(delta) < input.settings.minAbsDelta || Math.abs(delta) > input.settings.maxAbsDelta) {
       rejections.outsideDeltaRange++;
       continue;
@@ -414,8 +441,9 @@ export function makeBaselineSelector(input: {
   // Any |delta| passes 0–1: the ladder's Puts without a range still need a usable implied volatility, as every contract does.
   const ladderPutsSettings = baseline.ladderPutDeltaRange === "none" ? { ...baseline, minAbsDelta: 0, maxAbsDelta: 1 } : baseline;
   const settingsFor = (right: "C" | "P", ladderPut: boolean) => (right === "C" ? callsSettings : ladderPut ? ladderPutsSettings : baseline);
+  const lookFigures = newBaselineLookFigures();
   return (right: "C" | "P", minimumStrike: number | null = null, forEntry = true, maximumStrike: number | null = null, byPremiumYield = false, options = {}) => {
-    const selectionInput: BaselineCandidateInput = { quotes, forwardAnchors, commissions, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: settingsFor(right, options.ladderPut === true), spreadShareCharged, isHeld, minimumStrike, maximumStrike, minimumPremiumYield: minimumYieldFor(right, forEntry, options.ladderPut === true), ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" };
+    const selectionInput: BaselineCandidateInput = { lookFigures, quotes, forwardAnchors, commissions, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: settingsFor(right, options.ladderPut === true), spreadShareCharged, isHeld, minimumStrike, maximumStrike, minimumPremiumYield: minimumYieldFor(right, forEntry, options.ladderPut === true), ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" };
     return { ...selectBaselineCandidates(selectionInput), describeRules: () => describeBaselineRules(selectionInput) };
   };
 }

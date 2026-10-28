@@ -74,6 +74,8 @@ export class BacktestSymbolFile {
   private readonly unavailableDaysStatement: StatementSync | null;
   private readonly intradayDaysStatement: StatementSync | null;
   private readonly intradayQuotesStatement: StatementSync | null;
+  private readonly intradayQuotesOfContractStatement: StatementSync | null;
+  private readonly intradayQuoteWithinStatement: StatementSync | null;
   private readonly putExpiriesStatement: StatementSync;
   private readonly putQuotesOfExpiryStatement: StatementSync;
   private readonly intradayPutQuotesOfExpiryStatement: StatementSync | null;
@@ -98,6 +100,9 @@ export class BacktestSymbolFile {
     // Read by the thousand rows a day and look: only what a look reads (not the sizes), each row as an array.
     this.intradayQuotesStatement = hasIntradayTables ? database.prepare(`${intradayQuotesColumnsSql} WHERE trading_date = ? AND look_time > ? AND look_time <= ? AND strike BETWEEN ? AND ? AND ${expiresWithin45DaysSql}`) : null;
     this.intradayQuotesStatement?.setReturnArrays(true);
+    this.intradayQuotesOfContractStatement = hasIntradayTables ? database.prepare(`${intradayQuotesColumnsSql} WHERE trading_date = ? AND look_time = ? AND expiry = ? AND strike BETWEEN ? AND ? AND option_right = ? AND ${expiresWithin45DaysSql}`) : null;
+    this.intradayQuotesOfContractStatement?.setReturnArrays(true);
+    this.intradayQuoteWithinStatement = hasIntradayTables ? database.prepare(`SELECT 1 AS found FROM intraday_quotes WHERE trading_date = ? AND look_time = ? AND strike BETWEEN ? AND ? AND ${expiresWithin45DaysSql} LIMIT 1`) : null;
     // The hedge's long-dated Puts (backtestBaselineHedge.ts), past the 45-day window, one expiry at a time by the primary key.
     this.putExpiriesStatement = database.prepare("SELECT DISTINCT expiry FROM quotes WHERE trading_date = ? AND option_right = 'P' ORDER BY expiry");
     this.putQuotesOfExpiryStatement = database.prepare("SELECT strike, bid, ask, bid_size AS bidSize, ask_size AS askSize FROM quotes WHERE trading_date = ? AND expiry = ? AND option_right = 'P'");
@@ -195,6 +200,20 @@ export class BacktestSymbolFile {
       quotes.push({ expiry, strike, right, bid, ask, bidSize: null, askSize: null });
     }
     return quotesByLookTime;
+  }
+
+  /**
+   * One look's quotes of one expiry and right with a strike from `lowestStrike` to `highestStrike`: what
+   * loadIntradayQuotes holds of them at that look, in the same order, read by the primary key.
+   */
+  loadIntradayQuotesOfContract(tradingDate: string, lookTime: string, contract: { expiry: string; right: "C" | "P" }, lowestStrike: number, highestStrike: number): SymbolFileQuote[] {
+    if (!this.intradayQuotesOfContractStatement) return [];
+    return (this.intradayQuotesOfContractStatement.all(tradingDate, lookTime, contract.expiry, lowestStrike, highestStrike, contract.right) as unknown as [string, string, number, "C" | "P", number | null, number | null][]).map(([, expiry, strike, right, bid, ask]) => ({ expiry, strike, right, bid, ask, bidSize: null, askSize: null }));
+  }
+
+  /** Whether loadIntradayQuotes over a range of looks including `lookTime` holds quotes at that look for these strikes. */
+  hasIntradayQuoteWithin(tradingDate: string, lookTime: string, lowestStrike: number, highestStrike: number): boolean {
+    return this.intradayQuoteWithinStatement?.get(tradingDate, lookTime, lowestStrike, highestStrike) !== undefined;
   }
 
   /** Every Put expiry the day's 10:00 quotes hold, ascending, whatever its distance (the hedge's; files of schema 3 hold every expiry). */

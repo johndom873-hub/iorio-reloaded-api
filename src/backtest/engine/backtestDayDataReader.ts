@@ -17,18 +17,29 @@ export interface DayDataTable {
   columns: DayDataColumn[];
 }
 
-/** One symbol's day as the reader thread sends it. `intraday` is null on a file without intraday tables. */
+/** A strike range, both ends included. */
+export interface StrikeRange {
+  lowestStrike: number;
+  highestStrike: number;
+}
+
+/** One symbol's day as the reader thread sends it. `intraday` and `intradayProbes` are null on a file without intraday tables. */
 export interface DayDataPayload {
   strings: string[];
   quotes: DayDataTable;
   endOfDay: DayDataTable;
   openInterest: DayDataTable;
-  /** Every intraday row of the day after `intradayAfterLookTime`, in primary-key order. */
+  /** Every intraday row of the day after `intradayAfterLookTime`, in primary-key order; null when the looks were probed instead. */
   intraday: DayDataTable | null;
+  /**
+   * Read instead of the rows (probeIntradayQuotesOnly): each look after `intradayAfterLookTime` that has rows, with the
+   * strike of one of them within the request's probe range (null when none is, or the request gave no range).
+   */
+  intradayProbes: { lookTime: string; strikeWithinRange: number | null }[] | null;
   intradayAfterLookTime: string;
 }
 
-export type DayDataReaderRequest = { id: number; symbol: string; tradingDate: string; intradayAfterLookTime: string };
+export type DayDataReaderRequest = { id: number; symbol: string; tradingDate: string; intradayAfterLookTime: string; probeIntradayQuotesOnly: boolean; probeStrikeRange: StrikeRange | null };
 export type DayDataReaderReply = { id: number; ok: true; payload: DayDataPayload } | { id: number; ok: false; error: string };
 
 /** The buffers of a payload, to transfer rather than copy. */
@@ -101,11 +112,30 @@ export class PrefetchedSymbolDay {
     }
     return quotesByLookTime;
   }
+
+  /** The look times after `afterLookTime` that have rows, ascending; null when the day was not probed after that look time. */
+  intradayProbedLookTimes(afterLookTime: string): string[] | null {
+    if (this.payload.intradayProbes === null || afterLookTime !== this.payload.intradayAfterLookTime) return null;
+    return this.payload.intradayProbes.map((look) => look.lookTime);
+  }
+
+  /**
+   * Whether intradayQuotes(afterLookTime, …, range) would hold quotes at the look: false when the look has no rows at all,
+   * true when its probed strike lies in the range. Null when the day was not probed after that look time, or its probe
+   * cannot tell (no strike found in the probe range, or one outside this range): the caller asks the file then.
+   */
+  intradayLookHasStrikeWithin(afterLookTime: string, lookTime: string, range: StrikeRange): boolean | null {
+    if (this.payload.intradayProbes === null || afterLookTime !== this.payload.intradayAfterLookTime) return null;
+    const probe = this.payload.intradayProbes.find((look) => look.lookTime === lookTime);
+    if (!probe) return false;
+    return probe.strikeWithinRange !== null && probe.strikeWithinRange >= range.lowestStrike && probe.strikeWithinRange <= range.highestStrike ? true : null;
+  }
 }
 
 /**
  * The reader thread of one session. prefetch() queues a symbol's day; take() hands it over once read (null when it
- * could not be: the caller reads the file).
+ * could not be: the caller reads the file). With `probeIntradayQuotesOnly` (a session whose looks after 10:00 only mark
+ * what it holds) the intraday rows are not read: each look is probed for one row with a strike in the day's probe range.
  */
 export class BacktestDayDataReader {
   private readonly worker: Worker;
@@ -114,7 +144,7 @@ export class BacktestDayDataReader {
   private nextRequestId = 1;
   private stopped = false;
 
-  constructor() {
+  constructor(private readonly options: { probeIntradayQuotesOnly: boolean } = { probeIntradayQuotesOnly: false }) {
     this.worker = new Worker(engineWorkerModuleUrl("backtestDayDataReaderWorker"), { execArgv: engineWorkerExecArgv() });
     this.worker.on("message", (reply: DayDataReaderReply) => {
       const resolve = this.pending.get(reply.id);
@@ -130,21 +160,22 @@ export class BacktestDayDataReader {
     this.worker.on("exit", stop);
   }
 
-  prefetch(symbol: string, tradingDate: string, intradayAfterLookTime: string): void {
+  /** `probeStrikeRange`: where the looks are probed for a row (probeIntradayQuotesOnly); null: they are not. */
+  prefetch(symbol: string, tradingDate: string, intradayAfterLookTime: string, probeStrikeRange: StrikeRange | null = null): void {
     const key = `${symbol}|${tradingDate}|${intradayAfterLookTime}`;
     if (this.requested.has(key)) return;
     const read = new Promise<DayDataReaderReply | null>((resolve) => {
       if (this.stopped) return resolve(null);
       const id = this.nextRequestId++;
       this.pending.set(id, resolve);
-      this.worker.postMessage({ id, symbol, tradingDate, intradayAfterLookTime } satisfies DayDataReaderRequest);
+      this.worker.postMessage({ id, symbol, tradingDate, intradayAfterLookTime, probeIntradayQuotesOnly: this.options.probeIntradayQuotesOnly, probeStrikeRange } satisfies DayDataReaderRequest);
     });
     this.requested.set(key, read.then((reply) => (reply?.ok ? new PrefetchedSymbolDay(reply.payload) : null)));
   }
 
   /** The day, read ahead (asked for now when it was not); null when the thread could not read it. */
-  async take(symbol: string, tradingDate: string, intradayAfterLookTime: string): Promise<PrefetchedSymbolDay | null> {
-    this.prefetch(symbol, tradingDate, intradayAfterLookTime);
+  async take(symbol: string, tradingDate: string, intradayAfterLookTime: string, probeStrikeRange: StrikeRange | null = null): Promise<PrefetchedSymbolDay | null> {
+    this.prefetch(symbol, tradingDate, intradayAfterLookTime, probeStrikeRange);
     const key = `${symbol}|${tradingDate}|${intradayAfterLookTime}`;
     const read = this.requested.get(key)!;
     this.requested.delete(key);

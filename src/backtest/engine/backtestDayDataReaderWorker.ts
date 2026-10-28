@@ -1,8 +1,9 @@
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { parentPort } from "node:worker_threads";
+import { addCalendarDays } from "../../lib/calendarDays.js";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
-import { dayDataTransferList, type DayDataColumn, type DayDataPayload, type DayDataReaderReply, type DayDataReaderRequest, type DayDataTable } from "./backtestDayDataReader.js";
-import { endOfDayOfDaySql, expiresWithin45DaysSql, intradayQuotesColumnsSql, numberOrNull, openInterestOfDaySql, quotesOfDaySql } from "./backtestSymbolFile.js";
+import { dayDataTransferList, type DayDataColumn, type DayDataPayload, type DayDataReaderReply, type DayDataReaderRequest, type DayDataTable, type StrikeRange } from "./backtestDayDataReader.js";
+import { endOfDayOfDaySql, intradayQuotesColumnsSql, numberOrNull, openInterestOfDaySql, quotesOfDaySql } from "./backtestSymbolFile.js";
 
 // The day-data reader thread of a session (backtestDayDataReader.ts): reads a symbol's day with BacktestSymbolFile's
 // statements, applies the same conversions, and sends the rows back as columns. A value a column cannot carry exactly
@@ -16,7 +17,8 @@ interface OpenedFile {
   quotes: StatementSync;
   endOfDay: StatementSync;
   openInterest: StatementSync;
-  intraday: StatementSync | null;
+  /** A day's next look time after the one given (null after the last), one look's rows expiring by a date, and a strike of one of them in a range. */
+  intraday: { nextLookTime: StatementSync; rowsOfLook: StatementSync; strikeOfLookWithin: StatementSync } | null;
 }
 
 const openedFiles = new Map<string, OpenedFile>();
@@ -30,12 +32,48 @@ function fileOf(symbol: string): OpenedFile {
     const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
     const statements = [database.prepare(quotesOfDaySql), database.prepare(endOfDayOfDaySql), database.prepare(openInterestOfDaySql)] as const;
     for (const statement of statements) statement.setReturnArrays(true);
-    const intraday = tableNames.has("intraday_days") && tableNames.has("intraday_quotes") ? database.prepare(`${intradayQuotesColumnsSql} WHERE trading_date = ? AND look_time > ? AND ${expiresWithin45DaysSql}`) : null;
-    intraday?.setReturnArrays(true);
+    // One look at a time, so the expiry bounds the primary key's range (the file keeps every expiry of every look).
+    const intraday =
+      tableNames.has("intraday_days") && tableNames.has("intraday_quotes")
+        ? {
+            nextLookTime: database.prepare("SELECT min(look_time) AS lookTime FROM intraday_quotes WHERE trading_date = ? AND look_time > ?"),
+            rowsOfLook: database.prepare(`${intradayQuotesColumnsSql} WHERE trading_date = ? AND look_time = ? AND expiry <= ?`),
+            strikeOfLookWithin: database.prepare("SELECT strike FROM intraday_quotes WHERE trading_date = ? AND look_time = ? AND expiry <= ? AND strike BETWEEN ? AND ? LIMIT 1"),
+          }
+        : null;
+    intraday?.rowsOfLook.setReturnArrays(true);
     opened = { database, quotes: statements[0], endOfDay: statements[1], openInterest: statements[2], intraday };
     openedFiles.set(symbol, opened);
   }
   return opened;
+}
+
+/**
+ * A day's intraday rows after a look time with an expiry within 45 days (expiresWithin45DaysSql), in primary-key order:
+ * the rows of each look in turn.
+ */
+function intradayRowsAfter(intraday: NonNullable<OpenedFile["intraday"]>, tradingDate: string, afterLookTime: string): unknown[][] {
+  const lastExpiry = addCalendarDays(tradingDate, 45);
+  const rows: unknown[][] = [];
+  for (const lookTime of lookTimesAfter(intraday, tradingDate, afterLookTime)) for (const row of intraday.rowsOfLook.all(tradingDate, lookTime, lastExpiry) as unknown as unknown[][]) rows.push(row);
+  return rows;
+}
+
+/** The same looks probed for one of those rows with a strike in the range (PrefetchedSymbolDay.intradayLookHasStrikeWithin). */
+function intradayProbesAfter(intraday: NonNullable<OpenedFile["intraday"]>, tradingDate: string, afterLookTime: string, range: StrikeRange | null): { lookTime: string; strikeWithinRange: number | null }[] {
+  const lastExpiry = addCalendarDays(tradingDate, 45);
+  return lookTimesAfter(intraday, tradingDate, afterLookTime).map((lookTime) => {
+    const found = range === null ? undefined : (intraday.strikeOfLookWithin.get(tradingDate, lookTime, lastExpiry, range.lowestStrike, range.highestStrike) as { strike: number } | undefined);
+    return { lookTime, strikeWithinRange: found === undefined ? null : Number(found.strike) };
+  });
+}
+
+/** The day's look times after the one given, ascending. */
+function lookTimesAfter(intraday: NonNullable<OpenedFile["intraday"]>, tradingDate: string, afterLookTime: string): string[] {
+  const lookTimes: string[] = [];
+  const nextLookTime = (lookTime: string) => (intraday.nextLookTime.get(tradingDate, lookTime) as { lookTime: string | null }).lookTime;
+  for (let lookTime = nextLookTime(afterLookTime); lookTime !== null; lookTime = nextLookTime(lookTime)) lookTimes.push(lookTime);
+  return lookTimes;
 }
 
 type CellKind = "string" | "number" | "nullableNumber";
@@ -85,7 +123,8 @@ function readDay(request: DayDataReaderRequest): DayDataPayload {
     quotes: encodeTable(quotes, ["string", "number", "string", "nullableNumber", "nullableNumber", "nullableNumber", "nullableNumber"], strings, stringIndex),
     endOfDay: encodeTable(endOfDay, ["string", "number", "string", "nullableNumber", "nullableNumber", "nullableNumber", "nullableNumber"], strings, stringIndex),
     openInterest: encodeTable(openInterest, ["string", "number", "string", "number"], strings, stringIndex),
-    intraday: file.intraday ? encodeTable(all(file.intraday, request.tradingDate, request.intradayAfterLookTime), ["string", "string", "number", "string", "nullableNumber", "nullableNumber"], strings, stringIndex) : null,
+    intraday: file.intraday && !request.probeIntradayQuotesOnly ? encodeTable(intradayRowsAfter(file.intraday, request.tradingDate, request.intradayAfterLookTime), ["string", "string", "number", "string", "nullableNumber", "nullableNumber"], strings, stringIndex) : null,
+    intradayProbes: file.intraday && request.probeIntradayQuotesOnly ? intradayProbesAfter(file.intraday, request.tradingDate, request.intradayAfterLookTime, request.probeStrikeRange) : null,
     intradayAfterLookTime: request.intradayAfterLookTime,
   };
 }

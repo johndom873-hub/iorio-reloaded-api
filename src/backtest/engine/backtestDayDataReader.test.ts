@@ -12,6 +12,7 @@ import { syntheticOptionQuotes, writeSyntheticSymbolFile } from "./testSupport/s
 let dataDirectory: string;
 let previousDataDirectory: string | undefined;
 let reader: BacktestDayDataReader;
+let probingReader: BacktestDayDataReader;
 
 beforeAll(() => {
   dataDirectory = mkdtempSync(path.join(tmpdir(), "backtest-day-data-reader-"));
@@ -37,10 +38,12 @@ beforeAll(() => {
     },
   ], [], { schemaVersion: "3" });
   reader = new BacktestDayDataReader();
+  probingReader = new BacktestDayDataReader({ probeIntradayQuotesOnly: true });
 });
 
 afterAll(async () => {
   await reader.close();
+  await probingReader.close();
   if (previousDataDirectory === undefined) delete process.env.BACKTEST_DATA_DIR;
   else process.env.BACKTEST_DATA_DIR = previousDataDirectory;
   rmSync(dataDirectory, { recursive: true, force: true });
@@ -62,6 +65,57 @@ describe("BacktestDayDataReader", () => {
       expect(lastExpiry(day!.quotes().map((quote) => quote.expiry))).toBe("2026-04-16");
       expect(lastExpiry(day!.endOfDay().map((row) => row.expiry))).toBe("2026-04-17");
       expect(lastExpiry([...day!.intradayQuotes("10:00", "15:30", 0, 1e9)!.values()].flat().map((quote) => quote.expiry))).toBe("2026-04-16");
+    } finally {
+      file.close();
+    }
+  });
+
+  it("probes the looks instead of reading their rows when asked: with the file's own check, a look has quotes in a strike range exactly when its rows say so", async () => {
+    const file = BacktestSymbolFile.open("READ");
+    try {
+      const strikeRanges = [[0, 1e9], [90, 105], [100, 100], [97.495, 102.505], [200, 300], [100.0001, 102.4999]] as const;
+      // Probed around the 10:00 price as the session does, around another price, and with no range at all.
+      for (const probeStrikeRange of [{ lowestStrike: 45 - 0.005, highestStrike: 220 + 0.005 }, { lowestStrike: 200, highestStrike: 300 }, null]) {
+        const day = await probingReader.take("READ", "2026-03-02", "10:00", probeStrikeRange);
+        expect(day!.quotes()).toStrictEqual(file.loadQuotes("2026-03-02"));
+        // The rows are left to the file.
+        expect(day!.intradayQuotes("10:00", "15:30", 0, 1e9)).toBeNull();
+        for (const lookTime of ["10:30", "11:00", "12:00", "15:30"]) {
+          for (const [lowestStrike, highestStrike] of strikeRanges) {
+            const fileHasQuotes = file.loadIntradayQuotes("2026-03-02", "10:00", "15:30", lowestStrike, highestStrike).has(lookTime);
+            expect(file.hasIntradayQuoteWithin("2026-03-02", lookTime, lowestStrike, highestStrike)).toBe(fileHasQuotes);
+            const probed = day!.intradayLookHasStrikeWithin("10:00", lookTime, { lowestStrike, highestStrike });
+            if (probed !== null) expect(probed).toBe(fileHasQuotes);
+          }
+        }
+        // Every look with rows, as the file holds them.
+        expect(day!.intradayProbedLookTimes("10:00")).toStrictEqual([...file.loadIntradayQuotes("2026-03-02", "10:00", "23:59", 0, 1e9).keys()].sort());
+        expect(day!.intradayProbedLookTimes("10:30")).toBeNull();
+        // A look with no rows, and one with rows probed in range, are told without the file.
+        expect(day!.intradayLookHasStrikeWithin("10:00", "12:00", { lowestStrike: 0, highestStrike: 1e9 })).toBe(false);
+        if (probeStrikeRange?.lowestStrike === 45 - 0.005) expect(day!.intradayLookHasStrikeWithin("10:00", "10:30", { lowestStrike: 0, highestStrike: 1e9 })).toBe(true);
+        expect(day!.intradayLookHasStrikeWithin("10:30", "11:00", { lowestStrike: 0, highestStrike: 1e9 })).toBeNull();
+      }
+      // A day read with its rows answers from them (intradayQuotes), not this way.
+      const fullDay = await reader.take("READ", "2026-03-02", "10:00");
+      expect(fullDay!.intradayLookHasStrikeWithin("10:00", "11:00", { lowestStrike: 0, highestStrike: 1e9 })).toBeNull();
+      expect(fullDay!.intradayProbedLookTimes("10:00")).toBeNull();
+    } finally {
+      file.close();
+    }
+  });
+
+  it("reads one contract's intraday quotes as loadIntradayQuotes holds them", () => {
+    const file = BacktestSymbolFile.open("READ");
+    try {
+      const all = file.loadIntradayQuotes("2026-03-02", "10:00", "15:30", 0, 1e9);
+      for (const [lookTime, quotes] of all) {
+        for (const quote of quotes) {
+          expect(file.loadIntradayQuotesOfContract("2026-03-02", lookTime, quote, quote.strike - 0.0001, quote.strike + 0.0001)).toStrictEqual(quotes.filter((other) => other.expiry === quote.expiry && other.right === quote.right && other.strike === quote.strike));
+        }
+      }
+      // Past the 45-day window, as the look reads.
+      expect(file.loadIntradayQuotesOfContract("2026-03-02", "10:30", { expiry: "2026-04-17", right: "C" }, 0, 1e9)).toStrictEqual([]);
     } finally {
       file.close();
     }
