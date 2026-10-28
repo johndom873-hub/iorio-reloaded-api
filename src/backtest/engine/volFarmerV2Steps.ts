@@ -12,9 +12,10 @@ import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchas
 // levels and a LEAPS Call, no hedge Put. The steps of one look at one symbol, shared by the backtest
 // (backtestVolFarmerV2Look.ts, on the simulated ledger) and Pluto (on the live book): what they read and the orders they
 // place go through a VolFarmerV2Book, so the rules exist once. Per symbol (prices as traded today, S the look's stock
-// price, P the cycle's pot: the backtest's free cash, Pluto's ticker allocation):
-//   1. flat: the first position buys lots = floor(P ÷ 2 ÷ (100 × S + the stock commission)) at S, with a Call sold on them
-//      as in 2 (none: no cycle, tried again at the next look).
+// price, P the cycle's pot: the backtest's ticker share of the account's value, so one ticker's free cash; Pluto's ticker
+// allocation):
+//   1. flat: the first position buys lots = floor(P ÷ 2 ÷ (100 × S + the stock commission)) at S (the backtest: no more
+//      than the free cash pays for), with a Call sold on them as in 2 (none: no cycle, tried again at the next look).
 //   2. Calls: each position holding shares with no Call open sells one on every lot: the Calls of the next listed expiry
 //      after today, OTM, inside the Vol Farmer's |delta| range and spread limit (bid ≥ $0.05, volume as the ladder's),
 //      struck at or above the position's break-even, in order of premium yield: the first whose volume covers every lot,
@@ -40,7 +41,8 @@ import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchas
 //      contracts, each top-up no more than the free cash then pays for (and its ask offers, in the backtest), until N are
 //      held or the second position is called away (Marcelo 2026-10-27). It is sold whole at the first look after the
 //      second position is called away (the session's fill rule); held to its expiry, the session settles it at its
-//      intrinsic value.
+//      intrinsic value. The backtest's tickers sharing the account buy and top up their LEAPS once every ticker has done
+//      1 to 3 (runVolFarmerV2Turn), and an order the free cash cut is noted to the book (noteCashCut).
 // The first position's Calls are struck above the second's break-even (step 3's strike rule), so the second is called away
 // first or with it; a first position called away with the second's Puts open leaves them to their expiry, the same day.
 // When nothing is held, the next cycle starts at the next look (the backtest's next day when it decides at 10:00 only). A
@@ -108,6 +110,17 @@ export const stepImpliedVolatilityLookbackSessions = 10;
 /** The one-month implied move as the Step: IV × √(21 ÷ 252), in %; the fixed Step without an IV (Marcelo 2026-10-27). */
 export function volFarmerV2ImpliedMoveStep(fixedStepPct: number, impliedVolatility: number | null): VolFarmerV2Step {
   return impliedVolatility === null ? { stepPct: fixedStepPct, impliedVolatility: null } : { stepPct: impliedVolatility * Math.sqrt(21 / 252) * 100, impliedVolatility };
+}
+
+/**
+ * The tickers sharing the account in day k's turn (Marcelo 2026-10-28): alphabetical, starting with the (k mod n)-th of
+ * n, so the one that finds the free cash short is a different one each day. The backtest's k is the session's day,
+ * Pluto's the date's.
+ */
+export function volFarmerV2TurnOrder(symbols: readonly string[], dayIndex: number): string[] {
+  const alphabetical = [...symbols].sort();
+  const first = alphabetical.length === 0 ? 0 : dayIndex % alphabetical.length;
+  return [...alphabetical.slice(first), ...alphabetical.slice(0, first)];
 }
 
 /** What a LEAPS purchase may spend (Marcelo 2026-10-27): the free cash, no more than the cap's share of the cap base. */
@@ -230,6 +243,21 @@ export interface VolFarmerV2LeapsSale {
   candidateScores: Record<string, number | null>;
 }
 
+/**
+ * An order the free cash held back: a new cycle's lots, a Put's contracts, or a LEAPS' contracts below what its cap and
+ * ask allowed. Wanted: what the pot asked of the best candidate (the LEAPS': its cap); unsold: what the volume (and, for a
+ * LEAPS, the ask) would have allowed beyond the filled.
+ */
+export interface VolFarmerV2CashCut {
+  order: "new_cycle" | "put" | "leaps";
+  /** The new cycle's Call or the Put; null for a LEAPS. */
+  candidate: BaselineCandidate | null;
+  wantedContracts: number;
+  filledContracts: number;
+  unsoldContracts: number;
+  freeCash: number;
+}
+
 /** One of the symbol's legs, as the book holds it now. */
 export interface VolFarmerV2LegStatus {
   closed: boolean;
@@ -259,6 +287,8 @@ export interface VolFarmerV2Book {
   sellCashSecuredPut(sale: VolFarmerV2PutSale): string;
   buyLeaps(purchase: VolFarmerV2LeapsPurchase): string;
   sellLeaps(sale: VolFarmerV2LeapsSale): void;
+  /** The backtest records the orders the free cash cut (tickers sharing the account); live books leave it out. */
+  noteCashCut?(cut: VolFarmerV2CashCut): void;
 }
 
 export interface VolFarmerV2LookInput {
@@ -336,6 +366,26 @@ function pickByVolume(candidates: readonly BaselineCandidate[], wanted: (candida
 
 /** One look at one symbol: its orders go to the book as they are decided. Answers the look's note on it, or null. */
 export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null {
+  const turn = runVolFarmerV2Turn(input);
+  turn.leaps?.();
+  return turn.note();
+}
+
+/**
+ * A look at one symbol with steps 1 to 3 done: step 4 (its LEAPS purchase or top-up) waits in `leaps`, null when none is
+ * due; called, it answers what it said of the LEAPS (in `note()` too), null when nothing.
+ */
+export interface VolFarmerV2Turn {
+  leaps: (() => string | null) | null;
+  /** The look's note on the symbol, or null. */
+  note(): string | null;
+}
+
+/**
+ * One look at one symbol with its LEAPS left to the caller (tickers sharing the account or Pluto's budget, Marcelo
+ * 2026-10-28): steps 1 to 3 go to the book now, step 4 when `leaps` is called, once every ticker has had its turn.
+ */
+export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn {
   const { state, market, farmer, v2, book } = input;
   const { symbol, todayIso, stockPrice, riskFreeRate, quotes, priceToCycleScale } = market;
   const parts: string[] = [];
@@ -343,7 +393,8 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
   const sharesPerContractOnCycleScale = Math.round(sharesPerContract / priceToCycleScale);
   const asTraded = (cyclePrice: number) => cyclePrice / priceToCycleScale;
   const say = (text: string) => parts.push(text);
-  const finish = () => (parts.length === 0 ? null : `${symbol}: ${parts.join("; ")}`);
+  const note = () => (parts.length === 0 ? null : `${symbol}: ${parts.join("; ")}`);
+  const finish = (): VolFarmerV2Turn => ({ leaps: null, note });
 
   if (book.isFlat() && (state.first !== null || state.second !== null || state.leaps !== null)) Object.assign(state, { ...newVolFarmerV2SymbolState(), cash: state.cash });
   if (!market.optionContractsRepresentable) {
@@ -393,20 +444,33 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
     const lotCost = stockPrice * sharesPerContract + market.stockCommissionDollars(sharesPerContract);
     const lotsWanted = Math.floor(pot / 2 / lotCost + 1e-9);
     if (lotsWanted < 1) {
-      say(`no cycle opened: a lot costs ${formatWholeDollars(lotCost)}, more than half the free cash (${formatWholeDollars(pot / 2)})`);
+      say(`no cycle opened: a lot costs ${formatWholeDollars(lotCost)}, more than half the pot (${formatWholeDollars(pot / 2)})`);
       return finish();
     }
-    const shareCost = stockPrice + market.stockCommissionDollars(lotsWanted * sharesPerContract) / (lotsWanted * sharesPerContract);
+    // The tickers share the cash (the backtest's account, Pluto's budget): no more lots than the free cash pays for (a
+    // backtest of one ticker: all it wants, its pot being its free cash).
+    const freeCash = book.freeCash();
+    const lotsTarget = Math.min(lotsWanted, Math.floor(freeCash / lotCost + 1e-9));
+    const shareCost = stockPrice + market.stockCommissionDollars(Math.max(1, lotsTarget) * sharesPerContract) / (Math.max(1, lotsTarget) * sharesPerContract);
     const { calls, rejections } = callCandidates(shareCost, false);
-    const call = pickByVolume(calls, () => lotsWanted, (candidate) => candidate.volumeCap);
+    if (lotsTarget < 1 && calls.length > 0) {
+      book.noteCashCut?.({ order: "new_cycle", candidate: calls[0]!, wantedContracts: lotsWanted, filledContracts: 0, unsoldContracts: Math.min(lotsWanted, calls[0]!.volumeCap), freeCash });
+      say(`no cycle opened: the free cash (${formatWholeDollars(freeCash)}) pays for none of the ${lotsWanted} lots half the pot wants (${formatWholeDollars(lotCost)} each)`);
+      return finish();
+    }
+    const call = lotsTarget < 1 ? null : pickByVolume(calls, () => lotsTarget, (candidate) => candidate.volumeCap);
     if (call === null) {
       say(`no cycle opened: no Call at or above the shares' cost ${shareCost.toFixed(2)} (${describeRejections(rejections) || "none listed"})`);
       return finish();
     }
-    const lots = Math.min(lotsWanted, call.volumeCap);
+    const lots = Math.min(lotsTarget, call.volumeCap);
     if (lots < 1) {
       say("no cycle opened: the volume limit allows no Call");
       return finish();
+    }
+    if (lots === lotsTarget && lotsTarget < lotsWanted) {
+      book.noteCashCut?.({ order: "new_cycle", candidate: call, wantedContracts: lotsWanted, filledContracts: lots, unsoldContracts: Math.min(lotsWanted, call.volumeCap) - lots, freeCash });
+      say(`the free cash (${formatWholeDollars(freeCash)}) pays for ${lots} of the ${lotsWanted} lots half the pot wants`);
     }
     const spent = lots * sharesPerContract * stockPrice + market.stockCommissionDollars(lots * sharesPerContract);
     Object.assign(state, { ...newVolFarmerV2SymbolState(), cash: state.cash, potDollars: pot });
@@ -471,17 +535,29 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
       const stepScores: Record<string, number | null> = v2.stepRule === "fixed" ? {} : { stepPct: step.stepPct, stepImpliedVolatility: step.impliedVolatility };
       const { candidates: puts, rejections } = candidatesOf("P", { minAbsDelta: 0, maxAbsDelta: v2.putMaxAbsDelta, maximumStrike: strikeCap, heldExcluded: true });
       const freeCash = book.freeCash();
-      const wanted = (candidate: BaselineCandidate) => Math.min(Math.floor(state.potDollars / 2 / (candidate.strike * sharesPerContract) + 1e-9), Math.floor(freeCash / (candidate.strike * sharesPerContract) + 1e-9));
+      const potContracts = (candidate: BaselineCandidate) => Math.floor(state.potDollars / 2 / (candidate.strike * sharesPerContract) + 1e-9);
+      const wanted = (candidate: BaselineCandidate) => Math.min(potContracts(candidate), Math.floor(freeCash / (candidate.strike * sharesPerContract) + 1e-9));
       const put = pickByVolume(puts, wanted, (candidate) => candidate.volumeCap);
       const trigger = bestCall === null ? `no Call at or above the first break-even ${firstBreakEven.toFixed(2)}` : `the best Call at or above the first break-even ${firstBreakEven.toFixed(2)} yields ${percent(bestYield, 2)} a year, under ${v2.putsStartCallYieldPct}%`;
-      if (put === null) say(`no Put: ${trigger}, but none qualifies at or below ${strikeCap.toFixed(2)}${stepNote} (${describeRejections(rejections) || "none listed"})`);
+      // A book that records cash cuts hears of them, and the note names them: half the pot wants a Put the free cash
+      // secures no contract of, or fewer than it wants.
+      const recordsCashCuts = book.noteCashCut !== undefined;
+      const unsecured = recordsCashCuts && put === null ? (puts.find((candidate) => potContracts(candidate) >= 1) ?? null) : null;
+      if (unsecured !== null) {
+        book.noteCashCut?.({ order: "put", candidate: unsecured, wantedContracts: potContracts(unsecured), filledContracts: 0, unsoldContracts: Math.min(potContracts(unsecured), unsecured.volumeCap), freeCash });
+        say(`no Put: ${trigger}, but the free cash (${formatWholeDollars(freeCash)}) secures no contract of the ${unsecured.strike} Put${stepNote}`);
+      } else if (put === null) say(`no Put: ${trigger}, but none qualifies at or below ${strikeCap.toFixed(2)}${stepNote} (${describeRejections(rejections) || "none listed"})`);
       else {
         const contracts = Math.min(wanted(put), put.volumeCap);
         if (contracts < 1) say(`no Put: ${trigger}, but the volume limit allows none`);
         else {
+          const withinPot = Math.min(potContracts(put), put.volumeCap);
+          const cashCut = recordsCashCuts && contracts < withinPot;
+          if (cashCut) book.noteCashCut?.({ order: "put", candidate: put, wantedContracts: potContracts(put), filledContracts: contracts, unsoldContracts: withinPot - contracts, freeCash });
+          const cashNote = cashCut ? `; the free cash (${formatWholeDollars(freeCash)}) secures ${contracts} of the ${withinPot} contracts half the pot wants` : "";
           state.second ??= { shares: 0, costPerShare: 0, premiumDollars: 0, calls: [], puts: [] };
           state.cash.secondHalfLeft.push(state.potDollars / 2 - contracts * put.strike * sharesPerContract);
-          say(sellPut(input, state.second, put, contracts, `${trigger}; strike at most ${strikeCap.toFixed(2)}${stepNote}`, firstBreakEven, stepScores));
+          say(sellPut(input, state.second, put, contracts, `${trigger}; strike at most ${strikeCap.toFixed(2)}${stepNote}${cashNote}`, firstBreakEven, stepScores));
         }
       }
     }
@@ -489,12 +565,15 @@ export function runVolFarmerV2Steps(input: VolFarmerV2LookInput): string | null 
 
   // 4. The LEAPS, once the second position holds shares no Call at or above its break-even fits; one bought short of its
   // intended count at an earlier look is topped up while the second position holds its shares.
+  const sayLeaps = (text: string | null) => {
+    if (text !== null) say(text);
+    return text;
+  };
   if (secondFindsNoCall && state.second !== null && state.second.shares > 0 && state.leaps === null && !state.leapsBought) {
-    say(buyLeaps(input, breakEvenAsTraded(state.second)!));
-  } else if (state.leaps !== null && !state.leapsToSell && state.second !== null && state.second.shares > 0) {
-    const toppedUp = topUpLeaps(input);
-    if (toppedUp !== null) say(toppedUp);
+    const secondBreakEven = breakEvenAsTraded(state.second)!;
+    return { leaps: () => sayLeaps(buyLeaps(input, secondBreakEven)), note };
   }
+  if (state.leaps !== null && !state.leapsToSell && state.second !== null && state.second.shares > 0 && leapsTopUpContracts(book, state.leaps) > 0) return { leaps: () => sayLeaps(topUpLeaps(input)), note };
   return finish();
 }
 
@@ -581,6 +660,12 @@ function buyLeaps(input: VolFarmerV2LookInput, secondBreakEvenAsTraded: number):
   const budget = volFarmerV2LeapsBudget(freeCash, capBase, v2.leapsMaxAccountPct);
   const cashText = capped ? `free cash ${formatWholeDollars(freeCash)}, LEAPS cap ${formatWholeDollars(capBase * (v2.leapsMaxAccountPct / 100))} (${v2.leapsMaxAccountPct}% of ${market.leapsCapBaseLabel} ${formatWholeDollars(capBase)})` : `free cash ${formatWholeDollars(freeCash)}`;
   const affordable = contractsAffordable(budget, leaps.fillPrice, market.optionCommissionDollars);
+  // A book that records cash cuts hears of a capped LEAPS the free cash held below what its cap (and ask) allowed.
+  if (capped && book.noteCashCut !== undefined) {
+    const withinCap = contractsAffordable(capBase * (v2.leapsMaxAccountPct / 100), leaps.fillPrice, market.optionCommissionDollars);
+    const allowed = market.capsLeapsAtAskSize ? Math.min(withinCap, leaps.askSize ?? 0) : withinCap;
+    if (affordable < allowed) book.noteCashCut({ order: "leaps", candidate: null, wantedContracts: withinCap, filledContracts: affordable, unsoldContracts: allowed - affordable, freeCash });
+  }
   if (affordable < 1) return `no LEAPS: one contract of the ${leaps.strike} Call costs ${formatWholeDollars(contractCost)}, more than ${capped ? `${formatWholeDollars(budget)} (${cashText})` : `the free cash (${formatWholeDollars(freeCash)})`}`;
   // The backtest buys no more than the ask offered (Marcelo 2026-10-27): long-dated Calls trade rarely, but are quoted deep.
   const offered = market.capsLeapsAtAskSize ? (leaps.askSize ?? 0) : affordable;
@@ -607,13 +692,19 @@ function buyLeaps(input: VolFarmerV2LookInput, secondBreakEvenAsTraded: number):
   return description;
 }
 
+/** N − held: the contracts a LEAPS held short of its intended count still wants; 0 when it holds N, or none any longer. */
+function leapsTopUpContracts(book: VolFarmerV2Book, leaps: NonNullable<VolFarmerV2SymbolState["leaps"]>): number {
+  const held = openLeapsLegs(book, leaps).reduce((sum, leg) => sum + leg.contracts, 0);
+  return held < 1 ? 0 : Math.max(0, leaps.intendedContracts - held);
+}
+
 /** A LEAPS held short of its intended count: N − held more of the same contract, as the free cash (and, in the backtest, the ask) allows; null when none is due. */
 function topUpLeaps(input: VolFarmerV2LookInput): string | null {
   const { state, market, book, farmer } = input;
   const leaps = state.leaps!;
-  const held = openLeapsLegs(book, leaps).reduce((sum, leg) => sum + leg.contracts, 0);
-  const wanted = leaps.intendedContracts - held;
-  if (held < 1 || wanted < 1) return null;
+  const wanted = leapsTopUpContracts(book, leaps);
+  if (wanted < 1) return null;
+  const held = leaps.intendedContracts - wanted;
   const progress = `${held} of ${leaps.intendedContracts} held`;
   const quote = market.leapsCallQuotes?.quotesOf(leaps.expiry).find((candidate) => candidate.right === "C" && roundedStrike(candidate.strike) === roundedStrike(leaps.strike));
   if (!quote || baselineQuoteRejection(quote, farmer.maxSpreadPctOfMid) !== null) return `LEAPS top-up: no usable quote for the ${leaps.strike} Call (${progress})`;

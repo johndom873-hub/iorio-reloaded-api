@@ -304,6 +304,13 @@ export function validateVolFarmerV2Settings(values: Record<string, unknown>): st
   if (!isNumberIn(values.leapsAbsDelta, 0.05, 0.99)) return "volFarmerV2.leapsAbsDelta must be a number from 0.05 to 0.99.";
   if (!isNumberIn(values.leapsMaxAccountPct, 0, 100)) return "volFarmerV2.leapsMaxAccountPct must be a number from 0 to 100.";
   if (!(volFarmerV2LooksChoices as readonly unknown[]).includes(values.looks)) return `volFarmerV2.looks must be one of ${volFarmerV2LooksChoices.join(", ")}.`;
+  if (!isNumberIn(values.excessAllowancePct, 0, 1000)) return "volFarmerV2.excessAllowancePct must be a number from 0 to 1000.";
+  const allocations = values.tickerAllocationPct;
+  if (!isPlainObject(allocations)) return "volFarmerV2.tickerAllocationPct must be an object of symbols.";
+  const notAnAllocation = Object.entries(allocations).find(([, value]) => !isNumberIn(value, 0, 100) || value === 0);
+  if (notAnAllocation) return `volFarmerV2.tickerAllocationPct.${notAnAllocation[0]} must be a number above 0 and at most 100.`;
+  const setTotal = Object.values(allocations).reduce<number>((total, value) => total + (value as number), 0);
+  if (setTotal > 100 + 1e-9) return `volFarmerV2.tickerAllocationPct: the set allocations add up to ${Number(setTotal.toFixed(4))}%, at most 100%.`;
   return null;
 }
 
@@ -408,6 +415,9 @@ export function validateCreateBacktestSessionRequest(body: unknown, context: Bac
   if (effective.decisionMaker !== "baseline") {
     if (body.symbolSettings !== undefined && body.symbolSettings !== null) return { ok: false, error: "symbolSettings apply to the baseline only." };
     if (typeof startingValue !== "number") return { ok: false, error: "The starting account value must be a number above 0." };
+    // Vol Farmer v2's set allocations name the session's tickers.
+    const stranger = Object.keys({ ...defaultBacktestVolFarmerV2Settings, ...effective.volFarmerV2 }.tickerAllocationPct).find((symbol) => !symbols.includes(symbol));
+    if (effective.decisionMaker === "vol_farmer_v2" && stranger !== undefined) return { ok: false, error: `volFarmerV2.tickerAllocationPct.${stranger}: ${stranger} is not one of the session's symbols.` };
     return { ok: true, value: { ...base, startingValue, bookMode: "shared_account", symbolSettings: null, symbolResolution: null, settingsSource: null, potsFromStartingValue: null }, warnings };
   }
 

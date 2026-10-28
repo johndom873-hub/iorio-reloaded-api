@@ -2,7 +2,7 @@ import { loadCommissionEstimator, loadStockCommissionEstimator } from "../lib/co
 import type { InternalApiClient } from "../lib/internalApiClient.js";
 import { accountContextFromTotalCash } from "../lib/accountContext.js";
 import { frozenSymbolSet } from "../lib/tickerFreeze.js";
-import { loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
+import { loadInFlightNotionalsBySymbol, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
 import { executePlutoOrder, watchPlutoOrder } from "./executor.js";
 import { defaultLadderBandPlannerDependencies } from "./ladderBandPlanLoader.js";
 import { saveLadderCycleMemory } from "./ladderCycleMemory.js";
@@ -15,7 +15,7 @@ import { recordPlutoAction, recordPlutoEvent } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { tickerCooldownStatus } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
-import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings } from "./tickerSettingsStore.js";
+import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings, tickerPotFraction } from "./tickerSettingsStore.js";
 
 // One Pluto round under the CC + Put Ladder (Marcelo 2026-10-14/15): rules only, no model. Every enabled ticker gets a
 // look (ladderLook.ts) on its live book and the Day Signals loop's band quotes, and the sales it plans go out within the
@@ -61,10 +61,11 @@ export async function runLadderRound(input: LadderRoundInput): Promise<LadderRou
   const allocationBySymbol = effectiveAllocationPctBySymbol(enabled);
   const summary: LadderRoundSummary = { looked: [], planned: 0, outcomes: [], notes: [] };
   // The book: every ticker enabled in Pluto, frozen ones included (their positions still commit capital).
-  const [bookCounts, bookCommitted] = await Promise.all([loadLadderBookOrderCounts(enabled, input.now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol))]);
+  const [bookCounts, bookCommitted, inFlightAtStart] = await Promise.all([loadLadderBookOrderCounts(enabled, input.now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol)), loadInFlightNotionalsBySymbol()]);
   const book: LadderBookRoom = { counts: bookCounts, committedCapitalDollars: bookCommitted, budgetFraction: settings.capitalBudgetPct / 100, netLiquidationValue: input.netLiquidationValue };
   const bookNotices = new Set<LadderBookNoticeReason>();
-  // What this round's earlier tickers just sent: the cash they commit is gone for the next ones.
+  // What this round's earlier tickers just sent: the cash they commit is gone for the next ones. The orders in flight are
+  // read once, at the round's start, so the round's own are counted here only.
   let committedThisRound = 0;
   for (const ticker of enabled) {
     if (input.symbols.length > 0 && !input.symbols.includes(ticker.symbol)) continue;
@@ -80,9 +81,8 @@ export async function runLadderRound(input: LadderRoundInput): Promise<LadderRou
       continue;
     }
     // Pluto's free cash, less what orders on other tickers still tie up (the ticker's own are counted by its look).
-    const inFlight = await loadInFlightNotionals(ticker.symbol);
-    const freeCash = Math.max(0, account.freeCash - (inFlight.totalNotional - inFlight.tickerNotional) - committedThisRound);
-    const tickerWeight = ((allocationBySymbol.get(ticker.symbol) ?? 0) / 100) * (settings.capitalBudgetPct / 100);
+    const freeCash = Math.max(0, account.freeCash - (inFlightAtStart.totalNotional - (inFlightAtStart.tickerNotionalBySymbol.get(ticker.symbol) ?? 0)) - committedThisRound);
+    const tickerWeight = tickerPotFraction(allocationBySymbol.get(ticker.symbol) ?? 0, settings);
     const commissions = { option: optionCommissions, stock: stockCommissions };
     const lookInput = await loadLadderLookInput({ tickerId: ticker.tickerId, symbol: ticker.symbol, tickerWeight }, { now: input.now, clock, freeCash, accountValue: input.netLiquidationValue, commissions, maxQuoteAgeMinutes: settings.maxQuoteAgeMinutes });
     if ("unavailable" in lookInput) {

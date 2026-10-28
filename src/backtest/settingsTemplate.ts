@@ -206,7 +206,8 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
   },
   { path: "volFarmerV2.leapsMinDte", label: "LEAPS expiry from", unit: "days", editable: true, note: "when the second position finds no Call at or above its break-even, the free cash (up to the LEAPS cap) buys a LEAPS Call of the first listed expiry at least this many days out (30 to 1000), sold when the second position is called away" },
   { path: "volFarmerV2.leapsAbsDelta", label: "LEAPS |delta|", unit: "number", editable: true, note: "of that expiry's Calls, the one whose |delta| (from its own implied volatility) is nearest this" },
-  { path: "volFarmerV2.leapsMaxAccountPct", label: "LEAPS cap", unit: "percent", editable: true, note: "% of the account's value at the look (positions marked) a LEAPS purchase spends at most, never more than the free cash. 0: no cap, all the free cash (0 to 100)" },
+  { path: "volFarmerV2.leapsMaxAccountPct", label: "LEAPS cap", unit: "percent", editable: true, note: "% of the ticker's pot at the look (its allocation of the account's value, positions marked, raised by the excess allowance; one ticker with no allowance: the account) a LEAPS purchase spends at most, never more than the free cash. 0: no cap, all the free cash (0 to 100)" },
+  { path: "volFarmerV2.excessAllowancePct", label: "Excess allowance", unit: "percent", editable: true, note: "the session's tickers share one account, each with its allocation of it (Tickers: an equal share unless set); each ticker's pot is its allocation raised by this, at the account's value at the look. 24 tickers on $1,900,000 with 26.3158% each size from $100,000 at the start, the pots adding up to 126.3% of the account, so a ticker draws on the cash the others leave unused; when the cash runs short the tickers take turns, moved one place each day, and LEAPS buy last. 0: the pots are the allocations (0 to 1000)" },
   {
     path: "volFarmerV2.looks",
     label: "Decides",
@@ -749,7 +750,7 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
   {
     group: "Vol Farmer v2",
     section: "vol_farmer_v2",
-    rows: ["volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta", "volFarmerV2.leapsMaxAccountPct", "volFarmerV2.looks"].map((path) => ({
+    rows: ["volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta", "volFarmerV2.leapsMaxAccountPct", "volFarmerV2.looks", "volFarmerV2.excessAllowancePct"].map((path) => ({
       path,
       appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v2"] }], explanation: "Applies only with Vol Farmer v2 as decision maker." },
     })),

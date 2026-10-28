@@ -5,12 +5,13 @@ import { easternIsoDate } from "../lib/easternIsoDate.js";
 import type { LadderOrderGateContext } from "../lib/ladderOrderGates.js";
 import { defaultLadderBandPlannerDependencies } from "./ladderBandPlanLoader.js";
 import { loadPlutoSettings } from "./settingsStore.js";
-import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings } from "./tickerSettingsStore.js";
+import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, tickerPotFraction } from "./tickerSettingsStore.js";
 
 // The order-gate context of a Pluto strategy's order request (ladderOrderGates.ts): null unless the order's Pluto action
 // was taken under the CC + Put Ladder or Vol Farmer v2 (pluto_actions.execution_strategy). A ticker no longer enabled in
 // Pluto has no allocation, so its pot is 0 and every opening order on it is refused. The book is every ticker enabled in
-// Pluto. The ladder: the action's sale step (contract.saleStep, ladderOrders.ts) tells a Cash-Secured Put entry from a
+// Pluto; a ticker's pot is its allocation raised by the excess allowance (tickerPotFraction). The ladder: the action's
+// sale step (contract.saleStep, ladderOrders.ts) tells a Cash-Secured Put entry from a
 // ladder Put. Vol Farmer v2 (Marcelo 2026-10-27): its Calls are held to its Calls' |delta| range and its Puts to |delta|
 // at most its Put |delta|; a LEAPS is paid from Pluto's budget beyond the ticker's pot, so it has no pot cap and no
 // |delta| check, only the book's.
@@ -29,7 +30,7 @@ export async function loadLadderOrderGateContext(orderRequest: { pluto_action_id
   const optionLeg = orderRequest.payload.legs.find((leg) => leg.role === "option");
   const expiryIso = optionLeg?.expiry ? `${optionLeg.expiry.slice(0, 4)}-${optionLeg.expiry.slice(4, 6)}-${optionLeg.expiry.slice(6, 8)}` : null;
   const anchors = ticker && expiryIso ? await defaultLadderBandPlannerDependencies.loadForwardAnchors(ticker.tickerId, todayIso) : new Map();
-  const potFraction = ((allocationPct / 100) * settings.capitalBudgetPct) / 100;
+  const potFraction = tickerPotFraction(allocationPct, settings);
   if (isVolFarmerV2) {
     const isPut = optionLeg?.right === "P";
     return {

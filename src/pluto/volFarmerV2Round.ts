@@ -1,7 +1,7 @@
 import { db } from "../db/connection.js";
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
 import { baselineQuoteRejection } from "../backtest/engine/baselineSaleSteps.js";
-import { newVolFarmerV2SymbolState, runVolFarmerV2Steps, type VolFarmerV2Market, type VolFarmerV2SymbolState } from "../backtest/engine/volFarmerV2Steps.js";
+import { newVolFarmerV2SymbolState, runVolFarmerV2Turn, volFarmerV2TurnOrder, type VolFarmerV2Market, type VolFarmerV2SymbolState } from "../backtest/engine/volFarmerV2Steps.js";
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { liveExpiryStrikes } from "../ibkr/liveOptionChainLookups.js";
 import { fetchPricesPoolFirst } from "../ibkr/pricePool.js";
@@ -18,7 +18,7 @@ import { ladderBookCapitalVerdict, loadCommittedCapitalOnSymbols } from "../lib/
 import { computeTickerExposure } from "../lib/positionExposure.js";
 import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { frozenSymbolSet } from "../lib/tickerFreeze.js";
-import { loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
+import { loadInFlightNotionals, loadInFlightNotionalsBySymbol, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
 import { executePlutoOrder, watchPlutoOrder, type ExecuteInput } from "./executor.js";
 import { defaultLadderBandPlannerDependencies } from "./ladderBandPlanLoader.js";
 import { loadLadderBandQuotes } from "./ladderBandQuotes.js";
@@ -29,7 +29,7 @@ import { recordPlutoAction, recordPlutoEvent, type PlutoActionKind, type PlutoGa
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { tickerCooldownStatus } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
-import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings, type PlutoTickerSettings } from "./tickerSettingsStore.js";
+import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings, tickerPotFraction, type PlutoTickerSettings } from "./tickerSettingsStore.js";
 import {
   adoptVolFarmerV2Holdings,
   createVolFarmerV2LiveBook,
@@ -53,6 +53,10 @@ import { loadVolFarmerV2LegStatuses, loadVolFarmerV2Memory, loadVolFarmerV2Order
 // level holds, v2 opens nothing; a LEAPS sale still goes. A LEAPS is quoted when the steps ask for one: the strikes of its
 // expiry (stored, else looked up live) whose Black-Scholes |delta| at IBKR's 30-day IV is nearest the LEAPS |delta|, as
 // many as a quote burst takes.
+// The tickers share Pluto's budget (Marcelo 2026-10-28), each with its allocation as its pot: they look in the day's turn
+// (alphabetical, starting one ticker further each day), a new cycle buys no more lots than the free cash pays for, and
+// the LEAPS go last: a second pass looks again at the tickers whose LEAPS purchase or top-up is due and sends only those,
+// on the free cash every ticker's first pass left. What the free cash cut is in the ticker's notes.
 
 export interface VolFarmerV2RoundInput {
   passId: string;
@@ -103,23 +107,35 @@ export async function runVolFarmerV2Round(input: VolFarmerV2RoundInput): Promise
     loadLastFilledPlutoActionAtBySymbol(),
   ]);
   const summary: VolFarmerV2RoundSummary = { looked: [], planned: 0, sent: 0, notes: [] };
-  const tickers = enabled.filter((ticker) => effectivePlutoStrategy(ticker) === "vol_farmer_v2" && (input.symbols.length === 0 || input.symbols.includes(ticker.symbol)));
-  if (tickers.length === 0) return summary;
+  const v2Tickers = enabled.filter((ticker) => effectivePlutoStrategy(ticker) === "vol_farmer_v2" && (input.symbols.length === 0 || input.symbols.includes(ticker.symbol)));
+  if (v2Tickers.length === 0) return summary;
+  // The tickers share Pluto's budget (Marcelo 2026-10-28): they take their turn in the day's order, so the one that finds
+  // the free cash short is a different one each day.
+  const turnOrder = volFarmerV2TurnOrder(v2Tickers.map((ticker) => ticker.symbol), Math.round(Date.parse(`${input.todayIso}T00:00:00Z`) / 86_400_000));
+  const tickers = [...v2Tickers].sort((a, b) => turnOrder.indexOf(a.symbol) - turnOrder.indexOf(b.symbol));
   const allocationBySymbol = effectiveAllocationPctBySymbol(enabled);
-  const [bookCounts, bookCommittedAtStart] = await Promise.all([loadLadderBookOrderCounts(enabled, now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol))]);
+  const [bookCounts, bookCommittedAtStart, inFlightAtStart] = await Promise.all([loadLadderBookOrderCounts(enabled, now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol)), loadInFlightNotionalsBySymbol()]);
+  // What the round's own orders commit is counted once: the book's commitment and the orders in flight are read at its
+  // start, and each order it sends adds to them as it goes.
   const round = {
     bookCounts,
     bookCommitted: bookCommittedAtStart,
     /** Cash the round's earlier orders tie up, gone for the next tickers. */
     committedThisRound: 0,
+    accountInFlightAtStart: inFlightAtStart.totalNotional,
     optionCommissionDollars: (contracts: number) => optionCommissions.perContractDollars("sell", contracts) * contracts,
     stockCommissionDollars: (shares: number) => stockCommissions.perShareDollars("buy") * shares,
     commissions: { option: optionCommissions, stock: stockCommissions },
     accountFreeCash: account.freeCash,
   };
-  for (const ticker of tickers) {
-    const lastRound: LastRound = { notes: [], figures: null };
-    try {
+  const lastRounds = new Map<string, LastRound>();
+  const potDollarsOf = (ticker: PlutoTickerSettings) => tickerPotFraction(allocationBySymbol.get(ticker.symbol) ?? 0, settings) * input.netLiquidationValue;
+  const leapsDue: PlutoTickerSettings[] = [];
+  try {
+    // Every ticker's new cycle, Calls and Puts first; then, in the same order, the LEAPS due, on the free cash left.
+    for (const ticker of tickers) {
+      const lastRound: LastRound = { notes: [], figures: null };
+      lastRounds.set(ticker.symbol, lastRound);
       if (frozen.has(ticker.symbol)) {
         lastRound.notes.push("frozen (a split is pending), not traded");
         continue;
@@ -129,9 +145,14 @@ export async function runVolFarmerV2Round(input: VolFarmerV2RoundInput): Promise
         lastRound.notes.push(`ticker cooldown, ${cooldown.detail}`);
         continue;
       }
-      const allocationDollars = ((allocationBySymbol.get(ticker.symbol) ?? 0) / 100) * (settings.capitalBudgetPct / 100) * input.netLiquidationValue;
-      await lookAtTicker({ input, ticker, allocationDollars, clock, round, summary, lastRound });
-    } finally {
+      const looked = await lookAtTicker({ input, ticker, potDollars: potDollarsOf(ticker), clock, round, summary, lastRound, pass: "cycles_calls_puts" });
+      if (looked.leapsDue) leapsDue.push(ticker);
+    }
+    for (const ticker of leapsDue) await lookAtTicker({ input, ticker, potDollars: potDollarsOf(ticker), clock, round, summary, lastRound: lastRounds.get(ticker.symbol)!, pass: "leaps" });
+  } finally {
+    for (const ticker of tickers) {
+      const lastRound = lastRounds.get(ticker.symbol);
+      if (lastRound === undefined) continue;
       summary.notes.push(...lastRound.notes.map((text) => `${ticker.symbol}: ${text}`));
       await saveVolFarmerV2LastRound(ticker.tickerId, { at: now, notes: lastRound.notes, figures: lastRound.figures });
     }
@@ -149,17 +170,25 @@ type RoundState = {
   bookCounts: Awaited<ReturnType<typeof loadLadderBookOrderCounts>>;
   bookCommitted: number;
   committedThisRound: number;
+  /** The notional of every order in flight on the account when the round began. */
+  accountInFlightAtStart: number;
   optionCommissionDollars(contracts: number): number;
   stockCommissionDollars(shares: number): number;
   commissions: VolFarmerV2Market["commissions"];
   accountFreeCash: number;
 };
 
-async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: PlutoTickerSettings; allocationDollars: number; clock: Awaited<ReturnType<typeof defaultLadderBandPlannerDependencies.loadClock>>; round: RoundState; summary: VolFarmerV2RoundSummary; lastRound: LastRound }): Promise<void> {
-  const { input, ticker, allocationDollars, clock, round, summary, lastRound } = context;
+/**
+ * A ticker's look at one of the round's passes: "cycles_calls_puts" runs v2's steps 1 to 3 and sends their orders,
+ * answering whether its LEAPS (a purchase or a top-up) is due; "leaps" looks again, after every ticker's first pass, and
+ * sends only the LEAPS, on the free cash left then.
+ */
+async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: PlutoTickerSettings; potDollars: number; clock: Awaited<ReturnType<typeof defaultLadderBandPlannerDependencies.loadClock>>; round: RoundState; summary: VolFarmerV2RoundSummary; lastRound: LastRound; pass: "cycles_calls_puts" | "leaps" }): Promise<{ leapsDue: boolean }> {
+  const { input, ticker, potDollars, clock, round, summary, lastRound, pass } = context;
   const { settings, now } = input;
   const { symbol, tickerId } = ticker;
   const note = (text: string) => lastRound.notes.push(text);
+  const nothingDue = { leapsDue: false };
 
   // 1. The orders sent at earlier rounds that are done replace their plan with their fills.
   let memory = await loadVolFarmerV2Memory(tickerId);
@@ -186,10 +215,10 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
     else {
       const cycleRows = (await fetchOpenCycleSummaryRowsByTickerId([tickerId])).get(tickerId);
       const cycle = cycleRows ? summarizeOpenCycleFromRows(tickerId, cycleRows) : null;
-      const adoption = adoptVolFarmerV2Holdings({ positions, cycleBreakEvenPerShare: cycle?.breakEvenPerShare ?? null, allocationDollars });
+      const adoption = adoptVolFarmerV2Holdings({ positions, cycleBreakEvenPerShare: cycle?.breakEvenPerShare ?? null, potDollars });
       if ("waiting" in adoption) {
         note(adoption.waiting);
-        return;
+        return nothingDue;
       }
       memory = { state: adoption.state, pending: [] };
       adopted = true;
@@ -212,30 +241,30 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
   if (stockPrice === null || !(stockPrice > 0)) {
     note("no live stock price");
     await saveVolFarmerV2Memory(tickerId, memory, adopted);
-    return;
+    return nothingDue;
   }
   const { quotes, stale } = latestCycleQuotes(bandQuotes, now, settings.maxQuoteAgeMinutes);
   if (stale) {
     note(`the band's latest quotes are older than ${settings.maxQuoteAgeMinutes} minutes, so nothing is planned`);
     await saveVolFarmerV2Memory(tickerId, memory, adopted);
-    return;
+    return nothingDue;
   }
   const memoryLegIds = legIdsOf(memory.state).filter((legId) => !legId.startsWith("action:") && !legId.startsWith("planned:"));
   const openOptionLegs = openLegs.filter((leg) => leg.legType === "option" && leg.expiryDate !== null && leg.strikePrice !== null);
   const legStatusById = await loadVolFarmerV2LegStatuses([...new Set([...memoryLegIds, ...openOptionLegs.map((leg) => leg.id)])]);
-  const budgetFree = (settings.capitalBudgetPct / 100) * input.netLiquidationValue - round.bookCommitted - round.committedThisRound;
-  const accountFree = round.accountFreeCash - inFlight.totalNotional - round.committedThisRound;
+  const budgetFree = (settings.capitalBudgetPct / 100) * input.netLiquidationValue - round.bookCommitted;
+  const accountFree = round.accountFreeCash - round.accountInFlightAtStart - round.committedThisRound;
   const snapshot = {
     legStatusById,
     openOptionContracts: openOptionLegs.map((leg) => ({ expiry: leg.expiryDate!, strike: leg.strikePrice! })),
     flat: openLegs.length === 0,
     freeCash: Math.max(0, Math.min(budgetFree, accountFree)),
-    allocationDollars,
+    potDollars,
     stockPrice,
     optionCommissionDollars: round.optionCommissionDollars,
     stockCommissionDollars: round.stockCommissionDollars,
   };
-  lastRound.figures = { potDollars: allocationDollars, committedDollars: tickerExposure + inFlight.tickerNotional, freeCashDollars: snapshot.freeCash, leapsCapDollars: (allocationDollars * settings.volFarmerV2LeapsMaxAllocationPct) / 100 };
+  lastRound.figures = { potDollars, committedDollars: tickerExposure + inFlight.tickerNotional, freeCashDollars: snapshot.freeCash, leapsCapDollars: (potDollars * settings.volFarmerV2LeapsMaxAllocationPct) / 100 };
   const listedExpiries = chain.expirations
     .map((expiry) => `${expiry.slice(0, 4)}-${expiry.slice(4, 6)}-${expiry.slice(6, 8)}`)
     .filter((expiry) => expiry >= clock.todayIso)
@@ -266,15 +295,22 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
     commissions: round.commissions,
     optionCommissionDollars: round.optionCommissionDollars,
     stockCommissionDollars: round.stockCommissionDollars,
-    leapsCapBaseLabel: "the ticker's allocation",
+    leapsCapBaseLabel: "the ticker's pot",
     capsLeapsAtAskSize: false,
   });
+  // The first pass says what steps 1 to 3 did and leaves the LEAPS to the second, which says what only the LEAPS did (and
+  // the free cash cut).
   const runOnce = (leapsQuotesByExpiry: ReadonlyMap<string, SymbolFileQuote[]>) => {
     const state = structuredClone(memory!.state);
     const missing = new Set<string>();
-    const { book, planned } = createVolFarmerV2LiveBook({ state, pending: memory!.pending, snapshot });
-    const lookNote = runVolFarmerV2Steps({ state, market: marketWith(leapsQuotesByExpiry, missing), farmer, v2, book });
-    return { state, planned, lookNote, missing };
+    const { book, planned, cashCutNotes } = createVolFarmerV2LiveBook({ state, pending: memory!.pending, snapshot });
+    const turn = runVolFarmerV2Turn({ state, market: marketWith(leapsQuotesByExpiry, missing), farmer, v2, book });
+    if (pass === "cycles_calls_puts") {
+      const turnNote = turn.note();
+      return { state, planned, missing, leapsDue: turn.leaps !== null, notes: turnNote === null ? [] : [turnNote.slice(`${symbol}: `.length)] };
+    }
+    const leapsNote = turn.leaps?.() ?? null;
+    return { state, planned, missing, leapsDue: false, notes: [...(leapsNote === null ? [] : [leapsNote]), ...cashCutNotes] };
   };
   // The steps ask for a LEAPS expiry's quotes only when they buy, top up or sell one: quoted then, and the look run again.
   let look = runOnce(new Map());
@@ -283,9 +319,11 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
     for (const expiry of look.missing) leapsQuotesByExpiry.set(expiry, await quoteLeapsExpiry({ input, ticker, expiry, stockPrice, riskFreeRate: clock.riskFreeRate, impliedVolatility: stepImpliedVolatility, heldStrike: memory.state.leaps?.expiry === expiry ? memory.state.leaps.strike : null, storedStrikes: chain.strikesByExpiry.get(expiry.replaceAll("-", "")) ?? null, absDelta: v2.leapsAbsDelta }));
     look = runOnce(leapsQuotesByExpiry);
   }
-  summary.looked.push(symbol);
-  if (look.lookNote !== null) note(look.lookNote.slice(`${symbol}: `.length));
-  summary.planned += look.planned.length;
+  if (pass === "cycles_calls_puts") summary.looked.push(symbol);
+  lastRound.notes.push(...look.notes);
+  // The second pass sends the LEAPS only: what steps 1 to 3 plan again went out at the first (or waits for a later round).
+  const sendsOrder = (order: VolFarmerV2PlannedOrder) => pass === "cycles_calls_puts" || order.kind === "buy_leaps";
+  summary.planned += look.planned.filter(sendsOrder).length;
 
   // 4. The orders, in the steps' order: each one not sent is undone, as if never placed.
   const state = look.state;
@@ -297,6 +335,10 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
   };
   const tickerCounts = { working: pending.length, ordersToday: Number(((await ladderOrdersSentToday(now, symbol)) as { count?: string | number } | undefined)?.count ?? 0), openPositions: positions.length };
   for (const order of look.planned) {
+    if (!sendsOrder(order)) {
+      undo(order);
+      continue;
+    }
     if (input.stressed && order.kind !== "sell_leaps") {
       note(`market stress: ${describePlanned(order)} is not sent while SPY is down`);
       undo(order);
@@ -329,6 +371,7 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
     pending.push(...sent);
   }
   await saveVolFarmerV2Memory(tickerId, { state, pending }, adopted);
+  return { leapsDue: look.leapsDue };
 }
 
 /** Every leg reference the state holds. */

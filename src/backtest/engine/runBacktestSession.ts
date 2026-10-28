@@ -934,7 +934,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         }
         if (lookSymbols.length === 0) continue;
         if (decidesAtCaptureLookOnly && !isCaptureLook) continue;
-        const look = await runLook({ todayIso, lookTimeEt, symbols: lookSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
+        const look = await runLook({ todayIso, lookTimeEt, symbols: lookSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, sessionDayIndex: dayIndex, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
         actions.push(...look.actions);
         optionSales.push(...look.optionSales);
         if (look.shortfalls) keepShortfalls(look.shortfalls);

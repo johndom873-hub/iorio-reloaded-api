@@ -1,5 +1,7 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
+import { effectiveAllocationPctBySymbol, tickerPotShare } from "../lib/tickerAllocation.js";
+import { updatePlutoSettings, type PlutoSettings } from "./settingsStore.js";
 
 // Pluto's per-ticker settings (Marcelo 2026-10-15): one row per ticker in pluto_ticker_settings, null meaning "the
 // default", with a field-level audit trail (pluto_ticker_settings_audit). Read by the CC + Put Ladder through
@@ -88,16 +90,17 @@ export async function loadEnabledPlutoTickerSettings(connection: Knex = db): Pro
   return rows.map(rowToTickerSettings);
 }
 
+/** Each enabled ticker's allocation, % of Pluto's capital budget (the pool): the lab's rule (tickerAllocation.ts). */
+export { effectiveAllocationPctBySymbol };
+
 /**
- * Each enabled ticker's allocation, % of Pluto's capital budget (formula approved by Marcelo 2026-10-15): a set
- * allocation as is; every ticker without one gets (100 − the set allocations) ÷ the number of tickers without one,
- * never below 0. Example: 4 enabled tickers, one set to 40% → the other three get 20% each.
+ * A ticker's pot as a share of the account's value (Marcelo 2026-10-28): its allocation of Pluto's budget raised by the
+ * excess allowance, so the pots may add up to more than the budget, whose cash they share (tickerPotShare).
+ * Example: a $1,000,000 account, a 50% budget, 10 tickers on an equal share (10%) and a 20% allowance: each pot is
+ * 10% × 1.2 × 50% = 6% of the account, $60,000; together $600,000 on the budget's $500,000.
  */
-export function effectiveAllocationPctBySymbol(enabledTickers: readonly Pick<PlutoTickerSettings, "symbol" | "allocationPct">[]): Map<string, number> {
-  const setTotal = enabledTickers.reduce((total, ticker) => total + (ticker.allocationPct ?? 0), 0);
-  const unsetCount = enabledTickers.filter((ticker) => ticker.allocationPct === null).length;
-  const equalShare = unsetCount === 0 ? 0 : Math.max(0, 100 - setTotal) / unsetCount;
-  return new Map(enabledTickers.map((ticker) => [ticker.symbol, ticker.allocationPct ?? equalShare]));
+export function tickerPotFraction(allocationPct: number, settings: Pick<PlutoSettings, "capitalBudgetPct" | "excessAllowancePct">): number {
+  return tickerPotShare(allocationPct, settings.excessAllowancePct, settings.capitalBudgetPct);
 }
 
 export class PlutoTickerSettingsValidationError extends Error {}
@@ -163,6 +166,53 @@ export async function updatePlutoTickerSettings(symbol: string, input: PlutoTick
       .merge({ ...update, updated_at: trx.fn.now(), updated_by_user_id: userId });
     await trx("pluto_ticker_settings_audit").insert(audit);
     return (await loadPlutoTickerSettings(symbol, trx))!;
+  });
+}
+
+/** What a save of the Tickers tab's allocations changed. */
+export interface PlutoAllocationChanges {
+  allocations: { symbol: string; from: number | null; to: number | null }[];
+  excessAllowance: { from: number; to: number } | null;
+}
+
+/**
+ * The Tickers tab's save (Marcelo 2026-10-28): the allocations given (null: back to an equal share; kept to the column's
+ * two decimals) and the excess allowance, in one transaction, all or nothing. The set allocations, every ticker's
+ * counted, add up to 100% at most; one audit row per change.
+ */
+export async function updatePlutoAllocations(input: { allocationPctBySymbol: Record<string, number | null>; excessAllowancePct?: number }, userId: string): Promise<PlutoAllocationChanges> {
+  for (const [symbol, value] of Object.entries(input.allocationPctBySymbol)) {
+    const problem = validatePlutoTickerSettingsInput({ allocationPct: value });
+    if (problem) throw new PlutoTickerSettingsValidationError(`${symbol.toUpperCase()}: ${problem}`);
+  }
+  return db.transaction(async (trx) => {
+    await trx.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [allocationLockKey]);
+    const named: { current: PlutoTickerSettings; to: number | null }[] = [];
+    for (const [symbol, value] of Object.entries(input.allocationPctBySymbol)) {
+      const current = await loadPlutoTickerSettings(symbol, trx);
+      if (!current) throw new PlutoTickerNotFoundError(`${symbol.toUpperCase()} is not a known ticker.`);
+      named.push({ current, to: value === null ? null : Math.round(value * 100) / 100 });
+    }
+    // Every set allocation counts, enabled or not, so enabling a ticker can never take the total past 100%.
+    const others = await trx("pluto_ticker_settings").whereNotIn("ticker_id", named.map((entry) => entry.current.tickerId)).whereNotNull("allocation_pct").sum({ total: "allocation_pct" }).first();
+    const total = Number(others?.total ?? 0) + named.reduce((sum, entry) => sum + (entry.to ?? 0), 0);
+    if (total > 100 + 1e-9) throw new PlutoTickerSettingsValidationError(`The set allocations would add up to ${Number(total.toFixed(2))}%: at most 100%.`);
+    const changes: PlutoAllocationChanges = { allocations: [], excessAllowance: null };
+    for (const { current, to } of named) {
+      if (current.allocationPct === to) continue;
+      await trx("pluto_ticker_settings")
+        .insert({ ticker_id: current.tickerId, allocation_pct: to, updated_at: trx.fn.now(), updated_by_user_id: userId })
+        .onConflict("ticker_id")
+        .merge({ allocation_pct: to, updated_at: trx.fn.now(), updated_by_user_id: userId });
+      await trx("pluto_ticker_settings_audit").insert({ ticker_id: current.tickerId, user_id: userId, field: "allocationPct", old_value: current.allocationPct === null ? null : String(current.allocationPct), new_value: to === null ? null : String(to) });
+      changes.allocations.push({ symbol: current.symbol, from: current.allocationPct, to });
+    }
+    if (input.excessAllowancePct !== undefined) {
+      const before = Number((await trx("pluto_settings").where({ id: 1 }).first("excess_allowance_pct")).excess_allowance_pct);
+      const after = await updatePlutoSettings({ excessAllowancePct: input.excessAllowancePct }, userId, trx);
+      if (after.excessAllowancePct !== before) changes.excessAllowance = { from: before, to: after.excessAllowancePct };
+    }
+    return changes;
   });
 }
 

@@ -89,4 +89,15 @@ describe("loadLadderOrderGateContext", () => {
     const leapsPayload = { symbol: "GATE", strategyKey: "leaps", legs: [{ role: "option", action: "BUY", symbol: "GATE", quantity: 1, unitPrice: 12, strike: 40, expiry: "20271217", right: "C" }] } as never;
     expect(await loadLadderOrderGateContext({ pluto_action_id: leaps, payload: leapsPayload }, testDb, now)).toMatchObject({ potFraction: null, deltaChecked: false, book: { symbols: ["GATE", "OTHR"], budgetFraction: 0.4 } });
   });
+
+  it("raises the ticker's pot by the excess allowance; the book's cap stays Pluto's budget", async () => {
+    await testDb("pluto_settings").where({ id: 1 }).update({ excess_allowance_pct: 25 });
+    try {
+      // 50% × (1 + 25%) × 40% = a 25% pot.
+      const put = await action("vol_farmer_v2", { strategyKey: "cash_secured_put" });
+      expect(await loadLadderOrderGateContext({ pluto_action_id: put, payload: putPayload(45) }, testDb, now)).toMatchObject({ potFraction: 0.25, book: { budgetFraction: 0.4 } });
+    } finally {
+      await testDb("pluto_settings").where({ id: 1 }).update({ excess_allowance_pct: 0 });
+    }
+  });
 });

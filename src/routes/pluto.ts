@@ -8,7 +8,7 @@ import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
 import { isAdminRequest } from "../lib/sessionUser.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
-import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, loadPlutoTickerSettingsAudit, PlutoTickerNotFoundError, PlutoTickerSettingsValidationError, updatePlutoTickerSettings, type PlutoTickerSettingsField, type PlutoTickerSettingsInput } from "../pluto/tickerSettingsStore.js";
+import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, loadPlutoTickerSettingsAudit, PlutoTickerNotFoundError, PlutoTickerSettingsValidationError, updatePlutoAllocations, updatePlutoTickerSettings, type PlutoTickerSettingsField, type PlutoTickerSettingsInput } from "../pluto/tickerSettingsStore.js";
 import { loadLadderScreenSettings } from "../pluto/ladderSettings.js";
 import { loadCurrentPlutoSettingsVersion } from "../pluto/settingsVersions.js";
 import { loadPlutoHowItWorks } from "../pluto/howItWorks.js";
@@ -301,6 +301,46 @@ plutoRouter.put("/ticker-settings/:symbol", requireAdmin, async (request: Reques
     response.json(settings);
   } catch (error) {
     if (error instanceof PlutoTickerSettingsValidationError) {
+      response.status(400).json({ error: error.message });
+      return;
+    }
+    if (error instanceof PlutoTickerNotFoundError) {
+      response.status(404).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
+});
+
+/**
+ * The Tickers tab's save: body { allocations: { SYMBOL: % of Pluto's budget, or null for an equal share }, excessAllowancePct?: % },
+ * applied together or not at all (updatePlutoAllocations). One settings event per ticker changed, and one for the allowance.
+ */
+plutoRouter.put("/allocations", requireAdmin, async (request: Request, response: Response) => {
+  const body = request.body as Record<string, unknown> | null;
+  if (typeof body !== "object" || body === null || Array.isArray(body) || typeof body.allocations !== "object" || body.allocations === null || Array.isArray(body.allocations)) {
+    response.status(400).json({ error: "Body must be { allocations: { SYMBOL: % or null }, excessAllowancePct?: % }." });
+    return;
+  }
+  const unknownField = Object.keys(body).find((field) => field !== "allocations" && field !== "excessAllowancePct");
+  if (unknownField !== undefined) {
+    response.status(400).json({ error: `${unknownField} is not an allocation field.` });
+    return;
+  }
+  if (body.excessAllowancePct !== undefined && (typeof body.excessAllowancePct !== "number" || !Number.isFinite(body.excessAllowancePct))) {
+    response.status(400).json({ error: "excessAllowancePct must be a number." });
+    return;
+  }
+  try {
+    const changes = await updatePlutoAllocations({ allocationPctBySymbol: body.allocations as Record<string, number | null>, ...(body.excessAllowancePct !== undefined ? { excessAllowancePct: body.excessAllowancePct } : {}) }, currentUserId(request));
+    if (changes.allocations.length > 0 || changes.excessAllowance !== null) {
+      const who = await currentUserDisplayName(request);
+      for (const change of changes.allocations) await recordPlutoEvent("settings_changed", { by: who, symbol: change.symbol, fields: [{ field: "allocationPct", from: change.from, to: change.to }] });
+      if (changes.excessAllowance !== null) await recordPlutoEvent("settings_changed", { by: who, fields: [{ field: "excessAllowancePct", from: changes.excessAllowance.from, to: changes.excessAllowance.to }] });
+    }
+    response.json(changes);
+  } catch (error) {
+    if (error instanceof PlutoTickerSettingsValidationError || error instanceof PlutoSettingsValidationError) {
       response.status(400).json({ error: error.message });
       return;
     }

@@ -366,7 +366,8 @@ export interface BacktestVolFarmerV2Settings {
   /** The LEAPS: that expiry's Call whose |delta| is nearest this. */
   leapsAbsDelta: number;
   /**
-   * The LEAPS cap (Marcelo 2026-10-27), % of the account's value at the look, positions marked: a LEAPS purchase spends
+   * The LEAPS cap (Marcelo 2026-10-27), % of the ticker's pot at the look (its allocation of the account's value,
+   * positions marked, raised by the excess allowance; one ticker with no allowance: the account): a LEAPS purchase spends
    * at most this, never more than the free cash. 0: no cap, all the free cash.
    */
   leapsMaxAccountPct: number;
@@ -375,6 +376,18 @@ export interface BacktestVolFarmerV2Settings {
    * 30 minutes), on that look's quotes and price.
    */
   looks: VolFarmerV2Looks;
+  /**
+   * The session's tickers share one account as Pluto's share its budget (Marcelo 2026-10-28): each ticker's allocation,
+   * % of the account, set here or an equal share of what the set ones leave (one ticker: 100%); the set ones add up to
+   * 100% at most. A symbol not set is missing.
+   */
+  tickerAllocationPct: Record<string, number>;
+  /**
+   * Excess allowance, % (Marcelo 2026-10-28): each ticker's pot is its allocation raised by this, as a share of the
+   * account's value at the look (tickerPotShare), so the pots may add up to more than the account, whose cash they share.
+   * 0: the pots are the allocations.
+   */
+  excessAllowancePct: number;
 }
 
 export const volFarmerV2StepRules = ["fixed", "implied_move_at_put_sale"] as const;
@@ -382,7 +395,7 @@ export type VolFarmerV2StepRule = (typeof volFarmerV2StepRules)[number];
 export const volFarmerV2LooksChoices = ["first_look", "every_look"] as const;
 export type VolFarmerV2Looks = (typeof volFarmerV2LooksChoices)[number];
 
-export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 0, looks: "first_look" };
+export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 0, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 0 };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5), read by the retired rules

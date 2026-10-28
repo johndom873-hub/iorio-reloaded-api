@@ -67,6 +67,8 @@ export interface BacktestLookContext {
   /** The 10:00 mark per share of every open leg, on its cycle's scale. The look adds the legs it opens. */
   priceByLegId: Map<string, number>;
   nextActionId(): string;
+  /** Today's place among the session's days, 0 on its first: Vol Farmer v2's tickers take turns by it. */
+  sessionDayIndex?: number;
 }
 
 /** One option sold in the look, as traded: what the session's per-option trade row is built from. */

@@ -46,6 +46,25 @@ const wholePeriod: DataFilePeriodContents = { missingWeekdays: 0, firstMissingWe
 
 const validRequest = { name: " Edge Yield 20% ", symbol: "aaoi", startDate: "2021-01-04", endDate: "2026-09-30", startingValue: 1_000_000, tablesMode: "walk_forward", overrides: {} };
 
+describe("Vol Farmer v2's allocations and excess allowance", () => {
+  const { symbol: _oneSymbol, ...withoutSymbol } = validRequest;
+  const request = (volFarmerV2: Record<string, unknown>) => validateCreateBacktestSessionRequest({ ...withoutSymbol, symbols: ["AAOI", "HOOD"], startDate: "2021-08-02", overrides: { volFarmerV2 } }, context);
+
+  it("keeps each ticker's set allocation and the allowance as the session's", () => {
+    expect(request({ tickerAllocationPct: { AAOI: 60 }, excessAllowancePct: 26.3158 })).toMatchObject({ ok: true, value: { overrides: { volFarmerV2: { tickerAllocationPct: { AAOI: 60 }, excessAllowancePct: 26.3158 } } } });
+  });
+
+  it("refuses an allowance out of range, an allocation of 0 or above 100, set ones above 100% together and a symbol not in the session", () => {
+    expect(request({ excessAllowancePct: -1 })).toEqual({ ok: false, error: "volFarmerV2.excessAllowancePct must be a number from 0 to 1000." });
+    expect(request({ excessAllowancePct: 1001 })).toEqual({ ok: false, error: "volFarmerV2.excessAllowancePct must be a number from 0 to 1000." });
+    expect(request({ tickerAllocationPct: [] })).toEqual({ ok: false, error: "volFarmerV2.tickerAllocationPct must be an object of symbols." });
+    expect(request({ tickerAllocationPct: { AAOI: 0 } })).toEqual({ ok: false, error: "volFarmerV2.tickerAllocationPct.AAOI must be a number above 0 and at most 100." });
+    expect(request({ tickerAllocationPct: { AAOI: 101 } })).toEqual({ ok: false, error: "volFarmerV2.tickerAllocationPct.AAOI must be a number above 0 and at most 100." });
+    expect(request({ tickerAllocationPct: { AAOI: 60, HOOD: 50 } })).toEqual({ ok: false, error: "volFarmerV2.tickerAllocationPct: the set allocations add up to 110%, at most 100%." });
+    expect(request({ tickerAllocationPct: { INTC: 10 } })).toEqual({ ok: false, error: "volFarmerV2.tickerAllocationPct.INTC: INTC is not one of the session's symbols." });
+  });
+});
+
 describe("validateCreateBacktestSessionRequest", () => {
   it("accepts a valid request, trimming the name and normalizing the symbol", () => {
     const result = validateCreateBacktestSessionRequest(validRequest, context);

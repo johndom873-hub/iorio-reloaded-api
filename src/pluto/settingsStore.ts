@@ -11,6 +11,8 @@ export type PlutoTelegramVerbosity = "actions" | "off";
 export interface PlutoSettings {
   // Capital
   capitalBudgetPct: number;
+  /** % every ticker's pot is raised above its allocation (tickerPotFraction): the pots may add up to more than the budget. */
+  excessAllowancePct: number;
   // Market
   windowStartEt: string;
   windowEndEt: string;
@@ -63,7 +65,7 @@ export interface PlutoSettings {
   volFarmerV2StepRule: "fixed" | "implied_move_at_put_sale";
   volFarmerV2LeapsMinDte: number;
   volFarmerV2LeapsAbsDelta: number;
-  /** % of the ticker's allocation a LEAPS purchase spends at most (the lab's cap is a share of the account). */
+  /** % of the ticker's pot (its allocation raised by the excess allowance) a LEAPS purchase spends at most. */
   volFarmerV2LeapsMaxAllocationPct: number;
   volFarmerV2CallMinAbsDelta: number;
   volFarmerV2CallMaxAbsDelta: number;
@@ -77,6 +79,7 @@ type ColumnKind = "number" | "integer" | "text";
 /** camelCase field → snake_case column, with the kind that decides parsing and validation. */
 export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedAt" | "updatedByUserId">, { column: string; kind: ColumnKind; min?: number; max?: number; oneOf?: readonly string[] }> = {
   capitalBudgetPct: { column: "capital_budget_pct", kind: "number", min: 0, max: 100 },
+  excessAllowancePct: { column: "excess_allowance_pct", kind: "number", min: 0, max: 1000 },
   maxQuoteAgeMinutes: { column: "max_quote_age_minutes", kind: "integer", min: 0 },
   windowStartEt: { column: "window_start_et", kind: "text" },
   windowEndEt: { column: "window_end_et", kind: "text" },
@@ -170,9 +173,9 @@ export function validatePlutoSettingsInput(input: PlutoSettingsInput, current: P
   return null;
 }
 
-/** Applies the changed fields only, writing one audit row per field that actually changed. */
-export async function updatePlutoSettings(input: PlutoSettingsInput, userId: string): Promise<PlutoSettings> {
-  return db.transaction(async (trx) => {
+/** Applies the changed fields only, writing one audit row per field that actually changed; within `transaction` when given. */
+export async function updatePlutoSettings(input: PlutoSettingsInput, userId: string, transaction?: Knex.Transaction): Promise<PlutoSettings> {
+  const apply = async (trx: Knex.Transaction) => {
     const current = await loadPlutoSettings(trx);
     const problem = validatePlutoSettingsInput(input, current);
     if (problem) throw new PlutoSettingsValidationError(problem);
@@ -193,7 +196,8 @@ export async function updatePlutoSettings(input: PlutoSettingsInput, userId: str
     await trx("pluto_settings").where({ id: 1 }).update({ ...update, updated_at: trx.fn.now(), updated_by_user_id: userId });
     await trx("pluto_settings_audit").insert(audit);
     return loadPlutoSettings(trx);
-  });
+  };
+  return transaction ? apply(transaction) : db.transaction(apply);
 }
 
 export class PlutoSettingsValidationError extends Error {}

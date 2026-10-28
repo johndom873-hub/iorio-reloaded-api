@@ -24,7 +24,7 @@ const optionCommissionDollars = (contracts: number) => 0.65 * contracts;
 const stockCommissionDollars = (shares: number) => 0.005 * shares;
 
 function snapshotOf(overrides: Partial<VolFarmerV2LiveSnapshot> = {}): VolFarmerV2LiveSnapshot {
-  return { legStatusById: new Map(), openOptionContracts: [], flat: true, freeCash: 200_000, allocationDollars: 64_000, stockPrice: 100, optionCommissionDollars, stockCommissionDollars, ...overrides };
+  return { legStatusById: new Map(), openOptionContracts: [], flat: true, freeCash: 200_000, potDollars: 64_000, stockPrice: 100, optionCommissionDollars, stockCommissionDollars, ...overrides };
 }
 
 const leg = (id: string, fields: Partial<PositionFigures["legs"][number]>): PositionFigures["legs"][number] => ({ id, legType: "option", side: "short", quantity: 1, optionType: "call", strikePrice: 110, expiryDate: "2026-11-06", multiplier: 100, entryPrice: 1, entryAt: new Date("2026-10-20T14:00:00Z"), exitPrice: null, exitAt: null, ...fields });
@@ -63,10 +63,10 @@ function marketOf(stockPrice: number): VolFarmerV2Market {
 }
 
 describe("Vol Farmer v2's live rules", () => {
-  it("are Pluto's v2 settings, at every look, the LEAPS cap a share of the ticker's allocation", () => {
-    const { farmer, v2 } = volFarmerV2RulesOf(settings);
+  it("are Pluto's v2 settings, at every look, the LEAPS cap a share of the ticker's pot", () => {
+    const { farmer, v2 } = volFarmerV2RulesOf({ ...settings, excessAllowancePct: 20 });
     expect(farmer).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, maxSpreadPctOfMid: 50 });
-    expect(v2).toEqual({ putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 10, looks: "every_look" });
+    expect(v2).toEqual({ putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 10, looks: "every_look", tickerAllocationPct: {}, excessAllowancePct: 20 });
   });
 });
 
@@ -80,7 +80,7 @@ describe("adopting a ticker's holdings", () => {
       position([leg("s2", { legType: "stock", side: "long", quantity: 100, optionType: null, strikePrice: null, expiryDate: null, multiplier: 1, entryPrice: 88 }), leg("c2", { quantity: 1, strikePrice: 108 })]),
       { strategyKey: "cash_secured_put", status: "open" as const, legs: [leg("p1", { optionType: "put", strikePrice: 95, quantity: 2 })] },
     ];
-    const adopted = adoptVolFarmerV2Holdings({ positions, cycleBreakEvenPerShare: 105.42, allocationDollars: 64_007 });
+    const adopted = adoptVolFarmerV2Holdings({ positions, cycleBreakEvenPerShare: 105.42, potDollars: 64_007 });
     if (!("state" in adopted)) throw new Error(adopted.waiting);
     expect(adopted.state.potDollars).toBe(64_007);
     expect(adopted.state.first).toEqual({ shares: 500, costPerShare: 105.42, premiumDollars: 0, calls: [{ legId: "c1", shares: 400 }, { legId: "c2", shares: 100 }], puts: [] });
@@ -90,9 +90,9 @@ describe("adopting a ticker's holdings", () => {
 
   it("waits while the ticker holds only Puts, or its cycle's break-even is unknown", () => {
     const putsOnly = [{ strategyKey: "cash_secured_put", status: "open" as const, legs: [leg("p1", { optionType: "put", strikePrice: 225, quantity: 2 })] }];
-    expect(adoptVolFarmerV2Holdings({ positions: putsOnly, cycleBreakEvenPerShare: null, allocationDollars: 64_007 })).toEqual({ waiting: expect.stringContaining("holds no shares yet") });
+    expect(adoptVolFarmerV2Holdings({ positions: putsOnly, cycleBreakEvenPerShare: null, potDollars: 64_007 })).toEqual({ waiting: expect.stringContaining("holds no shares yet") });
     const shares = [{ strategyKey: "unstructured", status: "open" as const, legs: [leg("s1", { legType: "stock", side: "long", quantity: 100, optionType: null, strikePrice: null, expiryDate: null, multiplier: 1 })] }];
-    expect(adoptVolFarmerV2Holdings({ positions: shares, cycleBreakEvenPerShare: null, allocationDollars: 64_007 })).toEqual({ waiting: expect.stringContaining("break-even cannot be worked out") });
+    expect(adoptVolFarmerV2Holdings({ positions: shares, cycleBreakEvenPerShare: null, potDollars: 64_007 })).toEqual({ waiting: expect.stringContaining("break-even cannot be worked out") });
   });
 });
 

@@ -6,6 +6,7 @@ import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
 import { ladderFixedBaselineChoices } from "./ladderSettings.js";
 import { closeMarginMinutes } from "./sessionSchedule.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
+import { tickerPotFraction } from "./tickerSettingsStore.js";
 
 // The numbers Pluto's "How it works" tab quotes (approved mockup https://claude.ai/artifact/TYdARe8Sa6RuF5Lb1E1s2b; the
 // CC + Put Ladder and, since 2026-10-27, Vol Farmer v2): Pluto's live settings and the code's own constants, read from
@@ -37,6 +38,8 @@ export interface PlutoHowItWorks {
     windowEndEt: string;
     windowEndMinutesBeforeCloseAtLeast: number;
     capitalBudgetPct: number;
+    /** Every ticker's pot is its allocation raised by this share (tickerPotFraction). */
+    excessAllowancePct: number;
     dailyLossBreakerPct: number;
     unfilledOrderCancelMinutes: number;
   };
@@ -118,7 +121,7 @@ const percent = (fraction: number) => Math.round(fraction * 1_000_000) / 10_000;
 
 /** Pure: the tab's numbers from Pluto's settings, the platform's unfilled-order sweep and the code's constants. */
 export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfilledOrderCancelMinutes: number }): PlutoHowItWorks {
-  const pot = (ladderExampleAccountValue * ladderExampleAllocationPct * settings.capitalBudgetPct) / 10_000;
+  const pot = ladderExampleAccountValue * tickerPotFraction(ladderExampleAllocationPct, settings);
   const { sharesBudget, reserve } = ladderBudget(pot, settings.ladderSharesPct);
   const rungCollateral = ladderRungCollateral(reserve, 0, settings.ladderRungs);
   const shockPct = Math.min(settings.ladderShockMaxPct, Math.max(settings.ladderShockMinPct, ladderExampleShockPct));
@@ -140,6 +143,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       windowEndEt: settings.windowEndEt,
       windowEndMinutesBeforeCloseAtLeast: closeMarginMinutes,
       capitalBudgetPct: settings.capitalBudgetPct,
+      excessAllowancePct: settings.excessAllowancePct,
       dailyLossBreakerPct: settings.dailyLossBreakerPct,
       unfilledOrderCancelMinutes: figures.unfilledOrderCancelMinutes,
     },

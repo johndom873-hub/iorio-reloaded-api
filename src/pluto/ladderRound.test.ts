@@ -5,12 +5,16 @@ import type { LadderSaleOutcome } from "./ladderOrders.js";
 
 // One CC + Put Ladder round, everything outside its own logic mocked: the looks' inputs and results per ticker, the book's
 // counts and committed capital, the sending. The round's own work is checked: which tickers are looked at, the caps (the
-// ticker's and the book's, moved on as the round sends), and the once-a-day notices.
+// ticker's and the book's, moved on as the round sends), the free cash each look is given, and the once-a-day notices.
+// An order confirmed is in flight from then on, as an order request is.
 
 const harness = vi.hoisted(() => ({
   lookInputs: new Map<string, unknown>(),
   looks: new Map<string, unknown>(),
   sent: [] as { symbol: string; strikes: number[] }[],
+  inFlight: [] as { symbol: string; notional: number }[],
+  freeCashBySymbol: new Map<string, number>(),
+  weightBySymbol: new Map<string, number>(),
   outcomeFor: (_sale: { strike: number }): Partial<{ outcome: string; orderId: string | null; blockedOnLiveCheck: boolean }> => ({ outcome: "confirmed", orderId: "order", blockedOnLiveCheck: false }),
   bookCounts: { workingOrders: 0, ordersToday: 0, openPositions: 0 },
   tickerCounts: { workingOrders: 0, ordersToday: 0, openPositions: 0 },
@@ -23,11 +27,25 @@ vi.mock("../db/connection.js", () => ({ db: () => ({}) }));
 vi.mock("../lib/commissionEstimate.js", async (original) => ({ ...(await original<object>()), loadCommissionEstimator: async () => ({ perContractDollars: () => 0.65 }), loadStockCommissionEstimator: async () => ({ perShareDollars: () => 0.005 }) }));
 vi.mock("../lib/accountContext.js", () => ({ accountContextFromTotalCash: async () => ({ freeCash: 400_000 }) }));
 vi.mock("../lib/tickerFreeze.js", () => ({ frozenSymbolSet: async () => new Set(["FRZN"]) }));
-vi.mock("./book.js", () => ({ loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }), loadLastFilledPlutoActionAtBySymbol: async () => new Map() }));
+vi.mock("./book.js", () => ({
+  loadInFlightNotionalsBySymbol: async () => {
+    const tickerNotionalBySymbol = new Map<string, number>();
+    for (const order of harness.inFlight) tickerNotionalBySymbol.set(order.symbol, (tickerNotionalBySymbol.get(order.symbol) ?? 0) + order.notional);
+    const total = harness.inFlight.reduce((sum, order) => sum + order.notional, 0);
+    return { totalNotional: total, managedNotional: total, tickerNotionalBySymbol };
+  },
+  loadLastFilledPlutoActionAtBySymbol: async () => new Map(),
+}));
 vi.mock("./executor.js", () => ({ executePlutoOrder: vi.fn(), watchPlutoOrder: vi.fn() }));
 vi.mock("./ladderBandPlanLoader.js", () => ({ defaultLadderBandPlannerDependencies: { loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 960, riskFreeRate: 0.04 }) } }));
 vi.mock("./ladderCycleMemory.js", () => ({ saveLadderCycleMemory: vi.fn(async () => {}) }));
-vi.mock("./ladderLookLoader.js", () => ({ loadLadderLookInput: async (ticker: { symbol: string }) => harness.lookInputs.get(ticker.symbol) }));
+vi.mock("./ladderLookLoader.js", () => ({
+  loadLadderLookInput: async (ticker: { symbol: string; tickerWeight: number }, options: { freeCash: number }) => {
+    harness.freeCashBySymbol.set(ticker.symbol, options.freeCash);
+    harness.weightBySymbol.set(ticker.symbol, ticker.tickerWeight);
+    return harness.lookInputs.get(ticker.symbol);
+  },
+}));
 vi.mock("./ladderLook.js", () => ({ runLadderLook: (input: { symbol: string }) => harness.looks.get(input.symbol) }));
 vi.mock("./ledger.js", () => ({ recordPlutoAction: vi.fn(), recordPlutoEvent: vi.fn(async () => {}) }));
 vi.mock("./tickerSettingsStore.js", async (original) => ({
@@ -45,13 +63,15 @@ vi.mock("./ladderOrders.js", async (original) => ({
   loadLadderTickerOrderCounts: async () => ({ ...harness.tickerCounts }),
   sendLadderSales: async (input: { symbol: string; sales: PlannedLadderSale[] }): Promise<LadderSaleOutcome[]> => {
     harness.sent.push({ symbol: input.symbol, strikes: input.sales.map((sale) => sale.strike) });
-    return input.sales.map((sale) => ({ sale, actionId: "a", outcome: "confirmed", detail: "", orderId: "order", limitPrice: sale.optionPrice, blockedOnLiveCheck: false, ...harness.outcomeFor(sale) }) as LadderSaleOutcome);
+    const outcomes = input.sales.map((sale) => ({ sale, actionId: "a", outcome: "confirmed", detail: "", orderId: "order", limitPrice: sale.optionPrice, blockedOnLiveCheck: false, ...harness.outcomeFor(sale) }) as LadderSaleOutcome);
+    for (const outcome of outcomes) if (outcome.outcome === "confirmed") harness.inFlight.push({ symbol: input.symbol, notional: (outcome.sale.strike - outcome.sale.optionPrice) * 100 * outcome.sale.contracts });
+    return outcomes;
   },
 }));
 
 const { runLadderRound } = await import("./ladderRound.js");
 
-const settings = { capitalBudgetPct: 50, ladderTickerCooldownMinutes: 0, maxQuoteAgeMinutes: 10, telegramVerbosity: "actions", ladderMaxWorkingOrdersPerTicker: 10, ladderMaxOrdersPerTickerPerDay: 30, ladderMaxOpenPositionsPerTicker: 30, ladderMaxOpenPositions: 120, ladderMaxOrdersPerDay: 100 };
+const settings = { capitalBudgetPct: 50, excessAllowancePct: 0, ladderTickerCooldownMinutes: 0, maxQuoteAgeMinutes: 10, telegramVerbosity: "actions", ladderMaxWorkingOrdersPerTicker: 10, ladderMaxOrdersPerTickerPerDay: 30, ladderMaxOpenPositionsPerTicker: 30, ladderMaxOpenPositions: 120, ladderMaxOrdersPerDay: 100 };
 const now = new Date("2026-10-21T15:00:00Z");
 
 const put = (strike: number, contracts = 1): PlannedLadderSale => ({ strategyKey: "cash_secured_put", step: "ladder_put", expiry: "2026-11-20", strike, right: "P", contracts, optionPrice: 0.8, sharesBought: 0, stockPrice: 50, candidate: {} as never, eligibleCount: 1, chosenBecause: "test", scores: {} });
@@ -66,6 +86,9 @@ beforeEach(() => {
   harness.lookInputs.clear();
   harness.looks.clear();
   harness.sent.length = 0;
+  harness.inFlight.length = 0;
+  harness.freeCashBySymbol.clear();
+  harness.weightBySymbol.clear();
   harness.tickerNotices.length = 0;
   harness.bookNotices.length = 0;
   harness.bookCounts = { workingOrders: 0, ordersToday: 0, openPositions: 0 };
@@ -116,6 +139,25 @@ describe("runLadderRound", () => {
     expect(harness.sent).toEqual([{ symbol: "AAA", strikes: [45] }, { symbol: "BBB", strikes: [] }]);
     expect(summary.notes).toContain("BBB: 1 sale(s) wait for a later look (the ladder's tickers would commit more than Pluto's capital budget of $500,000 together ($497,680 committed))");
     expect(harness.bookNotices).toEqual(["book_committed_capital"]);
+  });
+
+  it("counts what an earlier ticker sent once in the next ticker's free cash, though the order is in flight by then", async () => {
+    // The account's $400,000; AAA's $45 Put ×4 secures $18,000: BBB's look gets $382,000.
+    harness.inFlight.push({ symbol: "OUT", notional: 5_000 }, { symbol: "BBB", notional: 2_000 });
+    harness.looks.set("AAA", look([put(45, 4)]));
+    harness.looks.set("BBB", look([put(30)]));
+    await round();
+    // Orders working before the round: another ticker's $5,000 counts for both, BBB's own $2,000 only for AAA (BBB's look counts its own).
+    expect(Object.fromEntries(harness.freeCashBySymbol)).toEqual({ AAA: 400_000 - 7_000, BBB: 400_000 - 5_000 - 18_000 });
+  });
+
+  it("gives each ticker's look its pot's share of the account: its allocation raised by the excess allowance, of Pluto's budget", async () => {
+    harness.looks.set("AAA", look([]));
+    harness.looks.set("BBB", look([]));
+    await runLadderRound({ passId: "p1", settings: { ...settings, excessAllowancePct: 20 } as never, api: {} as never, marketWatch: { burst: async () => [] } as never, trackWatch: () => {}, now, todayIso: "2026-10-21", totalCashValue: 500_000, netLiquidationValue: 1_000_000, cancelByMs: null, symbols: [] });
+    // Three enabled tickers (FRZN too) at 33.33% each × (1 + 20%) × 50% = 20% of the account.
+    expect(harness.weightBySymbol.get("AAA")).toBeCloseTo(0.2, 12);
+    expect(harness.weightBySymbol.get("BBB")).toBeCloseTo(0.2, 12);
   });
 
   it("an order refused before it was built does not count against the book: the next ticker still sends", async () => {
