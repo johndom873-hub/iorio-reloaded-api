@@ -120,7 +120,8 @@ const v2Ticker = (symbol: string) => ({ tickerId: `t-${symbol}`, symbol, strateg
 
 /**
  * A ticker whose LEAPS is due: both positions hold 200 shares, the first's break-even 100 (a Call to sell), the second's
- * 130 (no Call at or above it); its 17 Dec 2027 LEAPS expiry listed and quoted.
+ * 130 (no Call at or above it, and the price of 100 more than half a Step below it); its 17 Dec 2027 LEAPS expiry listed
+ * and quoted.
  */
 function withLeapsDue(tickerId: string): void {
   const position = (shares: number, costPerShare: number) => ({ shares, costPerShare, premiums: [], calls: [], puts: [] });

@@ -239,7 +239,7 @@ describe("Vol Farmer v2 at the looks", () => {
     settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
     const put = (await look(ledger, "2026-03-16", 80, "2026-03-20")).actions[0]!;
     settleExpiry(ledger, { legId: openOption(ledger, "put")[0]!.id, expiryClose: put.contract!.strike! - 3 });
-    // Monday 23 March at 55, far under both break-evens: no Call for either position, so the LEAPS. The free cash pays for
+    // Monday 23 March at 55, far under both break-evens and more than half a Step below B-E2: the LEAPS. The free cash pays for
     // more contracts than the 5 its ask offers: 5 are bought, the rest stays in cash.
     const freeCash = ledgerFreeCash(ledger);
     const fallen = await look(ledger, "2026-03-23", 55, "2026-03-27", {}, 5);
@@ -537,7 +537,7 @@ describe("Vol Farmer v2 at the looks", () => {
       const put = (await lookBook(ledger, "2026-03-16", { VFA: 80 }, "2026-03-20", book(5))).actions.find((action) => action.kind === "open_cash_secured_put")!;
       settleExpiry(ledger, { legId: openOption(ledger, "put")[0]!.id, expiryClose: put.contract!.strike! - 3 });
 
-      // Monday 23 March, day 10, VFA's turn first: at 55 VFA's second position finds no Call, so its LEAPS is due; VFB, flat
+      // Monday 23 March, day 10, VFA's turn first: at 55, more than half a Step below its B-E2, VFA's LEAPS is due; VFB, flat
       // at 50, opens a cycle. The cycle takes the lots the free cash pays for, fewer than half its pot wants, and only
       // then does VFA's LEAPS spend what is left, below its cap.
       const freeCash = ledgerFreeCash(ledger);
