@@ -29,8 +29,10 @@ export interface BacktestTickerProfile {
 
 export interface BacktestDayMarket {
   todayIso: string;
-  /** Every 10:00 quote of the day in the file. */
+  /** Every 10:00 quote of the day in the file; for Vol Farmer v2, only the next Call expiry's (it decides on no other). */
   quotes: readonly SymbolFileQuote[];
+  /** Set when `quotes` holds only the next Call expiry's: what was read of every quote, each right's count and whether one has an ask above 0. */
+  everyQuote?: { countByRight: { C: number; P: number }; hasAskAboveZero: boolean };
   /** The previous session's full volume, by contractKey; null when the file has no previous session. */
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
   /** The 10:00 stock price (IBKR's 09:30 bar's close, on the day's traded scale). */

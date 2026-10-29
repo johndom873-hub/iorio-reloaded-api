@@ -3,7 +3,7 @@ import { parentPort } from "node:worker_threads";
 import { addCalendarDays } from "../../lib/calendarDays.js";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { dayDataTransferList, type DayDataColumn, type DayDataPayload, type DayDataReaderReply, type DayDataReaderRequest, type DayDataTable } from "./backtestDayDataReader.js";
-import { endOfDayOfDaySql, intradayQuotesColumnsSql, intradayQuoteWithinSql, nextIntradayLookTimeSql, numberOrNull, quotesOfDaySql } from "./backtestSymbolFile.js";
+import { endOfDayOfDaySql, endOfDayOfExpirySql, endOfDayWithVolumeSql, intradayQuotesColumnsSql, intradayQuoteWithinSql, nextCallExpirySql, nextIntradayLookTimeSql, numberOrNull, quoteCountByRightOf, quoteCountByRightSql, quotesOfDaySql, quotesOfExpirySql, quoteWithAskAboveZeroSql } from "./backtestSymbolFile.js";
 
 // The day-data reader thread of a session (backtestDayDataReader.ts): reads a symbol's day with BacktestSymbolFile's
 // statements, applies the same conversions, and sends the rows back as columns. A value a column cannot carry exactly
@@ -16,6 +16,8 @@ interface OpenedFile {
   database: DatabaseSync;
   quotes: StatementSync;
   endOfDay: StatementSync;
+  /** Vol Farmer v2's day (NextCallExpiryDay). */
+  nextCallExpiry: { expiry: StatementSync; quotesOfExpiry: StatementSync; quoteCountByRight: StatementSync; quoteWithAskAboveZero: StatementSync; endOfDayOfExpiry: StatementSync; endOfDayWithVolume: StatementSync };
   /** A day's next look time after the one given (null after the last), one look's rows expiring by a date, and whether a look has a quote in a strike range. */
   intraday: { nextLookTime: StatementSync; rowsOfLook: StatementSync; quoteWithin: StatementSync } | null;
 }
@@ -29,15 +31,16 @@ function fileOf(symbol: string): OpenedFile {
     if (!database) throw new Error(`No data file for ${symbol}.`);
     database.exec("PRAGMA busy_timeout = 3000");
     const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
-    const statements = [database.prepare(quotesOfDaySql), database.prepare(endOfDayOfDaySql)] as const;
+    const statements = [database.prepare(quotesOfDaySql), database.prepare(endOfDayOfDaySql), database.prepare(quotesOfExpirySql), database.prepare(endOfDayOfExpirySql)] as const;
     for (const statement of statements) statement.setReturnArrays(true);
+    const nextCallExpiry = { expiry: database.prepare(nextCallExpirySql), quotesOfExpiry: statements[2], quoteCountByRight: database.prepare(quoteCountByRightSql), quoteWithAskAboveZero: database.prepare(quoteWithAskAboveZeroSql), endOfDayOfExpiry: statements[3], endOfDayWithVolume: database.prepare(endOfDayWithVolumeSql) };
     // One look at a time, so the expiry bounds the primary key's range (the file keeps every expiry of every look).
     const intraday =
       tableNames.has("intraday_days") && tableNames.has("intraday_quotes")
         ? { nextLookTime: database.prepare(nextIntradayLookTimeSql), rowsOfLook: database.prepare(`${intradayQuotesColumnsSql} WHERE trading_date = ? AND look_time = ? AND expiry <= ?`), quoteWithin: database.prepare(intradayQuoteWithinSql) }
         : null;
     intraday?.rowsOfLook.setReturnArrays(true);
-    opened = { database, quotes: statements[0], endOfDay: statements[1], intraday };
+    opened = { database, quotes: statements[0], endOfDay: statements[1], nextCallExpiry, intraday };
     openedFiles.set(symbol, opened);
   }
   return opened;
@@ -95,18 +98,36 @@ function encodeTable(rows: readonly unknown[][], kinds: readonly CellKind[], str
   return { rowCount: rows.length, columns };
 }
 
+const quoteKinds: readonly CellKind[] = ["string", "number", "string", "nullableNumber", "nullableNumber", "nullableNumber", "nullableNumber"];
+const endOfDayKinds: readonly CellKind[] = ["string", "number", "string", "nullableNumber", "nullableNumber", "nullableNumber", "nullableNumber"];
+
 function readDay(request: DayDataReaderRequest): DayDataPayload {
   const file = fileOf(request.symbol);
   const strings: string[] = [];
   const stringIndex = new Map<string, number>();
   const all = (statement: StatementSync, ...parameters: string[]) => statement.all(...parameters) as unknown as unknown[][];
   // The conversions of BacktestSymbolFile.loadQuotes and loadEndOfDay; intraday rows are taken as stored.
-  const quotes = all(file.quotes, request.tradingDate).map(([expiry, strike, right, bid, ask, bidSize, askSize]) => [String(expiry), Number(strike), right, numberOrNull(bid), numberOrNull(ask), numberOrNull(bidSize), numberOrNull(askSize)]);
-  const endOfDay = all(file.endOfDay, request.tradingDate).map(([expiry, strike, right, close, volume, bid, ask]) => [String(expiry), Number(strike), right, numberOrNull(close), numberOrNull(volume), numberOrNull(bid), numberOrNull(ask)]);
+  const quotesOf = (rows: unknown[][]) => encodeTable(rows.map(([expiry, strike, right, bid, ask, bidSize, askSize]) => [String(expiry), Number(strike), right, numberOrNull(bid), numberOrNull(ask), numberOrNull(bidSize), numberOrNull(askSize)]), quoteKinds, strings, stringIndex);
+  const endOfDayOf = (rows: unknown[][]) => encodeTable(rows.map(([expiry, strike, right, close, volume, bid, ask]) => [String(expiry), Number(strike), right, numberOrNull(close), numberOrNull(volume), numberOrNull(bid), numberOrNull(ask)]), endOfDayKinds, strings, stringIndex);
+  // BacktestSymbolFile.loadNextCallExpiryDay's statements, in its order.
+  const nextCallExpiryDay = (): DayDataPayload["nextCallExpiryDay"] => {
+    const { tradingDate, previousFileDay } = request;
+    const statements = file.nextCallExpiry;
+    const expiry = (statements.expiry.get(tradingDate, tradingDate, tradingDate) as { expiry: string | null }).expiry;
+    return {
+      expiry,
+      quotes: quotesOf(expiry === null ? [] : all(statements.quotesOfExpiry, tradingDate, expiry)),
+      quoteCountByRight: quoteCountByRightOf(statements.quoteCountByRight.all(tradingDate) as { right: string; count: number }[]),
+      hasAskAboveZero: statements.quoteWithAskAboveZero.get(tradingDate) !== undefined,
+      previousEndOfDay: endOfDayOf(previousFileDay === null || expiry === null ? [] : all(statements.endOfDayOfExpiry, previousFileDay, expiry)),
+      previousHasVolume: previousFileDay === null ? null : statements.endOfDayWithVolume.get(previousFileDay) !== undefined,
+    };
+  };
   return {
     strings,
-    quotes: encodeTable(quotes, ["string", "number", "string", "nullableNumber", "nullableNumber", "nullableNumber", "nullableNumber"], strings, stringIndex),
-    endOfDay: encodeTable(endOfDay, ["string", "number", "string", "nullableNumber", "nullableNumber", "nullableNumber", "nullableNumber"], strings, stringIndex),
+    quotes: request.readsNextCallExpiryOnly ? null : quotesOf(all(file.quotes, request.tradingDate)),
+    endOfDay: request.readsNextCallExpiryOnly ? null : endOfDayOf(all(file.endOfDay, request.tradingDate)),
+    nextCallExpiryDay: request.readsNextCallExpiryOnly ? nextCallExpiryDay() : null,
     intraday: file.intraday && request.readsIntradayQuotes ? encodeTable(intradayRowsAfter(file.intraday, request.tradingDate, request.intradayAfterLookTime), ["string", "string", "number", "string", "nullableNumber", "nullableNumber"], strings, stringIndex) : null,
     intradayAfterLookTime: request.intradayAfterLookTime,
     intradayLookCheck:

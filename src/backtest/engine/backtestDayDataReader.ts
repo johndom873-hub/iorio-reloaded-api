@@ -1,6 +1,6 @@
 import { Worker } from "node:worker_threads";
 import { engineWorkerExecArgv, engineWorkerModuleUrl } from "./engineWorkerThreads.js";
-import type { SymbolFileEndOfDayRow, SymbolFileQuote } from "./backtestSymbolFile.js";
+import type { NextCallExpiryDay, SymbolFileEndOfDayRow, SymbolFileQuote } from "./backtestSymbolFile.js";
 
 // Reading the symbol files ahead of the session (Marcelo 2026-10-12): a day's 10:00 quotes, end-of-day rows and
 // intraday quotes are read on threads of their own, a few days before the session reaches them, with the statements
@@ -23,11 +23,22 @@ export interface IntradayLookCheck {
   highestStrike: number;
 }
 
+/** What a day's request asks of the reader threads besides its rows. */
+export interface DayDataRequestExtras {
+  /** A look to check for a quote in a strike range while the day is read (PrefetchedSymbolDay.intradayLookHasQuoteWithin); null for none. */
+  intradayLookCheck: IntradayLookCheck | null;
+  /** The file day before the day (null on the first), read with it when the threads read Vol Farmer v2's days. */
+  previousFileDay: string | null;
+}
+
 /** One symbol's day as the reader thread sends it. */
 export interface DayDataPayload {
   strings: string[];
-  quotes: DayDataTable;
-  endOfDay: DayDataTable;
+  /** Every 10:00 quote of the day within 45 days, and every end-of-day row within 46; null when the threads read Vol Farmer v2's day instead. */
+  quotes: DayDataTable | null;
+  endOfDay: DayDataTable | null;
+  /** NextCallExpiryDay, its rows as columns; null when the threads read the day in full. */
+  nextCallExpiryDay: (Omit<NextCallExpiryDay, "quotes" | "previousEndOfDay"> & { quotes: DayDataTable; previousEndOfDay: DayDataTable }) | null;
   /** Every intraday row of the day after `intradayAfterLookTime`, in primary-key order; null on a file without intraday tables, or when the session does not read them. */
   intraday: DayDataTable | null;
   intradayAfterLookTime: string;
@@ -35,13 +46,13 @@ export interface DayDataPayload {
   intradayLookCheck: (IntradayLookCheck & { hasQuote: boolean }) | null;
 }
 
-export type DayDataReaderRequest = { id: number; symbol: string; tradingDate: string; intradayAfterLookTime: string; readsIntradayQuotes: boolean; intradayLookCheck: IntradayLookCheck | null };
+export type DayDataReaderRequest = { id: number; symbol: string; tradingDate: string; intradayAfterLookTime: string; readsIntradayQuotes: boolean; readsNextCallExpiryOnly: boolean } & DayDataRequestExtras;
 export type DayDataReaderReply = { id: number; ok: true; payload: DayDataPayload } | { id: number; ok: false; error: string };
 
 /** The buffers of a payload, to transfer rather than copy. */
 export function dayDataTransferList(payload: DayDataPayload): ArrayBuffer[] {
   const buffers: ArrayBuffer[] = [];
-  for (const table of [payload.quotes, payload.endOfDay, payload.intraday]) {
+  for (const table of [payload.quotes, payload.endOfDay, payload.nextCallExpiryDay?.quotes, payload.nextCallExpiryDay?.previousEndOfDay, payload.intraday]) {
     for (const column of table?.columns ?? []) {
       if (column.kind === "string") buffers.push(column.indices.buffer as ArrayBuffer);
       else buffers.push(column.values.buffer as ArrayBuffer, column.nulls.buffer as ArrayBuffer);
@@ -56,26 +67,41 @@ function cellReader(strings: readonly string[], column: DayDataColumn): (row: nu
   return (row) => (column.nulls[row] === 1 ? null : column.values[row]!);
 }
 
+/** The quote rows of a table, as BacktestSymbolFile builds them. */
+function quoteRowsOf(strings: readonly string[], table: DayDataTable): SymbolFileQuote[] {
+  const [expiry, strike, right, bid, ask, bidSize, askSize] = table.columns.map((column) => cellReader(strings, column));
+  const rows: SymbolFileQuote[] = new Array(table.rowCount);
+  for (let row = 0; row < table.rowCount; row++) rows[row] = { expiry: expiry!(row) as string, strike: strike!(row) as number, right: right!(row) as "C" | "P", bid: bid!(row) as number | null, ask: ask!(row) as number | null, bidSize: bidSize!(row) as number | null, askSize: askSize!(row) as number | null };
+  return rows;
+}
+
+/** The end-of-day rows of a table, as BacktestSymbolFile builds them. */
+function endOfDayRowsOf(strings: readonly string[], table: DayDataTable): SymbolFileEndOfDayRow[] {
+  const [expiry, strike, right, close, volume, bid, ask] = table.columns.map((column) => cellReader(strings, column));
+  const rows: SymbolFileEndOfDayRow[] = new Array(table.rowCount);
+  for (let row = 0; row < table.rowCount; row++) rows[row] = { expiry: expiry!(row) as string, strike: strike!(row) as number, right: right!(row) as "C" | "P", close: close!(row) as number | null, volume: volume!(row) as number | null, bid: bid!(row) as number | null, ask: ask!(row) as number | null };
+  return rows;
+}
+
 /** One symbol's day read ahead: each part built when first asked for, as BacktestSymbolFile builds it. */
 export class PrefetchedSymbolDay {
   constructor(private readonly payload: DayDataPayload) {}
 
-  /** BacktestSymbolFile.loadQuotes. */
-  quotes(): SymbolFileQuote[] {
-    const { rowCount, columns } = this.payload.quotes;
-    const [expiry, strike, right, bid, ask, bidSize, askSize] = columns.map((column) => cellReader(this.payload.strings, column));
-    const rows: SymbolFileQuote[] = new Array(rowCount);
-    for (let row = 0; row < rowCount; row++) rows[row] = { expiry: expiry!(row) as string, strike: strike!(row) as number, right: right!(row) as "C" | "P", bid: bid!(row) as number | null, ask: ask!(row) as number | null, bidSize: bidSize!(row) as number | null, askSize: askSize!(row) as number | null };
-    return rows;
+  /** BacktestSymbolFile.loadQuotes; null when the day was read for Vol Farmer v2 (the caller reads the file then). */
+  quotes(): SymbolFileQuote[] | null {
+    return this.payload.quotes === null ? null : quoteRowsOf(this.payload.strings, this.payload.quotes);
   }
 
-  /** BacktestSymbolFile.loadEndOfDay. */
-  endOfDay(): SymbolFileEndOfDayRow[] {
-    const { rowCount, columns } = this.payload.endOfDay;
-    const [expiry, strike, right, close, volume, bid, ask] = columns.map((column) => cellReader(this.payload.strings, column));
-    const rows: SymbolFileEndOfDayRow[] = new Array(rowCount);
-    for (let row = 0; row < rowCount; row++) rows[row] = { expiry: expiry!(row) as string, strike: strike!(row) as number, right: right!(row) as "C" | "P", close: close!(row) as number | null, volume: volume!(row) as number | null, bid: bid!(row) as number | null, ask: ask!(row) as number | null };
-    return rows;
+  /** BacktestSymbolFile.loadEndOfDay; null when the day was read for Vol Farmer v2 (the caller reads the file then). */
+  endOfDay(): SymbolFileEndOfDayRow[] | null {
+    return this.payload.endOfDay === null ? null : endOfDayRowsOf(this.payload.strings, this.payload.endOfDay);
+  }
+
+  /** BacktestSymbolFile.loadNextCallExpiryDay; null when the day was read in full (the caller reads the file then). */
+  nextCallExpiryDay(): NextCallExpiryDay | null {
+    const day = this.payload.nextCallExpiryDay;
+    if (day === null) return null;
+    return { expiry: day.expiry, quotes: quoteRowsOf(this.payload.strings, day.quotes), quoteCountByRight: day.quoteCountByRight, hasAskAboveZero: day.hasAskAboveZero, previousEndOfDay: endOfDayRowsOf(this.payload.strings, day.previousEndOfDay), previousHasVolume: day.previousHasVolume };
   }
 
   /**
@@ -114,7 +140,8 @@ export class PrefetchedSymbolDay {
  * The reader threads of one session, each with its own connection to the files. prefetch() queues a symbol's day;
  * take() hands it over once read (null when it could not be: the caller reads the file). Without `readsIntradayQuotes`
  * (a session whose looks after 10:00 only mark what it holds, reading the held contracts by their key) the threads leave
- * the intraday rows alone.
+ * the intraday rows alone; with `readsNextCallExpiryOnly` (Vol Farmer v2) they read its NextCallExpiryDay in place of
+ * the day's 10:00 quotes and end-of-day rows.
  */
 export class BacktestDayDataReader {
   private readonly workers: Worker[];
@@ -124,7 +151,7 @@ export class BacktestDayDataReader {
   private nextRequestId = 1;
   private stopped = false;
 
-  constructor(private readonly options: { readsIntradayQuotes: boolean; threadCount: number }) {
+  constructor(private readonly options: { readsIntradayQuotes: boolean; readsNextCallExpiryOnly: boolean; threadCount: number }) {
     const stop = () => {
       this.stopped = true;
       for (const resolve of this.pending.values()) resolve(null);
@@ -143,11 +170,8 @@ export class BacktestDayDataReader {
     });
   }
 
-  /**
-   * Queues the day on the threads in turn, so the days asked for ahead are read at the same time. `intradayLookCheck`:
-   * a look to check for a quote in a strike range while the day is read (PrefetchedSymbolDay.intradayLookHasQuoteWithin).
-   */
-  prefetch(symbol: string, tradingDate: string, intradayAfterLookTime: string, intradayLookCheck: IntradayLookCheck | null = null): void {
+  /** Queues the day on the threads in turn, so the days asked for ahead are read at the same time. */
+  prefetch(symbol: string, tradingDate: string, intradayAfterLookTime: string, extras: DayDataRequestExtras = { intradayLookCheck: null, previousFileDay: null }): void {
     const key = `${symbol}|${tradingDate}|${intradayAfterLookTime}`;
     if (this.requested.has(key)) return;
     const read = new Promise<DayDataReaderReply | null>((resolve) => {
@@ -156,14 +180,14 @@ export class BacktestDayDataReader {
       this.pending.set(id, resolve);
       const worker = this.workers[this.nextWorkerIndex]!;
       this.nextWorkerIndex = (this.nextWorkerIndex + 1) % this.workers.length;
-      worker.postMessage({ id, symbol, tradingDate, intradayAfterLookTime, readsIntradayQuotes: this.options.readsIntradayQuotes, intradayLookCheck } satisfies DayDataReaderRequest);
+      worker.postMessage({ id, symbol, tradingDate, intradayAfterLookTime, readsIntradayQuotes: this.options.readsIntradayQuotes, readsNextCallExpiryOnly: this.options.readsNextCallExpiryOnly, ...extras } satisfies DayDataReaderRequest);
     });
     this.requested.set(key, read.then((reply) => (reply?.ok ? new PrefetchedSymbolDay(reply.payload) : null)));
   }
 
   /** The day, read ahead (asked for now when it was not); null when the thread could not read it. */
-  async take(symbol: string, tradingDate: string, intradayAfterLookTime: string, intradayLookCheck: IntradayLookCheck | null = null): Promise<PrefetchedSymbolDay | null> {
-    this.prefetch(symbol, tradingDate, intradayAfterLookTime, intradayLookCheck);
+  async take(symbol: string, tradingDate: string, intradayAfterLookTime: string, extras: DayDataRequestExtras = { intradayLookCheck: null, previousFileDay: null }): Promise<PrefetchedSymbolDay | null> {
+    this.prefetch(symbol, tradingDate, intradayAfterLookTime, extras);
     const key = `${symbol}|${tradingDate}|${intradayAfterLookTime}`;
     const read = this.requested.get(key)!;
     this.requested.delete(key);

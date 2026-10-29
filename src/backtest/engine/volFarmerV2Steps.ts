@@ -203,6 +203,11 @@ export interface VolFarmerV2Market {
   /** As a fraction. */
   riskFreeRate: number;
   quotes: readonly SymbolFileQuote[];
+  /**
+   * The backtest's 10:00 quotes of each right left unread (every expiry within the 45-day window but the next Call
+   * expiry's, which `quotes` holds): counted with the candidates outside the expiry, as reading them would have.
+   */
+  quotesLeftUnreadByRight?: { C: number; P: number };
   forwardAnchors: ReadonlyMap<string, BaselineForwardAnchor>;
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
   /** Years from the look to today's close: a same-day expiry's time. */
@@ -472,6 +477,7 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
       ...(limits.minimumStrike === undefined ? {} : { minimumStrike: limits.minimumStrike }),
       ...(limits.maximumStrike === undefined ? {} : { maximumStrike: limits.maximumStrike }),
     });
+    selected.rejections.outsideExpiryRange += market.quotesLeftUnreadByRight?.[right] ?? 0;
     return { ...selected, candidates: limits.kept ? selected.candidates.filter(limits.kept) : selected.candidates };
   };
   const callCandidates = (breakEvenAsTraded: number, heldExcluded: boolean) => {

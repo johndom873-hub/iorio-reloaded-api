@@ -43,9 +43,35 @@ export interface SymbolFileDayIssue {
   message: string;
 }
 
+/**
+ * What Vol Farmer v2 reads of a day (it decides on the next Call expiry only), each part as the full read would give it
+ * (loadNextCallExpiryDay).
+ */
+export interface NextCallExpiryDay {
+  /** The first Call expiry after the day within the 45-day window; null when there is none. */
+  expiry: string | null;
+  /** That expiry's quotes, as loadQuotes holds them. */
+  quotes: SymbolFileQuote[];
+  /** How many of loadQuotes' quotes each right has. */
+  quoteCountByRight: { C: number; P: number };
+  /** Whether one of loadQuotes' quotes has an ask above 0. */
+  hasAskAboveZero: boolean;
+  /** The previous file day's end-of-day rows of `expiry`, as loadEndOfDay holds them there; none without either. */
+  previousEndOfDay: SymbolFileEndOfDayRow[];
+  /** Whether one of the previous file day's loadEndOfDay rows has a volume; null without a previous day. */
+  previousHasVolume: boolean | null;
+}
+
 export const supportedSymbolFileSchemaVersions: readonly string[] = ["1", "2", "3"];
 
 export const numberOrNull = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
+
+/** The conversions of every 10:00 quote and end-of-day row read. */
+export const quoteOfRow = (row: Record<string, unknown>): SymbolFileQuote => ({ expiry: String(row.expiry), strike: Number(row.strike), right: row.right as "C" | "P", bid: numberOrNull(row.bid), ask: numberOrNull(row.ask), bidSize: numberOrNull(row.bidSize), askSize: numberOrNull(row.askSize) });
+export const endOfDayOfRow = (row: Record<string, unknown>): SymbolFileEndOfDayRow => ({ expiry: String(row.expiry), strike: Number(row.strike), right: row.right as "C" | "P", close: numberOrNull(row.close), volume: numberOrNull(row.volume), bid: numberOrNull(row.bid), ask: numberOrNull(row.ask) });
+
+/** Each right's count from quoteCountByRightSql's rows. */
+export const quoteCountByRightOf = (rows: readonly { right: string; count: number }[]): { C: number; P: number } => ({ C: Number(rows.find((row) => row.right === "C")?.count ?? 0), P: Number(rows.find((row) => row.right === "P")?.count ?? 0) });
 
 /**
  * The expiries the engine reads: 0..45 days out for the 10:00 and intraday quotes, 0..46 for the end of day (and the
@@ -56,9 +82,23 @@ const expiresWithin46DaysSql = "expiry <= date(trading_date, '+46 days')";
 /** A day's issues about what the engine reads: a whole part, or an expiration within the part's window above. */
 const issueWithinReadWindowSql = `(expiry IS NULL OR (part IN ('quotes', 'intraday_quotes') AND ${expiresWithin45DaysSql}) OR (part IN ('eod', 'open_interest') AND ${expiresWithin46DaysSql}))`;
 
+const quoteColumnsSql = "SELECT expiry, strike, option_right AS right, bid, ask, bid_size AS bidSize, ask_size AS askSize FROM quotes";
+const endOfDayColumnsSql = "SELECT expiry, strike, option_right AS right, close, volume, bid, ask FROM eod";
 /** A day's 10:00 quotes and end-of-day rows: the statements the engine reads them with (also on the day-data reader thread). */
-export const quotesOfDaySql = `SELECT expiry, strike, option_right AS right, bid, ask, bid_size AS bidSize, ask_size AS askSize FROM quotes WHERE trading_date = ? AND ${expiresWithin45DaysSql}`;
-export const endOfDayOfDaySql = `SELECT expiry, strike, option_right AS right, close, volume, bid, ask FROM eod WHERE trading_date = ? AND ${expiresWithin46DaysSql}`;
+export const quotesOfDaySql = `${quoteColumnsSql} WHERE trading_date = ? AND ${expiresWithin45DaysSql}`;
+export const endOfDayOfDaySql = `${endOfDayColumnsSql} WHERE trading_date = ? AND ${expiresWithin46DaysSql}`;
+/**
+ * Vol Farmer v2's day (NextCallExpiryDay), read in place of every quote and end-of-day row: the first Call expiry after the
+ * day within the 45-day window (its date passed three times), that expiry's quotes, each right's count within the window,
+ * whether one of them has an ask above 0, and on the previous file day that expiry's end-of-day rows and whether a row
+ * within the window has a volume (also on the day-data reader thread).
+ */
+export const nextCallExpirySql = "SELECT min(expiry) AS expiry FROM quotes WHERE trading_date = ? AND expiry > ? AND expiry <= date(?, '+45 days') AND option_right = 'C'";
+export const quotesOfExpirySql = `${quoteColumnsSql} WHERE trading_date = ? AND expiry = ? AND ${expiresWithin45DaysSql}`;
+export const quoteCountByRightSql = `SELECT option_right AS right, count(*) AS count FROM quotes WHERE trading_date = ? AND ${expiresWithin45DaysSql} GROUP BY option_right`;
+export const quoteWithAskAboveZeroSql = `SELECT 1 AS found FROM quotes WHERE trading_date = ? AND ${expiresWithin45DaysSql} AND ask > 0 LIMIT 1`;
+export const endOfDayOfExpirySql = `${endOfDayColumnsSql} WHERE trading_date = ? AND expiry = ? AND ${expiresWithin46DaysSql}`;
+export const endOfDayWithVolumeSql = `SELECT 1 AS found FROM eod WHERE trading_date = ? AND ${expiresWithin46DaysSql} AND volume IS NOT NULL LIMIT 1`;
 /** The columns an intraday look reads, in primary-key order (look time, expiry, strike, right) within the day; read with expiresWithin45DaysSql. */
 export const intradayQuotesColumnsSql = "SELECT look_time, expiry, strike, option_right, bid, ask FROM intraday_quotes";
 /** A day's first look time after the one given that has rows: one step down the primary key (also on the day-data reader thread). */
@@ -70,6 +110,14 @@ export class BacktestSymbolFile {
   private readonly daysStatement: StatementSync;
   private readonly quotesStatement: StatementSync;
   private readonly endOfDayStatement: StatementSync;
+  private readonly nextCallExpiryStatement: StatementSync;
+  private readonly quotesOfExpiryStatement: StatementSync;
+  private readonly quoteCountByRightStatement: StatementSync;
+  private readonly quoteWithAskAboveZeroStatement: StatementSync;
+  private readonly endOfDayOfExpiryStatement: StatementSync;
+  private readonly endOfDayWithVolumeStatement: StatementSync;
+  private readonly quotesOfContractStatement: StatementSync;
+  private readonly endOfDayOfContractStatement: StatementSync;
   /** Null on a file downloaded before the table existed. */
   private readonly dayIssuesStatement: StatementSync | null;
   private readonly unavailableDaysStatement: StatementSync | null;
@@ -93,6 +141,15 @@ export class BacktestSymbolFile {
     this.daysStatement = database.prepare("SELECT trading_date AS tradingDate, status FROM days ORDER BY trading_date");
     this.quotesStatement = database.prepare(quotesOfDaySql);
     this.endOfDayStatement = database.prepare(endOfDayOfDaySql);
+    this.nextCallExpiryStatement = database.prepare(nextCallExpirySql);
+    this.quotesOfExpiryStatement = database.prepare(quotesOfExpirySql);
+    this.quoteCountByRightStatement = database.prepare(quoteCountByRightSql);
+    this.quoteWithAskAboveZeroStatement = database.prepare(quoteWithAskAboveZeroSql);
+    this.endOfDayOfExpiryStatement = database.prepare(endOfDayOfExpirySql);
+    this.endOfDayWithVolumeStatement = database.prepare(endOfDayWithVolumeSql);
+    // One contract's rows by the primary key, within the window its day's read keeps.
+    this.quotesOfContractStatement = database.prepare(`${quoteColumnsSql} WHERE trading_date = ? AND expiry = ? AND strike BETWEEN ? AND ? AND option_right = ? AND ${expiresWithin45DaysSql}`);
+    this.endOfDayOfContractStatement = database.prepare(`${endOfDayColumnsSql} WHERE trading_date = ? AND expiry = ? AND strike BETWEEN ? AND ? AND option_right = ? AND ${expiresWithin46DaysSql}`);
     const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
     this.dayIssuesStatement = tableNames.has("day_issues") ? database.prepare(`SELECT trading_date AS tradingDate, part, expiry, message FROM day_issues WHERE trading_date = ? AND ${issueWithinReadWindowSql} ORDER BY part, expiry`) : null;
     this.unavailableDaysStatement = tableNames.has("unavailable_days") ? database.prepare("SELECT trading_date AS tradingDate, reason FROM unavailable_days ORDER BY trading_date") : null;
@@ -141,27 +198,34 @@ export class BacktestSymbolFile {
   }
 
   loadQuotes(tradingDate: string): SymbolFileQuote[] {
-    return (this.quotesStatement.all(tradingDate) as Record<string, unknown>[]).map((row) => ({
-      expiry: String(row.expiry),
-      strike: Number(row.strike),
-      right: row.right as "C" | "P",
-      bid: numberOrNull(row.bid),
-      ask: numberOrNull(row.ask),
-      bidSize: numberOrNull(row.bidSize),
-      askSize: numberOrNull(row.askSize),
-    }));
+    return (this.quotesStatement.all(tradingDate) as Record<string, unknown>[]).map(quoteOfRow);
   }
 
   loadEndOfDay(tradingDate: string): SymbolFileEndOfDayRow[] {
-    return (this.endOfDayStatement.all(tradingDate) as Record<string, unknown>[]).map((row) => ({
-      expiry: String(row.expiry),
-      strike: Number(row.strike),
-      right: row.right as "C" | "P",
-      close: numberOrNull(row.close),
-      volume: numberOrNull(row.volume),
-      bid: numberOrNull(row.bid),
-      ask: numberOrNull(row.ask),
-    }));
+    return (this.endOfDayStatement.all(tradingDate) as Record<string, unknown>[]).map(endOfDayOfRow);
+  }
+
+  /** Vol Farmer v2's read of a day (NextCallExpiryDay), with the file day before it (null on the first). */
+  loadNextCallExpiryDay(tradingDate: string, previousFileDay: string | null): NextCallExpiryDay {
+    const expiry = (this.nextCallExpiryStatement.get(tradingDate, tradingDate, tradingDate) as { expiry: string | null }).expiry;
+    return {
+      expiry,
+      quotes: expiry === null ? [] : (this.quotesOfExpiryStatement.all(tradingDate, expiry) as Record<string, unknown>[]).map(quoteOfRow),
+      quoteCountByRight: quoteCountByRightOf(this.quoteCountByRightStatement.all(tradingDate) as { right: string; count: number }[]),
+      hasAskAboveZero: this.quoteWithAskAboveZeroStatement.get(tradingDate) !== undefined,
+      previousEndOfDay: previousFileDay === null || expiry === null ? [] : (this.endOfDayOfExpiryStatement.all(previousFileDay, expiry) as Record<string, unknown>[]).map(endOfDayOfRow),
+      previousHasVolume: previousFileDay === null ? null : this.endOfDayWithVolumeStatement.get(previousFileDay) !== undefined,
+    };
+  }
+
+  /** One expiry and right's 10:00 quotes with a strike from `lowestStrike` to `highestStrike`: what loadQuotes holds of them, in the same order. */
+  loadQuotesOfContract(tradingDate: string, contract: { expiry: string; right: "C" | "P" }, lowestStrike: number, highestStrike: number): SymbolFileQuote[] {
+    return (this.quotesOfContractStatement.all(tradingDate, contract.expiry, lowestStrike, highestStrike, contract.right) as Record<string, unknown>[]).map(quoteOfRow);
+  }
+
+  /** One expiry and right's end-of-day rows with a strike from `lowestStrike` to `highestStrike`: what loadEndOfDay holds of them, in the same order. */
+  loadEndOfDayOfContract(tradingDate: string, contract: { expiry: string; right: "C" | "P" }, lowestStrike: number, highestStrike: number): SymbolFileEndOfDayRow[] {
+    return (this.endOfDayOfContractStatement.all(tradingDate, contract.expiry, lowestStrike, highestStrike, contract.right) as Record<string, unknown>[]).map(endOfDayOfRow);
   }
 
   /** What the downloader could not retrieve of a stored day, among what the engine reads (issueWithinReadWindowSql); none on a file without the table. */
