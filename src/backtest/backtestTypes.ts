@@ -401,7 +401,7 @@ export type VolFarmerV2StepRule = (typeof volFarmerV2StepRules)[number];
 export const volFarmerV2LooksChoices = ["first_look", "every_look"] as const;
 export type VolFarmerV2Looks = (typeof volFarmerV2LooksChoices)[number];
 
-export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.2, stepBelowFirstBreakEvenPct: 15, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 0, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 0 };
+export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 0 };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5), read by the retired rules

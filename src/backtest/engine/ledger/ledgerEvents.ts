@@ -822,7 +822,8 @@ function applyAlignOpenOptionLegsToSplitFactor(ledger: SimulatedLedger, symbol: 
   const isWhole = (value: number) => value > 0 && Math.abs(value - Math.round(value)) < 1e-9;
   if (!isWhole(sharesPerContractToday)) return { representable: false, adjustedLegIds: [] };
   const symbolPositionIds = new Set(positionsOfSymbol(ledger, symbol).map((position) => position.id));
-  const openOptionLegs = ledger.legs.filter((leg) => symbolPositionIds.has(leg.positionId) && leg.legType === "option" && leg.exitAt === null);
+  // Open legs first: most of a long session's legs are closed, and it is the cheapest test.
+  const openOptionLegs = ledger.legs.filter((leg) => leg.exitAt === null && leg.legType === "option" && symbolPositionIds.has(leg.positionId));
   if (openOptionLegs.some((leg) => !isWhole((leg.quantity * leg.multiplier) / sharesPerContractToday))) return { representable: false, adjustedLegIds: [] };
   const adjustedLegIds: string[] = [];
   for (const leg of openOptionLegs) {

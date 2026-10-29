@@ -261,7 +261,7 @@ describe("runBaselineLook with the entry whichever ranks higher", () => {
     let actionNumber = 0;
     const lookSymbol = {
       profile: { symbol: "WHL", calendarChecksApply: false, earnings: [] },
-      market: { todayIso, quotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+      market: { todayIso, quotes, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
       splitFactorToday: 1,
       optionContractsRepresentable: true,
     } as unknown as BacktestLookSymbol;
@@ -319,7 +319,7 @@ describe("runBaselineLook with the average-cost floor", () => {
     let actionNumber = 0;
     const lookSymbol = {
       profile: { symbol: "WHL", calendarChecksApply: false, earnings: [] },
-      market: { todayIso, quotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+      market: { todayIso, quotes, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
       splitFactorToday: 1,
       optionContractsRepresentable: true,
     } as unknown as BacktestLookSymbol;
@@ -368,7 +368,7 @@ describe("runBaselineLook with the average-cost floor", () => {
     let actionNumber = 0;
     const lookSymbol = {
       profile: { symbol: "WHL", calendarChecksApply: false, earnings: [] },
-      market: { todayIso, quotes: fallbackQuotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(fallbackQuotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+      market: { todayIso, quotes: fallbackQuotes, previousSessionVolumeByContract: new Map(fallbackQuotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
       splitFactorToday: 1,
       optionContractsRepresentable: true,
     } as unknown as BacktestLookSymbol;
@@ -396,7 +396,7 @@ describe("runBaselineLook with the average-cost floor", () => {
     let actionNumber = 0;
     const lookSymbol = {
       profile: { symbol: "WHL", calendarChecksApply: false, earnings: [] },
-      market: { todayIso, quotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+      market: { todayIso, quotes, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
       splitFactorToday: 1,
       optionContractsRepresentable: true,
     } as unknown as BacktestLookSymbol;
@@ -411,7 +411,7 @@ describe("runBaselineLook with the average-cost floor", () => {
       let actionNumber = 0;
       const lookSymbol = {
         profile: { symbol: "WHL", calendarChecksApply: false, earnings: [] },
-        market: { todayIso, quotes: capQuotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(capQuotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+        market: { todayIso, quotes: capQuotes, previousSessionVolumeByContract: new Map(capQuotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
         splitFactorToday: 1,
         optionContractsRepresentable: true,
       } as unknown as BacktestLookSymbol;
@@ -431,7 +431,7 @@ describe("runBaselineLook with the average-cost floor", () => {
       let actionNumber = 0;
       const lookSymbol = {
         profile: { symbol: "WHL", calendarChecksApply: false, earnings: [] },
-        market: { todayIso, quotes: callQuotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(callQuotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+        market: { todayIso, quotes: callQuotes, previousSessionVolumeByContract: new Map(callQuotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
         splitFactorToday: 1,
         optionContractsRepresentable: true,
       } as unknown as BacktestLookSymbol;
@@ -464,7 +464,7 @@ describe("runBaselineLook in a session of per-ticker pots", () => {
   const lookSymbolOf = (symbol: string) =>
     ({
       profile: { symbol, calendarChecksApply: false, earnings: [] },
-      market: { todayIso, quotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+      market: { todayIso, quotes, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
       adjustedDailyClosesBeforeToday: [],
       splitFactorToday: 1,
       optionContractsRepresentable: true,
@@ -516,7 +516,7 @@ describe("runBaselineLook with a Cash-Secured Put entry and the ladder", () => {
   const quotes = [100, 105, 110].map((strike) => quote(expiry, strike, "C")).concat([90, 95].map((strike) => quote(expiry, strike, "P")));
   const lookSymbol = {
     profile: { symbol: "WHL", calendarChecksApply: false, earnings: [] },
-    market: { todayIso, quotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+    market: { todayIso, quotes, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
     adjustedDailyClosesBeforeToday: [],
     splitFactorToday: 1,
     optionContractsRepresentable: true,

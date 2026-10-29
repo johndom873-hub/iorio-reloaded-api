@@ -29,7 +29,7 @@ import { describeHedgeTotals, hedgeIsOn, summarizeHedge, type HedgePutQuoteSourc
 import { createSimulatedLedger, cycleSplitFactorFor, rememberedForRevision, requirePosition, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { loadOrInferSplitSchedule, requireSplitFactors, splitFactorForNewCycle, splitFactorOn, type SplitSchedule } from "./splitFactors.js";
 import { BacktestTradingCalendar, loadMarketCalendarRowsFrom } from "./backtestTradingCalendar.js";
-import { BacktestDayDataReader, type PrefetchedSymbolDay, type StrikeRange } from "./backtestDayDataReader.js";
+import { BacktestDayDataReader, type IntradayLookCheck, type PrefetchedSymbolDay } from "./backtestDayDataReader.js";
 import { loadTreasuryBillRates } from "./treasuryBillRates.js";
 import { prepareModelTablesForSession } from "./walkForwardModelTables.js";
 import { runBaselineLook } from "./backtestBaselineLook.js";
@@ -89,8 +89,10 @@ export class BacktestCancelledError extends Error {
 const progressIntervalMs = 5_000;
 const cancelCheckIntervalMs = 2_000;
 const insertBatchSize = 500;
-/** How many of a symbol's days the reader thread reads ahead of the one being replayed (today's included). */
+/** How many of a symbol's days the reader threads read ahead of the one being replayed (today's included). */
 const prefetchDaysAhead = 3;
+/** The reader threads: as many as the days a symbol reads ahead, so a one-ticker session reads them all at once. */
+const dayDataReaderThreadCount = prefetchDaysAhead;
 
 interface SessionRow {
   id: string;
@@ -167,9 +169,22 @@ export const lookGridTimesEt: readonly string[] = ["10:00", "10:30", "11:00", "1
 /** A look's quotes are read for the strikes from this share of the 10:00 stock price to that multiple of it (the capture's widest window at any price the day can reach), and for the held legs' strikes. */
 const lookStrikeRangeOfStockPrice = { lowest: 0.45, highest: 2.2 };
 
+/** A strike range, both ends included. */
+interface StrikeRange {
+  lowestStrike: number;
+  highestStrike: number;
+}
+
 /** A snapshot of zeros: quotes, none with an ask above 0. Missing data in the files, not a market with no bid. */
 export function isZeroQuoteSnapshot(quotes: readonly Pick<SymbolFileQuote, "ask">[]): boolean {
   return quotes.length > 0 && !quotes.some((quote) => quote.ask !== null && quote.ask > 0);
+}
+
+/** Whether a look's quotes are a snapshot of zeros; at 10:00 of a day read for Vol Farmer v2, from what was read of every quote. */
+function isZeroQuoteLook(lookSymbol: BacktestLookSymbol): boolean {
+  if (lookSymbol.intraday) return isZeroQuoteSnapshot(lookSymbol.intraday.quotes);
+  const everyQuote = lookSymbol.market.everyQuote;
+  return everyQuote ? everyQuote.countByRight.C + everyQuote.countByRight.P > 0 && !everyQuote.hasAskAboveZero : isZeroQuoteSnapshot(lookSymbol.market.quotes);
 }
 
 const clockTime = (minutesOfDay: number) => `${String(Math.floor(minutesOfDay / 60)).padStart(2, "0")}:${String(minutesOfDay % 60).padStart(2, "0")}`;
@@ -258,15 +273,15 @@ function volumeByContract(endOfDayRows: readonly SymbolFileEndOfDayRow[] | null)
  * volume rule reads: a day stored without them (or without some expirations) leaves that volume unknown, and the rule
  * refuses the contracts. Today's own missing parts are named too.
  */
-function describeDataGaps(file: BacktestSymbolFile, todayIso: string, previousFileDay: string | null, previousSessionVolumeByContract: ReadonlyMap<string, number> | null): string[] {
+function describeDataGaps(dayIssuesByDate: ReadonlyMap<string, SymbolFileDayIssue[]>, todayIso: string, previousFileDay: string | null, previousSessionHasVolume: boolean): string[] {
   const notes: string[] = [];
   const expiriesOf = (issues: readonly SymbolFileDayIssue[]) => issues.map((issue) => issue.expiry).filter((expiry): expiry is string => expiry !== null);
   if (previousFileDay !== null) {
-    const endOfDayIssues = file.loadDayIssues(previousFileDay).filter((issue) => issue.part === "eod");
-    if (endOfDayIssues.some((issue) => issue.expiry === null) || (previousSessionVolumeByContract?.size ?? 0) === 0) notes.push(`volume unknown for every contract (refused by the volume rule): the file has no end-of-day data for ${previousFileDay}`);
+    const endOfDayIssues = (dayIssuesByDate.get(previousFileDay) ?? []).filter((issue) => issue.part === "eod");
+    if (endOfDayIssues.some((issue) => issue.expiry === null) || !previousSessionHasVolume) notes.push(`volume unknown for every contract (refused by the volume rule): the file has no end-of-day data for ${previousFileDay}`);
     else if (endOfDayIssues.length > 0) notes.push(`volume unknown for the expiries ${expiriesOf(endOfDayIssues).join(", ")} (refused by the volume rule): their end-of-day data of ${previousFileDay} could not be downloaded`);
   }
-  const todaysIssues = file.loadDayIssues(todayIso);
+  const todaysIssues = dayIssuesByDate.get(todayIso) ?? [];
   for (const [part, what] of [["quotes", "10:00 quotes"], ["open_interest", "open interest"]] as const) {
     const issues = todaysIssues.filter((issue) => issue.part === part);
     if (issues.length === 0) continue;
@@ -310,9 +325,13 @@ export interface SimulatedSessionResult {
 /** A symbol's file day at 10:00: its quotes, the stock price then (IBKR), and what the looks read with them. */
 interface DayCapture {
   quotes: SymbolFileQuote[];
+  /** Vol Farmer v2's day: `quotes` holds only this expiry's (none when null), and a held contract of another is read by its key. Undefined when `quotes` holds every quote. */
+  quotesOnlyOfExpiry?: string | null;
   /** The close of IBKR's 09:30 bar on the day's traded scale; null without that bar. */
   stockPrice: number | null;
   previousSessionVolumeByContract: Map<string, number> | null;
+  /** Whether a contract of the previous session has a volume (describeDataGaps). */
+  previousSessionHasVolume: boolean;
   /** The 10:00 market the looks read; null without a 10:00 price. */
   market: BacktestLookSymbol["market"] | null;
 }
@@ -337,6 +356,8 @@ interface SessionSymbol {
   endOfDayRows(tradingDate: string): readonly SymbolFileEndOfDayRow[];
   /** The complete file day before each complete day; null for the first. */
   previousFileDayOf: Map<string, string | null>;
+  /** The file's day issues by date (loadDayIssuesByDate), read once. */
+  dayIssuesByDate: Map<string, SymbolFileDayIssue[]>;
   /** The symbol's complete days inside the session, ascending: what the reader thread reads ahead. */
   ownSessionDays: string[];
   /** The days the reader thread read for the symbol, the last few kept (a day's end-of-day rows are read again the next day). */
@@ -384,6 +405,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
   const hedgeOnFor = (symbol: string) => settings.decisionMaker === "vol_farmer" || (settings.decisionMaker === "baseline" && hedgeIsOn(tickerSetupBySymbol?.get(symbol)?.baseline ?? settings.baseline));
   // Vol Farmer v2 buys its LEAPS from the 10:00 Calls of every listed expiry (backtestVolFarmerV2Look.ts).
   const leapsOn = settings.decisionMaker === "vol_farmer_v2";
+  // Vol Farmer v2 decides on the next Call expiry's quotes only: its days are read as NextCallExpiryDay (backtestSymbolFile.ts).
+  const readsNextCallExpiryOnly = settings.decisionMaker === "vol_farmer_v2";
   // The Steady Stake decides at 10:00 only, the Vol Farmer too but reads every look's quotes (the IVs a crossing is
   // priced on), the baseline and Vol Farmer v2 at every look unless their looks say the first only.
   const decidesAtCaptureLookOnly =
@@ -393,9 +416,9 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
   const dataDirectory = requireBacktestDataDirectory();
   // Every file is opened once and stays open for the run.
   const files: BacktestSymbolFile[] = [];
-  // The files are read ahead on a thread of their own (backtestDayDataReader.ts); a session whose later looks only mark
-  // what it holds reads the held contracts' rows itself, and the thread only probes each look for one row in range.
-  const dayDataReader = new BacktestDayDataReader({ probeIntradayQuotesOnly: decidesAtCaptureLookOnly });
+  // The files are read ahead on threads of their own (backtestDayDataReader.ts); a session whose later looks only mark
+  // what it holds reads the held contracts' rows itself, by their key, and the threads leave the intraday rows alone.
+  const dayDataReader = new BacktestDayDataReader({ readsIntradayQuotes: !decidesAtCaptureLookOnly, readsNextCallExpiryOnly, threadCount: dayDataReaderThreadCount });
   try {
     const fileBySymbol = new Map<string, BacktestSymbolFile>();
     for (const symbol of symbolNames) {
@@ -478,6 +501,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         intradayDays: file.loadIntradayDays(),
         endOfDayRows,
         previousFileDayOf: new Map(completeDays.map((dateIso, index) => [dateIso, index > 0 ? completeDays[index - 1]! : null])),
+        dayIssuesByDate: file.loadDayIssuesByDate(),
         ownSessionDays,
         prefetchedDays,
         captureByDay: new Map(),
@@ -495,8 +519,9 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     // A day no file holds is skipped; those the downloader could not retrieve for any symbol are named on the next day.
     const sessionDaySet = new Set(sessionDays);
     const skippedUnavailableDays = [...new Set(symbols.flatMap((entry) => entry.unavailableDaysInPeriod))].filter((dateIso) => !sessionDaySet.has(dateIso)).sort();
-    const tables = await prepareModelTablesForSession(session.tablesMode, sessionDays, dataDirectory, (year) => hooks.reportProgress(0, sessionDays.length, `Model tables for ${year}`), connection);
-    for (const line of tables.report) console.log(`backtest ${sessionId} tables: ${line}`);
+    // The volatility model's tables: only the baseline reads them (its Edge Yield ranking and volatility edge filter).
+    const tables = settings.decisionMaker === "baseline" ? await prepareModelTablesForSession(session.tablesMode, sessionDays, dataDirectory, (year) => hooks.reportProgress(0, sessionDays.length, `Model tables for ${year}`), connection) : null;
+    for (const line of tables?.report ?? []) console.log(`backtest ${sessionId} tables: ${line}`);
     const marketStressPrices = await loadMarketStressPrices(sessionDays[0]!, sessionDays.at(-1)!, connection);
     // SPY at 10:00: the close of its 09:30 bar, else the day's IBKR open (the daily bar has no 10:00 price).
     const spyTicker: { id: string } | undefined = await connection("tickers").where({ symbol: marketStressSymbol }).first("id");
@@ -584,22 +609,26 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     const riskFreeRatePercentOn = (dateIso: string) => rates.ratePercentOnOrBefore(addCalendarDays(dateIso, -1));
     /** F on a day: the symbol's own on a day its file holds, else the factor of the last segment before the date; null when it cannot be inferred. */
     const splitFactorOnDay = (entry: SessionSymbol, dateIso: string): number | null => entry.splitFactorByDay.get(dateIso) ?? splitFactorOn(entry.schedule, dateIso);
-    /** The reader thread's copy of a symbol's file day, taken once, at the top of the day. */
     /**
-     * Where the reader thread probes a day's later looks (probeIntradayQuotesOnly): the strikes intradayStrikeRangeOf
-     * gives without any held, from the day's 10:00 price as its capture works it out; null without that price.
+     * For a session whose looks after 10:00 only mark what it holds, what the reader threads check of a day: whether its
+     * last look holds a quote in the strike range of its 10:00 price, the narrowest range applyMarksOnlyLooks asks there
+     * (it widens it to the held strikes). Null without that price, a look after 10:00 or intraday quotes.
      */
-    const intradayProbeRangeOf = (entry: SessionSymbol, dateIso: string): StrikeRange | null => {
-      if (!decidesAtCaptureLookOnly) return null;
+    const lastLookCheckOf = (entry: SessionSymbol, dateIso: string): IntradayLookCheck | null => {
+      if (!decidesAtCaptureLookOnly || !entry.intradayDays.has(dateIso)) return null;
+      const lookTime = lookTimesInWindow(pluto.windowStartEt, pluto.windowEndEt, closeMinutesByDay.get(dateIso) ?? regularCloseMinutesEt).filter((lookTimeEt) => lookTimeEt > captureLookTimeEt).at(-1);
       const adjustedPrice = entry.intradayPrices.priceAt(dateIso, captureLookTimeEt);
       const splitFactor = splitFactorOnDay(entry, dateIso);
-      if (adjustedPrice === null || splitFactor === null) return null;
+      if (lookTime === undefined || adjustedPrice === null || splitFactor === null) return null;
       const stockPrice = adjustedPrice * splitFactor;
-      return { lowestStrike: stockPrice * lookStrikeRangeOfStockPrice.lowest - 0.005, highestStrike: stockPrice * lookStrikeRangeOfStockPrice.highest + 0.005 };
+      return { lookTime, lowestStrike: stockPrice * lookStrikeRangeOfStockPrice.lowest - 0.005, highestStrike: stockPrice * lookStrikeRangeOfStockPrice.highest + 0.005 };
     };
+    /** What a day's request asks the reader threads besides its rows. */
+    const dayRequestExtrasOf = (entry: SessionSymbol, dateIso: string) => ({ intradayLookCheck: lastLookCheckOf(entry, dateIso), previousFileDay: readsNextCallExpiryOnly ? (entry.previousFileDayOf.get(dateIso) ?? null) : null });
+    /** The reader threads' copy of a symbol's file day, taken once, at the top of the day. */
     const takePrefetchedDay = async (entry: SessionSymbol, dateIso: string) => {
       if (entry.prefetchedDays.has(dateIso)) return;
-      entry.prefetchedDays.set(dateIso, await dayDataReader.take(entry.symbol, dateIso, captureLookTimeEt, intradayProbeRangeOf(entry, dateIso)));
+      entry.prefetchedDays.set(dateIso, await dayDataReader.take(entry.symbol, dateIso, captureLookTimeEt, dayRequestExtrasOf(entry, dateIso)));
       if (entry.prefetchedDays.size > 4) entry.prefetchedDays.delete(entry.prefetchedDays.keys().next().value!);
     };
     /** A file day's 10:00 capture (DayCapture), worked out once. */
@@ -607,14 +636,24 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       let capture = entry.captureByDay.get(dateIso);
       if (capture) return capture;
       const riskFreeRatePercent = riskFreeRatePercentOn(dateIso);
-      const quotes = entry.prefetchedDays.get(dateIso)?.quotes() ?? entry.file.loadQuotes(dateIso);
       const adjustedPrice = entry.intradayPrices.priceAt(dateIso, captureLookTimeEt);
       const splitFactor = splitFactorOnDay(entry, dateIso);
       const stockPrice = adjustedPrice === null || splitFactor === null ? null : adjustedPrice * splitFactor;
       const previousFileDay = entry.previousFileDayOf.get(dateIso) ?? null;
-      const previousSessionVolumeByContract = volumeByContract(previousFileDay === null ? null : entry.endOfDayRows(previousFileDay));
-      const market = stockPrice !== null ? { todayIso: dateIso, quotes, openInterestByContract: entry.prefetchedDays.get(dateIso)?.openInterest() ?? entry.file.loadOpenInterest(dateIso), previousSessionVolumeByContract, stockPrice, riskFreeRatePercent } : null;
-      capture = { quotes, stockPrice, previousSessionVolumeByContract, market };
+      if (readsNextCallExpiryOnly) {
+        // What Vol Farmer v2 reads of the day, each part as the full read gives it: the next Call expiry's quotes, every
+        // quote's count and asks, and the previous day's volumes of that expiry, with whether any contract had one.
+        const day = entry.prefetchedDays.get(dateIso)?.nextCallExpiryDay() ?? entry.file.loadNextCallExpiryDay(dateIso, previousFileDay);
+        const previousSessionVolumeByContract = volumeByContract(previousFileDay === null ? null : day.previousEndOfDay);
+        const everyQuote = { countByRight: day.quoteCountByRight, hasAskAboveZero: day.hasAskAboveZero };
+        const market = stockPrice !== null ? { todayIso: dateIso, quotes: day.quotes, everyQuote, previousSessionVolumeByContract, stockPrice, riskFreeRatePercent } : null;
+        capture = { quotes: day.quotes, quotesOnlyOfExpiry: day.expiry, stockPrice, previousSessionVolumeByContract, previousSessionHasVolume: day.previousHasVolume === true, market };
+      } else {
+        const quotes = entry.prefetchedDays.get(dateIso)?.quotes() ?? entry.file.loadQuotes(dateIso);
+        const previousSessionVolumeByContract = volumeByContract(previousFileDay === null ? null : entry.endOfDayRows(previousFileDay));
+        const market = stockPrice !== null ? { todayIso: dateIso, quotes, previousSessionVolumeByContract, stockPrice, riskFreeRatePercent } : null;
+        capture = { quotes, stockPrice, previousSessionVolumeByContract, previousSessionHasVolume: (previousSessionVolumeByContract?.size ?? 0) > 0, market };
+      }
       entry.captureByDay.set(dateIso, capture);
       if (entry.captureByDay.size > 3) entry.captureByDay.delete(entry.captureByDay.keys().next().value!);
       return capture;
@@ -635,7 +674,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const ownDayIndex = entry.ownSessionDays.indexOf(todayIso);
         const nextDayIndex = ownDayIndex === -1 ? entry.ownSessionDays.findIndex((dateIso) => dateIso > todayIso) : ownDayIndex;
         // A day already taken is not read again.
-        if (nextDayIndex !== -1) for (const dateIso of entry.ownSessionDays.slice(nextDayIndex, nextDayIndex + prefetchDaysAhead)) if (!entry.prefetchedDays.has(dateIso)) dayDataReader.prefetch(entry.symbol, dateIso, captureLookTimeEt, intradayProbeRangeOf(entry, dateIso));
+        if (nextDayIndex !== -1) for (const dateIso of entry.ownSessionDays.slice(nextDayIndex, nextDayIndex + prefetchDaysAhead)) if (!entry.prefetchedDays.has(dateIso)) dayDataReader.prefetch(entry.symbol, dateIso, captureLookTimeEt, dayRequestExtrasOf(entry, dateIso));
         if (ownDayIndex === -1) continue;
         await takePrefetchedDay(entry, todayIso);
       }
@@ -792,6 +831,41 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         return unmarked;
       };
       /**
+       * The 10:00 quotes markLegs reads for a symbol's legs: the capture's, and on a day read for Vol Farmer v2 (the next
+       * Call expiry's only) those of its held contracts of another expiry within the 45-day window, read by their key:
+       * every stored strike markKey rounds to the contract's, as the full read holds them.
+       */
+      const tenOclockQuotesOfLegs = (entry: SessionSymbol, capture: DayCapture, legs: readonly LedgerLeg[], splitFactor: number): readonly SymbolFileQuote[] => {
+        if (capture.quotesOnlyOfExpiry === undefined) return capture.quotes;
+        const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
+        const lastExpiryRead = addCalendarDays(todayIso, 45);
+        const quotes = [...capture.quotes];
+        const contractsRead = new Set<string>();
+        for (const leg of legs) {
+          if (leg.legType !== "option" || leg.expiryDate === capture.quotesOnlyOfExpiry || leg.expiryDate! > lastExpiryRead) continue;
+          const contract = { expiry: leg.expiryDate!, right: leg.optionType === "call" ? ("C" as const) : ("P" as const) };
+          const strike = roundedStrike(leg.strikePrice! / priceToCycleScale);
+          const key = markKey(contract.expiry, strike, contract.right);
+          if (contractsRead.has(key)) continue;
+          contractsRead.add(key);
+          for (const row of entry.file.loadQuotesOfContract(todayIso, contract, strike - 0.0001, strike + 0.0001)) if (roundedStrike(row.strike) === strike) quotes.push(row);
+        }
+        return quotes;
+      };
+      /** What the day's end-of-day read holds of these contracts, read by their key: every stored strike markKey rounds to a contract's, in the file's order. */
+      const endOfDayOfContracts = (entry: SessionSymbol, contracts: readonly { expiry: string; strike: number; right: "C" | "P" }[]): SymbolFileEndOfDayRow[] => {
+        const rows: SymbolFileEndOfDayRow[] = [];
+        const contractsRead = new Set<string>();
+        for (const contract of contracts) {
+          const key = markKey(contract.expiry, contract.strike, contract.right);
+          if (contractsRead.has(key)) continue;
+          contractsRead.add(key);
+          const strike = roundedStrike(contract.strike);
+          for (const row of entry.file.loadEndOfDayOfContract(todayIso, contract, strike - 0.0001, strike + 0.0001)) if (roundedStrike(row.strike) === strike) rows.push(row);
+        }
+        return rows;
+      };
+      /**
        * What an intraday read of the strike range would hold of these contracts at one look, read by their key: every
        * stored strike markKey rounds to a contract's, within the range, in the file's order.
        */
@@ -820,15 +894,23 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const highestStrike = Math.max(...strikes) + 0.005;
         const closeEt = clockTime(closeMinutesByDay.get(todayIso) ?? regularCloseMinutesEt);
         const contractOf = (leg: LedgerLeg) => ({ expiry: leg.expiryDate!, strike: leg.strikePrice! / priceToCycleScale, right: leg.optionType === "call" ? ("C" as const) : ("P" as const) });
-        // A day the reader thread only probed: the legs' own quotes at each of its looks, read by their key.
-        const probedLookTimes = entry.prefetchedDays.get(todayIso)?.intradayProbedLookTimes(captureLookTimeEt) ?? null;
-        const snapshots = !entry.intradayDays.has(todayIso)
-          ? new Map<string, SymbolFileQuote[]>()
-          : probedLookTimes !== null
-            ? new Map(probedLookTimes.filter((lookTimeEt) => lookTimeEt <= closeEt).map((lookTimeEt) => [lookTimeEt, intradayQuotesOfContracts(entry, lookTimeEt, legs.map(contractOf), { lowestStrike, highestStrike })]))
-            : (entry.prefetchedDays.get(todayIso)?.intradayQuotes(captureLookTimeEt, closeEt, lowestStrike, highestStrike) ?? entry.file.loadIntradayQuotes(todayIso, captureLookTimeEt, closeEt, lowestStrike, highestStrike));
-        const quoteSets = [...[...snapshots.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, quotes]) => quotes), entry.endOfDayRows(todayIso)];
-        const quoteByContract = firstTwoSidedQuotes(quoteSets, legs.map(contractOf));
+        const contracts = legs.map(contractOf);
+        // A session whose looks after 10:00 only mark what it holds (the reader thread leaves its intraday rows alone): the
+        // legs' own quotes at each of the file's looks in turn, read by their key, only until every leg has its first.
+        function* quotesOfLegsLookByLook(): Generator<SymbolFileQuote[]> {
+          for (let lookTimeEt = entry.file.nextIntradayLookTime(todayIso, captureLookTimeEt); lookTimeEt !== null && lookTimeEt <= closeEt; lookTimeEt = entry.file.nextIntradayLookTime(todayIso, lookTimeEt)) yield intradayQuotesOfContracts(entry, lookTimeEt, contracts, { lowestStrike, highestStrike });
+        }
+        const snapshots: Iterable<SymbolFileQuote[]> = !entry.intradayDays.has(todayIso)
+          ? []
+          : decidesAtCaptureLookOnly
+            ? quotesOfLegsLookByLook()
+            : [...(entry.prefetchedDays.get(todayIso)?.intradayQuotes(captureLookTimeEt, closeEt, lowestStrike, highestStrike) ?? entry.file.loadIntradayQuotes(todayIso, captureLookTimeEt, closeEt, lowestStrike, highestStrike)).entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, quotes]) => quotes);
+        const quoteSets = (function* () {
+          yield* snapshots;
+          // A day read for Vol Farmer v2 has not read its end of day: the legs' own rows, by their key.
+          yield readsNextCallExpiryOnly ? endOfDayOfContracts(entry, contracts) : entry.endOfDayRows(todayIso);
+        })();
+        const quoteByContract = firstTwoSidedQuotes(quoteSets, contracts);
         const marks = new Map<string, number>();
         for (const leg of legs) {
           const contract = contractOf(leg);
@@ -855,7 +937,6 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         if (!aligned.representable) notes.push(noteFor(entry, "the open cycle spans a split whose contracts do not fit its share scale: no option order until it ends"));
         const previousFileDay = hasFileDay ? (entry.previousFileDayOf.get(todayIso) ?? null) : null;
         const capture = hasFileDay ? captureOf(entry, todayIso) : null;
-        const quotes = capture?.quotes ?? [];
         const tenOclockPrice = capture?.stockPrice ?? null;
         const adjustedFallbackPrice: number | null = tenOclockPrice !== null ? null : (entry.bars.previousClose(todayIso)?.close ?? entry.lastAdjustedStockPrice);
         const stockPrice: number | null = tenOclockPrice ?? (adjustedFallbackPrice === null ? null : adjustedFallbackPrice * splitFactor);
@@ -865,7 +946,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           notes.push(noteFor(entry, "not scored: no data for the day and no earlier close"));
           continue;
         }
-        const unmarkedByTheDayQuotes = markLegs(entry, legsOfSymbol, stockPrice, quotes, splitFactor);
+        const unmarkedByTheDayQuotes = markLegs(entry, legsOfSymbol, stockPrice, capture === null ? [] : tenOclockQuotesOfLegs(entry, capture, legsOfSymbol, splitFactor), splitFactor);
         const unmarkedAtCapture = unmarkedByTheDayQuotes.length > 0 && hasFileDay && (hedgeOnFor(entry.symbol) || leapsOn) ? markLongDatedOptionLegs(entry, unmarkedByTheDayQuotes, splitFactor) : unmarkedByTheDayQuotes;
         if (unmarkedAtCapture.length > 0 && hasFileDay) {
           for (const [legId, mark] of laterMarksOfDay(entry, unmarkedAtCapture, splitFactor)) {
@@ -894,8 +975,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         }
         const previousBarDate = entry.bars.previousClose(todayIso)?.dateIso ?? null;
         if (previousFileDay !== null && previousBarDate !== null && previousBarDate < previousFileDay) notes.push(noteFor(entry, `IBKR bars end ${previousBarDate}: the forecast and the day's move use that close`));
-        const previousSessionVolumeByContract = capture!.previousSessionVolumeByContract;
-        notes.push(...describeDataGaps(entry.file, todayIso, previousFileDay, previousSessionVolumeByContract).map((note) => noteFor(entry, note)));
+        notes.push(...describeDataGaps(entry.dayIssuesByDate, todayIso, previousFileDay, capture!.previousSessionHasVolume).map((note) => noteFor(entry, note)));
         const hedgePutQuotes = hedgePutQuotesAt(entry, captureLookTimeEt);
         const leapsCallQuotes = leapsCallQuotesAt(entry, captureLookTimeEt);
         const nextSessionIso = sessionDays[dayIndex + 1];
@@ -932,7 +1012,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       // d. The looks inside Pluto's window, over every symbol of the day.
       const lookTimes = lookTimesInWindow(pluto.windowStartEt, pluto.windowEndEt, closeMinutesByDay.get(todayIso) ?? regularCloseMinutesEt);
       const laterLookTimes = lookTimes.filter((lookTimeEt) => lookTimeEt > captureLookTimeEt);
-      const modelTables = tables.tablesFor(todayIso);
+      const modelTables = tables?.tablesFor(todayIso) ?? null;
       /** The strikes a symbol's looks after 10:00 read, set at the first of them: the 10:00 price's range and the held strikes. */
       const intradayStrikeRangeBySymbol = new Map<string, StrikeRange>();
       const intradayStrikeRangeOf = (entry: SessionSymbol, stockPriceAtCapture: number, splitFactor: number) => {
@@ -957,18 +1037,50 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         return quotesByLookTime;
       };
       /**
-       * A look after 10:00 of a session that decides at 10:00 only, where the look marks the held options and nothing
-       * else: the quotes intradayQuotesOf would hold of the held contracts at the look, read by their key, or undefined
-       * when it would hold no quote at all then (the symbol sits the look out). The reader thread's probe tells the
-       * second in most looks; the file is asked when it cannot.
+       * The looks after 10:00, not applied yet, at which a symbol of a session that decides at 10:00 only marks what it
+       * holds and nothing else. Such a look, when it has quotes in the symbol's range and an IBKR price, marks the stock
+       * and every option it quotes two-sided; an option it does not quote keeps its mark. So of the looks since the last
+       * decision, only the latest with quotes sets the stock's mark, and the latest that quotes an option sets that
+       * option's: applyMarksOnlyLooks takes them from the last back, reading only as far as that, before anything reads the
+       * marks (a decision at a later look, the end of the day).
        */
-      const heldContractQuotesAt = (entry: SessionSymbol, stockPriceAtCapture: number, splitFactor: number, lookTimeEt: string): SymbolFileQuote[] | undefined => {
-        const range = intradayStrikeRangeOf(entry, stockPriceAtCapture, splitFactor);
-        const lookHasQuotes = entry.prefetchedDays.get(todayIso)?.intradayLookHasStrikeWithin(captureLookTimeEt, lookTimeEt, range) ?? entry.file.hasIntradayQuoteWithin(todayIso, lookTimeEt, range.lowestStrike, range.highestStrike);
-        if (!lookHasQuotes) return undefined;
-        const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
-        const heldContracts = openLegsOf(ledger).flatMap((leg) => (leg.legType === "option" && symbolOfLeg(leg) === entry ? [{ expiry: leg.expiryDate!, strike: leg.strikePrice! / priceToCycleScale, right: leg.optionType === "call" ? ("C" as const) : ("P" as const) }] : []));
-        return intradayQuotesOfContracts(entry, lookTimeEt, heldContracts, range);
+      const marksOnlyLooksBySymbol = new Map<SessionSymbol, { splitFactor: number; lookTimes: string[] }>();
+      const applyMarksOnlyLooks = () => {
+        for (const [entry, { splitFactor, lookTimes: marksOnlyLookTimes }] of marksOnlyLooksBySymbol) {
+          const range = intradayStrikeRangeBySymbol.get(entry.symbol)!;
+          const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
+          const legsOfSymbol = openLegsOf(ledger).filter((leg) => symbolOfLeg(leg) === entry);
+          const contractOf = (leg: LedgerLeg) => ({ expiry: leg.expiryDate!, strike: leg.strikePrice! / priceToCycleScale, right: leg.optionType === "call" ? ("C" as const) : ("P" as const) });
+          const optionLegs = legsOfSymbol.filter((leg) => leg.legType === "option");
+          const heldContracts = optionLegs.map(contractOf);
+          const heldStrikes = new Set(heldContracts.map((contract) => roundedStrike(contract.strike)));
+          // An option expiring past the 45 days the looks read (a LEAPS) has no quote at any of them.
+          const lastExpiryRead = addCalendarDays(todayIso, 45);
+          let optionLegsToMark = optionLegs.filter((leg) => leg.expiryDate! <= lastExpiryRead);
+          let stockMarked = false;
+          for (let index = marksOnlyLookTimes.length - 1; index >= 0 && (!stockMarked || optionLegsToMark.length > 0); index--) {
+            const lookTimeEt = marksOnlyLookTimes[index]!;
+            const adjustedPrice = entry.intradayPrices.priceAt(todayIso, lookTimeEt);
+            // Without an IBKR price then, or a quote in the range, the symbol sat the look out (the reader threads checked the last look).
+            if (adjustedPrice === null || !(entry.prefetchedDays.get(todayIso)?.intradayLookHasQuoteWithin(lookTimeEt, range.lowestStrike, range.highestStrike) ?? entry.file.hasIntradayQuoteWithin(todayIso, lookTimeEt, range.lowestStrike, range.highestStrike))) continue;
+            const lookPrice = adjustedPrice * splitFactorToday(entry);
+            if (!stockMarked) {
+              for (const leg of legsOfSymbol) if (leg.legType === "stock") priceByLegId.set(leg.id, lookPrice * priceToCycleScale);
+              entry.lastAdjustedStockPrice = lookPrice / splitFactor;
+              stockMarked = true;
+            }
+            if (optionLegsToMark.length === 0) continue;
+            const quoteByContract = twoSidedQuoteByContract(intradayQuotesOfContracts(entry, lookTimeEt, heldContracts, range), heldStrikes);
+            optionLegsToMark = optionLegsToMark.filter((leg) => {
+              const contract = contractOf(leg);
+              const quote = quoteByContract.get(markKey(contract.expiry, contract.strike, contract.right));
+              if (quote === undefined) return true;
+              priceByLegId.set(leg.id, markOfLeg(leg, quote) * priceToCycleScale);
+              return false;
+            });
+          }
+        }
+        marksOnlyLooksBySymbol.clear();
       };
       const looksOfDay: DayLookSummary[] = [];
       let filledActionsToday = 0;
@@ -999,16 +1111,21 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           for (const { entry, lookSymbol, splitFactor } of daySymbols) {
             if (!entry.intradayDays.has(todayIso)) continue;
             // A session that decides at 10:00 only decides nothing at this look (below) for a symbol other than a Vol Farmer
-            // v2 one still waiting for quotes: the look only marks what the symbol holds.
-            const marksOnly = decidesAtCaptureLookOnly && !symbolsWaitingForQuotes.has(entry.symbol);
-            const quotes = marksOnly ? heldContractQuotesAt(entry, lookSymbol.market.stockPrice, splitFactor, lookTimeEt) : intradayQuotesOf(entry, lookSymbol.market.stockPrice, splitFactor).get(lookTimeEt);
+            // v2 one still waiting for quotes: the look only marks what the symbol holds (applyMarksOnlyLooks), with the
+            // range of strikes set at its first look after 10:00.
+            if (decidesAtCaptureLookOnly && !symbolsWaitingForQuotes.has(entry.symbol)) {
+              intradayStrikeRangeOf(entry, lookSymbol.market.stockPrice, splitFactor);
+              const marksOnlyLooks = marksOnlyLooksBySymbol.get(entry) ?? marksOnlyLooksBySymbol.set(entry, { splitFactor, lookTimes: [] }).get(entry)!;
+              marksOnlyLooks.lookTimes.push(lookTimeEt);
+              continue;
+            }
+            const quotes = intradayQuotesOf(entry, lookSymbol.market.stockPrice, splitFactor).get(lookTimeEt);
             const adjustedPrice = entry.intradayPrices.priceAt(todayIso, lookTimeEt);
             const lookPrice = adjustedPrice === null ? null : adjustedPrice * splitFactorToday(entry);
             // Without this look's quotes or an IBKR price then, the symbol keeps its last marks and is left out of the look.
             if (!quotes || lookPrice === null) continue;
             markLegs(entry, openLegsAtLook.filter((leg) => symbolOfLeg(leg) === entry), lookPrice, quotes, splitFactor);
             entry.lastAdjustedStockPrice = lookPrice / splitFactor;
-            if (marksOnly) continue;
             const hedgePutQuotes = hedgePutQuotesAt(entry, lookTimeEt);
             const leapsCallQuotes = leapsCallQuotesAt(entry, lookTimeEt);
             lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: lookPrice }, ...(hedgePutQuotes ? { hedgePutQuotes } : {}), ...(leapsCallQuotes ? { leapsCallQuotes } : {}) });
@@ -1017,7 +1134,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         if (lookSymbols.length === 0) continue;
         let decidingSymbols = lookSymbols;
         if (settings.decisionMaker === "vol_farmer_v2") {
-          const withQuotes = lookSymbols.filter((lookSymbol) => !isZeroQuoteSnapshot(lookSymbol.intraday?.quotes ?? lookSymbol.market.quotes));
+          const withQuotes = lookSymbols.filter((lookSymbol) => !isZeroQuoteLook(lookSymbol));
           if (isCaptureLook) {
             for (const { entry, lookSymbol } of daySymbols) {
               if (withQuotes.includes(lookSymbol)) continue;
@@ -1029,6 +1146,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           for (const lookSymbol of decidingSymbols) symbolsWaitingForQuotes.delete(lookSymbol.profile.symbol);
         } else if (decidesAtCaptureLookOnly && !isCaptureLook) continue;
         if (decidingSymbols.length === 0) continue;
+        applyMarksOnlyLooks();
         const look = await runLook({ todayIso, lookTimeEt, symbols: decidingSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, sessionDayIndex: dayIndex, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
         actions.push(...look.actions);
         optionSales.push(...look.optionSales);
@@ -1042,6 +1160,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         looksOfDay.push({ lookTimeEt, summary: look.summaryOfActions, filledCount: filledAtLook, refusedCount: look.actions.length - filledAtLook, opensStopped: look.opensStopped });
         if (!isCaptureLook) lookedAfterCapture = true;
       }
+      applyMarksOnlyLooks();
       for (const { entry } of daySymbols) if (symbolsWaitingForQuotes.has(entry.symbol)) notes.push(noteFor(entry, "no look today had a quote with an ask above 0: no decision"));
       scanVolFarmerCrossings(clockTime(closeMinutesByDay.get(todayIso) ?? regularCloseMinutesEt));
       if (lookedAfterCapture) runStatistics.daysWithIntradayLooks += 1;

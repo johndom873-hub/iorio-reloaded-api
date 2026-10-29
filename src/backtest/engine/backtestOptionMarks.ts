@@ -36,9 +36,10 @@ export function twoSidedQuoteByContract(quotes: readonly MarkQuote[], roundedStr
 
 /**
  * For each contract, its first two-sided quote across the quote sets, taken in order (a day's snapshots after 10:00, then
- * its close), by markKey; a contract no set quotes two-sided is left out.
+ * its close), by markKey; a contract no set quotes two-sided is left out. The sets after the one that quotes the last
+ * contract are not taken.
  */
-export function firstTwoSidedQuotes(quoteSets: readonly (readonly MarkQuote[])[], contracts: readonly { expiry: string; strike: number; right: "C" | "P" }[]): Map<string, TwoSidedQuote> {
+export function firstTwoSidedQuotes(quoteSets: Iterable<readonly MarkQuote[]>, contracts: readonly { expiry: string; strike: number; right: "C" | "P" }[]): Map<string, TwoSidedQuote> {
   const wanted = new Set(contracts.map((contract) => roundedStrike(contract.strike)));
   const keys = new Set(contracts.map((contract) => markKey(contract.expiry, contract.strike, contract.right)));
   const firstQuotes = new Map<string, TwoSidedQuote>();

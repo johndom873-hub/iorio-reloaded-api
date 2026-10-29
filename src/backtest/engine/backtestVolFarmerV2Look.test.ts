@@ -17,6 +17,9 @@ import { createSimulatedLedger, type LedgerLeg, type SimulatedLedger } from "./l
 /** Daily bars at 100 with IBKR's 30-day IV as given (null: none that day). */
 const barsWithImpliedVolatility = (days: [string, number | null][]) => new BacktestBarHistory(days.map(([tradingDate, impliedVolatility]) => ({ tradingDate, open: 100, high: 100, low: 100, close: 100, volume: 1_000, impliedVolatility })));
 
+/** The scenarios' values, set here so their worked numbers hold whatever the code's defaults: a fixed 15% Step, Puts up to |delta| 0.20, a 365-day |delta| 0.70 LEAPS with no cap. */
+const scenarioVolFarmerV2Settings: BacktestVolFarmerV2Settings = { ...defaultBacktestVolFarmerV2Settings, putMaxAbsDelta: 0.2, stepRule: "fixed", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 0 };
+
 describe("the v2 formulas", () => {
   it("puts a position's premiums against its shares' cost, each option for at most the shares held", () => {
     // 200 shares at 250.01, Calls on all of them that brought in $540 net: 250.01 − 2.70 = 247.31 a share.
@@ -133,7 +136,7 @@ describe("Vol Farmer v2 at the looks", () => {
     const leaps = quotesAt({ todayIso, stockPrice, expiry: leapsExpiry, strikes: range(30, 120), right: "C" }).map((quote) => ({ ...quote, askSize: leapsAskSize }));
     return {
       profile: { symbol: tickerSymbol, calendarChecksApply: false, earnings: [] },
-      market: { todayIso, quotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(quotes.map((quote) => [contractKey(quote), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+      market: { todayIso, quotes, previousSessionVolumeByContract: new Map(quotes.map((quote) => [contractKey(quote), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
       adjustedDailyClosesBeforeToday: [],
       splitFactorToday: 1,
       optionContractsRepresentable: true,
@@ -144,12 +147,12 @@ describe("Vol Farmer v2 at the looks", () => {
   let actionNumber = 0;
   const nextActionId = () => `action-${++actionNumber}`;
   function look(ledger: SimulatedLedger, todayIso: string, stockPrice: number, expiry: string, more: Partial<BacktestVolFarmerV2Settings> = {}, leapsAskSize: number | null = 10, bars = barsWithImpliedVolatility([])) {
-    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings, ...more } } as unknown as EffectiveBacktestSettings;
+    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...scenarioVolFarmerV2Settings, ...more } } as unknown as EffectiveBacktestSettings;
     return runVolFarmerV2Look({ todayIso, lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf(todayIso, stockPrice, expiry, leapsAskSize), bars }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
   }
   /** A look of tickers sharing one account, each at its price: `prices` holds those at the look, `sessionSymbols` every one of the session. */
   function lookBook(ledger: SimulatedLedger, todayIso: string, prices: Record<string, number>, expiry: string, book: { sessionSymbols: string[]; sessionDayIndex: number; more: Partial<BacktestVolFarmerV2Settings> }) {
-    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings, ...book.more } } as unknown as EffectiveBacktestSettings;
+    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...scenarioVolFarmerV2Settings, ...book.more } } as unknown as EffectiveBacktestSettings;
     const symbols = Object.entries(prices).map(([tickerSymbol, stockPrice]) => ({ ...lookSymbolOf(todayIso, stockPrice, expiry, 10, "2027-04-16", tickerSymbol), bars: barsWithImpliedVolatility([]) }));
     return runVolFarmerV2Look({ todayIso, lookTimeEt: "10:00", symbols, sectorBySymbol: new Map(book.sessionSymbols.map((tickerSymbol) => [tickerSymbol, null])), settings, ledger, priceByLegId: new Map(), nextActionId, sessionDayIndex: book.sessionDayIndex } as unknown as BacktestLookContext);
   }
@@ -276,7 +279,7 @@ describe("Vol Farmer v2 at the looks", () => {
 
   it("buys and sells a LEAPS 33% of the half-spread past the mid, and values it at what selling it would bring", async () => {
     // The lab's default 33, about two-thirds of the way across the spread: bid $10, ask $13 buys at $11.995 and sells at $11.005.
-    const leapsShare = defaultBacktestVolFarmerV2Settings.leapsSpreadCostChargedPct / 100;
+    const leapsShare = scenarioVolFarmerV2Settings.leapsSpreadCostChargedPct / 100;
     expect(optionPurchaseFillPrice(10, 13, leapsShare)).toBeCloseTo(11.995, 10);
     expect(optionSaleFillPrice(10, 13, leapsShare)).toBeCloseTo(11.005, 10);
     const pastTheMid = (quote: { bid: number; ask: number }, side: 1 | -1) => (quote.bid + quote.ask) / 2 + (side * leapsShare * (quote.ask - quote.bid)) / 2;
@@ -287,7 +290,7 @@ describe("Vol Farmer v2 at the looks", () => {
     settleExpiry(ledger, { legId: openOption(ledger, "put")[0]!.id, expiryClose: put.contract!.strike! - 3 });
     // Monday 23 March at 55, quotes 2% either side of the mid: bought 33% of the half-spread above the mid, valued 33% of it
     // below.
-    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: defaultBacktestVolFarmerV2Settings } as unknown as EffectiveBacktestSettings;
+    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: scenarioVolFarmerV2Settings } as unknown as EffectiveBacktestSettings;
     const priceByLegId = new Map<string, number>();
     const bought = await runVolFarmerV2Look({ todayIso: "2026-03-23", lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf("2026-03-23", 55, "2026-03-27", 100), bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId, nextActionId } as unknown as BacktestLookContext);
     const purchase = bought.actions.find((action) => action.kind === "buy_leaps")!;
@@ -373,7 +376,7 @@ describe("Vol Farmer v2 at the looks", () => {
     const lookWithoutCalls = (ledger: SimulatedLedger, todayIso: string, stockPrice: number, expiry: string) => {
       const symbolLook = lookSymbolOf(todayIso, stockPrice, expiry);
       const market = { ...symbolLook.market, quotes: symbolLook.market.quotes.map((quote) => (quote.right === "C" && quote.expiry === expiry ? { ...quote, bid: 0.01 } : quote)) };
-      const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: defaultBacktestVolFarmerV2Settings } as unknown as EffectiveBacktestSettings;
+      const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: scenarioVolFarmerV2Settings } as unknown as EffectiveBacktestSettings;
       return runVolFarmerV2Look({ todayIso, lookTimeEt: "10:00", symbols: [{ ...symbolLook, market, bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
     };
 
@@ -421,7 +424,7 @@ describe("Vol Farmer v2 at the looks", () => {
 
   it("decides at a later look on that look's quotes and price, and records the look's time", async () => {
     const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
-    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings, looks: "every_look" } } as unknown as EffectiveBacktestSettings;
+    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...scenarioVolFarmerV2Settings, looks: "every_look" } } as unknown as EffectiveBacktestSettings;
     // The 10:00 capture at 100; the 10:30 look's own quotes at 90.
     const tenOClock = lookSymbolOf("2026-03-09", 100, "2026-03-13");
     const later = lookSymbolOf("2026-03-09", 90, "2026-03-13");
@@ -437,7 +440,7 @@ describe("Vol Farmer v2 at the looks", () => {
 
   /** A 10:00 look with the Calls and Puts of `strikes` on each of `expiries`, at the day's split factor. */
   function lookWithExpiries(ledger: SimulatedLedger, input: { todayIso: string; stockPrice: number; expiries: string[]; strikes: number[]; splitFactorToday?: number; more?: Partial<BacktestVolFarmerV2Settings> }) {
-    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings, ...input.more } } as unknown as EffectiveBacktestSettings;
+    const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...scenarioVolFarmerV2Settings, ...input.more } } as unknown as EffectiveBacktestSettings;
     const quotes = input.expiries.flatMap((expiry) => (["C", "P"] as const).flatMap((right) => quotesAt({ todayIso: input.todayIso, stockPrice: input.stockPrice, expiry, strikes: input.strikes, right })));
     const lookSymbol = lookSymbolOf(input.todayIso, input.stockPrice, input.expiries[0]!);
     const market = { ...lookSymbol.market, quotes, previousSessionVolumeByContract: new Map(quotes.map((quote) => [contractKey(quote), 1_000])) };

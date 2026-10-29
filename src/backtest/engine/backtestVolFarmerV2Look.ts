@@ -101,6 +101,9 @@ function marketOf(context: BacktestLookContext, lookSymbol: BacktestLookSymbol, 
   const stockPrice = lookSymbol.intraday?.stockPrice ?? lookSymbol.market.stockPrice;
   const riskFreeRate = (lookSymbol.market.riskFreeRatePercent ?? 0) / 100;
   const quotes = lookSymbol.intraday?.quotes ?? lookSymbol.market.quotes;
+  // At 10:00 the quotes are the next Call expiry's only: what was read of every quote counts the others.
+  const everyQuote = lookSymbol.intraday ? undefined : lookSymbol.market.everyQuote;
+  const quotesLeftUnreadByRight = everyQuote && { C: everyQuote.countByRight.C - quotes.filter((quote) => quote.right === "C").length, P: everyQuote.countByRight.P - quotes.filter((quote) => quote.right === "P").length };
   const yearsToTodaysClose = Math.max(0, expirySettlementInstant(todayIso).getTime() - at.getTime()) / millisecondsPerYear;
   const forwardAnchors = new Map<string, BaselineForwardAnchor>();
   noteBaselineForwardAnchors(forwardAnchors, { quotes, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate });
@@ -110,6 +113,7 @@ function marketOf(context: BacktestLookContext, lookSymbol: BacktestLookSymbol, 
     stockPrice,
     riskFreeRate,
     quotes,
+    ...(quotesLeftUnreadByRight ? { quotesLeftUnreadByRight } : {}),
     forwardAnchors,
     previousSessionVolumeByContract: lookSymbol.market.previousSessionVolumeByContract,
     yearsToTodaysClose,
