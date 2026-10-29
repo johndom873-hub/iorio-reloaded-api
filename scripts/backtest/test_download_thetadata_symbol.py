@@ -573,6 +573,18 @@ class SymbolFileTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_leaves_a_file_of_a_later_schema_untouched(self):
+        later_file = sqlite3.connect(self.file_path)
+        later_file.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('symbol', 'INTC'), ('schema_version', '4');")
+        later_file.close()
+        with self.assertRaisesRegex(downloader.DownloadFailed, "has schema version 4; this downloader writes version 3 and leaves it untouched"):
+            self.open_file()
+        check = sqlite3.connect(self.file_path)
+        try:
+            self.assertEqual([name for (name,) in check.execute("SELECT name FROM sqlite_master WHERE type = 'table'")], ["meta"])
+        finally:
+            check.close()
+
     def test_a_file_of_the_first_version_gets_the_new_tables_and_keeps_its_data(self):
         first_version_file = sqlite3.connect(self.file_path)
         first_version_file.executescript(FIRST_VERSION_SCHEMA)

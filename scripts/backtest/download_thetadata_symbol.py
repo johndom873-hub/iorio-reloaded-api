@@ -417,6 +417,11 @@ def open_symbol_file(file_path: Path, symbol: str, now_utc: datetime.datetime) -
     connection = sqlite3.connect(file_path, isolation_level=None)
     try:
         connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MILLISECONDS}")
+        # A file converted to a later schema (4: slices, docs/backtesting/DATA-FILES.md) is left untouched.
+        has_meta = connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").fetchone() is not None
+        stored_version = connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() if has_meta else None
+        if stored_version is not None and stored_version[0] not in (SCHEMA_VERSION, *EARLIER_SCHEMA_VERSIONS):
+            raise DownloadFailed(f"{file_path} has schema version {stored_version[0]}; this downloader writes version {SCHEMA_VERSION} and leaves it untouched")
         connection.execute("BEGIN IMMEDIATE")
         for statement in SCHEMA_STATEMENTS:
             connection.execute(statement)
