@@ -41,6 +41,8 @@ export interface LadderLookInput {
   forwardAnchors: ReadonlyMap<string, BaselineForwardAnchor>;
   /** The previous session's volume per contractKey; null when it was not captured (nothing can be sold). */
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
+  /** The trading sessions from today's to an expiry's (liveTradingSessions.ts): what the premium yields are annualized over. */
+  tradingSessionsThrough(expiry: string): number;
   /** Pluto's maxQuoteAgeMinutes: an older band quote is left out. */
   maxQuoteAgeMinutes: number;
 }
@@ -98,6 +100,7 @@ export function runLadderLook(input: LadderLookInput): LadderLookResult {
     isHeld: book.book.isHeld,
     earningsDatesIso: undefined,
     model: null,
+    tradingSessionsThrough: input.tradingSessionsThrough,
   });
   const notes: string[] = [];
   if (input.previousSessionVolumeByContract === null) notes.push(`${input.symbol}: no previous-session option volume was captured, so nothing can be sold (the 20% rule)`);

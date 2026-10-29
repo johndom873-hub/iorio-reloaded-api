@@ -96,7 +96,8 @@ describe("ladderSaleNotional", () => {
 });
 
 describe("ladderLiveRuleFailure", () => {
-  const base = { stockPrice: 50, todayIso, now, closeMinutesEt: 960, baseline, commissions };
+  // Tuesday 20 October to Friday 20 November: 24 sessions.
+  const base = { stockPrice: 50, todayIso, sessionsHeld: 24, baseline, commissions };
   it("re-runs the ladder's quote, spread and expiry rules on the live quote", () => {
     expect(ladderLiveRuleFailure({ ...base, sale: sale(45), bid: 0.78, ask: 0.82 })).toBeNull();
     expect(ladderLiveRuleFailure({ ...base, sale: sale(45), bid: 0.04, ask: 0.06 })).toMatch(/under the ladder's 0.05 minimum/);
@@ -107,14 +108,16 @@ describe("ladderLiveRuleFailure", () => {
   });
 
   it("holds the entries to the minimum yield on the live mid, not the Calls on held shares or the ladder's Puts", () => {
-    // A $45 Put at 0.10 for 31 days: (10 − 0.65) ÷ 4,490 × 365 ÷ 31 ≈ 2.5% a year, under 20%.
+    // A $45 Put at 0.10 for 24 sessions: (10 − 0.68) ÷ 4,490 × 252 ÷ 24 ≈ 2.2% a year, under 20%.
     const cheap = { bid: 0.09, ask: 0.11 };
     expect(ladderLiveRuleFailure({ ...base, sale: sale(45, { step: "entry" }), ...cheap })).toMatch(/^the premium yield on the live mid is 2\.\d% a year, not above the 20% minimum$/);
     expect(ladderLiveRuleFailure({ ...base, sale: sale(45, { step: "ladder_put" }), ...cheap })).toBeNull();
     expect(ladderLiveRuleFailure({ ...base, sale: sale(60, { step: "held_calls", right: "C", strategyKey: "covered_call" }), ...cheap })).toBeNull();
     expect(ladderLiveRuleFailure({ ...base, sale: sale(60, { step: "entry", right: "C", strategyKey: "covered_call" }), ...cheap })).toMatch(/not above the 20% minimum/);
-    // A $45 Put at 0.80: (80 − 0.65) ÷ 4,420 × 365 ÷ 31 ≈ 21% a year, above it.
-    expect(ladderLiveRuleFailure({ ...base, sale: sale(45, { step: "entry" }), bid: 0.78, ask: 0.82 })).toBeNull();
+    // A $45 Put at 0.80: (80 − 0.68) ÷ 4,420 × 252 ÷ 24 ≈ 18.8% a year, still under it; at 0.90: (90 − 0.68) ÷ 4,410 ×
+    // 252 ÷ 24 ≈ 21.3%, above it.
+    expect(ladderLiveRuleFailure({ ...base, sale: sale(45, { step: "entry" }), bid: 0.78, ask: 0.82 })).toMatch(/^the premium yield on the live mid is 18\.8% a year, not above the 20% minimum$/);
+    expect(ladderLiveRuleFailure({ ...base, sale: sale(45, { step: "entry" }), bid: 0.88, ask: 0.92 })).toBeNull();
   });
 });
 
@@ -136,7 +139,7 @@ describe("sendLadderSales", () => {
       now: () => now,
     };
   }
-  const send = (sales: PlannedLadderSale[], deps: LadderOrderDependencies) => sendLadderSales({ passId: "p1", symbol: "LADR", tickerId: "t1", sales, deltaContext, forwardAnchors: new Map(), stockPrice: 50, todayIso, baseline, commissions }, deps);
+  const send = (sales: PlannedLadderSale[], deps: LadderOrderDependencies) => sendLadderSales({ passId: "p1", symbol: "LADR", tickerId: "t1", sales, deltaContext, forwardAnchors: new Map(), stockPrice: 50, todayIso, baseline, commissions, tradingSessionsThrough: () => 24 }, deps);
   const gateOf = (recorded: unknown, gate: string) => (recorded as { gateResults: { gate: string; ok: boolean; detail: string }[] }).gateResults.find((entry) => entry.gate === gate);
 
   it("sends a sale whose live quote passes the ladder's rules at the live mid, with the ladder snapshot and its step, and watches it", async () => {

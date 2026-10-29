@@ -5,6 +5,7 @@ import { defaultBacktestBaselineSettings, type BacktestAction, type BacktestBase
 import { blackScholesPriceOnForward } from "../../lib/impliedVolatilitySurface.js";
 import { BaselineHedgeSteps, hedgeCoverageRatio, hedgePutExpiry, hedgePutQuote, hedgePutQuoteByDelta, realizedVolatility21, summarizeHedge, typicalYearlyFall, withHedgeInBreakEven, type HedgePutQuoteSource } from "./backtestBaselineHedge.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
+import { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import { buyHedgePut, openCashSecuredPut, openCoveredCall, sellHedgePut, sellShares, settleExpiry, settleHedgePut } from "./ledger/ledgerEvents.js";
 import { ledgerCycles, ledgerKeptHedgeLegs, ledgerOpenHedgeLegs, ledgerRealizedPnl } from "./ledger/ledgerSelectors.js";
 import { createSimulatedLedger, isSymbolFlat, legsOfPosition, requireLeg, requirePosition, type SimulatedLedger } from "./ledger/simulatedLedger.js";
@@ -222,6 +223,7 @@ describe("the hedge's steps at a look", () => {
       riskFreeRate: 0.0,
       pastDailyCloses: options.pastDailyCloses ?? [],
       pastImpliedVolatilities: () => options.pastImpliedVolatilities ?? [],
+      tradingSessionsThrough: (expiry) => new BacktestTradingCalendar([], []).sessionsHeld(dateIso, expiry),
       priceByLegId,
       nextActionId: () => `hedge-action-${(actionCount += 1)}`,
       actions,
@@ -585,7 +587,8 @@ describe("the hedge's steps at a look", () => {
     });
 
     it("buys no Put while it is too dear, noting it once a day, and buys it once the rule allows", () => {
-      // $690 Put at 83.05 with 319 days left on a 686.95 stock: 83.05 ÷ 686.95 × 365 ÷ 319 = 13.8% a year. The saw's typical
+      // $690 Put at 83.05 with 319 days (230 sessions, every weekday one) left on a 686.95 stock: 83.05 ÷ 686.95 × 252 ÷ 230 =
+      // 13.2% a year. The saw's typical
       // yearly fall is 50%: 0.2 × 50% = 10% blocks it, 0.3 × 50% = 15% doesn't.
       const saw = Array.from({ length: 1300 }, (_, index) => ({ close: 100 + 100 * (1 - Math.abs(((index % 126) - 63) / 63)) }));
       const gated = (dateIso: string, values: Partial<BacktestBaselineSettings>, history: { pastDailyCloses?: { close: number }[]; pastImpliedVolatilities?: number[] }, ledger: SimulatedLedger) =>
@@ -596,7 +599,7 @@ describe("the hedge's steps at a look", () => {
       blocked.steps.afterSales();
       blocked.steps.afterSales();
       expect(blocked.actions).toEqual([]);
-      expect(blocked.summaries).toEqual(["NFLX: no hedge Put bought for the position: 600 shares and 0 short Put(s): its yearly cost 13.8% is above 0.2 × the typical yearly fall 50.0% = 10.0% (noted once a day)"]);
+      expect(blocked.summaries).toEqual(["NFLX: no hedge Put bought for the position: 600 shares and 0 short Put(s): its yearly cost 13.2% is above 0.2 × the typical yearly fall 50.0% = 10.0% (noted once a day)"]);
       const allowed = gated("2021-11-01", { hedgePutPriceGate: "cost_vs_typical_fall", hedgePutCostFallShare: 0.3 }, { pastDailyCloses: saw }, ledger);
       allowed.steps.afterSales();
       expect(allowed.actions.map((action) => [action.kind, action.quantity])).toEqual([["buy_hedge", 6]]);

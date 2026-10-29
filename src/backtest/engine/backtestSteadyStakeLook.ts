@@ -122,6 +122,7 @@ export async function runSteadyStakeLook(context: BacktestLookContext): Promise<
         settings: { minAbsDelta: Math.max(0.0001, targetAbsDelta - stake.deltaTolerance), maxAbsDelta: Math.min(1, targetAbsDelta + stake.deltaTolerance), minDte: 0, maxDte: 0, maxSpreadPctOfMid: stake.maxSpreadPctOfMid },
         spreadShareCharged,
         isHeld: (contract) => heldContracts.has(heldKey(contract)),
+        tradingSessionsThrough: (expiry) => context.calendar.sessionsHeld(todayIso, expiry),
       });
       const distance = (candidate: BaselineCandidate) => Math.abs(Math.abs(candidate.delta) - targetAbsDelta);
       return candidates.sort((a, b) => distance(a) - distance(b) || b.premiumYield - a.premiumYield || a.strike - b.strike);

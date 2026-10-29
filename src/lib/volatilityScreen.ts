@@ -1,6 +1,7 @@
 import { db } from "../db/connection.js";
 import { easternIsoDate } from "./easternIsoDate.js";
 import { computeIvMetrics } from "./ivMetrics.js";
+import { loadLiveTradingSessions } from "./liveTradingSessions.js";
 import { loadTradingSessionsBetween } from "./marketSessionStatus.js";
 import { calendarDaysUntilExpiry } from "./optionChainExpiryRange.js";
 import { loadOptionDataUniverse, type OptionDataTicker } from "./optionDataUniverse.js";
@@ -137,6 +138,8 @@ export interface BestCallYieldContext {
   spreadShareCharged: number;
   riskFreeRate: number;
   yearsToTodaysClose: number;
+  /** The trading sessions from the one an order placed now fills in to an expiry's (liveTradingSessions.ts). */
+  sessionsHeldTo(expiryIso: string): number;
   nextEarningsDateIso: string | null;
 }
 
@@ -150,7 +153,7 @@ export function bestCallYieldsByWindow(quotes: Iterable<LiveCallQuote>, context:
     if (!window) continue;
     const delta = deltaFromQuoteMid({ bid: quote.bid, ask: quote.ask, spotPrice: quote.stockPrice, strike: quote.strike, isCall: true, yearsToExpiry: daysToExpiry === 0 ? context.yearsToTodaysClose : daysToExpiry / 365, riskFreeRate: context.riskFreeRate });
     if (delta === null || delta < context.band.min || delta > context.band.max) continue;
-    const yieldAYear = coveredCallYieldAfterCosts({ bid: quote.bid, ask: quote.ask, spotPrice: quote.stockPrice, daysToExpiry, spreadShareCharged: context.spreadShareCharged });
+    const yieldAYear = coveredCallYieldAfterCosts({ bid: quote.bid, ask: quote.ask, spotPrice: quote.stockPrice, sessionsHeld: context.sessionsHeldTo(quote.expiry), spreadShareCharged: context.spreadShareCharged });
     if (yieldAYear === null) continue;
     const current = best[window.key];
     if (current && current.yield >= yieldAYear) continue;
@@ -179,7 +182,7 @@ export interface VolatilityScreen {
 export async function loadVolatilityScreen(band: DeltaBand, now: Date = new Date()): Promise<VolatilityScreen> {
   const todayIso = easternIsoDate(now);
   const nowMs = now.getTime();
-  const [tickers, settings, riskFreeRate, sessions] = await Promise.all([loadOptionDataUniverse(), loadTradingSettings(), getRiskFreeRate(), loadTradingSessionsBetween(todayIso, todayIso)]);
+  const [tickers, settings, riskFreeRate, sessions, liveSessions] = await Promise.all([loadOptionDataUniverse(), loadTradingSettings(), getRiskFreeRate(), loadTradingSessionsBetween(todayIso, todayIso), loadLiveTradingSessions(now)]);
   const daily = await loadDailyFigures(tickers, todayIso, nowMs);
   const yearsToTodaysClose = sessions[0] ? yearsToSessionClose(now, sessions[0].closeMinutesEt) : 0;
   const rows = tickers.map((ticker): VolatilityRow => {
@@ -206,7 +209,7 @@ export async function loadVolatilityScreen(band: DeltaBand, now: Date = new Date
       dailyBarCount: figures?.dailyBarCount ?? 0,
       nextEarningsDateIso: figures?.nextEarningsDateIso ?? null,
       bestCallYields: live
-        ? bestCallYieldsByWindow(live.callQuotes.values(), { todayIso, nowMs, band, spreadShareCharged: settings.spreadCostChargedPct / 100, riskFreeRate: riskFreeRate ?? 0, yearsToTodaysClose, nextEarningsDateIso: figures?.nextEarningsDateIso ?? null })
+        ? bestCallYieldsByWindow(live.callQuotes.values(), { todayIso, nowMs, band, spreadShareCharged: settings.spreadCostChargedPct / 100, riskFreeRate: riskFreeRate ?? 0, yearsToTodaysClose, sessionsHeldTo: liveSessions.sessionsHeldTo, nextEarningsDateIso: figures?.nextEarningsDateIso ?? null })
         : { upTo7: null, from8To21: null, from22To45: null },
     };
   });

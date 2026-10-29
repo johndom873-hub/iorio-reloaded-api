@@ -5,6 +5,7 @@ import { contractKey } from "../../lib/optionContractKey.js";
 import { defaultBacktestVolFarmerSettings, type BacktestVolFarmerSettings, type EffectiveBacktestSettings } from "../backtestTypes.js";
 import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
+import { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import { chooseVolFarmerPut, findVolFarmerCrossing, runVolFarmerLook, scanVolFarmerCrossing, volFarmerCycleNet, volFarmerHedgeSurplus, volFarmerOptionValue, volFarmerPutCostPerYear, volFarmerProtection, type VolFarmerPutCandidate } from "./backtestVolFarmerLook.js";
 import { buyHedgePut, closeCoveredCall, expirySettlementInstant, openCoveredCall, sellHedgePut, settleExpiry } from "./ledger/ledgerEvents.js";
 import { ledgerOpenHedgeLegs, ledgerRealizedPnl } from "./ledger/ledgerSelectors.js";
@@ -55,8 +56,9 @@ describe("volFarmerProtection", () => {
 });
 
 describe("chooseVolFarmerPut", () => {
-  // Days to expiry from Friday 6 March 2026, a week before the Call's expiry.
-  const putQuote = (expiry: string, strike: number, fillPrice: number, impliedVolatility: number): VolFarmerPutCandidate => ({ expiry, dte: Math.round((Date.parse(expiry) - Date.parse("2026-03-06")) / 86_400_000), strike, bid: fillPrice - 0.05, ask: fillPrice + 0.05, fillPrice, impliedVolatility });
+  // Days and sessions (every weekday a session) to expiry from Friday 6 March 2026, a week before the Call's expiry.
+  const weekdays = new BacktestTradingCalendar([], []);
+  const putQuote = (expiry: string, strike: number, fillPrice: number, impliedVolatility: number): VolFarmerPutCandidate => ({ expiry, dte: Math.round((Date.parse(expiry) - Date.parse("2026-03-06")) / 86_400_000), sessionsHeld: weekdays.sessionsHeld("2026-03-06", expiry), strike, bid: fillPrice - 0.05, ask: fillPrice + 0.05, fillPrice, impliedVolatility });
   const look = { callStrike: 103, callExpiry: "2026-03-13", shareCostPerShare: 100, realizedHedgePnlPerShare: 0, stockPrice: 100, fallFraction: 0.2, riskFreeRate: 0.04 };
 
   it("takes the Put with the most protection among those that pass, never one expiring before the Call", () => {
@@ -88,10 +90,11 @@ describe("chooseVolFarmerPut", () => {
   });
 
   it("takes the cheapest per year with putChoice cheapest_per_year: a longer Put at the same strike, though it protects less", () => {
-    // $100 Puts at IV 30%: 42 days @ 3.95 costs (395 + 0.68) ÷ 10,000 ÷ (42 ÷ 365) = 34.4% a year, 196 days @ 8.80 costs 16.4%.
+    // $100 Puts at IV 30%: 42 days (31 sessions) @ 3.95 cost (395 + 0.68) ÷ 10,000 × 252 ÷ 31 = 32.2% a year, 196 days (141
+    // sessions) @ 8.80 cost (880 + 0.68) ÷ 10,000 × 252 ÷ 141 = 15.7%.
     const puts = [putQuote("2026-04-17", 100, 3.95, 0.3), putQuote("2026-09-18", 100, 8.8, 0.3)];
-    expect(volFarmerPutCostPerYear(puts[0]!, 100)).toBeCloseTo(0.3439, 4);
-    expect(volFarmerPutCostPerYear(puts[1]!, 100)).toBeCloseTo(0.164, 4);
+    expect(volFarmerPutCostPerYear(puts[0]!, 100)).toBeCloseTo((395.68 / 10_000) * (252 / 31), 10);
+    expect(volFarmerPutCostPerYear(puts[1]!, 100)).toBeCloseTo((880.68 / 10_000) * (252 / 141), 10);
     expect(chooseVolFarmerPut({ ...look, puts })!.put.expiry).toBe("2026-04-17");
     const cheapest = chooseVolFarmerPut({ ...look, puts, choice: "cheapest_per_year" })!;
     expect(cheapest.put.expiry).toBe("2026-09-18");
@@ -221,7 +224,7 @@ describe("the VF4 rules at the looks", () => {
   const nextActionId = () => `action-${++actionNumber}`;
   function look(ledger: SimulatedLedger, todayIso: string, lookSymbol: BacktestLookSymbol, lookTimeEt = "10:00", more: Partial<BacktestVolFarmerSettings> = {}) {
     const settings = { trading: { spreadCostChargedPct: 0 }, volFarmer: { ...defaultBacktestVolFarmerSettings, ...vf4, ...more } } as unknown as EffectiveBacktestSettings;
-    return runVolFarmerLook({ todayIso, lookTimeEt, symbols: [lookSymbol], settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
+    return runVolFarmerLook({ todayIso, lookTimeEt, calendar: new BacktestTradingCalendar([], []), symbols: [lookSymbol], settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
   }
 
   /** Monday 9 March at 100: Calls of 13 and 20 March, Puts of 17 April (39 days) and 19 June (102 days), all at IV 50%. */

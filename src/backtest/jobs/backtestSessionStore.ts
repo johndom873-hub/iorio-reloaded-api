@@ -39,7 +39,7 @@ import type {
   BacktestBookMode,
 } from "../backtestTypes.js";
 import { ladderRungReached } from "../engine/backtestBaselineLadder.js";
-import { hedgePutCostYield } from "../engine/baselineSaleSteps.js";
+import { hedgePutCostYield, hedgePutCostYieldOnCalendarDays } from "../engine/baselineSaleSteps.js";
 import { optionCommissionDollars } from "../engine/ledger/ledgerFills.js";
 import { loadLadderRungs } from "../analysis/analysisBacktest.js";
 import { loadSessionFreeCash } from "../analysis/sessionFreeCash.js";
@@ -918,19 +918,26 @@ async function loadSaleRecords(sessionId: string, symbol: string, timeline: read
   };
 }
 
-/** The hedge Puts bought in the cycle's days, read by day, strike and expiry: their yearly cost (hedgePutCostYield) from what each purchase recorded, contract-weighted. */
+/** A hedge purchase's yearly cost from what it recorded: over its sessions held, or over its calendar days when it recorded none (sessions run before engine 4). */
+function recordedHedgeCostYield(purchase: { fillPrice: number; strike: number; stockPrice: number; dte: number; sessionsHeld: number | null }): number | null {
+  const commissionDollarsPerContract = optionCommissionDollars(1);
+  const { fillPrice, strike, stockPrice, dte, sessionsHeld } = purchase;
+  return sessionsHeld === null ? hedgePutCostYieldOnCalendarDays({ fillPrice, strike, stockPrice, dte, commissionDollarsPerContract }) : hedgePutCostYield({ fillPrice, strike, stockPrice, sessionsHeld, commissionDollarsPerContract });
+}
+
+/** The hedge Puts bought in the cycle's days, read by day, strike and expiry: their yearly cost (recordedHedgeCostYield) from what each purchase recorded, contract-weighted. */
 async function loadHedgePurchaseRecords(sessionId: string, symbol: string, timeline: readonly BacktestCycleTimelineRow[]): Promise<{ costYieldOf: (date: string, strike: number | null, expiry: string | null) => number | null }> {
   const dates = timeline.map((entry) => entry.tradingDate).sort();
   if (dates.length === 0) return { costYieldOf: () => null };
-  const purchases: { date: string; contract: { strike: number; expiry: string }; quantity: string; fill_price: string; stock_price: string | null; dte: string | null }[] = await db("backtest_actions")
+  const purchases: { date: string; contract: { strike: number; expiry: string }; quantity: string; fill_price: string; stock_price: string | null; dte: string | null; sessions_held: string | null }[] = await db("backtest_actions")
     .where({ session_id: sessionId, symbol, outcome: "filled", kind: "buy_hedge" })
     .whereBetween("trading_date", [dates[0]!, dates.at(-1)!])
-    .select(db.raw("trading_date::text as date"), "contract", "quantity", "fill_price", db.raw("candidate_scores->>'stockPrice' as stock_price"), db.raw("candidate_scores->>'dte' as dte"));
+    .select(db.raw("trading_date::text as date"), "contract", "quantity", "fill_price", db.raw("candidate_scores->>'stockPrice' as stock_price"), db.raw("candidate_scores->>'dte' as dte"), db.raw("candidate_scores->>'sessionsHeld' as sessions_held"));
   const keyOf = (date: string, strike: number, expiry: string) => `${date}|${Math.round(strike * 10_000)}|${expiry}`;
   const totals = new Map<string, { weightedCostYield: number; contracts: number }>();
   for (const purchase of purchases) {
     if (purchase.stock_price === null || purchase.dte === null) continue;
-    const costYield = hedgePutCostYield({ fillPrice: Number(purchase.fill_price), strike: Number(purchase.contract.strike), stockPrice: Number(purchase.stock_price), dte: Number(purchase.dte), commissionDollarsPerContract: optionCommissionDollars(1) });
+    const costYield = recordedHedgeCostYield({ fillPrice: Number(purchase.fill_price), strike: Number(purchase.contract.strike), stockPrice: Number(purchase.stock_price), dte: Number(purchase.dte), sessionsHeld: purchase.sessions_held === null ? null : Number(purchase.sessions_held) });
     if (costYield === null) continue;
     const key = keyOf(purchase.date, Number(purchase.contract.strike), purchase.contract.expiry);
     const total = totals.get(key) ?? { weightedCostYield: 0, contracts: 0 };
@@ -946,17 +953,17 @@ async function loadHedgePurchaseRecords(sessionId: string, symbol: string, timel
   };
 }
 
-/** Every symbol's yearly yields recorded at each Call and Put sale (premiumYield) and yearly costs of each hedge Put bought (hedgePutCostYield), for the session tiles. */
+/** Every symbol's yearly yields recorded at each Call and Put sale (premiumYield) and yearly costs of each hedge Put bought (recordedHedgeCostYield), for the session tiles. */
 async function loadQuotedYields(sessionId: string): Promise<{ callSaleYields: number[]; putSaleYields: number[]; hedgeCostYields: number[] }> {
-  const rows: { kind: string; premium_yield: string | null; fill_price: string | null; strike: string | null; stock_price: string | null; dte: string | null }[] = await db("backtest_actions")
+  const rows: { kind: string; premium_yield: string | null; fill_price: string | null; strike: string | null; stock_price: string | null; dte: string | null; sessions_held: string | null }[] = await db("backtest_actions")
     .where({ session_id: sessionId, outcome: "filled" })
     .whereIn("kind", ["open_covered_call", "open_cash_secured_put", "buy_hedge"])
-    .select("kind", db.raw("candidate_scores->>'premiumYield' as premium_yield"), "fill_price", db.raw("contract->>'strike' as strike"), db.raw("candidate_scores->>'stockPrice' as stock_price"), db.raw("candidate_scores->>'dte' as dte"));
+    .select("kind", db.raw("candidate_scores->>'premiumYield' as premium_yield"), "fill_price", db.raw("contract->>'strike' as strike"), db.raw("candidate_scores->>'stockPrice' as stock_price"), db.raw("candidate_scores->>'dte' as dte"), db.raw("candidate_scores->>'sessionsHeld' as sessions_held"));
   const callSaleYields = rows.flatMap((row) => (row.kind === "open_covered_call" && row.premium_yield !== null ? [Number(row.premium_yield)] : []));
   const putSaleYields = rows.flatMap((row) => (row.kind === "open_cash_secured_put" && row.premium_yield !== null ? [Number(row.premium_yield)] : []));
   const hedgeCostYields = rows.flatMap((row) => {
     if (row.kind !== "buy_hedge" || row.fill_price === null || row.strike === null || row.stock_price === null || row.dte === null) return [];
-    const costYield = hedgePutCostYield({ fillPrice: Number(row.fill_price), strike: Number(row.strike), stockPrice: Number(row.stock_price), dte: Number(row.dte), commissionDollarsPerContract: optionCommissionDollars(1) });
+    const costYield = recordedHedgeCostYield({ fillPrice: Number(row.fill_price), strike: Number(row.strike), stockPrice: Number(row.stock_price), dte: Number(row.dte), sessionsHeld: row.sessions_held === null ? null : Number(row.sessions_held) });
     return costYield === null ? [] : [costYield];
   });
   return { callSaleYields, putSaleYields, hedgeCostYields };

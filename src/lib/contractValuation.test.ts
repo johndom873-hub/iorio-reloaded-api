@@ -8,7 +8,7 @@ import { blackScholesPriceOnForward } from "./impliedVolatilitySurface.js";
 function tablesWith(buckets: number[], calibration: VolatilityModelTables["calibration"] = []): VolatilityModelTables {
   return { builtAtIso: "", source: "test", sampleFromIso: "", sampleToIso: "", bucketCount: buckets.length, maxHorizon: 2, standardizedReturnBuckets: { etf: [buckets, buckets], stock: [buckets, buckets] }, sampleCounts: { etf: [0, 0], stock: [0, 0] }, calibration };
 }
-const base: ContractValuationInput = { isCall: false, strike: 100, forward: 100, mid: 2, frictionDollars: 0, perSessionVariance: 0.0004, varianceSessions: 1, calendarYears: 0, riskFreeRate: 0, group: "stock", spot: 100 };
+const base: ContractValuationInput = { isCall: false, strike: 100, forward: 100, mid: 2, frictionDollars: 0, perSessionVariance: 0.0004, varianceSessions: 1, calendarYears: 0, sessionsHeld: 1, riskFreeRate: 0, group: "stock", spot: 100 };
 
 describe("valueContract (P4/P5, approved 2026-10-10)", () => {
   it("prices from the buckets, normalized so the mean outcome is the forward", () => {
@@ -46,16 +46,17 @@ describe("valueContract (P4/P5, approved 2026-10-10)", () => {
     expect(charged.edgeMargin).toBeCloseTo(free.edgeMargin, 12); // margin is before friction
   });
 
-  it("annualizes on calendar days against capital at risk net of the premium, whatever the variance time", () => {
-    // Friday → Monday: 1.3 trading days of variance, but the capital is tied up for 3 calendar days.
+  it("annualizes over the sessions held against capital at risk net of the premium, whatever the variance or calendar time", () => {
+    // Friday → Monday: 1.3 trading days of variance and 3 calendar days (discounting only), but the capital is held 2
+    // sessions, Friday's and Monday's: × 252 ÷ 2.
     // A $100 put sold at $2: $10,000 reserved less the $200 received = $9,800 at risk.
-    const valuation = valueContract(tablesWith([-1, 1]), { ...base, varianceSessions: 1.3, calendarYears: 3 / 365 })!;
+    const valuation = valueContract(tablesWith([-1, 1]), { ...base, varianceSessions: 1.3, calendarYears: 3 / 365, sessionsHeld: 2 })!;
     expect(valuation.capitalAtRiskDollars).toBeCloseTo(9_800, 9);
-    expect(valuation.calendarYears).toBeCloseTo(3 / 365, 15);
-    expect(valuation.expectedAnnualizedReturn).toBeCloseTo((valuation.expectedPnlDollars / 9_800) * (365 / 3), 10);
-    expect(valuation.premiumYield).toBeCloseTo((200 / 9_800) * (365 / 3), 10);
-    // Never annualized over less than one calendar day.
-    expect(valueContract(tablesWith([-1, 1]), { ...base, calendarYears: 0 })!.premiumYield).toBeCloseTo((200 / 9_800) * 365, 10);
+    expect(valuation.sessionsHeld).toBe(2);
+    expect(valuation.expectedAnnualizedReturn).toBeCloseTo((valuation.expectedPnlDollars / 9_800) * (252 / 2), 10);
+    expect(valuation.premiumYield).toBeCloseTo((200 / 9_800) * (252 / 2), 10);
+    // Never annualized over less than one session.
+    expect(valueContract(tablesWith([-1, 1]), { ...base, sessionsHeld: 0 })!.premiumYield).toBeCloseTo((200 / 9_800) * 252, 10);
     // A covered call: 100 shares at the $104 spot less the premium.
     expect(valueContract(tablesWith([-1, 1]), { ...base, isCall: true, spot: 104 })!.capitalAtRiskDollars).toBeCloseTo(10_200, 9);
   });
@@ -168,7 +169,7 @@ describe("valueContract answers the same in any order", () => {
   const inputs: ContractValuationInput[] = [];
   for (const varianceSessions of [3.5, 12.25, 30]) {
     for (const strike of [80, 95, 100, 105, 120]) {
-      for (const isCall of [true, false]) inputs.push({ isCall, strike, forward: 101, mid: 1.5 + strike / 100, frictionDollars: 3, perSessionVariance: 0.0006, varianceSessions, calendarYears: varianceSessions / 252, riskFreeRate: 0.04, group: "stock", spot: 100.5 });
+      for (const isCall of [true, false]) inputs.push({ isCall, strike, forward: 101, mid: 1.5 + strike / 100, frictionDollars: 3, perSessionVariance: 0.0006, varianceSessions, calendarYears: varianceSessions / 252, sessionsHeld: Math.ceil(varianceSessions), riskFreeRate: 0.04, group: "stock", spot: 100.5 });
     }
   }
   function valuedInAnyOrder(): (ContractValuation | null)[] {

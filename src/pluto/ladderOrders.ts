@@ -3,12 +3,10 @@ import { db } from "../db/connection.js";
 import { baselineExpiryInRange, baselineMinimumBid, baselineMinimumSaleYield, baselineQuoteRejection, baselineSaleYield, type BaselineCommissions } from "../backtest/engine/baselineSaleSteps.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { formatWholeDollars } from "../lib/formatWholeDollars.js";
-import { yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import { ladderDeltaVerdict, type LadderDeltaContext } from "../lib/ladderOrderGates.js";
 import { daysToExpiry } from "../lib/optionContractLabel.js";
 import { ladderBookCapitalVerdict } from "../lib/orderLimits.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
-import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import type { LiveOptionQuote } from "../lib/optionContractKey.js";
 import type { ExecuteLadderOpenInput, ExecuteResult } from "./executor.js";
 import type { PlutoGateResult, RecordPlutoActionInput } from "./ledger.js";
@@ -134,9 +132,10 @@ export function admitLadderSales(planned: readonly PlannedLadderSale[], ticker: 
 /**
  * Pure: the ladder's own contract rules on a sale's live quote (the shared steps' predicates, baselineSaleSteps.ts): a bid of
  * at least the minimum with an ask above it, the spread within the ladder's share of the mid, the expiry still in range,
- * and, for the sales it applies to (the entries), a premium yield on the live mid above the minimum. Null when all pass.
+ * and, for the sales it applies to (the entries), a premium yield on the live mid above the minimum, over `sessionsHeld`
+ * (tradingSessionsHeld.ts). Null when all pass.
  */
-export function ladderLiveRuleFailure(input: { sale: Pick<PlannedLadderSale, "step" | "expiry" | "strike" | "right">; bid: number; ask: number; stockPrice: number; todayIso: string; now: Date; closeMinutesEt: number; baseline: Pick<LadderBaselineSettings, "minDte" | "maxDte" | "maxSpreadPctOfMid" | "minCallYieldPct" | "minCallYieldAppliesTo">; commissions: BaselineCommissions }): string | null {
+export function ladderLiveRuleFailure(input: { sale: Pick<PlannedLadderSale, "step" | "expiry" | "strike" | "right">; bid: number; ask: number; stockPrice: number; todayIso: string; sessionsHeld: number; baseline: Pick<LadderBaselineSettings, "minDte" | "maxDte" | "maxSpreadPctOfMid" | "minCallYieldPct" | "minCallYieldAppliesTo">; commissions: BaselineCommissions }): string | null {
   const { sale, bid, ask, baseline } = input;
   const quoteRejection = baselineQuoteRejection({ bid, ask }, baseline.maxSpreadPctOfMid);
   if (quoteRejection === "noUsableQuote") return `the live bid ${bid.toFixed(2)} is under the ladder's ${baselineMinimumBid.toFixed(2)} minimum, or the ask is not above it`;
@@ -146,8 +145,7 @@ export function ladderLiveRuleFailure(input: { sale: Pick<PlannedLadderSale, "st
   if (!baselineExpiryInRange(dte, baseline)) return `${dte} DTE is outside the ladder's ${baseline.minDte}–${baseline.maxDte} days`;
   const minimumYield = baselineMinimumSaleYield(baseline, sale.right, sale.step === "entry", sale.step === "ladder_put");
   if (minimumYield === null) return null;
-  const yearsToExpiry = dte === 0 ? yearsToSessionClose(input.now, input.closeMinutesEt) : yearsBetweenIsoDates(input.todayIso, sale.expiry);
-  const { premiumYield } = baselineSaleYield({ isCall: sale.right === "C", fillPrice: mid, strike: sale.strike, stockPrice: input.stockPrice, yearsToExpiry, commissions: input.commissions });
+  const { premiumYield } = baselineSaleYield({ isCall: sale.right === "C", fillPrice: mid, strike: sale.strike, stockPrice: input.stockPrice, sessionsHeld: input.sessionsHeld, commissions: input.commissions });
   if (premiumYield === null) return "no time value left on the live mid after the commission";
   if (!(premiumYield > minimumYield)) return `the premium yield on the live mid is ${(premiumYield * 100).toFixed(1)}% a year, not above the ${+(minimumYield * 100).toFixed(4)}% minimum`;
   return null;
@@ -190,6 +188,8 @@ export async function sendLadderSales(
     /** The ticker's ladder settings and the commissions the look ranked with: the contract rules re-run on the live quote. */
     baseline: LadderBaselineSettings;
     commissions: BaselineCommissions;
+    /** The trading sessions from today's to an expiry's (liveTradingSessions.ts): what the live premium yield is annualized over. */
+    tradingSessionsThrough(expiry: string): number;
   },
   dependencies: LadderOrderDependencies,
 ): Promise<LadderSaleOutcome[]> {
@@ -202,7 +202,7 @@ export async function sendLadderSales(
     const twoSided = live && live.bid !== null && live.ask !== null && live.bid > 0 && live.ask > live.bid ? { bid: live.bid, ask: live.ask } : null;
     const quotedAt = live?.quotedAt ?? null;
     const isEntryPut = sale.right === "P" && sale.step === "entry";
-    const ruleFailure = twoSided ? ladderLiveRuleFailure({ sale, ...twoSided, stockPrice: input.stockPrice, todayIso: input.todayIso, now, closeMinutesEt: input.deltaContext.closeMinutesEt, baseline: input.baseline, commissions: input.commissions }) : null;
+    const ruleFailure = twoSided ? ladderLiveRuleFailure({ sale, ...twoSided, stockPrice: input.stockPrice, todayIso: input.todayIso, sessionsHeld: input.tradingSessionsThrough(sale.expiry), baseline: input.baseline, commissions: input.commissions }) : null;
     const verdict = twoSided ? ladderDeltaVerdict({ ...twoSided, stockPrice: input.stockPrice, strike: sale.strike, expiryIso: sale.expiry, isCall: sale.right === "C", putHeldToRange: isEntryPut, now, context: deltaContext }) : null;
     const limitPrice = twoSided ? midLimitPrice(twoSided.bid, twoSided.ask, input.symbol) : null;
     const describeDelta = (delta: number | null) => (sale.right === "P" && !isEntryPut ? `own |delta| ${delta === null ? "unknown" : Math.abs(delta).toFixed(3)} (the ladder's Puts have no |delta| range)` : `own |delta| ${Math.abs(delta!).toFixed(3)} inside ${deltaContext.minAbsDelta}–${deltaContext.maxAbsDelta}`);

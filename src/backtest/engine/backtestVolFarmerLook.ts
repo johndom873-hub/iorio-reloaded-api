@@ -171,6 +171,8 @@ export interface VolFarmerPutCandidate {
   expiry: string;
   /** Calendar days from today to its expiry. */
   dte: number;
+  /** The trading sessions from today's to its expiry's: what its yearly cost is annualized over. */
+  sessionsHeld: number;
   strike: number;
   bid: number;
   ask: number;
@@ -179,7 +181,7 @@ export interface VolFarmerPutCandidate {
 }
 
 /** A hedge Put's yearly cost (hedgePutCostYield) at its fill: the putChoice "cheapest_per_year" order. */
-export const volFarmerPutCostPerYear = (put: VolFarmerPutCandidate, stockPrice: number) => hedgePutCostYield({ fillPrice: put.fillPrice, strike: put.strike, stockPrice, dte: put.dte, commissionDollarsPerContract: optionCommissionDollars(1) }) ?? 0;
+export const volFarmerPutCostPerYear = (put: VolFarmerPutCandidate, stockPrice: number) => hedgePutCostYield({ fillPrice: put.fillPrice, strike: put.strike, stockPrice, sessionsHeld: put.sessionsHeld, commissionDollarsPerContract: optionCommissionDollars(1) }) ?? 0;
 
 /**
  * Of the Puts expiring on or after the Call, those that pass the hedge rule (with a Call) and offer the least protection
@@ -659,6 +661,7 @@ function openSymbol(input: { context: BacktestLookContext; lookSymbol: BacktestL
     settings: { minAbsDelta: farmer.callMinAbsDelta, maxAbsDelta: farmer.callMaxAbsDelta, ...callDteRange, maxSpreadPctOfMid: farmer.maxSpreadPctOfMid },
     spreadShareCharged: context.settings.trading.spreadCostChargedPct / 100,
     isHeld: () => false,
+    tradingSessionsThrough: (expiry) => context.calendar.sessionsHeld(todayIso, expiry),
   });
   const calls = candidates.filter((candidate) => candidate.strike > stockPrice);
   if (calls.length === 0) return noCallNote(`${symbol}: no Call within the rules (${describeRejections(rejections)})`);
@@ -720,7 +723,7 @@ function openSymbol(input: { context: BacktestLookContext; lookSymbol: BacktestL
 
   // A new Put with the Call. A cycle's first keeps putCashReservePct of the free cash for the later Puts; a later one
   // spends all of it.
-  const putChoice = volFarmerPutCandidates({ lookSymbol, farmer, callExpiries: calls.map((call) => call.expiry), todayIso, at, spreadShareCharged });
+  const putChoice = volFarmerPutCandidates({ lookSymbol, farmer, callExpiries: calls.map((call) => call.expiry), todayIso, at, spreadShareCharged, sessionsHeldTo: (expiry) => context.calendar.sessionsHeld(todayIso, expiry) });
   if (typeof putChoice === "string") return putChoice;
   const putCandidates = putChoice;
   const startsCycle = sharesHeldToday === 0;
@@ -788,7 +791,7 @@ function sellCallWithoutHedge(input: Parameters<typeof openSymbol>[0] & { calls:
 }
 
 /** The Puts a new hedge is chosen from (the "Puts tried" above) for the Calls' expiries (with no Call, the one protection is measured at), or why there are none. */
-function volFarmerPutCandidates(input: { lookSymbol: BacktestLookSymbol; farmer: BacktestVolFarmerSettings; callExpiries: readonly string[]; todayIso: string; at: Date; spreadShareCharged: number }): VolFarmerPutCandidate[] | string {
+function volFarmerPutCandidates(input: { lookSymbol: BacktestLookSymbol; farmer: BacktestVolFarmerSettings; callExpiries: readonly string[]; todayIso: string; at: Date; spreadShareCharged: number; sessionsHeldTo: (expiry: string) => number }): VolFarmerPutCandidate[] | string {
   const { lookSymbol, farmer, todayIso, at } = input;
   const symbol = lookSymbol.profile.symbol;
   const stockPrice = lookSymbol.market.stockPrice;
@@ -809,7 +812,7 @@ function volFarmerPutCandidates(input: { lookSymbol: BacktestLookSymbol; farmer:
       const mid = (quote.bid! + quote.ask!) / 2;
       const impliedVolatility = impliedVolatilityFromPrice(mid, stockPrice * Math.exp(riskFreeRate * yearsToExpiry), quote.strike, yearsToExpiry, riskFreeRate, false);
       if (impliedVolatility === null) continue;
-      putCandidates.push({ expiry, dte: putDte, strike: quote.strike, bid: quote.bid!, ask: quote.ask!, fillPrice: optionPurchaseFillPrice(quote.bid!, quote.ask!, input.spreadShareCharged), impliedVolatility });
+      putCandidates.push({ expiry, dte: putDte, sessionsHeld: input.sessionsHeldTo(expiry), strike: quote.strike, bid: quote.bid!, ask: quote.ask!, fillPrice: optionPurchaseFillPrice(quote.bid!, quote.ask!, input.spreadShareCharged), impliedVolatility });
     }
   }
   if (putCandidates.length === 0) return `${symbol}: no Put with a usable quote ${withTheCall ? "expiring with the Calls" : `from ${farmer.putMinDte} to ${farmer.putMaxDte} days`}`;
@@ -901,7 +904,7 @@ function rollPutForCall(input: {
     sales.push({ leg, strike, fill });
   }
   if (inProfitOnly && !(realizedIfSold > 0)) return null;
-  const putCandidates = volFarmerPutCandidates({ lookSymbol, farmer, callExpiries: input.calls.map((call) => call.expiry), todayIso, at, spreadShareCharged: input.spreadShareCharged });
+  const putCandidates = volFarmerPutCandidates({ lookSymbol, farmer, callExpiries: input.calls.map((call) => call.expiry), todayIso, at, spreadShareCharged: input.spreadShareCharged, sessionsHeldTo: (expiry) => context.calendar.sessionsHeld(todayIso, expiry) });
   if (typeof putCandidates === "string") return null;
   const realizedPerShare = (input.cycleRealized + realizedIfSold) / input.sharesHeld;
   const { pick } = pickVolFarmerOpening({ calls: input.calls, putCandidates, farmer, shareCostPerShare: input.shareCostPerShare, realizedPerShare, stockPrice, riskFreeRate, freeCash: ledgerFreeCash(ledger) + proceeds, reservedCash: 0, startsCycle: false, lotsHeld: input.lotsHeld });
@@ -1223,7 +1226,7 @@ function buyPut(input: { context: BacktestLookContext; lookSymbol: BacktestLookS
     blockReason: null,
     gateResults: [{ gate: "vol_farmer", ok: true, detail: `${contracts} contract(s)` }],
     contract: { strategyKey: "hedge", expiry: put.expiry, strike: put.strike, right: "P" },
-    candidateScores: { bid: put.bid, ask: put.ask, dte, stockPrice, impliedVolatility: put.impliedVolatility, protection: input.protection, hedgeSurplusPerShare: input.surplus, costDollars: put.fillPrice * sharesPerContract * contracts + optionCommissionDollars(contracts), halfSpreadDollars: ((put.ask - put.bid) / 2) * sharesPerContract * contracts, ...(cheapestPerYear ? { costPerYear } : {}) },
+    candidateScores: { bid: put.bid, ask: put.ask, dte, sessionsHeld: put.sessionsHeld, stockPrice, impliedVolatility: put.impliedVolatility, protection: input.protection, hedgeSurplusPerShare: input.surplus, costDollars: put.fillPrice * sharesPerContract * contracts + optionCommissionDollars(contracts), halfSpreadDollars: ((put.ask - put.bid) / 2) * sharesPerContract * contracts, ...(cheapestPerYear ? { costPerYear } : {}) },
     quantity: contracts,
     limitPrice: put.fillPrice,
     fillPrice: put.fillPrice,
@@ -1264,7 +1267,7 @@ function hedgeWithoutCall(input: HedgeWithoutCallInput): string {
   const affordableLots = Math.floor(ledgerFreeCash(context.ledger) / (fillPrice * sharesPerContract + optionCommissionDollars(1)) + 1e-9);
   const contracts = Math.min(lotsHeld, affordableLots);
   if (contracts < 1) return `${symbol}: the free cash pays for no Put to hedge the shares`;
-  const put: VolFarmerPutCandidate = { expiry, dte: daysToExpiry(expiry, context.todayIso), strike: quote.strike, bid: quote.bid!, ask: quote.ask!, fillPrice, impliedVolatility };
+  const put: VolFarmerPutCandidate = { expiry, dte: daysToExpiry(expiry, context.todayIso), sessionsHeld: context.calendar.sessionsHeld(context.todayIso, expiry), strike: quote.strike, bid: quote.bid!, ask: quote.ask!, fillPrice, impliedVolatility };
   const protection = volFarmerProtection({ stockPrice, fallFraction: farmer.protectionFallPct / 100, put: { strike: put.strike, costPerShare: fillPrice + putSaleCommissionPerShare, impliedVolatility, yearsLeftAtCallExpiry: 0 }, riskFreeRate });
   return buyPut({ ...input, put, contracts, surplus: null, protection, callStrike: null, sharesPerContractOnCycleScale: Math.round(sharesPerContract / priceToCycleScale) });
 }
@@ -1283,7 +1286,7 @@ function hedgeWithoutCallByPutChoice(input: HedgeWithoutCallInput): string {
   const riskFreeRate = (lookSymbol.market.riskFreeRatePercent ?? 0) / 100;
   const nextCallExpiry = lookSymbol.market.quotes.reduce<string | null>((next, quote) => (quote.right === "C" && quote.expiry > todayIso && (next === null || quote.expiry < next) ? quote.expiry : next), null);
   if (nextCallExpiry === null) return `${symbol}: no Call expiry listed to measure a Put's protection at`;
-  const puts = volFarmerPutCandidates({ lookSymbol, farmer, callExpiries: [nextCallExpiry], todayIso, at, spreadShareCharged: context.settings.trading.spreadCostChargedPct / 100 });
+  const puts = volFarmerPutCandidates({ lookSymbol, farmer, callExpiries: [nextCallExpiry], todayIso, at, spreadShareCharged: context.settings.trading.spreadCostChargedPct / 100, sessionsHeldTo: (expiry) => context.calendar.sessionsHeld(todayIso, expiry) });
   if (typeof puts === "string") return puts;
   const chosen = chooseVolFarmerPut({ puts, callStrike: null, callExpiry: nextCallExpiry, shareCostPerShare: 0, realizedHedgePnlPerShare: 0, stockPrice, fallFraction: farmer.protectionFallPct / 100, riskFreeRate, minProtection: minProtectionPct / 100, choice: farmer.putChoice });
   if (chosen === null) return `${symbol}: no Put ${minProtectionPct > 0 ? `offers ${minProtectionPct}% protection` : "qualifies"} to hedge the shares`;

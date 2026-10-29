@@ -10,6 +10,8 @@ export interface ChainScanWorkerRequest {
   filePath: string;
   days: ChainScanDayInput[];
   settings: ChainScanSettings;
+  /** The sessions from the first day to 45 days past the last, ascending: what the premium yields are annualized over. */
+  openDays: string[];
   /** The day whose whole chain is priced for the yield map, when it is one of `days`. */
   chainMapDate: string | null;
 }
@@ -24,9 +26,9 @@ parentPort?.on("message", (request: ChainScanWorkerRequest) => {
     const database = new DatabaseSync(request.filePath, { readOnly: true });
     try {
       const file = new BacktestSymbolFile(database);
-      const rows = request.days.map((day) => scanChainDay(file, day, request.settings));
+      const rows = request.days.map((day) => scanChainDay(file, day, request.settings, request.openDays));
       const mapDay = request.days.find((day) => day.date === request.chainMapDate) ?? null;
-      const chainMap = mapDay === null ? null : priceChainMap(file.loadQuotes(mapDay.date), mapDay, volumeByContract(mapDay.previousDate === null ? null : file.loadEndOfDay(mapDay.previousDate)));
+      const chainMap = mapDay === null ? null : priceChainMap(file.loadQuotes(mapDay.date), mapDay, volumeByContract(mapDay.previousDate === null ? null : file.loadEndOfDay(mapDay.previousDate)), request.openDays);
       parentPort!.postMessage({ ok: true, response: { rows, chainMap } satisfies ChainScanWorkerResponse });
     } finally {
       database.close();

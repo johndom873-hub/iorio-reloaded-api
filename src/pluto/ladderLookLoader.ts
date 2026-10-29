@@ -4,6 +4,7 @@ import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchPricesPoolFirst } from "../ibkr/pricePool.js";
 import type { BaselineCommissions } from "../backtest/engine/baselineSaleSteps.js";
 import { fetchOpenCycleSummaryRowsByTickerId } from "../lib/cycleBreakEvenQueries.js";
+import { loadLiveTradingSessions } from "../lib/liveTradingSessions.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { loadPreviousClose } from "../lib/tickerCalendarQueries.js";
 import { loadOptionQuoteBandQuotes } from "./optionQuoteBandQuotes.js";
@@ -64,7 +65,7 @@ export async function loadWorkingLadderSales(symbol: string, connection: Knex = 
 }
 
 export async function loadLadderLookInput(ticker: { tickerId: string; symbol: string; tickerWeight: number }, pass: LadderPassContext, connection: Knex = db): Promise<LadderLookInput | LadderLookUnavailable> {
-  const [prices, previousClose, memory, settings, positions, cycleRowsByTicker, workingSales, bandQuotes, forwardAnchors, previousSessionVolumeByContract] = await Promise.all([
+  const [prices, previousClose, memory, settings, positions, cycleRowsByTicker, workingSales, bandQuotes, forwardAnchors, previousSessionVolumeByContract, liveSessions] = await Promise.all([
     fetchPricesPoolFirst([{ key: "stock", legType: "stock", symbol: ticker.symbol }]),
     loadPreviousClose(ticker.tickerId, pass.clock.todayIso),
     loadLadderCycleMemory(ticker.tickerId, connection),
@@ -75,6 +76,7 @@ export async function loadLadderLookInput(ticker: { tickerId: string; symbol: st
     loadOptionQuoteBandQuotes(ticker.tickerId, pass.clock.todayIso, connection),
     defaultOptionQuoteBandPlannerDependencies.loadForwardAnchors(ticker.tickerId, pass.clock.todayIso),
     defaultOptionQuoteBandPlannerDependencies.loadPreviousSessionVolume(ticker.tickerId, pass.clock.todayIso),
+    loadLiveTradingSessions(pass.now),
   ]);
   const stockPrice = prices["stock"] ?? null;
   if (stockPrice === null || !(stockPrice > 0)) return { unavailable: `${ticker.symbol}: no live stock price`, noShock: false };
@@ -94,5 +96,6 @@ export async function loadLadderLookInput(ticker: { tickerId: string; symbol: st
     forwardAnchors,
     previousSessionVolumeByContract,
     maxQuoteAgeMinutes: pass.maxQuoteAgeMinutes,
+    tradingSessionsThrough: liveSessions.sessionsHeldTo,
   };
 }

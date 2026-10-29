@@ -1,5 +1,6 @@
 import { exactInputCachesAreEnabled } from "./exactInputCaches.js";
 import { RecentEntriesCache } from "./recentEntriesCache.js";
+import { tradingSessionsPerYear } from "./tradingSessionsHeld.js";
 import { calibratedEdgeMargin, standardizedReturnBucketsFor, type ValuationGroup, type VolatilityModelTables } from "./volatilityModelTables.js";
 
 // One contract's value to a seller (model review P2, P4, P5, approved by Marcelo 2026-10-10;
@@ -14,21 +15,23 @@ import { calibratedEdgeMargin, standardizedReturnBucketsFor, type ValuationGroup
 //   expected P&L    = mean_i P&L_i  (the new Edge $)
 //   edge margin     = 1 − fair ÷ mid                                (before friction; the grade and the calibration use it)
 //   calibrated P&L  = calibrated margin(edge margin, τ) × mid × 100 − friction   (what history delivered, ATM proxy)
-//   Edge Yield      = expected P&L ÷ capital at risk ÷ T            (a yearly rate on calendar time, as every yield on the
-//                                                                  platform: the capital is tied up on weekends too;
-//                                                                  capital = EXP $, net of the premium (Marcelo
-//                                                                  2026-10-12): (strike − mid)×100 for a put, the cash
-//                                                                  reserved less the premium; (spot − mid)×100 for a call,
-//                                                                  the shares bought less the premium)
-//   Hist Yield      = calibrated P&L ÷ capital at risk ÷ T
+//   Edge Yield      = expected P&L ÷ capital at risk × 252 ÷ N      (a yearly rate on trading sessions, as every yield on
+//                                                                  the platform, Marcelo 2026-10-29: N = the sessions from
+//                                                                  the quote's to the expiry's, both in full,
+//                                                                  tradingSessionsHeld.ts; capital = EXP $, net of the
+//                                                                  premium (Marcelo 2026-10-12): (strike − mid)×100 for a
+//                                                                  put, the cash reserved less the premium; (spot − mid)×100
+//                                                                  for a call, the shares bought less the premium)
+//   Hist Yield      = calibrated P&L ÷ capital at risk × 252 ÷ N
 //   risk outcome_i  = P&L_i for a put; for a call, the shares and the call together (Marcelo 2026-10-10: the strategy holds
 //                     shares only with the call, so a covered call is judged like a cash-secured put, the same payoff):
 //                     P&L_i + (S_i − F) × 100, the shares' move from the forward (zero on average, so Edge $ is unchanged)
 //   PoP = share of risk outcomes > 0; average win / loss; 5% expected shortfall = mean of the worst 5% of risk outcomes
 //   (25 of the 500); 2σ stress = the risk outcome at S = F·e^{−2s} (the stock down two standard deviations by expiry).
-//   premium after costs = mid × 100 − friction, and its premium yield on capital over T (the sale's own income; a covered
-//   call's shares can add the rise to the strike on top of it).
-// The variance clock (τ) values the contract; calendar time (T) annualizes what the capital earns.
+//   premium after costs = mid × 100 − friction, and its premium yield on capital × 252 ÷ N (the sale's own income; a
+//   covered call's shares can add the rise to the strike on top of it).
+// The variance clock (τ) values the contract, calendar time (T) discounts it, and the sessions held (N) annualize what
+// the capital earns.
 // Grades on the edge margin (approved 2026-10-12): strong ≥ 20%, good ≥ 10%, weak ≥ 0%, else avoid (a negative margin).
 
 /** The valuation model's grade of a contract, from its edge margin. */
@@ -37,13 +40,10 @@ export type ValuationGrade = "strong" | "good" | "weak" | "avoid";
 export const gradeMarginCutPoints = { strong: 0.2, good: 0.1, weak: 0 } as const;
 export const expectedShortfallTailShare = 0.05;
 export const stressStandardDeviations = 2;
-/** Annualization floor: a contract is never annualized over less than one calendar day. */
-const minimumAnnualizationYears = 1 / 365;
 
-
-/** A per-contract dollar amount as a yearly rate on the contract's exposure over its calendar time to expiry (a yield). */
-export function yieldOnExposure(dollars: number, exposureDollars: number, calendarYears: number): number {
-  return dollars / exposureDollars / Math.max(calendarYears, minimumAnnualizationYears);
+/** A per-contract dollar amount as a yearly rate on the contract's exposure over the trading sessions it is held, at least one (a yield; tradingSessionsHeld.ts). */
+export function yieldOnExposure(dollars: number, exposureDollars: number, sessionsHeld: number): number {
+  return (dollars / exposureDollars) * (tradingSessionsPerYear / Math.max(sessionsHeld, 1));
 }
 
 /** The edge margins the grades start at, as fractions. */
@@ -76,6 +76,8 @@ export interface ContractValuationInput {
   varianceSessions: number;
   /** Calendar years to expiry, for discounting only. */
   calendarYears: number;
+  /** The trading sessions from the quote's to the expiry's, both in full (tradingSessionsHeld.ts): what the yields are annualized over. */
+  sessionsHeld: number;
   riskFreeRate: number;
   group: ValuationGroup;
   /** Spot at the quote (a covered call's shares, and its capital at risk with the premium taken off). */
@@ -91,7 +93,7 @@ export interface ContractValuation {
   expectedPnlDollars: number;
   calibratedEdgeMargin: number;
   calibratedExpectedPnlDollars: number;
-  /** Edge Yield: expected P&L ÷ capital at risk, annualized on calendar time (0.25 = 25% a year). */
+  /** Edge Yield: expected P&L ÷ capital at risk, annualized over the sessions held (0.25 = 25% a year). */
   expectedAnnualizedReturn: number;
   calibratedAnnualizedReturn: number;
   probabilityOfProfit: number;
@@ -104,7 +106,7 @@ export interface ContractValuation {
   stressPnlDollars: number;
   /** The premium kept after friction, per contract: a put's best case; a covered call's shares can add the rise to the strike. */
   premiumAfterCostsDollars: number;
-  /** Premium after costs ÷ capital at risk, annualized on calendar time. */
+  /** Premium after costs ÷ capital at risk, annualized over the sessions held. */
   premiumYield: number;
   /** Variance of the per-contract P&L of the option alone (dollars²). */
   pnlVarianceDollars: number;
@@ -115,8 +117,8 @@ export interface ContractValuation {
   forecastVolatility: number;
   /** τ the contract was valued over. */
   varianceSessions: number;
-  /** Calendar years to expiry the yields are annualized over. */
-  calendarYears: number;
+  /** The trading sessions the yields are annualized over. */
+  sessionsHeld: number;
   grade: ValuationGrade;
 }
 
@@ -155,7 +157,7 @@ export function valueContract(tables: VolatilityModelTables, input: ContractValu
   let tablesId = tablesIds.get(tables);
   if (tablesId === undefined) tablesIds.set(tables, (tablesId = nextTablesId++));
   const valuations = valuationsByKey;
-  const key = `${tablesId}|${input.isCall ? "C" : "P"}|${input.strike}|${input.forward}|${input.mid}|${input.frictionDollars}|${input.perSessionVariance}|${input.varianceSessions}|${input.calendarYears}|${input.riskFreeRate}|${input.group}|${input.spot}`;
+  const key = `${tablesId}|${input.isCall ? "C" : "P"}|${input.strike}|${input.forward}|${input.mid}|${input.frictionDollars}|${input.perSessionVariance}|${input.varianceSessions}|${input.calendarYears}|${input.sessionsHeld}|${input.riskFreeRate}|${input.group}|${input.spot}`;
   if (valuations.has(key)) {
     const valued = valuations.get(key)!;
     return valued === null ? null : { ...valued };
@@ -202,8 +204,7 @@ function computeContractValuation(tables: VolatilityModelTables, input: Contract
   const stressPrice = input.forward * Math.exp(-stressStandardDeviations * totalStandardDeviation);
   const stressShareMove = input.isCall ? (stressPrice - input.forward) * 100 : 0;
   const capitalAtRiskDollars = ((input.isCall ? input.spot : input.strike) - input.mid) * 100;
-  const annualizationYears = Math.max(input.calendarYears, minimumAnnualizationYears);
-  const annualize = (dollars: number) => yieldOnExposure(dollars, capitalAtRiskDollars, annualizationYears);
+  const annualize = (dollars: number) => yieldOnExposure(dollars, capitalAtRiskDollars, input.sessionsHeld);
   const edgeMargin = 1 - fairPrice / input.mid;
   const calibrated = calibratedEdgeMargin(tables, edgeMargin, input.varianceSessions);
   const calibratedExpectedPnlDollars = calibrated * premiumDollars - input.frictionDollars;
@@ -229,7 +230,7 @@ function computeContractValuation(tables: VolatilityModelTables, input: Contract
     capitalAtRiskDollars,
     forecastVolatility: Math.sqrt(input.perSessionVariance * 252),
     varianceSessions: input.varianceSessions,
-    calendarYears: annualizationYears,
+    sessionsHeld: input.sessionsHeld,
     grade: gradeForEdgeMargin(edgeMargin),
   };
 }

@@ -2,6 +2,7 @@ import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
 import { addCalendarDays } from "../../lib/calendarDays.js";
 import { earlyCloseDatesIso, openDaysFromCalendarRows, tradingSessionsFromCalendarRows, type TradingSession } from "../../lib/marketSessionStatus.js";
+import { sessionsHeldAmong } from "../../lib/tradingSessionsHeld.js";
 import type { SymbolFileDay } from "./backtestSymbolFile.js";
 
 // The sessions a backtest day is valued over (variance clock, sessions to expiry). Inside the symbol file's range its days
@@ -77,6 +78,25 @@ export class BacktestTradingCalendar {
   /** Whether `dateIso` is a session. */
   isSession(dateIso: string): boolean {
     return this.openDaysBetween(dateIso, dateIso).length === 1;
+  }
+
+  private sessionsHeldDays: { fromIso: string; toIso: string; openDays: string[] } | null = null;
+
+  /**
+   * The sessions from `fromIso` to `toIso`, both included, at least one: what a premium yield is annualized over
+   * (tradingSessionsHeld.ts). The session dates are listed once, from the calendar's first day to about three years past
+   * its last, and listed again only for a date outside them.
+   */
+  sessionsHeld(fromIso: string, toIso: string): number {
+    const listed = this.sessionsHeldDays;
+    if (listed === null || fromIso < listed.fromIso || toIso > listed.toIso) {
+      const dates = [...this.rowsByDate.keys()].sort();
+      const first = dates[0] !== undefined && dates[0] < fromIso ? dates[0] : fromIso;
+      const pastLast = dates.length > 0 ? addCalendarDays(dates.at(-1)!, 1_100) : toIso;
+      const last = pastLast > toIso ? pastLast : toIso;
+      this.sessionsHeldDays = { fromIso: first, toIso: last, openDays: this.openDaysBetween(first, last) };
+    }
+    return sessionsHeldAmong(this.sessionsHeldDays!.openDays, fromIso, toIso);
   }
 
   /** The last session before `dateIso`, within two weeks; null when none. */

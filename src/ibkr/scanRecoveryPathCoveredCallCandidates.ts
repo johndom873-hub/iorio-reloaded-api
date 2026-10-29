@@ -1,6 +1,8 @@
 import { OptionType } from "@stoqey/ib";
 import type { IBApi } from "@stoqey/ib";
 import { blackScholesDelta } from "../lib/impliedVolatilitySurface.js";
+import { loadLiveTradingSessions } from "../lib/liveTradingSessions.js";
+import { tradingSessionsPerYear } from "../lib/tradingSessionsHeld.js";
 import type { RecoveryTargetWindow } from "../lib/recoveryTargetWindow.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { loadCloseImpliedVolatilities } from "../lib/volatilityScreen.js";
@@ -112,7 +114,8 @@ export function filterStrikesByEstimatedCallDelta(expiryStrikes: ExpiryStrikes[]
 /**
  * Covered-call candidates for one ticker inside the covered_call delta/DTE
  * target window, ranked by annualized premium yield on the exposure net of the
- * premium (Marcelo 2026-10-12): annualizedYield = premium / (spot − premium) × (365 / dte). Drops any
+ * premium (Marcelo 2026-10-12): annualizedYield = premium / (spot − premium) × 252 ÷ the trading sessions held
+ * (tradingSessionsHeld.ts, Marcelo 2026-10-29). Drops any
  * expiry that would leave the call open across a known earnings or
  * ex-dividend date (calendarConflict.ts). Strike grids come from the stored
  * chain (the 09:00 UTC structure refresh), quotes from quoteContracts (pool first).
@@ -132,11 +135,12 @@ export async function scanRecoveryPathCoveredCallCandidates(ib: IBApi, symbol: s
   const expiryStrikes = filterStrikesByEstimatedCallDelta(inWindow, targetWindow, estimated);
   if (expiryStrikes.length === 0) return [];
 
-  const [quotes, calendarContext] = await Promise.all([
+  const [quotes, calendarContext, liveSessions] = await Promise.all([
     quoteContracts(ib, symbol, expiryStrikes.flatMap(({ expiry, strikes }) => strikes.map((strike) => ({ expiry, strike, right: OptionType.Call })))),
     fetchCalendarConflictContext(tickerId),
+    loadLiveTradingSessions(),
   ]);
-  return rankCoveredCallCandidates(quotes, targetWindow, spotPrice, (expiryIso) => findCalendarConflict(calendarContext, "covered_call", expiryIso) !== null, !calendarContext.resolved);
+  return rankCoveredCallCandidates(quotes, targetWindow, spotPrice, (expiryIso) => findCalendarConflict(calendarContext, "covered_call", expiryIso) !== null, !calendarContext.resolved, liveSessions.sessionsHeldTo);
 }
 
 function rankCoveredCallCandidates(
@@ -145,6 +149,7 @@ function rankCoveredCallCandidates(
   spotPrice: number,
   expiryHasCalendarConflict: (expiryIso: string) => boolean,
   calendarUnverified: boolean,
+  sessionsHeldTo: (expiryIso: string) => number,
 ): CoveredCallCandidate[] {
   const today = new Date();
   const candidates: CoveredCallCandidate[] = [];
@@ -170,7 +175,7 @@ function rankCoveredCallCandidates(
       bid: quote.bid,
       ask: quote.ask,
       dte,
-      annualizedYield: (premium / (spotPrice - premium)) * (365 / dte),
+      annualizedYield: (premium / (spotPrice - premium)) * (tradingSessionsPerYear / sessionsHeldTo(expiryIso)),
       spotPrice,
       calendarUnverified,
     });

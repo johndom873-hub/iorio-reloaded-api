@@ -3,6 +3,8 @@ import { blackScholesDelta, blackScholesPriceOnForward } from "./impliedVolatili
 import { selectBandEdgeCallStrikes } from "./volatilityConsumer.js";
 import type { LiveCallQuote } from "./volatilityLive.js";
 import { bestCallYieldsByWindow, callQuoteMaxAgeMs } from "./volatilityScreen.js";
+import { addCalendarDays } from "./calendarDays.js";
+import { sessionsHeldAmong } from "./tradingSessionsHeld.js";
 
 const todayIso = "2026-10-27";
 const nowMs = new Date("2026-10-27T15:00:00Z").getTime();
@@ -17,7 +19,9 @@ function quote(strike: number, expiry: string, daysToExpiry: number, extra: Part
   return { expiry, strike, bid: Math.round((price - 0.05) * 100) / 100, ask: Math.round((price + 0.05) * 100) / 100, stockPrice: spot, quotedAt: new Date(nowMs - 60_000), ...extra };
 }
 
-const context = { todayIso, nowMs, band: { min: 0.1, max: 0.5 }, spreadShareCharged: 0, riskFreeRate, yearsToTodaysClose: 0.0005, nextEarningsDateIso: null };
+/** Every weekday from Tuesday 27 October a session (the first holiday is Thanksgiving): Friday 30 October 4, 6 November 9. */
+const openDays = Array.from({ length: 60 }, (_, index) => addCalendarDays(todayIso, index)).filter((dateIso) => ![0, 6].includes(new Date(`${dateIso}T12:00:00Z`).getUTCDay()));
+const context = { todayIso, nowMs, band: { min: 0.1, max: 0.5 }, spreadShareCharged: 0, riskFreeRate, yearsToTodaysClose: 0.0005, sessionsHeldTo: (expiryIso: string) => sessionsHeldAmong(openDays, todayIso, expiryIso), nextEarningsDateIso: null };
 
 describe("selectBandEdgeCallStrikes", () => {
   it("picks, per band, the highest-delta strike at or under Delta max and the next strike below it", () => {

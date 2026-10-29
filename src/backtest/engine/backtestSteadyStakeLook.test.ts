@@ -7,6 +7,7 @@ import { validateSteadyStakeSettings } from "../jobs/backtestSessionRequest.js";
 import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import { runSteadyStakeLook } from "./backtestSteadyStakeLook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
+import { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import { buyShares } from "./ledger/ledgerEvents.js";
 import { ledgerFreeCash, ledgerFreeShares, ledgerOpenCycleSummary } from "./ledger/ledgerSelectors.js";
 import { createSimulatedLedger, legsOfPosition, positionsOfSymbol, type SimulatedLedger } from "./ledger/simulatedLedger.js";
@@ -18,8 +19,9 @@ const riskFreeRate = 0.04;
 const volatility = 0.5;
 const yearsToClose = 6 / 8760;
 
-/** Today closes at 16:00. */
-const calendarOf = (dateIso: string) => ({ sessionsBetween: () => [{ dateIso, closeMinutesEt: 16 * 60 }] });
+/** Today closes at 16:00; every weekday a session for the premium yields (tradingSessionsHeld.ts). */
+const weekdayCalendar = new BacktestTradingCalendar([], []);
+const calendarOf = (dateIso: string) => ({ sessionsBetween: () => [{ dateIso, closeMinutesEt: 16 * 60 }], sessionsHeld: (fromIso: string, toIso: string) => weekdayCalendar.sessionsHeld(fromIso, toIso) });
 
 /** A quote expiring at today's close, priced by Black-76 at 50% volatility with a 4% spread around that mid. */
 function sameDayQuote(expiry: string, strike: number, right: "C" | "P"): SymbolFileQuote {

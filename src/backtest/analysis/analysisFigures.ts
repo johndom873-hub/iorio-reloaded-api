@@ -16,6 +16,8 @@ import type { BacktestBaselineSettings } from "../backtestTypes.js";
 import { summarizeChainScan, type AnalysisChainSummary, type ChainMapContract, type ChainScanDayRow } from "./analysisChainScan.js";
 import { scanChainDaysInParallel } from "./analysisChainScanPool.js";
 import { computeOptionActivity, type AnalysisOptionActivity } from "./analysisOptionActivity.js";
+import { openDaysFromCalendarRows } from "../../lib/marketSessionStatus.js";
+import { loadMarketCalendarRowsFrom } from "../engine/backtestTradingCalendar.js";
 import { buildChainScanDayInputs, tenOclockPriceAsTraded } from "./analysisDayInputs.js";
 import { correlationRows, impliedReportMove, reportMove, reportSessionDates, summarizeEarnings, type AnalysisCorrelationRow, type AnalysisEarningsSummary, type AnalysisReport } from "./analysisEarningsAndCorrelation.js";
 import {
@@ -362,11 +364,15 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
 
   report("chains", 0, completeDays.length);
   const days = buildChainScanDayInputs({ completeDays, intradayPrices, schedule, rates, dailyBars, shockSettings: values.baseline, earnings: skipsEarnings ? calendar.earnings.map((event) => ({ dateIso: event.date, eventTime: event.eventTime })) : null });
+  // The sessions its premium yields count (tradingSessionsHeld.ts): the file's complete days, then the market calendar for the 45 days after them.
+  const afterLastDay = addCalendarDays(completeDays.at(-1)!, 1);
+  const openDays = [...completeDays, ...openDaysFromCalendarRows(afterLastDay, addCalendarDays(afterLastDay, 44), await loadMarketCalendarRowsFrom(afterLastDay, connection))];
   const scanStarted = Date.now();
   const { rows, chainMap } = await scanChainDaysInParallel({
     filePath: backtestDataFilePath(symbol),
     days,
     settings: { ...values.baseline, spreadShareCharged: values.spreadShareCharged },
+    openDays,
     chainMapDate: completeDays.at(-1)!,
     onChunkDone: (daysDone) => report("chains", daysDone, completeDays.length),
   });

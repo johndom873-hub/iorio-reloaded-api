@@ -35,6 +35,8 @@ function input(overrides: Partial<LadderLookInput> = {}): LadderLookInput {
     forwardAnchors: new Map(),
     previousSessionVolumeByContract: new Map(bandQuotes.map((quote) => [contractKey(quote), 1_000])),
     maxQuoteAgeMinutes: 10,
+    // Tuesday 20 October to Friday 20 November: 24 sessions.
+    tradingSessionsThrough: () => 24,
     ...overrides,
   };
 }

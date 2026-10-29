@@ -5,6 +5,8 @@ import { contractKey } from "../../lib/optionContractKey.js";
 import { commissionPerContractDollars } from "../../lib/optionFriction.js";
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib/commissionEstimate.js";
 import { blackScholesDelta, impliedVolatilityFromPrice, parityImpliedForward, yearsBetweenIsoDates } from "../../lib/impliedVolatilitySurface.js";
+import { yieldOnExposure } from "../../lib/contractValuation.js";
+import { sessionsHeldAmong } from "../../lib/tradingSessionsHeld.js";
 
 // The Analyse window's 10:00 chain scan (Marcelo 2026-10-15): every complete day of a symbol file filtered with the
 // engine's own selectBaselineCandidates at the ticker's lab values, counted by right and expiry range (F8), the Puts also
@@ -103,7 +105,7 @@ export function volumeByContract(rows: readonly SymbolFileEndOfDayRow[] | null):
 }
 
 /** One day's counts. Pure apart from reading the file. */
-export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, settings: ChainScanSettings): ChainScanDayRow {
+export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, settings: ChainScanSettings, openDays: readonly string[]): ChainScanDayRow {
   const cap = day.spot === null ? null : day.spot * (1 - day.shock / settings.ladderRungs);
   const row: ChainScanDayRow = { date: day.date, spot: day.spot, shock: day.shock, cap, cells: emptyCells(), cellsByDelta: { any: emptyCells(), band: emptyCells() }, passingByDelta: { any: { passingTotal: 0, spreadsUnder25: 0 }, band: { passingTotal: 0, spreadsUnder25: 0 } }, bestCappedPut: null, bestEntryCall: null, largestPotPut: null, largestPotCall: null, passingTotal: 0, spreadsUnder25: 0 };
   if (day.spot === null || cap === null) return row;
@@ -136,6 +138,7 @@ export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, s
       settings: anyDelta ? { ...settings, minAbsDelta: 0, maxAbsDelta: 1 } : right === "C" ? callSettings : putSettings,
       spreadShareCharged: settings.spreadShareCharged,
       isHeld: () => false,
+      tradingSessionsThrough: (expiry) => sessionsHeldAmong(openDays, day.date, expiry),
       ...rules,
     }).candidates;
   // One selection a right at any |delta|: the selector tests each contract on its own and keeps them all, so each range is a filter on its result.
@@ -179,7 +182,7 @@ export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, s
 }
 
 /** The last day's chain for the yield map: every quoted contract 1–45 days out with a usable mid, its delta from the mid's IV and its premium yield at the mid. */
-export function priceChainMap(quotes: readonly SymbolFileQuote[], day: ChainScanDayInput, previousSessionVolumeByContract: ReadonlyMap<string, number> | null): ChainMapContract[] {
+export function priceChainMap(quotes: readonly SymbolFileQuote[], day: ChainScanDayInput, previousSessionVolumeByContract: ReadonlyMap<string, number> | null, openDays: readonly string[]): ChainMapContract[] {
   if (day.spot === null) return [];
   const spot = day.spot;
   const forwardByExpiry = new Map<string, number>();
@@ -204,7 +207,7 @@ export function priceChainMap(quotes: readonly SymbolFileQuote[], day: ChainScan
     const intrinsic = isCall ? Math.max(spot - quote.strike, 0) : Math.max(quote.strike - spot, 0);
     const earned = (mid - intrinsic) * 100 - commissionPerContractDollars;
     const capitalAtRisk = ((isCall ? spot : quote.strike) - mid) * 100;
-    const yieldAtMid = earned > 0 && capitalAtRisk > 0 ? earned / capitalAtRisk / Math.max(years, 1 / 365) : null;
+    const yieldAtMid = earned > 0 && capitalAtRisk > 0 ? yieldOnExposure(earned, capitalAtRisk, sessionsHeldAmong(openDays, day.date, quote.expiry)) : null;
     contracts.push({ right: quote.right, expiry: quote.expiry, strike: quote.strike, dte, bid, ask: quote.ask, previousVolume: previousSessionVolumeByContract?.get(contractKey(quote)) ?? 0, delta, yieldAtMid });
   }
   return contracts;

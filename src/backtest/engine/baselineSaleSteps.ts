@@ -20,7 +20,6 @@ import type { CommissionEstimator, StockCommissionEstimator } from "../../lib/co
 
 export const baselineMinimumBid = 0.05;
 export const baselineMaxVolumeShare = 0.2;
-const minimumAnnualizationYears = 1 / 365;
 export const roundedStrike = (strike: number) => Math.round(strike * 10_000) / 10_000;
 
 export interface BaselineCandidate {
@@ -130,6 +129,8 @@ export interface BaselineCandidateInput {
   /** λ: the share of the half-spread a fill gives up. */
   spreadShareCharged: number;
   isHeld(contract: { expiry: string; strike: number }): boolean;
+  /** The trading sessions from today's to an expiry's, both in full (tradingSessionsHeld.ts): what a premium yield is annualized over. */
+  tradingSessionsThrough(expiry: string): number;
   /** Calls on held shares under a cost rule: the lowest strike allowed; absent or null when any strike is. */
   minimumStrike?: number | null;
   /** The highest strike allowed (puts under a cost rule); absent or null when any strike is. */
@@ -149,13 +150,13 @@ export interface BaselineCandidateInput {
 }
 
 /**
- * What a look's selections work out the same way whatever they select: each expiry's days and years to it, and each
+ * What a look's selections work out the same way whatever they select: each expiry's days, years and sessions to it, and each
  * quote's volume limit, forward, implied volatility and delta. Each is worked out the first time a selection reaches it,
  * so a contract still drops out at the first check it fails. Valid for one look's quotes, stock price, rate, anchors,
  * volumes and earnings only.
  */
 export interface BaselineLookFigures {
-  byExpiry: Map<string, { dte: number; yearsToExpiry: number; spansEarnings?: boolean }>;
+  byExpiry: Map<string, { dte: number; yearsToExpiry: number; sessionsHeld?: number; spansEarnings?: boolean }>;
   byQuote: Map<SymbolFileQuote, { volumeCap?: number; forward?: number; impliedVolatility?: number | null; delta?: number }>;
 }
 
@@ -176,29 +177,40 @@ export function baselineQuoteRejection(quote: { bid: number | null; ask: number 
 
 /**
  * A sale's time value and premium yield at a fill: the fill less its intrinsic value, and what that earns after one
- * contract's commission on the capital it ties up (strike, or the stock, less the fill), annualized. A null yield: no
- * time value left after the commission, or no capital.
+ * contract's commission on the capital it ties up (strike, or the stock, less the fill), annualized over the trading
+ * sessions held: × 252 ÷ sessions (tradingSessionsHeld.ts). A null yield: no time value left after the commission, or no
+ * capital.
  */
-export function baselineSaleYield(input: { isCall: boolean; fillPrice: number; strike: number; stockPrice: number; yearsToExpiry: number; commissions: BaselineCommissions }): { timeValue: number; premiumYield: number | null } {
+export function baselineSaleYield(input: { isCall: boolean; fillPrice: number; strike: number; stockPrice: number; sessionsHeld: number; commissions: BaselineCommissions }): { timeValue: number; premiumYield: number | null } {
   const intrinsicValue = input.isCall ? Math.max(input.stockPrice - input.strike, 0) : Math.max(input.strike - input.stockPrice, 0);
   const timeValue = input.fillPrice - intrinsicValue;
   const capitalPerShare = (input.isCall ? input.stockPrice : input.strike) - input.fillPrice;
   const earnedDollars = timeValue * sharesPerContract - optionCommissionPerContract(input.commissions);
   if (!(earnedDollars > 0) || !(capitalPerShare > 0)) return { timeValue, premiumYield: null };
-  return { timeValue, premiumYield: yieldOnExposure(earnedDollars, capitalPerShare * sharesPerContract, Math.max(input.yearsToExpiry, minimumAnnualizationYears)) };
+  return { timeValue, premiumYield: yieldOnExposure(earnedDollars, capitalPerShare * sharesPerContract, input.sessionsHeld) };
+}
+
+/** A hedge Put's cost per contract: its time value (the fill less any in-the-money part) plus one contract's commission; null when not above 0 or without a stock price. */
+function hedgePutCostDollars(input: { fillPrice: number; strike: number; stockPrice: number; commissionDollarsPerContract: number }): number | null {
+  const timeValue = input.fillPrice - Math.max(input.strike - input.stockPrice, 0);
+  const costDollars = timeValue * sharesPerContract + input.commissionDollarsPerContract;
+  return costDollars > 0 && input.stockPrice > 0 ? costDollars : null;
 }
 
 /**
  * A hedge Put's yearly cost at its purchase, the sale yield's twin (Marcelo 2026-10-26, the Wheel cycles' hedge rows): its
- * time value (the fill less any in-the-money part) plus one contract's commission, on the stock it protects, annualized
- * over its own days to expiry: (time value × 100 + commission) ÷ (stock price × 100) ÷ (days ÷ 365). Null when that
- * cost is not above 0.
+ * cost on the stock it protects, annualized over the trading sessions it is held, as every yield (Marcelo 2026-10-29):
+ * (time value × 100 + commission) ÷ (stock price × 100) × 252 ÷ sessions. Null when that cost is not above 0.
  */
-export function hedgePutCostYield(input: { fillPrice: number; strike: number; stockPrice: number; dte: number; commissionDollarsPerContract: number }): number | null {
-  const timeValue = input.fillPrice - Math.max(input.strike - input.stockPrice, 0);
-  const costDollars = timeValue * sharesPerContract + input.commissionDollarsPerContract;
-  if (!(costDollars > 0) || !(input.stockPrice > 0)) return null;
-  return yieldOnExposure(costDollars, input.stockPrice * sharesPerContract, Math.max(input.dte / 365, minimumAnnualizationYears));
+export function hedgePutCostYield(input: { fillPrice: number; strike: number; stockPrice: number; sessionsHeld: number; commissionDollarsPerContract: number }): number | null {
+  const costDollars = hedgePutCostDollars(input);
+  return costDollars === null ? null : yieldOnExposure(costDollars, input.stockPrice * sharesPerContract, input.sessionsHeld);
+}
+
+/** The same cost over calendar days to expiry, at least one, ÷ (days ÷ 365): what a purchase recorded before engine 4 (no session count) shows. */
+export function hedgePutCostYieldOnCalendarDays(input: { fillPrice: number; strike: number; stockPrice: number; dte: number; commissionDollarsPerContract: number }): number | null {
+  const costDollars = hedgePutCostDollars(input);
+  return costDollars === null ? null : (costDollars / (input.stockPrice * sharesPerContract)) * (365 / Math.max(input.dte, 1));
 }
 
 /**
@@ -284,7 +296,9 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
       continue;
     }
     const fillPrice = computeSaleFillPrice(bid, ask, input.spreadShareCharged);
-    const { timeValue, premiumYield } = baselineSaleYield({ isCall, fillPrice, strike: quote.strike, stockPrice: input.stockPrice, yearsToExpiry, commissions: input.commissions });
+    // Worked out once a contract of the expiry has passed the range checks: only those are annualized.
+    const sessionsHeld = (expiryFigures.sessionsHeld ??= input.tradingSessionsThrough(quote.expiry));
+    const { timeValue, premiumYield } = baselineSaleYield({ isCall, fillPrice, strike: quote.strike, stockPrice: input.stockPrice, sessionsHeld, commissions: input.commissions });
     if (premiumYield === null) {
       rejections.noTimeValue++;
       continue;
@@ -317,6 +331,7 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
           perSessionVariance: forecast.perSessionVariance,
           varianceSessions,
           calendarYears: yearsToExpiry,
+          sessionsHeld,
           riskFreeRate: input.riskFreeRate,
           group: input.model.group,
           spot: input.stockPrice,
@@ -430,8 +445,9 @@ export function makeBaselineSelector(input: {
   isHeld(contract: { expiry: string; strike: number }): boolean;
   earningsDatesIso: readonly string[] | undefined;
   model: BaselineModelInput | null;
+  tradingSessionsThrough(expiry: string): number;
 }): BaselineSelect {
-  const { quotes, forwardAnchors, commissions, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract, baseline, spreadShareCharged, isHeld, earningsDatesIso, model } = input;
+  const { quotes, forwardAnchors, commissions, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract, baseline, spreadShareCharged, isHeld, earningsDatesIso, model, tradingSessionsThrough } = input;
   // The calls on held shares are held to the margin only when every sale is.
   const callsModel = model && baseline.volatilityEdgeFilter === "entries" ? { ...model, minVolatilityEdge: null } : model;
   // With their own range every Call uses it, the Covered Call entry's included (Marcelo 2026-10-15).
@@ -443,7 +459,7 @@ export function makeBaselineSelector(input: {
   const settingsFor = (right: "C" | "P", ladderPut: boolean) => (right === "C" ? callsSettings : ladderPut ? ladderPutsSettings : baseline);
   const lookFigures = newBaselineLookFigures();
   return (right: "C" | "P", minimumStrike: number | null = null, forEntry = true, maximumStrike: number | null = null, byPremiumYield = false, options = {}) => {
-    const selectionInput: BaselineCandidateInput = { lookFigures, quotes, forwardAnchors, commissions, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: settingsFor(right, options.ladderPut === true), spreadShareCharged, isHeld, minimumStrike, maximumStrike, minimumPremiumYield: minimumYieldFor(right, forEntry, options.ladderPut === true), ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" };
+    const selectionInput: BaselineCandidateInput = { lookFigures, quotes, forwardAnchors, commissions, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: settingsFor(right, options.ladderPut === true), spreadShareCharged, isHeld, tradingSessionsThrough, minimumStrike, maximumStrike, minimumPremiumYield: minimumYieldFor(right, forEntry, options.ladderPut === true), ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" };
     return { ...selectBaselineCandidates(selectionInput), describeRules: () => describeBaselineRules(selectionInput) };
   };
 }

@@ -38,6 +38,8 @@ vi.mock("../lib/marketSessionStatus.js", async () => {
   const actual = await vi.importActual<typeof import("../lib/marketSessionStatus.js")>("../lib/marketSessionStatus.js");
   return { ...actual, computeMarketSessionStatus: (...args: unknown[]) => computeMarketSessionStatusMock(...args) };
 });
+const loadLiveTradingSessionsMock = vi.fn();
+vi.mock("../lib/liveTradingSessions.js", () => ({ loadLiveTradingSessions: (...args: unknown[]) => loadLiveTradingSessionsMock(...args) }));
 
 const collectReadinessChecksMock = vi.fn();
 const createDefaultReadinessDependenciesMock = vi.fn();
@@ -198,6 +200,7 @@ const protectedRoutes: [string, string][] = [
   ["GET", "/presence"],
   ["GET", "/db"],
   ["GET", "/market-status"],
+  ["GET", "/trading-sessions"],
   ["GET", "/market-quote-loop"],
   ["GET", "/genosuke"],
   ["GET", "/web-dyno"],
@@ -505,6 +508,14 @@ describe("GET /system-health/market-status", () => {
     const { json } = await callJson("/market-status");
     expect(json).toMatchObject({ state: "open", label: "closes in 2h 5m", nextChangeAt: "2030-03-04T21:00:00.000Z" });
     expect(computeMarketSessionStatusMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("GET /system-health/trading-sessions", () => {
+  it("answers with the session an order placed now fills in and the sessions from it on, for the screens' yields", async () => {
+    // Friday 30 October after the close: Monday's session, the weekend left out.
+    loadLiveTradingSessionsMock.mockResolvedValue({ saleSessionIso: "2026-11-02", openDays: ["2026-11-02", "2026-11-03"], sessionsHeldTo: () => 1 });
+    expect(await callJson("/trading-sessions")).toEqual({ status: 200, json: { saleSessionIso: "2026-11-02", openDays: ["2026-11-02", "2026-11-03"] } });
   });
 });
 

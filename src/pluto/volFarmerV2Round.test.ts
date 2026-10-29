@@ -35,6 +35,17 @@ const harness = vi.hoisted(() => ({
 const workingOrders = () => harness.executed.filter((order) => (harness.outcomes.get(order.actionId as string) as { working: boolean } | undefined)?.working === true).map((order) => ({ symbol: order.symbol as string, notional: (order.plan as { notional: number }).notional }));
 
 vi.mock("../db/connection.js", () => ({ db: () => ({}) }));
+// Every weekday from the round's day a session: what the premium yields are annualized over.
+vi.mock("../lib/liveTradingSessions.js", async () => {
+  const { sessionsHeldAmong } = await import("../lib/tradingSessionsHeld.js");
+  return {
+    loadLiveTradingSessions: async (now: Date) => {
+      const saleSessionIso = now.toISOString().slice(0, 10);
+      const openDays = Array.from({ length: 800 }, (_, index) => new Date(now.getTime() + index * 86_400_000).toISOString().slice(0, 10)).filter((dateIso) => ![0, 6].includes(new Date(`${dateIso}T12:00:00Z`).getUTCDay()));
+      return { saleSessionIso, openDays, sessionsHeldTo: (expiryIso: string) => sessionsHeldAmong(openDays, saleSessionIso, expiryIso) };
+    },
+  };
+});
 vi.mock("../lib/commissionEstimate.js", async (original) => ({ ...(await original<object>()), loadCommissionEstimator: async () => ({ perContractDollars: () => 0.65 }), loadStockCommissionEstimator: async () => ({ perShareDollars: () => 0.005 }) }));
 vi.mock("../lib/accountContext.js", () => ({ accountContextFromTotalCash: async () => ({ freeCash: harness.accountFreeCash }) }));
 vi.mock("../lib/tickerFreeze.js", () => ({ frozenSymbolSet: async () => new Set() }));

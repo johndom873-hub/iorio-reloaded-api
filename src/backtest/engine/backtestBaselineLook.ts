@@ -160,7 +160,7 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
     // The ticker's forwards anchored at the day's first look that quoted each expiry, then moved with the stock (Pluto's rule).
     const forwardAnchors = forwardAnchorsOfDay(ledger, symbol, todayIso);
     noteBaselineForwardAnchors(forwardAnchors, { quotes, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate });
-    const select = makeBaselineSelector({ quotes, forwardAnchors, commissions: backtestCommissions, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: lookSymbol.market.previousSessionVolumeByContract, baseline, spreadShareCharged, isHeld, earningsDatesIso, model });
+    const select = makeBaselineSelector({ quotes, forwardAnchors, commissions: backtestCommissions, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: lookSymbol.market.previousSessionVolumeByContract, baseline, spreadShareCharged, isHeld, earningsDatesIso, model, tradingSessionsThrough: (expiry) => context.calendar.sessionsHeld(todayIso, expiry) });
     // The day's account value for sizing: the session's own, open options at zero when it leaves them out.
     const accountValueToday = () =>
       ledgerNetLiquidationValue(ledger, baseline.dayValueOptions === "excluded" ? new Map([...context.priceByLegId].map(([legId, price]) => [legId, requireLeg(ledger, legId).legType === "option" ? 0 : price])) : context.priceByLegId);
@@ -209,6 +209,7 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
           riskFreeRate,
           pastDailyCloses: lookSymbol.adjustedDailyClosesBeforeToday,
           pastImpliedVolatilities: () => impliedVolatilitiesBefore(lookSymbol.bars, todayIso, ivRankWindowDays),
+          tradingSessionsThrough: (expiry) => context.calendar.sessionsHeld(todayIso, expiry),
           priceByLegId: context.priceByLegId,
           nextActionId: context.nextActionId,
           actions,

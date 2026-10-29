@@ -52,6 +52,8 @@ function marketOf(stockPrice: number): VolFarmerV2Market {
     yearsToExpiry: () => 1,
     leapsCallQuotes: undefined,
     stepImpliedVolatility: () => null,
+    // Tuesday 27 October to Friday 6 November: 9 sessions.
+    tradingSessionsThrough: () => 9,
     priceToCycleScale: 1,
     optionContractsRepresentable: true,
     spreadShareCharged: 0,

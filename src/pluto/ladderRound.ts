@@ -126,6 +126,7 @@ export async function runLadderRound(input: LadderRoundInput): Promise<LadderRou
         todayIso: clock.todayIso,
         baseline: lookInput.baseline,
         commissions,
+        tradingSessionsThrough: lookInput.tradingSessionsThrough,
       },
       {
         burst: (symbol, contracts) => input.marketWatch.burst(symbol, contracts),

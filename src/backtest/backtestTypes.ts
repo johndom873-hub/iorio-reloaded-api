@@ -233,9 +233,11 @@ export interface BacktestBaselineSettings {
  * session's settings would give different results, so the ticker analysis compares only same-engine runs. A new setting
  * whose default keeps the results does not raise it. 1: the engine as of 3020323 (2026-10-15). 2: max per ticker and max
  * per sector are shares of the capital budget, not of the account (2026-10-16). 3: a call's break-even floor is the
- * cycle's cash break-even, counting what shares that left the cycle brought in (2026-10-20).
+ * cycle's cash break-even, counting what shares that left the cycle brought in (2026-10-20). 4: every premium yield and
+ * hedge Put's yearly cost is annualized over the trading sessions held ÷ 252, not the calendar days to expiry ÷ 365
+ * (Marcelo 2026-10-29, tradingSessionsHeld.ts).
  */
-export const backtestEngineVersion = 3;
+export const backtestEngineVersion = 4;
 
 export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", hedgePutTenorDays: 0, hedgePutExpiry: "nearest", hedgePutStrikeFrom: "stock_price", hedgePutBelowPricePct: 0, hedgePutSize: "share_level", hedgePutCoveragePct: 100, hedgePutRollDaysLeft: 7, hedgePutCovers: "entries", hedgePutStaggeredExpiries: 3, hedgePutStrikeBy: "price", hedgePutAbsDelta: 0.25, hedgePutPriceGate: "off", hedgePutCostFallShare: 0.3, hedgePutIvMultiple: 1.3, hedgeInBreakEven: "excluded", hedgePutTurnover: "sell_when_shares_leave", hedgePutTurnoverDays: 30, hedgePutFarBelowPct: 10 };
 

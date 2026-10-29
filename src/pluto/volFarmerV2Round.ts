@@ -9,6 +9,7 @@ import { fetchPricesPoolFirst } from "../ibkr/pricePool.js";
 import { accountContextFromTotalCash } from "../lib/accountContext.js";
 import { loadCommissionEstimator, loadStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { fetchOpenCycleSummaryRowsByTickerId } from "../lib/cycleBreakEvenQueries.js";
+import { loadLiveTradingSessions } from "../lib/liveTradingSessions.js";
 import { summarizeOpenCycleFromRows } from "../lib/cycleInputRows.js";
 import { blackScholesDelta, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import type { InternalApiClient } from "../lib/internalApiClient.js";
@@ -309,6 +310,7 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
   const noCallQuotedReason = quotes.some((quote) => quote.right === "C" && quote.expiry > clock.todayIso)
     ? undefined
     : volFarmerV2NoCallQuotedReason({ todayIso: clock.todayIso, expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, previousSessionVolumeByContract, bandQuotes });
+  const liveSessions = await loadLiveTradingSessions(now);
   const marketWith = (leapsQuotesByExpiry: ReadonlyMap<string, SymbolFileQuote[]>, missing: Set<string>): VolFarmerV2Market => ({
     symbol,
     todayIso: clock.todayIso,
@@ -328,6 +330,7 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
       },
     },
     stepImpliedVolatility: () => stepImpliedVolatility,
+    tradingSessionsThrough: liveSessions.sessionsHeldTo,
     priceToCycleScale: 1,
     optionContractsRepresentable: true,
     spreadShareCharged: 0,

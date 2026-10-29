@@ -10,6 +10,7 @@ import { fetchPresenceOverview } from "../lib/userLastSeen.js";
 import * as llmStats from "../genosuke/llmStats.js";
 import { requestRateStats, processStartedAt } from "../lib/requestRateTracker.js";
 import { computeMarketSessionStatus } from "../lib/marketSessionStatus.js";
+import { loadLiveTradingSessions } from "../lib/liveTradingSessions.js";
 import { collectReadinessChecks, createDefaultReadinessDependencies } from "../lib/preOpenReadinessCollectors.js";
 import { summarizeReadiness } from "../lib/preOpenReadiness.js";
 import { dbQueryTimingStats } from "../lib/dbQueryTimingTracker.js";
@@ -151,6 +152,13 @@ systemHealthRouter.get("/market-status", async (_request, response) => {
   const status = await computeMarketSessionStatus();
 
   response.json({ exchanges: exchangeNames.length > 0 ? exchangeNames : ["US Markets"], state: status.state, label: status.label, nextChangeAt: status.nextChangeAt });
+});
+
+// The sessions the screens' premium yields count (tradingSessionsHeld.ts, Marcelo 2026-10-29): the session an order
+// placed now fills in, and every session from it on, about three years ahead.
+systemHealthRouter.get("/trading-sessions", async (_request, response) => {
+  const { saleSessionIso, openDays } = await loadLiveTradingSessions();
+  response.json({ saleSessionIso, openDays });
 });
 
 // The market quote loop's state (in-process; null when this process isn't running it) and the live market-data pool's standing.

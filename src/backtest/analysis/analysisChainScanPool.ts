@@ -32,7 +32,7 @@ function runWorker(request: ChainScanWorkerRequest): Promise<ChainScanWorkerResp
 }
 
 /** Scans every day, the chain map priced on `chainMapDate`; `onChunkDone` reports the days done so far. */
-export async function scanChainDaysInParallel(input: { filePath: string; days: readonly ChainScanDayInput[]; settings: ChainScanSettings; chainMapDate: string | null; onChunkDone?: (daysDone: number) => void }): Promise<{ rows: ChainScanDayRow[]; chainMap: ChainMapContract[] }> {
+export async function scanChainDaysInParallel(input: { filePath: string; days: readonly ChainScanDayInput[]; settings: ChainScanSettings; openDays: readonly string[]; chainMapDate: string | null; onChunkDone?: (daysDone: number) => void }): Promise<{ rows: ChainScanDayRow[]; chainMap: ChainMapContract[] }> {
   const workerCount = chainScanWorkerCount(input.days.length);
   const chunkSize = Math.ceil(input.days.length / workerCount);
   const chunks: ChainScanDayInput[][] = [];
@@ -40,7 +40,7 @@ export async function scanChainDaysInParallel(input: { filePath: string; days: r
   let daysDone = 0;
   const responses = await Promise.all(
     chunks.map(async (days) => {
-      const response = await runWorker({ filePath: input.filePath, days, settings: input.settings, chainMapDate: input.chainMapDate });
+      const response = await runWorker({ filePath: input.filePath, days, settings: input.settings, openDays: [...input.openDays], chainMapDate: input.chainMapDate });
       daysDone += days.length;
       input.onChunkDone?.(daysDone);
       return response;

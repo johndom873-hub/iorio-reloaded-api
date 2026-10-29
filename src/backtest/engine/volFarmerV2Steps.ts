@@ -218,6 +218,8 @@ export interface VolFarmerV2Market {
   leapsCallQuotes: HedgePutQuoteSource | undefined;
   /** IBKR's 30-day IV the implied-move Step reads; null when none is recent enough. */
   stepImpliedVolatility(): number | null;
+  /** The trading sessions from today's to an expiry's, both in full: what the premium yields are annualized over (tradingSessionsHeld.ts). */
+  tradingSessionsThrough(expiry: string): number;
   /** r: the book's prices ÷ this are the prices as traded today (1 unless a split fell inside the open cycle). */
   priceToCycleScale: number;
   /** False when the open cycle spans a split whose contracts do not fit its share scale. */
@@ -474,6 +476,7 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
       settings: { minAbsDelta: limits.minAbsDelta, maxAbsDelta: limits.maxAbsDelta, minDte: dte, maxDte: dte, maxSpreadPctOfMid: farmer.maxSpreadPctOfMid },
       spreadShareCharged: market.spreadShareCharged,
       isHeld: (contract) => limits.heldExcluded && heldContracts.has(contractKeyOf(contract)),
+      tradingSessionsThrough: market.tradingSessionsThrough,
       ...(limits.minimumStrike === undefined ? {} : { minimumStrike: limits.minimumStrike }),
       ...(limits.maximumStrike === undefined ? {} : { maximumStrike: limits.maximumStrike }),
     });

@@ -4,6 +4,7 @@ import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
 import { impliedVolatilityFromPrice } from "../../lib/impliedVolatilitySurface.js";
 import { daysToExpiry, describeOptionContract, describeOrderSize } from "../../lib/optionContractLabel.js";
 import { deltaFromQuoteMid } from "../../lib/quoteOwnDelta.js";
+import { tradingSessionsPerYear } from "../../lib/tradingSessionsHeld.js";
 import type { BacktestAction, BacktestBaselineSettings, BacktestHedgeTotals } from "../backtestTypes.js";
 import { sharesPerContract } from "./backtestBook.js";
 import { baselineQuoteRejection, roundedStrike } from "./baselineSaleSteps.js";
@@ -316,6 +317,8 @@ export interface BaselineHedgeLook {
   pastDailyCloses: readonly { close: number }[];
   /** The stock's daily IV (IBKR's, a decimal) over the last 252 sessions with one before today, oldest first. */
   pastImpliedVolatilities(): readonly number[];
+  /** The trading sessions from today's to an expiry's (tradingSessionsHeld.ts): what a Put's yearly cost is annualized over. */
+  tradingSessionsThrough(expiry: string): number;
   priceByLegId: Map<string, number>;
   nextActionId(): string;
   actions: BacktestAction[];
@@ -652,12 +655,13 @@ export class BaselineHedgeSteps {
     const expiry = hedgePutExpiry(this.look.quotes.listedExpiries(), todayIso, { ...baseline, hedgePutTenorDays: targetDays });
     if (expiry === null) return null;
     const dte = daysToExpiry(expiry, todayIso);
+    const sessionsHeld = this.look.tradingSessionsThrough(expiry);
     const targetStrike = referencePrice * (1 - baseline.hedgePutBelowPricePct / 100);
     const isTaken = (strike: number) => this.isTakenByShortOption(expiry, strike);
     const byDelta = baseline.hedgePutStrikeBy === "delta" ? hedgePutQuoteByDelta(this.look.quotes.quotesOf(expiry), { stockPrice: this.look.stockPrice, yearsToExpiry: dte / 365, riskFreeRate: this.look.riskFreeRate, absDelta: baseline.hedgePutAbsDelta }, baseline.maxSpreadPctOfMid, isTaken) : null;
     const quote = baseline.hedgePutStrikeBy === "delta" ? (byDelta?.quote ?? null) : hedgePutQuote(this.look.quotes.quotesOf(expiry), targetStrike, baseline.maxSpreadPctOfMid, isTaken);
     if (quote === null) return null;
-    const tooDear = this.priceGateBlock(quote, dte);
+    const tooDear = this.priceGateBlock(quote, dte, sessionsHeld);
     if (tooDear !== null) {
       if (this.state.priceGateNotedOn !== todayIso) this.look.summaries.push(`${symbol}: no hedge Put bought for ${whatFor}: ${tooDear} (noted once a day)`);
       this.state.priceGateNotedOn = todayIso;
@@ -710,6 +714,7 @@ export class BaselineHedgeSteps {
         bidSize: quote.bidSize,
         askSize: quote.askSize,
         dte,
+        sessionsHeld,
         stockPrice: this.look.stockPrice,
         referencePrice,
         targetStrike,
@@ -729,7 +734,7 @@ export class BaselineHedgeSteps {
   }
 
   /** Why the Put chosen is too dear to buy now (hedgePutPriceGate), or null; a measure that can't be worked out blocks nothing. */
-  private priceGateBlock(quote: SymbolFileQuote, daysLeft: number): string | null {
+  private priceGateBlock(quote: SymbolFileQuote, daysLeft: number, sessionsHeld: number): string | null {
     const { baseline, stockPrice, riskFreeRate } = this.look;
     if (baseline.hedgePutPriceGate === "off") return null;
     const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
@@ -737,7 +742,7 @@ export class BaselineHedgeSteps {
     const measures = this.priceGateMeasures();
     if (baseline.hedgePutPriceGate === "cost_vs_typical_fall") {
       if (measures.typicalFall === null) return null;
-      const yearlyCost = (mid / stockPrice) * (365 / daysLeft);
+      const yearlyCost = (mid / stockPrice) * (tradingSessionsPerYear / sessionsHeld);
       const limit = baseline.hedgePutCostFallShare * measures.typicalFall;
       return yearlyCost > limit ? `its yearly cost ${percent(yearlyCost)} is above ${baseline.hedgePutCostFallShare} × the typical yearly fall ${percent(measures.typicalFall)} = ${percent(limit)}` : null;
     }

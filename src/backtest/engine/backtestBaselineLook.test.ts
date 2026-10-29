@@ -20,14 +20,19 @@ import { ledgerFreeShares, ledgerHeldSharesAverageCost } from "./ledger/ledgerSe
 import { createSimulatedLedger, legsOfPosition, positionsOfSymbol, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { BacktestBarHistory } from "./backtestBarHistory.js";
 import { addCalendarDays } from "../../lib/calendarDays.js";
+import { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 
 const todayIso = "2026-03-02";
 const stockPrice = 100;
 const riskFreeRate = 0.04;
 const volatility = 0.5;
 
+/** Every weekday a session (no holiday in March 2026): what the premium yields are annualized over. */
+const weekdayCalendar = new BacktestTradingCalendar([], []);
+const sessionsHeldTo = (expiry: string) => weekdayCalendar.sessionsHeld(todayIso, expiry);
+
 /** The look's trading calendar: today closes at 16:00. */
-const oneDayCalendar = { sessionsBetween: () => [{ dateIso: todayIso, closeMinutesEt: 16 * 60 }] };
+const oneDayCalendar = { sessionsBetween: () => [{ dateIso: todayIso, closeMinutesEt: 16 * 60 }], sessionsHeld: (fromIso: string, toIso: string) => weekdayCalendar.sessionsHeld(fromIso, toIso) };
 
 /** A quote priced by Black-76 at 50% volatility, with a 4% spread around that mid unless given. */
 function quote(expiry: string, strike: number, right: "C" | "P", spreadFraction = 0.04): SymbolFileQuote {
@@ -54,6 +59,7 @@ function input(quotes: SymbolFileQuote[], overrides: Partial<BaselineCandidateIn
     settings: { minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15 },
     spreadShareCharged: 0.5,
     isHeld: () => false,
+    tradingSessionsThrough: sessionsHeldTo,
     ...overrides,
   };
 }
@@ -73,7 +79,8 @@ describe("selectBaselineCandidates", () => {
   it("ranks by premium yield on the time value and reads each quote's own delta", () => {
     const quotes = [quote("2026-03-06", 95, "P"), quote("2026-03-06", 100, "P"), quote("2026-03-27", 95, "P"), quote("2026-03-06", 105, "C")];
     const { candidates } = selectBaselineCandidates(input(quotes));
-    // The 25-day $95 put out-earns the 4-day one a year at these prices (45% vs 41%); the call is the other right.
+    // Monday 2 March: the $95 put of Friday 27 March (20 sessions) out-earns Friday 6 March's (5) a year at these prices
+    // (38.8% vs 22.6%); the call is the other right.
     expect(candidates.map((candidate) => [candidate.expiry, candidate.strike])).toEqual([
       ["2026-03-06", 100],
       ["2026-03-27", 95],
@@ -85,13 +92,13 @@ describe("selectBaselineCandidates", () => {
       expect(candidate.delta).toBeCloseTo(blackScholesDelta(stockPrice * Math.exp(riskFreeRate * years), candidate.strike, years, riskFreeRate, volatility, false), 2);
       expect(candidate.volumeCap).toBe(200);
     }
-    // At the money: no intrinsic value, so the yield is the fill after its commission on the capital, annualized.
+    // At the money: no intrinsic value, so the yield is the fill after its commission on the capital, annualized over the
+    // 5 sessions from Monday to Friday.
     const atTheMoney = candidates[0]!;
-    const years = yearsBetweenIsoDates(todayIso, atTheMoney.expiry);
-    expect(atTheMoney.premiumYield).toBeCloseTo((atTheMoney.fillPrice * 100 - 0.68) / ((100 - atTheMoney.fillPrice) * 100) / years, 10);
+    expect(atTheMoney.premiumYield).toBeCloseTo(((atTheMoney.fillPrice * 100 - 0.68) / ((100 - atTheMoney.fillPrice) * 100)) * (252 / 5), 10);
   });
 
-  it("prices an option expiring on the look's day on the hours left to the close, and counts its yield over one day", () => {
+  it("prices an option expiring on the look's day on the hours left to the close, and counts its yield over one session", () => {
     // A $99 Put expiring today at the 10:00 look: 6 hours to a 16:00 close.
     const years = 6 / 8760;
     const mid = blackScholesPriceOnForward(stockPrice * Math.exp(riskFreeRate * years), 99, years, riskFreeRate, volatility, false);
@@ -103,7 +110,7 @@ describe("selectBaselineCandidates", () => {
     const candidate = candidates[0]!;
     expect(candidate.impliedVolatility).toBeCloseTo(volatility, 2);
     expect(candidate.delta).toBeCloseTo(blackScholesDelta(stockPrice * Math.exp(riskFreeRate * years), 99, years, riskFreeRate, volatility, false), 2);
-    expect(candidate.premiumYield).toBeCloseTo(((candidate.fillPrice * 100 - 0.68) / ((99 - candidate.fillPrice) * 100)) * 365, 10);
+    expect(candidate.premiumYield).toBeCloseTo(((candidate.fillPrice * 100 - 0.68) / ((99 - candidate.fillPrice) * 100)) * 252, 10);
     // At the close nothing is left to price: no implied volatility, so it is refused.
     expect(selectBaselineCandidates(input([sameDay], { settings: fromZeroDays, yearsToTodaysClose: 0 })).rejections.noImpliedVolatility).toBe(1);
   });
@@ -130,7 +137,7 @@ describe("selectBaselineCandidates", () => {
     const quotes = Array.from({ length: 41 }, (_, index) => 80 + index).flatMap((strike) => [quote("2026-03-20", strike, "C"), quote("2026-03-20", strike, "P")]);
     const { forwardAnchors } = input(quotes);
     const baseline = { ...defaultBacktestBaselineSettings, entry: "covered_call", minAbsDelta: 0.05, maxAbsDelta: 0.4, callDeltaRange: "own_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, maxSpreadPctOfMid: 50 } as BacktestBaselineSettings;
-    const select = makeBaselineSelector({ quotes, forwardAnchors, commissions: flatCommissions, todayIso, yearsToTodaysClose: 6 / 8760, stockPrice, riskFreeRate, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), baseline, spreadShareCharged: 0, isHeld: () => false, earningsDatesIso: undefined, model: null });
+    const select = makeBaselineSelector({ quotes, forwardAnchors, commissions: flatCommissions, todayIso, yearsToTodaysClose: 6 / 8760, stockPrice, riskFreeRate, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), baseline, spreadShareCharged: 0, isHeld: () => false, earningsDatesIso: undefined, model: null, tradingSessionsThrough: sessionsHeldTo });
     const maxAbsDelta = (candidates: { delta: number }[]) => Math.max(...candidates.map((candidate) => Math.abs(candidate.delta)));
     // The entry (forEntry) and the held shares' Calls both stop at 0.30; the Puts reach 0.40.
     expect(maxAbsDelta(select("C", null, true).candidates)).toBeLessThanOrEqual(0.3);
@@ -144,7 +151,7 @@ describe("selectBaselineCandidates", () => {
     const quotes = Array.from({ length: 41 }, (_, index) => 80 + index).flatMap((strike) => [quote("2026-03-20", strike, "C"), quote("2026-03-20", strike, "P")]);
     const { forwardAnchors } = input(quotes);
     const selectorFor = (ladderPutDeltaRange: BacktestBaselineSettings["ladderPutDeltaRange"]) =>
-      makeBaselineSelector({ quotes, forwardAnchors, commissions: flatCommissions, todayIso, yearsToTodaysClose: 6 / 8760, stockPrice, riskFreeRate, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), baseline: { ...defaultBacktestBaselineSettings, entry: "covered_call", minAbsDelta: 0.2, maxAbsDelta: 0.3, maxSpreadPctOfMid: 50, ladderPutDeltaRange } as BacktestBaselineSettings, spreadShareCharged: 0, isHeld: () => false, earningsDatesIso: undefined, model: null });
+      makeBaselineSelector({ quotes, forwardAnchors, commissions: flatCommissions, todayIso, yearsToTodaysClose: 6 / 8760, stockPrice, riskFreeRate, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), baseline: { ...defaultBacktestBaselineSettings, entry: "covered_call", minAbsDelta: 0.2, maxAbsDelta: 0.3, maxSpreadPctOfMid: 50, ladderPutDeltaRange } as BacktestBaselineSettings, spreadShareCharged: 0, isHeld: () => false, earningsDatesIso: undefined, model: null, tradingSessionsThrough: sessionsHeldTo });
     const absDeltas = (candidates: { delta: number }[]) => candidates.map((candidate) => Math.abs(candidate.delta));
     const insideRange = (values: number[]) => values.every((value) => value >= 0.2 - 1e-12 && value <= 0.3 + 1e-12);
     // On the range: the ladder's Puts (under a $99 cap) stay within 0.20–0.30.
@@ -680,6 +687,7 @@ describe("selectBaselineCandidates with the Signals model", () => {
       perSessionVariance: fixtureModelForecast(0.4).perSessionVariance,
       varianceSessions: years * 365 * varianceSessionsPerDay,
       calendarYears: years,
+      sessionsHeld: sessionsHeldTo(first.expiry),
       riskFreeRate,
       group: "stock",
       spot: stockPrice,

@@ -116,7 +116,7 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Put chosen",
     unit: "choice",
     editable: true,
-    note: "of the Puts that pass the hedge rule and offer at least the least protection: the most protection, or the cheapest per year: (time value × 100 + one contract's commission) ÷ (stock price × 100) ÷ (days to expiry ÷ 365), a tie going to the more protection",
+    note: "of the Puts that pass the hedge rule and offer at least the least protection: the most protection, or the cheapest per year: (time value × 100 + one contract's commission) ÷ (stock price × 100) × 252 ÷ the trading sessions it is held, a tie going to the more protection",
     choices: [
       { value: "most_protection", label: "The most protection" },
       { value: "cheapest_per_year", label: "The cheapest per year" },
@@ -554,7 +554,7 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
       { value: "iv_vs_realized", label: "IV above a multiple of the last 21 sessions' realized volatility" },
     ],
   },
-  { path: "baseline.hedgePutCostFallShare", label: "Hedge: yearly cost at most this share of the typical fall", unit: "number", editable: true, note: "yearly cost = mid ÷ stock price × 365 ÷ days to expiry; typical yearly fall = the median, over 5 years, of the deepest fall in each year of closes. 0.3 × a 40% fall = 12% a year" },
+  { path: "baseline.hedgePutCostFallShare", label: "Hedge: yearly cost at most this share of the typical fall", unit: "number", editable: true, note: "yearly cost = mid ÷ stock price × 252 ÷ the trading sessions to expiry (today's and the expiry's both counted); typical yearly fall = the median, over 5 years, of the deepest fall in each year of closes. 0.3 × a 40% fall = 12% a year" },
   { path: "baseline.hedgePutIvMultiple", label: "Hedge: IV at most this multiple", unit: "number", editable: true, note: "of the stock's median IV over 252 sessions, or of the realized volatility of the last 21" },
   {
     path: "baseline.hedgePutSize",

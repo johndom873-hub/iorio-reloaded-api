@@ -2,6 +2,7 @@ import { baselineMaxVolumeShare, baselineMinimumBid } from "../backtest/engine/b
 import { ladderBudget, ladderRungCollateral, ladderStrikeCap } from "../backtest/engine/backtestBaselineLadder.js";
 import { stepImpliedVolatilityLookbackSessions, volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap } from "../backtest/engine/volFarmerV2Steps.js";
 import { flatStockCommissionEstimator } from "../lib/commissionEstimate.js";
+import { tradingSessionsPerYear } from "../lib/tradingSessionsHeld.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
 import { ladderFixedBaselineChoices } from "./ladderSettings.js";
 import { closeMarginMinutes } from "./sessionSchedule.js";
@@ -42,6 +43,8 @@ export interface PlutoHowItWorks {
     excessAllowancePct: number;
     dailyLossBreakerPct: number;
     unfilledOrderCancelMinutes: number;
+    /** A premium yield a year is the sale's return × this ÷ the trading sessions it is held (tradingSessionsHeld.ts). */
+    premiumYieldSessionsPerYear: number;
   };
   ladder: {
     /** The Calls' |delta| range; the ladder's Puts have none (the rung's cap bounds them). */
@@ -148,6 +151,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       excessAllowancePct: settings.excessAllowancePct,
       dailyLossBreakerPct: settings.dailyLossBreakerPct,
       unfilledOrderCancelMinutes: figures.unfilledOrderCancelMinutes,
+      premiumYieldSessionsPerYear: tradingSessionsPerYear,
     },
     ladder: {
       minAbsDelta: settings.ladderMinAbsDelta,

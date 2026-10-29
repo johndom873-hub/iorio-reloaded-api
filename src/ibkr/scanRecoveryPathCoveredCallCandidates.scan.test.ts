@@ -19,6 +19,17 @@ vi.mock("../lib/volatilityScreen.js", () => ({
   },
 }));
 vi.mock("../lib/riskFreeRate.js", () => ({ getRiskFreeRate: async () => 0 }));
+// Every weekday from the faked day a session: what the yields are annualized over.
+vi.mock("../lib/liveTradingSessions.js", async () => {
+  const { sessionsHeldAmong } = await import("../lib/tradingSessionsHeld.js");
+  return {
+    loadLiveTradingSessions: async (now: Date = new Date()) => {
+      const saleSessionIso = now.toISOString().slice(0, 10);
+      const openDays = Array.from({ length: 60 }, (_, index) => new Date(now.getTime() + index * 86_400_000).toISOString().slice(0, 10)).filter((dateIso) => ![0, 6].includes(new Date(`${dateIso}T12:00:00Z`).getUTCDay()));
+      return { saleSessionIso, openDays, sessionsHeldTo: (expiryIso: string) => sessionsHeldAmong(openDays, saleSessionIso, expiryIso) };
+    },
+  };
+});
 vi.mock("./fetchOptionChain.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./fetchOptionChain.js")>()),
   loadStoredOptionChain: async () => mocks.storedChain,
@@ -146,7 +157,8 @@ describe("scanRecoveryPathCoveredCallCandidates: ranking the quotes", () => {
   beforeEach(() => storeChain({ "20261016": [105], "20261023": [105] }));
   const scan = () => scanRecoveryPathCoveredCallCandidates(ib, "AAPL", "t1", 100, window);
 
-  it("builds a candidate from the mid, with the yield (premium / spot) x (365 / dte)", async () => {
+  it("builds a candidate from the mid, with the yield premium / (spot − premium) × 252 / sessions held", async () => {
+    // Tuesday 6 October to Friday 16 October: 9 sessions.
     mocks.quotesToReturn = [callQuote("20261016", 105, { bid: 1.0, ask: 1.4, delta: 0.25 })];
     const [candidate] = await scan();
     expect(candidate).toEqual({
@@ -158,7 +170,7 @@ describe("scanRecoveryPathCoveredCallCandidates: ranking the quotes", () => {
       bid: 1.0,
       ask: 1.4,
       dte: 10,
-      annualizedYield: (1.2 / (100 - 1.2)) * (365 / 10),
+      annualizedYield: (1.2 / (100 - 1.2)) * (252 / 9),
       spotPrice: 100,
       calendarUnverified: false,
     });
@@ -204,9 +216,9 @@ describe("scanRecoveryPathCoveredCallCandidates: ranking the quotes", () => {
 
   it("ranks by annualized yield, highest first, so a nearer cheaper contract can outrank a farther dearer one", async () => {
     mocks.quotesToReturn = [
-      callQuote("20261023", 105, { bid: 2.0, ask: 2.2 }), // 2.1 / 100 * 365/17 = 0.4509
-      callQuote("20261016", 104, { bid: 1.0, ask: 1.2 }), // 1.1 / 100 * 365/10 = 0.4015
-      callQuote("20261016", 106, { bid: 1.5, ask: 1.7 }), // 1.6 / 100 * 365/10 = 0.584
+      callQuote("20261023", 105, { bid: 2.0, ask: 2.2 }), // 2.1 / 97.9 × 252/14 = 0.386
+      callQuote("20261016", 104, { bid: 1.0, ask: 1.2 }), // 1.1 / 98.9 × 252/9 = 0.311
+      callQuote("20261016", 106, { bid: 1.5, ask: 1.7 }), // 1.6 / 98.4 × 252/9 = 0.455
     ];
     expect((await scan()).map((candidate) => candidate.strike)).toEqual([106, 105, 104]);
   });
