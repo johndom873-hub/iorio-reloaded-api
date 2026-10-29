@@ -2,8 +2,9 @@ import { easternInstant } from "../../lib/easternIsoDate.js";
 
 // Schema 4 of the symbol files (docs/backtesting/DATA-FILES.md): a day's option rows stored as slices, one SQLite row
 // per day, look and expiry, its contracts packed as columns in strike order (the Call before the Put), each column in
-// the narrowest width its values need within the slice. BacktestSymbolFile and the day-data reader threads read them;
-// the downloader and the schema 3 conversion write them.
+// the narrowest width its values need within the slice. The four slice tables hold what schema 3's quotes,
+// intraday_quotes, eod and open_interest hold. BacktestSymbolFile and the day-data reader threads read them; the
+// downloader and the schema 3 conversion write them.
 //
 // A slice's bytes (little-endian): u32 contract count, then each column in order:
 // - the right: a bitmap (bit set = Put), padded to 4 bytes;
@@ -14,7 +15,7 @@ import { easternInstant } from "../../lib/easternIsoDate.js";
 //   dollar for strikes, cents for prices, counts for sizes, volumes, open interest and milliseconds. A slice whose
 //   values are not exact in the unit keeps that column as f64.
 
-/** The 10:00 quotes' look, in minutes after midnight Eastern; each later look is its own minute (10:30 = 630). */
+/** The 10:00 look, in minutes after midnight Eastern: the 10:00 quotes' keys, and the intraday look at 10:00; each later look is its own minute (10:30 = 630). */
 export const tenOClockLookMinute = 600;
 
 /** The look minute of the end-of-day and open-interest slices' keys. */
@@ -54,20 +55,19 @@ export type SliceColumnKind = "strike" | "right" | "cents" | "centsOverPrevious"
 
 /** The 10:00 quotes: strike, right, bid, ask, bid size, ask size, and the milliseconds from the quote's own time to 10:00 (quoted_at). */
 export const tenOClockQuoteColumns: readonly SliceColumnKind[] = ["strike", "right", "cents", "centsOverPrevious", "count", "count", "count"];
-/** A later look's quotes: strike, right, bid, ask, bid size, ask size. */
-export const laterLookQuoteColumns: readonly SliceColumnKind[] = ["strike", "right", "cents", "centsOverPrevious", "count", "count"];
+/** An intraday look's quotes: strike, right, bid, ask, bid size, ask size. */
+export const intradayQuoteColumns: readonly SliceColumnKind[] = ["strike", "right", "cents", "centsOverPrevious", "count", "count"];
 /** The end of day: strike, right, close, volume, the closing bid and ask. */
 export const endOfDayColumns: readonly SliceColumnKind[] = ["strike", "right", "cents", "count", "cents", "centsOverPrevious"];
 /** The open interest: strike, right, open interest. */
 export const openInterestColumns: readonly SliceColumnKind[] = ["strike", "right", "count"];
 
-export const quoteColumnsOfLook = (lookMinute: number): readonly SliceColumnKind[] => (lookMinute === tenOClockLookMinute ? tenOClockQuoteColumns : laterLookQuoteColumns);
-
 /** Column positions in the quote, end-of-day and open-interest slices. */
 export const sliceColumn = { strike: 0, right: 1, bid: 2, ask: 3, bidSize: 4, askSize: 5, millisecondsBeforeTen: 6, close: 2, volume: 3, endOfDayBid: 4, endOfDayAsk: 5, openInterest: 2 } as const;
 
 export const schemaFourSliceTablesSql = `
-  CREATE TABLE option_quote_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL, has_ask_above_zero INTEGER NOT NULL, data BLOB NOT NULL);
+  CREATE TABLE ten_oclock_quote_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL, has_ask_above_zero INTEGER NOT NULL, data BLOB NOT NULL);
+  CREATE TABLE intraday_quote_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL, data BLOB NOT NULL);
   CREATE TABLE end_of_day_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL, has_volume INTEGER NOT NULL, data BLOB NOT NULL);
   CREATE TABLE open_interest_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL, data BLOB NOT NULL);
 `;

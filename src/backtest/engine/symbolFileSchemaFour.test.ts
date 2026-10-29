@@ -16,7 +16,7 @@ import { syntheticOptionQuotes, writeSyntheticSymbolFile, type SyntheticSymbolFi
 let schemaThreeDirectory: string;
 let schemaFourDirectory: string;
 let previousDataDirectory: string | undefined;
-const symbols = ["EDGES", "INTRA", "ALLEXP"];
+const symbols = ["EDGES", "INTRA", "ALLEXP", "TENLOOK"];
 const schemaThreeFile = (symbol: string) => path.join(schemaThreeDirectory, `${symbol}.sqlite`);
 const schemaFourFile = (symbol: string) => path.join(schemaFourDirectory, `${symbol}.sqlite`);
 const day = (tradingDate: string, price = 100, withoutEndOfDay = false): SyntheticSymbolFileDay => ({ tradingDate, quotes: syntheticOptionQuotes(tradingDate, price, ["2026-03-13", "2026-03-20"], 0.5, 0.04, 2.5, 3), endOfDayVolume: 100, openInterest: 200, withoutEndOfDay });
@@ -45,6 +45,10 @@ beforeAll(() => {
   writeSyntheticSymbolFile(schemaThreeFile("INTRA"), "INTRA", [{ ...day("2026-03-02"), intradayQuotes: { "10:30": laterLook(101), "11:00": laterLook(102), "15:30": laterLook(99) } }, day("2026-03-03"), day("2026-03-09")], ["2026-03-04"], { schemaVersion: "3" });
   const everyExpiry = syntheticOptionQuotes("2026-03-02", 100, ["2026-03-12", "2026-04-16", "2026-04-17", "2026-12-27"], 0.5, 0.04, 5, 1);
   writeSyntheticSymbolFile(schemaThreeFile("ALLEXP"), "ALLEXP", [{ ...day("2026-03-02"), quotes: everyExpiry, intradayQuotes: { "10:30": everyExpiry } }], [], { schemaVersion: "3" });
+  // An intraday look at 10:00 that differs from the 10:00 quotes (a size, a price, a contract the 10:00 quotes lack),
+  // as on a few days of the real files: schema 4 keeps both.
+  const tenOClockLook = syntheticOptionQuotes("2026-03-02", 100, ["2026-03-13"], 0.5, 0.04, 2.5, 3);
+  writeSyntheticSymbolFile(schemaThreeFile("TENLOOK"), "TENLOOK", [{ ...day("2026-03-02"), quotes: tenOClockLook.slice(1), intradayQuotes: { "10:00": tenOClockLook.map((quote, index) => (index === 2 ? { ...quote, bidSize: (quote.bidSize ?? 0) + 81 } : index === 3 ? { ...quote, bid: (quote.bid ?? 0) + 0.05 } : quote)), "10:30": laterLook(101) } }, day("2026-03-03")], [], { schemaVersion: "3" });
   for (const symbol of symbols) convertSymbolFileToSchemaFour(schemaThreeFile(symbol), schemaFourFile(symbol));
 });
 
@@ -93,11 +97,7 @@ describe("the schema 3 → 4 conversion", () => {
     for (const symbol of symbols) expect(checkSchemaFourFile(schemaThreeFile(symbol), schemaFourFile(symbol)).optionRows).toBeGreaterThan(0);
   });
 
-  it("refuses a file whose intraday quotes at 10:00 differ from the 10:00 quotes, and a file of another version", () => {
-    const quotes = syntheticOptionQuotes("2026-03-02", 100, ["2026-03-13"], 0.5, 0.04, 2.5, 2);
-    const differing = path.join(schemaThreeDirectory, "DIFFER.sqlite");
-    writeSyntheticSymbolFile(differing, "DIFFER", [{ ...day("2026-03-02"), quotes, intradayQuotes: { "10:00": quotes.map((quote, index) => (index === 0 ? { ...quote, bid: (quote.bid ?? 0) + 0.01 } : quote)) } }], [], { schemaVersion: "3" });
-    expect(() => convertSymbolFileToSchemaFour(differing, path.join(schemaFourDirectory, "DIFFER.sqlite"))).toThrow("1 intraday quotes at 10:00 differ from the 10:00 quotes");
+  it("refuses a file of another version", () => {
     const versionTwo = path.join(schemaThreeDirectory, "VERTWO.sqlite");
     writeSyntheticSymbolFile(versionTwo, "VERTWO", [day("2026-03-02")], [], { schemaVersion: "2" });
     expect(() => convertSymbolFileToSchemaFour(versionTwo, path.join(schemaFourDirectory, "VERTWO.sqlite"))).toThrow("only version 3 files are converted");
@@ -124,7 +124,8 @@ describe("a schema 4 file", () => {
         same((file) => file.loadEndOfDay(tradingDate));
         same((file) => file.loadNextCallExpiryDay(tradingDate, index === 0 ? null : days[index - 1]!));
         const looks: string[] = [];
-        for (let look = same((file) => file.nextIntradayLookTime(tradingDate, "10:00")); look !== null; look = same((file) => file.nextIntradayLookTime(tradingDate, look!))) looks.push(look);
+        for (let look = same((file) => file.nextIntradayLookTime(tradingDate, "09:30")); look !== null; look = same((file) => file.nextIntradayLookTime(tradingDate, look!))) looks.push(look);
+        same((file) => file.loadIntradayQuotes(tradingDate, "09:30", "15:30", 0, Number.MAX_SAFE_INTEGER));
         same((file) => file.loadIntradayQuotes(tradingDate, "10:00", "15:30", 0, Number.MAX_SAFE_INTEGER));
         same((file) => file.loadIntradayQuotes(tradingDate, "10:30", "15:30", 97, 103));
         for (const look of looks) {
@@ -179,16 +180,6 @@ describe("a schema 4 file", () => {
         await originalReader.close();
         await convertedReader.close();
       }
-    }
-  });
-
-  it("refuses an intraday read at 10:00 or earlier: 10:00 is read from the 10:00 quotes", () => {
-    const converted = openFile(schemaFourFile("INTRA"));
-    try {
-      expect(() => converted.loadIntradayCallQuotesOfExpiry("2026-03-02", "10:00", "2026-03-13")).toThrow("Schema 4 files keep intraday quotes after 10:00 only");
-      expect(() => converted.loadIntradayQuotes("2026-03-02", "09:30", "15:30", 0, 1000)).toThrow("Schema 4 files keep intraday quotes after 10:00 only");
-    } finally {
-      converted.close();
     }
   });
 

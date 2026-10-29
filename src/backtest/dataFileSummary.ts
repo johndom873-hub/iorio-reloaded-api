@@ -96,8 +96,8 @@ export function readBacktestDataFilePeriodContents(symbol: string, startDate: st
     const completeDays = tableNames.has("days") ? datesOf("SELECT trading_date AS tradingDate FROM days WHERE status = 'complete' AND trading_date BETWEEN ? AND ?") : new Set<string>();
     const unavailableDays = tableNames.has("unavailable_days") ? datesOf("SELECT trading_date AS tradingDate FROM unavailable_days WHERE trading_date BETWEEN ? AND ?") : new Set<string>();
     // As the engine reads them (BacktestSymbolFile.loadIntradayDays): a day counts when its quotes are there to read (in
-    // intraday_quotes, or a schema 4 file's slices).
-    const intradayDays = tableNames.has("intraday_days") && (tableNames.has("intraday_quotes") || tableNames.has("option_quote_slices")) ? datesOf("SELECT trading_date AS tradingDate FROM intraday_days WHERE status = 'complete' AND trading_date BETWEEN ? AND ?") : new Set<string>();
+    // intraday_quotes, or a schema 4 file's intraday_quote_slices).
+    const intradayDays = tableNames.has("intraday_days") && (tableNames.has("intraday_quotes") || tableNames.has("intraday_quote_slices")) ? datesOf("SELECT trading_date AS tradingDate FROM intraday_days WHERE status = 'complete' AND trading_date BETWEEN ? AND ?") : new Set<string>();
     const missingWeekdays: string[] = [];
     for (let day = startDate; day <= endDate; day = addCalendarDays(day, 1)) if (!isWeekendDate(day) && !storedDays.has(day) && !unavailableDays.has(day)) missingWeekdays.push(day);
     return {

@@ -3,8 +3,8 @@ import { parentPort } from "node:worker_threads";
 import { addCalendarDays } from "../../lib/calendarDays.js";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { dayDataTransferList, type DayDataColumn, type DayDataPayload, type DayDataReaderReply, type DayDataReaderRequest, type DayDataTable } from "./backtestDayDataReader.js";
-import { dayDataEndOfDayValueColumns, dayDataIntradayValueColumns, dayDataQuoteValueColumns, dayDataTableOfSlices, DayDataStrings, sliceEndOfDayWindowDays, sliceQuoteWindowDays, SymbolFileSliceReads } from "./symbolFileSliceReads.js";
-import { dayNumberOf, endOfDayColumns, quoteColumnsOfLook, tenOClockLookMinute } from "./symbolFileSlices.js";
+import { dayDataEndOfDayValueColumns, dayDataIntradayValueColumns, dayDataQuoteValueColumns, dayDataTableOfSlices, DayDataStrings, SymbolFileSliceReads, type StoredSlice } from "./symbolFileSliceReads.js";
+import { endOfDayColumns, intradayQuoteColumns, tenOClockQuoteColumns } from "./symbolFileSlices.js";
 import { endOfDayOfDaySql, endOfDayOfExpirySql, endOfDayWithVolumeSql, intradayQuotesColumnsSql, intradayQuoteWithinSql, nextCallExpirySql, nextIntradayLookTimeSql, numberOrNull, quoteCountByRightOf, quoteCountByRightSql, quotesOfDaySql, quotesOfExpirySql, quoteWithAskAboveZeroSql } from "./backtestSymbolFile.js";
 
 // The day-data reader thread of a session (backtestDayDataReader.ts): reads a symbol's day with BacktestSymbolFile's
@@ -118,9 +118,8 @@ const endOfDayKinds: readonly CellKind[] = ["string", "number", "string", "nulla
 /** readDay on a schema 4 file: the same tables, built from the slices. */
 function readSchemaFourDay(request: DayDataReaderRequest, slices: SymbolFileSliceReads): DayDataPayload {
   const strings = new DayDataStrings();
-  const dayNumber = dayNumberOf(request.tradingDate);
-  const quotesOf = (stored: ReturnType<SymbolFileSliceReads["quoteSlicesOf"]>) => dayDataTableOfSlices(stored, quoteColumnsOfLook, dayDataQuoteValueColumns, strings, false);
-  const endOfDayOf = (stored: ReturnType<SymbolFileSliceReads["endOfDaySlicesOf"]>) => dayDataTableOfSlices(stored, () => endOfDayColumns, dayDataEndOfDayValueColumns, strings, false);
+  const quotesOf = (stored: StoredSlice[]) => dayDataTableOfSlices(stored, tenOClockQuoteColumns, dayDataQuoteValueColumns, strings, false);
+  const endOfDayOf = (stored: StoredSlice[]) => dayDataTableOfSlices(stored, endOfDayColumns, dayDataEndOfDayValueColumns, strings, false);
   let nextCallExpiryDay: DayDataPayload["nextCallExpiryDay"] = null;
   if (request.readsNextCallExpiryOnly) {
     const { quoteSlice, previousEndOfDaySlice, ...parts } = slices.nextCallExpiryParts(request.tradingDate, request.previousFileDay);
@@ -129,10 +128,10 @@ function readSchemaFourDay(request: DayDataReaderRequest, slices: SymbolFileSlic
   const check = request.intradayLookCheck;
   return {
     strings: strings.strings,
-    quotes: request.readsNextCallExpiryOnly ? null : quotesOf(slices.quoteSlicesOf(dayNumber, tenOClockLookMinute, sliceQuoteWindowDays)),
-    endOfDay: request.readsNextCallExpiryOnly ? null : endOfDayOf(slices.endOfDaySlicesOf(dayNumber, sliceEndOfDayWindowDays)),
+    quotes: request.readsNextCallExpiryOnly ? null : quotesOf(slices.tenOClockSlicesOf(request.tradingDate)),
+    endOfDay: request.readsNextCallExpiryOnly ? null : endOfDayOf(slices.endOfDaySlicesOf(request.tradingDate)),
     nextCallExpiryDay,
-    intraday: request.readsIntradayQuotes ? dayDataTableOfSlices(slices.laterLookSlicesAfter(request.tradingDate, request.intradayAfterLookTime), quoteColumnsOfLook, dayDataIntradayValueColumns, strings, true) : null,
+    intraday: request.readsIntradayQuotes ? dayDataTableOfSlices(slices.intradaySlicesAfter(request.tradingDate, request.intradayAfterLookTime), intradayQuoteColumns, dayDataIntradayValueColumns, strings, true) : null,
     intradayAfterLookTime: request.intradayAfterLookTime,
     intradayLookCheck: check ? { ...check, hasQuote: slices.hasIntradayQuoteWithin(request.tradingDate, check.lookTime, check.lowestStrike, check.highestStrike) } : null,
   };
