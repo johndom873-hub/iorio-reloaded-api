@@ -518,6 +518,20 @@ class StrikeWindowTests(unittest.TestCase):
         self.assertEqual([row[3] for row in downloader.keep_strikes_within_window(intraday_rows, 50.0, 40.0)], [30.0, 50.0, 70.0])
 
 
+def create_schema_three_tables(connection):
+    """The file's slices as TEMP tables named and laid out as schema 3's option tables, so a test reads them as rows."""
+    for part_name, column_names in downloader.PART_COLUMN_NAMES.items():
+        connection.execute(f"CREATE TEMP TABLE {part_name} ({', '.join(column_names)})")
+        connection.executemany(f"INSERT INTO temp.{part_name} VALUES ({', '.join('?' * len(column_names))})", downloader.read_part_rows(connection, part_name))
+
+
+def change_part_rows(connection, part_name, trading_date_text, change):
+    """Rewrites a day's rows of a part through `change` (a row in, a row out)."""
+    rows = [change(row) for row in downloader.read_part_rows(connection, part_name, trading_date_text)]
+    downloader.delete_part_rows_of_day(connection, part_name, trading_date_text)
+    downloader.insert_part_rows(connection, part_name, rows)
+
+
 FIRST_VERSION_SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE days (trading_date TEXT PRIMARY KEY, status TEXT NOT NULL CHECK (status IN ('complete', 'no_data')), quote_rows INTEGER NOT NULL,
@@ -549,22 +563,21 @@ class SymbolFileTests(unittest.TestCase):
         connection = self.open_file(created_at=datetime.datetime(2026, 10, 12, 3, 4, 5, 678000, tzinfo=datetime.timezone.utc))
         try:
             self.assertEqual(dict(connection.execute("SELECT key, value FROM meta")), {
-                "symbol": "INTC", "schema_version": "3", "quote_time_et": "10:00:00", "max_dte": "all", "intraday_interval": "30m",
+                "symbol": "INTC", "schema_version": "4", "quote_time_et": "10:00:00", "max_dte": "all", "intraday_interval": "30m",
                 "intraday_window": "10:00-15:30", "created_at": "2026-10-12T03:04:05.678Z"})
+            self.assertEqual(connection.execute("PRAGMA page_size").fetchone()[0], 16384)
             table_names = [name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")]
             columns_by_table = {table_name: [column[1] for column in connection.execute(f"PRAGMA table_info({table_name})")] for table_name in table_names if table_name != "meta"}
             self.assertEqual(columns_by_table, {
                 "days": ["trading_date", "status", "quote_rows", "eod_rows", "open_interest_rows", "fetched_at", "all_expiries"],
-                "quotes": ["trading_date", "expiry", "strike", "option_right", "bid", "ask", "bid_size", "ask_size", "quoted_at"],
-                "eod": ["trading_date", "expiry", "strike", "option_right", "close", "volume", "bid", "ask"],
-                "open_interest": ["trading_date", "expiry", "strike", "option_right", "open_interest"],
                 "intraday_days": ["trading_date", "status", "look_count", "quote_rows", "strike_window_pct", "fetched_at", "all_expiries"],
-                "intraday_quotes": ["trading_date", "look_time", "expiry", "strike", "option_right", "bid", "ask", "bid_size", "ask_size", "quoted_at"],
                 "day_issues": ["trading_date", "part", "expiry", "message", "recorded_at", "attempts"],
                 "unavailable_days": ["trading_date", "reason", "attempts", "last_attempt_at"],
+                "ten_oclock_quote_slices": ["key", "call_count", "put_count", "has_ask_above_zero", "data"],
+                "intraday_quote_slices": ["key", "call_count", "put_count", "data"],
+                "end_of_day_slices": ["key", "call_count", "put_count", "has_volume", "data"],
+                "open_interest_slices": ["key", "call_count", "put_count", "data"],
             })
-            without_rowid_tables = {name for name, sql in connection.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'") if "WITHOUT ROWID" in sql}
-            self.assertEqual(without_rowid_tables, {"quotes", "eod", "open_interest", "intraday_quotes"})
             for rejected_insert in ("INSERT INTO days VALUES ('2024-03-25', 'partial', 0, 0, 0, 'x', 1)",
                                     "INSERT INTO intraday_days VALUES ('2024-03-25', 'partial', 0, 0, NULL, 'x', 1)",
                                     "INSERT INTO day_issues VALUES ('2024-03-25', 'greeks', NULL, 'm', 'x', 1)"):
@@ -573,50 +586,20 @@ class SymbolFileTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_leaves_a_file_of_a_later_schema_untouched(self):
-        later_file = sqlite3.connect(self.file_path)
-        later_file.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('symbol', 'INTC'), ('schema_version', '4');")
-        later_file.close()
-        with self.assertRaisesRegex(downloader.DownloadFailed, "has schema version 4; this downloader writes version 3 and leaves it untouched"):
-            self.open_file()
-        check = sqlite3.connect(self.file_path)
-        try:
-            self.assertEqual([name for (name,) in check.execute("SELECT name FROM sqlite_master WHERE type = 'table'")], ["meta"])
-        finally:
-            check.close()
-
-    def test_a_file_of_the_first_version_gets_the_new_tables_and_keeps_its_data(self):
-        first_version_file = sqlite3.connect(self.file_path)
-        first_version_file.executescript(FIRST_VERSION_SCHEMA)
-        first_version_file.close()
-        connection = self.open_file()
-        try:
-            tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-            self.assertEqual(tables, {"meta", "days", "quotes", "eod", "open_interest", "intraday_days", "intraday_quotes", "day_issues", "unavailable_days"})
-            self.assertEqual(connection.execute("SELECT trading_date, status, quote_rows, all_expiries FROM days").fetchall(), [("2024-03-25", "complete", 1, 0)])
-            self.assertEqual(dict(connection.execute("SELECT key, value FROM meta WHERE key LIKE 'intraday%' OR key IN ('created_at', 'schema_version', 'max_dte')")), {
-                "intraday_interval": "30m", "intraday_window": "10:00-15:30", "created_at": "2026-10-12T04:00:00.000Z", "schema_version": "3", "max_dte": "all"})
-            # Stored with the 45-day cap: its morning parts are completed on the next run.
-            self.assertEqual(downloader.read_stored_days(connection), {"2024-03-25": downloader.StoredDay("complete", 1, has_intraday_quotes=False, morning_parts_have_all_expiries=False)})
-        finally:
-            connection.close()
-
-    def test_a_file_whose_day_issues_have_no_attempts_gets_the_column_and_keeps_its_issues(self):
-        first_version_file = sqlite3.connect(self.file_path)
-        first_version_file.executescript(FIRST_VERSION_SCHEMA + """
-CREATE TABLE day_issues (trading_date TEXT NOT NULL, part TEXT NOT NULL CHECK (part IN ('quotes', 'eod', 'open_interest', 'intraday_quotes')),
-  expiry TEXT, message TEXT NOT NULL, recorded_at TEXT NOT NULL);
-INSERT INTO day_issues VALUES ('2024-03-25', 'eod', '2024-04-05', 'INTERNAL: Corrupt FIT data', '2026-10-12T04:00:01.000Z');
-""")
-        first_version_file.close()
-        self.open_file().close()
-        connection = self.open_file()
-        try:
-            self.assertEqual(connection.execute("SELECT trading_date, part, expiry, message, attempts FROM day_issues").fetchall(),
-                             [("2024-03-25", "eod", "2024-04-05", "INTERNAL: Corrupt FIT data", 1)])
-            self.assertEqual(connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "3")
-        finally:
-            connection.close()
+    def test_leaves_a_file_of_an_earlier_schema_untouched(self):
+        for version in ("1", "3"):
+            with self.subTest(version):
+                earlier_file = sqlite3.connect(self.file_path)
+                earlier_file.executescript(FIRST_VERSION_SCHEMA.replace("('schema_version', '1')", f"('schema_version', '{version}')"))
+                earlier_file.close()
+                with self.assertRaisesRegex(downloader.DownloadFailed, f"has schema version {version}; this downloader writes version 4: convert the file first"):
+                    self.open_file()
+                check = sqlite3.connect(self.file_path)
+                try:
+                    self.assertEqual(sorted(name for (name,) in check.execute("SELECT name FROM sqlite_master WHERE type = 'table'")), ["days", "eod", "meta", "open_interest", "quotes"])
+                finally:
+                    check.close()
+                self.file_path.unlink()
 
     def test_reopening_keeps_created_at_and_rejects_another_symbol(self):
         self.open_file().close()
@@ -634,7 +617,7 @@ INSERT INTO day_issues VALUES ('2024-03-25', 'eod', '2024-04-05', 'INTERNAL: Cor
                             "open_interest": downloader.DayPartResult([]), "intraday_quotes": downloader.DayPartResult([])}
             with self.assertRaises(sqlite3.IntegrityError):
                 downloader.store_day(connection, downloader.DayPlan(datetime.date(2024, 3, 25), True, True), part_results, None, datetime.datetime.now(datetime.timezone.utc), datetime.date.max)
-            self.assertEqual(connection.execute("SELECT (SELECT count(*) FROM quotes) + (SELECT count(*) FROM days)").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT (SELECT count(*) FROM ten_oclock_quote_slices) + (SELECT count(*) FROM days)").fetchone()[0], 0)
             self.assertFalse(connection.in_transaction)
         finally:
             connection.close()
@@ -652,7 +635,7 @@ INSERT INTO day_issues VALUES ('2024-03-25', 'eod', '2024-04-05', 'INTERNAL: Cor
             downloader.store_day(connection, day_plan, part_results(0.5), None, datetime.datetime.now(datetime.timezone.utc), datetime.date.max)
             connection.execute("DELETE FROM days WHERE trading_date = '2024-03-25'")
             downloader.store_day(connection, day_plan, part_results(0.6), None, datetime.datetime.now(datetime.timezone.utc), datetime.date.max)
-            self.assertEqual(connection.execute("SELECT bid FROM quotes").fetchall(), [(0.6,)])
+            self.assertEqual([row[4] for row in downloader.read_part_rows(connection, "quotes")], [0.6])
             self.assertEqual(connection.execute("SELECT status, look_count, quote_rows FROM intraday_days").fetchall(), [("no_data", 0, 0)])
         finally:
             connection.close()
@@ -715,6 +698,7 @@ class DownloadRunTests(unittest.TestCase):
     def read_database(self, query, parameters=()):
         connection = sqlite3.connect(self.data_directory / "INTC.sqlite")
         try:
+            create_schema_three_tables(connection)
             return connection.execute(query, parameters).fetchall()
         finally:
             connection.close()
@@ -779,7 +763,10 @@ class DownloadRunTests(unittest.TestCase):
     def test_a_file_without_intraday_quotes_gets_only_those(self):
         self.run_downloader(FakeThetaData(self.frames_by_date))
         connection = sqlite3.connect(self.data_directory / "INTC.sqlite")
-        connection.executescript("DELETE FROM intraday_quotes WHERE trading_date IN ('2024-03-26', '2024-03-28'); DELETE FROM intraday_days WHERE trading_date IN ('2024-03-26', '2024-03-28');")
+        for trading_date_text in ("2024-03-26", "2024-03-28"):
+            downloader.delete_part_rows_of_day(connection, "intraday_quotes", trading_date_text)
+        connection.execute("DELETE FROM intraday_days WHERE trading_date IN ('2024-03-26', '2024-03-28')")
+        connection.commit()
         connection.close()
         service = FakeThetaData(self.frames_by_date)
         exit_code, events = self.run_downloader(service)
@@ -803,7 +790,7 @@ class DownloadRunTests(unittest.TestCase):
     def test_the_strike_window_uses_the_stored_ten_o_clock_quotes_when_only_intraday_quotes_are_fetched(self):
         self.run_downloader(FakeThetaData(self.frames_by_date), end="2024-03-25")
         connection = sqlite3.connect(self.data_directory / "INTC.sqlite")
-        connection.executescript("DELETE FROM intraday_quotes; DELETE FROM intraday_days;")
+        connection.executescript("DELETE FROM intraday_quote_slices; DELETE FROM intraday_days;")
         connection.close()
         self.run_downloader(FakeThetaData(self.frames_by_date), end="2024-03-25", extra_arguments=("--intraday-strike-window-pct", "20"))
         self.assertEqual(self.read_database("SELECT DISTINCT strike FROM intraday_quotes ORDER BY strike"), [(40.0,), (42.5,), (45.0,)])
@@ -827,13 +814,13 @@ class DownloadRunTests(unittest.TestCase):
         return frames_by_date
 
     def store_with_the_earlier_cap(self, extra_arguments=()):
-        """A complete download of the days without the 300-day expiry, then brought back to a file of schema 2 stored
-        with max_dte 45 (no all_expiries flags)."""
+        """A complete download of the days without the 300-day expiry, its days then flagged as stored with the earlier
+        45-day cap (all_expiries 0, as the conversion keeps them), and one stored quote changed."""
         self.run_downloader(FakeThetaData(self.frames_by_date), extra_arguments=extra_arguments)
         connection = sqlite3.connect(self.data_directory / "INTC.sqlite")
-        connection.executescript("""ALTER TABLE days DROP COLUMN all_expiries; ALTER TABLE intraday_days DROP COLUMN all_expiries;
-                                    UPDATE meta SET value = '45' WHERE key = 'max_dte'; UPDATE meta SET value = '2' WHERE key = 'schema_version';
-                                    UPDATE quotes SET bid = 0.77 WHERE trading_date = '2024-03-26' AND strike = 42.5 AND option_right = 'C';""")
+        connection.executescript("UPDATE days SET all_expiries = 0 WHERE status = 'complete'; UPDATE intraday_days SET all_expiries = 0;")
+        change_part_rows(connection, "quotes", "2024-03-26", lambda row: row[:4] + (0.77,) + row[5:] if row[2] == 42.5 and row[3] == "C" else row)
+        connection.commit()
         connection.close()
 
     def test_a_file_stored_with_the_earlier_cap_is_completed_to_every_expiry_adding_only_what_it_lacks(self):
@@ -852,7 +839,7 @@ class DownloadRunTests(unittest.TestCase):
         # A row the file held is left as it was, though the new answer differs.
         self.assertEqual(self.read_database("SELECT DISTINCT bid FROM quotes WHERE trading_date = '2024-03-26' AND strike = 42.5 AND option_right = 'C'"), [(0.77,)])
         self.assertEqual(self.read_database("SELECT DISTINCT all_expiries FROM days UNION SELECT DISTINCT all_expiries FROM intraday_days"), [(1,)])
-        self.assertEqual(dict(self.read_database("SELECT key, value FROM meta WHERE key IN ('max_dte', 'schema_version')")), {"max_dte": "all", "schema_version": "3"})
+        self.assertEqual(dict(self.read_database("SELECT key, value FROM meta WHERE key IN ('max_dte', 'schema_version')")), {"max_dte": "all", "schema_version": "4"})
         self.assertEqual(sorted({call[0] for call in service.calls if call[1] == self.trading_dates[0]}), ["eod", "intraday_quotes", "open_interest", "quotes"])
         self.assertEqual({expiration_key for _, _, expiration_key in service.calls}, {"*"})
         self.assert_every_stored_day_is_whole()
@@ -916,7 +903,7 @@ class DownloadRunTests(unittest.TestCase):
         self.store_with_the_earlier_cap()
         day = self.trading_dates[0]
         connection = sqlite3.connect(self.data_directory / "INTC.sqlite")
-        connection.execute("DELETE FROM eod WHERE trading_date = ? AND expiry = ?", (day.isoformat(), far_expiry(day)))
+        connection.execute("DELETE FROM end_of_day_slices WHERE key = ?", (downloader.slices.slice_key(downloader.slices.day_number_of(day), 0, (datetime.date.fromisoformat(far_expiry(day)) - day).days),))
         connection.execute("UPDATE days SET eod_rows = eod_rows - ? WHERE trading_date = ?", (CONTRACTS_PER_DAY // 2, day.isoformat()))
         connection.execute("INSERT INTO day_issues (trading_date, part, expiry, message, recorded_at, attempts) VALUES (?, 'eod', ?, 'INTERNAL: Corrupt FIT data', 'x', 4)",
                            (day.isoformat(), far_expiry(day)))

@@ -1,8 +1,8 @@
 # Downloads one symbol's option history from ThetaData into <data-dir>/<SYMBOL>.sqlite for the model backtest. For each
 # weekday, for every expiry: every contract's NBBO at 10:00 ET, that day's end-of-day report, the open interest reported
-# that morning, and the NBBO at every 30-minute look from 10:00 to 15:30 ET. Files stored with max_dte 45 kept 0..45 days
-# to expiry (0..46 for the end of day and open interest): a run completes each such day by fetching its parts again and
-# adding only the rows it lacks (days.all_expiries, intraday_days.all_expiries).
+# that morning, and the NBBO at every 30-minute look from 10:00 to 15:30 ET, stored as schema 4's slices
+# (symbol_file_slices.py). A day flagged as stored with the earlier 45-day cap (days.all_expiries or
+# intraday_days.all_expiries 0) is completed by fetching its parts again and adding only the rows it lacks.
 # Resumable: what a day already has in the file is not fetched again. A day ThetaData cannot serve never stops the run:
 # what can be retrieved is kept, what cannot is recorded (day_issues, unavailable_days) and asked for again on later
 # runs. At most 2 requests in flight (the plan's limit). Progress goes to stdout as JSON lines, logs to stderr. Spec: docs/backtesting/DATA-FILES.md.
@@ -35,15 +35,15 @@ from dotenv import dotenv_values
 from thetadata import ThetaClient
 from thetadata.errors import AuthenticationError, NoDataFoundError
 
-SCHEMA_VERSION = "3"
-# Versions this downloader brings up to SCHEMA_VERSION when it opens a file: '1' has no day_issues.attempts, and may
-# lack the tables added after the first downloads; '1' and '2' have no all_expiries flags.
-EARLIER_SCHEMA_VERSIONS = ("1", "2")
+import symbol_file_slices as slices
+
+SCHEMA_VERSION = "4"
+# A new file's page size: the slices of schema 4 fit 16 KB pages best (docs/backtesting/DATA-FILES.md).
+NEW_FILE_PAGE_SIZE = 16384
 QUOTE_TIME_EASTERN = "10:00:00"
-# Every expiry is stored. A file whose meta says max_dte '45' was stored with the earlier caps below; its days are
-# completed to every expiry as they are planned.
+# Every expiry is stored. A day stored with the earlier caps below is flagged all_expiries 0 and completed to every
+# expiry as it is planned.
 MAX_DTE_META = "all"
-EARLIER_MAX_DTE_META = "45"
 EARLIER_QUOTE_MAX_DAYS_TO_EXPIRY = 45
 EARLIER_END_OF_DAY_AND_OPEN_INTEREST_MAX_DAYS_TO_EXPIRY = 46
 # An expiration asked for on its own (when a request for all of them keeps failing) lies at most this many days out:
@@ -98,25 +98,6 @@ SCHEMA_STATEMENTS = (
   fetched_at TEXT NOT NULL,
   all_expiries INTEGER NOT NULL DEFAULT 0
 )""",
-    """CREATE TABLE IF NOT EXISTS quotes (
-  trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
-  option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')),
-  bid REAL, ask REAL, bid_size INTEGER, ask_size INTEGER,
-  quoted_at TEXT,
-  PRIMARY KEY (trading_date, expiry, strike, option_right)
-) WITHOUT ROWID""",
-    """CREATE TABLE IF NOT EXISTS eod (
-  trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
-  option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')),
-  close REAL, volume INTEGER, bid REAL, ask REAL,
-  PRIMARY KEY (trading_date, expiry, strike, option_right)
-) WITHOUT ROWID""",
-    """CREATE TABLE IF NOT EXISTS open_interest (
-  trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
-  option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')),
-  open_interest INTEGER NOT NULL,
-  PRIMARY KEY (trading_date, expiry, strike, option_right)
-) WITHOUT ROWID""",
     """CREATE TABLE IF NOT EXISTS intraday_days (
   trading_date TEXT PRIMARY KEY,
   status TEXT NOT NULL CHECK (status IN ('complete', 'no_data')),
@@ -126,13 +107,6 @@ SCHEMA_STATEMENTS = (
   fetched_at TEXT NOT NULL,
   all_expiries INTEGER NOT NULL DEFAULT 0
 )""",
-    """CREATE TABLE IF NOT EXISTS intraday_quotes (
-  trading_date TEXT NOT NULL, look_time TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
-  option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')),
-  bid REAL, ask REAL, bid_size INTEGER, ask_size INTEGER,
-  quoted_at TEXT,
-  PRIMARY KEY (trading_date, look_time, expiry, strike, option_right)
-) WITHOUT ROWID""",
     """CREATE TABLE IF NOT EXISTS day_issues (
   trading_date TEXT NOT NULL,
   part TEXT NOT NULL CHECK (part IN ('quotes', 'eod', 'open_interest', 'intraday_quotes')),
@@ -147,7 +121,7 @@ SCHEMA_STATEMENTS = (
   attempts INTEGER NOT NULL,
   last_attempt_at TEXT NOT NULL
 )""",
-)
+) + slices.SLICE_TABLES_SQL
 
 logger = logging.getLogger("download_thetadata_symbol")
 
@@ -411,30 +385,152 @@ def keep_strikes_within_window(intraday_quote_rows: list[tuple], at_the_money_st
 # Symbol file
 
 
+# Schema 4 keeps each option part as slices (symbol_file_slices.py, docs/backtesting/DATA-FILES.md): one row per day,
+# look and expiry. The functions below take and give rows in PART_COLUMN_NAMES' order, as schema 3 stored them.
+SLICE_TABLE_BY_PART_NAME = {"quotes": "ten_oclock_quote_slices", "intraday_quotes": "intraday_quote_slices", "eod": "end_of_day_slices", "open_interest": "open_interest_slices"}
+SLICE_COLUMNS_BY_PART_NAME = {"quotes": slices.TEN_O_CLOCK_QUOTE_COLUMNS, "intraday_quotes": slices.INTRADAY_QUOTE_COLUMNS, "eod": slices.END_OF_DAY_COLUMNS,
+                              "open_interest": slices.OPEN_INTEREST_COLUMNS}
+# The slice row flag each table keeps: whether any ask is above 0 (10:00 quotes) or any volume is there (end of day).
+SLICE_FLAG_BY_PART_NAME = {"quotes": ("has_ask_above_zero", lambda row: row[3] is not None and row[3] > 0), "eod": ("has_volume", lambda row: row[3] is not None)}
+
+
+def slice_key_and_row(part_name: str, row: tuple) -> tuple[int, tuple]:
+    """A part row as its slice's key and the slice's columns."""
+    trading_date = datetime.date.fromisoformat(row[0])
+    day_number = slices.day_number_of(trading_date)
+    if part_name == "intraday_quotes":
+        _, look_time, expiry, strike, option_right, bid, ask, bid_size, ask_size, quoted_at = row
+        if quoted_at is not None:
+            raise DownloadFailed(f"an intraday quote on {row[0]} at {look_time} has a quote time; schema 4 keeps none for intraday looks")
+        return slices.slice_key(day_number, slices.look_minute_of(look_time), (datetime.date.fromisoformat(expiry) - trading_date).days), (strike, option_right, bid, ask, bid_size, ask_size)
+    days_to_expiry = (datetime.date.fromisoformat(row[1]) - trading_date).days
+    if part_name == "quotes":
+        strike, option_right, bid, ask, bid_size, ask_size, quoted_at = row[2:]
+        quote_time = None if quoted_at is None else slices.milliseconds_before_ten_o_clock(trading_date, quoted_at)
+        return slices.slice_key(day_number, slices.TEN_O_CLOCK_LOOK_MINUTE, days_to_expiry), (strike, option_right, bid, ask, bid_size, ask_size, quote_time)
+    return slices.slice_key(day_number, slices.DAILY_SLICE_LOOK_MINUTE, days_to_expiry), tuple(row[2:])
+
+
+def part_row_of_slice_row(part_name: str, key: int, slice_row: tuple) -> tuple:
+    """slice_key_and_row's inverse."""
+    trading_date = slices.date_of_day_number(slices.day_number_of_key(key))
+    expiry_text = (trading_date + datetime.timedelta(days=slices.days_to_expiry_of_key(key))).isoformat()
+    if part_name == "intraday_quotes":
+        return (trading_date.isoformat(), slices.look_time_of_minute(slices.look_minute_of_key(key)), expiry_text) + tuple(slice_row) + (None,)
+    if part_name == "quotes":
+        quote_time = slice_row[6]
+        return (trading_date.isoformat(), expiry_text) + tuple(slice_row[:6]) + (None if quote_time is None else slices.quoted_at_text_of(trading_date, quote_time),)
+    return (trading_date.isoformat(), expiry_text) + tuple(slice_row)
+
+
+def day_key_range(trading_date_text: str) -> tuple[int, int]:
+    day_number = slices.day_number_of(datetime.date.fromisoformat(trading_date_text))
+    return slices.slice_key(day_number, 0, 0), slices.slice_key(day_number + 1, 0, 0) - 1
+
+
+def read_slices(connection: sqlite3.Connection, part_name: str, first_key: int, last_key: int) -> list[tuple[int, list[tuple]]]:
+    """(key, the slice's rows) of the part's slices between two keys, in key order."""
+    columns = SLICE_COLUMNS_BY_PART_NAME[part_name]
+    return [(key, slices.unpack_slice(data, columns)) for key, data in connection.execute(
+        f"SELECT key, data FROM {SLICE_TABLE_BY_PART_NAME[part_name]} WHERE key BETWEEN ? AND ? ORDER BY key", (first_key, last_key))]
+
+
+def write_slice(connection: sqlite3.Connection, part_name: str, key: int, slice_rows: list[tuple]) -> None:
+    """Stores a slice's rows (any order: kept in strike order, the Call before the Put), replacing a stored slice of that key."""
+    slice_rows = sorted(slice_rows, key=lambda slice_row: (slice_row[0], slice_row[1]))
+    call_count, put_count = slices.slice_counts(slice_rows)
+    data = slices.pack_slice(slice_rows, SLICE_COLUMNS_BY_PART_NAME[part_name])
+    table_name = SLICE_TABLE_BY_PART_NAME[part_name]
+    if part_name in SLICE_FLAG_BY_PART_NAME:
+        flag_column, flagged = SLICE_FLAG_BY_PART_NAME[part_name]
+        connection.execute(f"INSERT OR REPLACE INTO {table_name} (key, call_count, put_count, {flag_column}, data) VALUES (?, ?, ?, ?, ?)",
+                           (key, call_count, put_count, int(any(flagged(slice_row) for slice_row in slice_rows)), data))
+    else:
+        connection.execute(f"INSERT OR REPLACE INTO {table_name} (key, call_count, put_count, data) VALUES (?, ?, ?, ?)", (key, call_count, put_count, data))
+
+
+def delete_part_rows_of_day(connection: sqlite3.Connection, part_name: str, trading_date_text: str) -> None:
+    connection.execute(f"DELETE FROM {SLICE_TABLE_BY_PART_NAME[part_name]} WHERE key BETWEEN ? AND ?", day_key_range(trading_date_text))
+
+
+def merge_part_rows(connection: sqlite3.Connection, part_name: str, rows: list[tuple], on_stored_contract: str) -> int:
+    """Adds rows to their slices. A contract stored already (or twice among the rows) raises IntegrityError
+    ('fail', as schema 3's INSERT), keeps its stored values ('keep') or takes the new ones ('replace'). Returns how many
+    contracts were added."""
+    rows_by_key: dict[int, list[tuple]] = collections.defaultdict(list)
+    for row in rows:
+        key, slice_row = slice_key_and_row(part_name, row)
+        rows_by_key[key].append(slice_row)
+    added = 0
+    for key, new_rows in sorted(rows_by_key.items()):
+        stored = read_slices(connection, part_name, key, key)
+        merged = {(slice_row[0], slice_row[1]): slice_row for slice_row in (stored[0][1] if stored else [])}
+        for slice_row in new_rows:
+            contract = (slice_row[0], slice_row[1])
+            if contract not in merged:
+                added += 1
+                merged[contract] = slice_row
+            elif on_stored_contract == "fail":
+                raise sqlite3.IntegrityError(f"UNIQUE constraint failed: {part_name} contract {contract} in slice {key}")
+            elif on_stored_contract == "replace":
+                merged[contract] = slice_row
+        write_slice(connection, part_name, key, list(merged.values()))
+    return added
+
+
+def insert_part_rows(connection: sqlite3.Connection, part_name: str, rows: list[tuple], replace_stored_rows: bool = False) -> None:
+    merge_part_rows(connection, part_name, rows, "replace" if replace_stored_rows else "fail")
+
+
+def add_missing_part_rows(connection: sqlite3.Connection, part_name: str, rows: list[tuple]) -> int:
+    """Adds the rows the day does not hold yet (by contract), leaving the stored ones as they are; returns how many."""
+    return merge_part_rows(connection, part_name, rows, "keep")
+
+
+def read_part_rows(connection: sqlite3.Connection, part_name: str, trading_date_text: str | None = None) -> list[tuple]:
+    """The part's rows of one day (or of every day), in PART_COLUMN_NAMES' order and schema 3's key order."""
+    first_key, last_key = day_key_range(trading_date_text) if trading_date_text is not None else (0, 2 ** 62)
+    return [part_row_of_slice_row(part_name, key, slice_row) for key, slice_rows in read_slices(connection, part_name, first_key, last_key) for slice_row in slice_rows]
+
+
+def count_part_rows(connection: sqlite3.Connection, part_name: str, trading_date_text: str) -> int:
+    return connection.execute(f"SELECT coalesce(sum(call_count + put_count), 0) FROM {SLICE_TABLE_BY_PART_NAME[part_name]} WHERE key BETWEEN ? AND ?",
+                              day_key_range(trading_date_text)).fetchone()[0]
+
+
+def count_intraday_rows_and_looks(connection: sqlite3.Connection, trading_date_text: str) -> tuple[int, int]:
+    """(the day's intraday quotes, its distinct look times)."""
+    return connection.execute("SELECT coalesce(sum(call_count + put_count), 0), count(DISTINCT (key / 65536) % 65536) FROM intraday_quote_slices WHERE key BETWEEN ? AND ?",
+                              day_key_range(trading_date_text)).fetchone()
+
+
+def part_has_rows(connection: sqlite3.Connection, part_name: str, trading_date_text: str, expiry_text: str | None) -> bool:
+    """Whether the day holds rows of the part (of one expiration, when given)."""
+    first_key, last_key = day_key_range(trading_date_text)
+    if expiry_text is None:
+        return connection.execute(f"SELECT 1 FROM {SLICE_TABLE_BY_PART_NAME[part_name]} WHERE key BETWEEN ? AND ? LIMIT 1", (first_key, last_key)).fetchone() is not None
+    days_to_expiry = (datetime.date.fromisoformat(expiry_text) - datetime.date.fromisoformat(trading_date_text)).days
+    return connection.execute(f"SELECT 1 FROM {SLICE_TABLE_BY_PART_NAME[part_name]} WHERE key BETWEEN ? AND ? AND key % 65536 = ? LIMIT 1",
+                              (first_key, last_key, days_to_expiry)).fetchone() is not None
+
+
 def open_symbol_file(file_path: Path, symbol: str, now_utc: datetime.datetime) -> sqlite3.Connection:
     """Opens (creating if needed) the symbol file, adds whatever tables, columns and meta keys an older file lacks
     (which makes it a file of SCHEMA_VERSION), and checks its meta matches this download."""
     connection = sqlite3.connect(file_path, isolation_level=None)
     try:
         connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MILLISECONDS}")
-        # A file converted to a later schema (4: slices, docs/backtesting/DATA-FILES.md) is left untouched.
+        # Only schema 4 files are written; an earlier file is converted first (every file was on 2026-10-29).
         has_meta = connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").fetchone() is not None
         stored_version = connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() if has_meta else None
-        if stored_version is not None and stored_version[0] not in (SCHEMA_VERSION, *EARLIER_SCHEMA_VERSIONS):
-            raise DownloadFailed(f"{file_path} has schema version {stored_version[0]}; this downloader writes version {SCHEMA_VERSION} and leaves it untouched")
+        if stored_version is not None and stored_version[0] != SCHEMA_VERSION:
+            raise DownloadFailed(f"{file_path} has schema version {stored_version[0]}; this downloader writes version {SCHEMA_VERSION}: convert the file first "
+                                 "(src/backtest/symbolFileSchemaFourConversion.ts)")
+        if connection.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0:
+            connection.execute(f"PRAGMA page_size = {NEW_FILE_PAGE_SIZE}")
         connection.execute("BEGIN IMMEDIATE")
         for statement in SCHEMA_STATEMENTS:
             connection.execute(statement)
-        if "attempts" not in [column[1] for column in connection.execute("PRAGMA table_info(day_issues)")]:
-            connection.execute("ALTER TABLE day_issues ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1")
-        # Days stored before the flags existed hold the earlier 45-day cap: 0 marks them to be completed. A 'no_data' day
-        # has nothing to complete (its 10:00 quotes were asked for every expiry).
-        for table_name in ("days", "intraday_days"):
-            if "all_expiries" not in [column[1] for column in connection.execute(f"PRAGMA table_info({table_name})")]:
-                connection.execute(f"ALTER TABLE {table_name} ADD COLUMN all_expiries INTEGER NOT NULL DEFAULT 0")
-                if table_name == "days":
-                    connection.execute("UPDATE days SET all_expiries = 1 WHERE status = 'no_data'")
-        connection.execute("UPDATE meta SET value = ? WHERE key = 'max_dte' AND value = ?", (MAX_DTE_META, EARLIER_MAX_DTE_META))
         expected_meta = {
             "symbol": symbol,
             "schema_version": SCHEMA_VERSION,
@@ -445,8 +541,6 @@ def open_symbol_file(file_path: Path, symbol: str, now_utc: datetime.datetime) -
         }
         connection.executemany("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
                                list(expected_meta.items()) + [("created_at", format_utc_timestamp(now_utc))])
-        connection.execute(f"UPDATE meta SET value = ? WHERE key = 'schema_version' AND value IN ({', '.join('?' * len(EARLIER_SCHEMA_VERSIONS))})",
-                           (SCHEMA_VERSION, *EARLIER_SCHEMA_VERSIONS))
         connection.execute("COMMIT")
         stored_meta = dict(connection.execute("SELECT key, value FROM meta").fetchall())
         mismatched_keys = [key for key, value in expected_meta.items() if stored_meta.get(key) != value]
@@ -549,20 +643,6 @@ PART_COLUMN_NAMES = {
 ROW_COUNT_COLUMN_BY_MORNING_PART_NAME = {"quotes": "quote_rows", "eod": "eod_rows", "open_interest": "open_interest_rows"}
 
 
-def insert_part_rows(connection: sqlite3.Connection, part_name: str, rows: list[tuple], replace_stored_rows: bool = False) -> None:
-    column_names = PART_COLUMN_NAMES[part_name]
-    connection.executemany(
-        f"INSERT {'OR REPLACE ' if replace_stored_rows else ''}INTO {part_name} ({', '.join(column_names)}) VALUES ({', '.join('?' * len(column_names))})", rows)
-
-
-def add_missing_part_rows(connection: sqlite3.Connection, part_name: str, rows: list[tuple]) -> int:
-    """Adds the rows the day does not hold yet (by primary key), leaving the stored ones as they are; returns how many."""
-    column_names = PART_COLUMN_NAMES[part_name]
-    before = connection.total_changes
-    connection.executemany(f"INSERT OR IGNORE INTO {part_name} ({', '.join(column_names)}) VALUES ({', '.join('?' * len(column_names))})", rows)
-    return connection.total_changes - before
-
-
 def settle_day_issues_after_completion(connection: sqlite3.Connection, trading_date_text: str, part_results: dict[str, DayPartResult], recorded_at_text: str) -> int:
     """After parts of a stored day were completed: an issue the day now holds rows for is settled (an expiration with
     rows, or a whole part with any row); what the completion left out is recorded (or its message brought up to date).
@@ -570,10 +650,7 @@ def settle_day_issues_after_completion(connection: sqlite3.Connection, trading_d
     issue_count = 0
     for part_name, part_result in part_results.items():
         for (expiry_text,) in connection.execute("SELECT DISTINCT expiry FROM day_issues WHERE trading_date = ? AND part = ?", (trading_date_text, part_name)).fetchall():
-            held = connection.execute(
-                f"SELECT EXISTS (SELECT 1 FROM {part_name} WHERE trading_date = ?{' AND expiry = ?' if expiry_text is not None else ''})",
-                (trading_date_text,) + ((expiry_text,) if expiry_text is not None else ())).fetchone()[0]
-            if held:
+            if part_has_rows(connection, part_name, trading_date_text, expiry_text):
                 connection.execute("DELETE FROM day_issues WHERE trading_date = ? AND part = ? AND expiry IS ?", (trading_date_text, part_name, expiry_text))
         for expiry_text, message in part_result.issues:
             updated = connection.execute("UPDATE day_issues SET message = ?, recorded_at = ? WHERE trading_date = ? AND part = ? AND expiry IS ?",
@@ -593,8 +670,7 @@ def keep_intraday_quotes_within_strike_window(connection: sqlite3.Connection, tr
     if strike_window_pct is None or not intraday_quote_rows:
         return intraday_quote_rows, None
     if ten_o_clock_quote_rows is None:
-        ten_o_clock_quote_rows = connection.execute(
-            "SELECT trading_date, expiry, strike, option_right, bid, ask FROM quotes WHERE trading_date = ?", (trading_date.isoformat(),)).fetchall()
+        ten_o_clock_quote_rows = read_part_rows(connection, "quotes", trading_date.isoformat())
     at_the_money_strike = find_at_the_money_strike(ten_o_clock_quote_rows, trading_date)
     if at_the_money_strike is None:
         logger.warning("%s: no strike quoted on both sides at 10:00, intraday quotes kept for every strike", trading_date.isoformat())
@@ -623,7 +699,7 @@ def store_day_in_open_transaction(connection: sqlite3.Connection, day_plan: DayP
             record_unavailable_day(connection, trading_date_text, outcome.unavailable_reason, stored_at_text)
             return outcome
         for part_name, part_result in morning_results.items():
-            connection.execute(f"DELETE FROM {part_name} WHERE trading_date = ?", (trading_date_text,))
+            delete_part_rows_of_day(connection, part_name, trading_date_text)
             insert_part_rows(connection, part_name, part_result.rows)
             if part_result.rows:
                 outcome.reference_expiry_by_part_name[part_name] = min(row[1] for row in part_result.rows)
@@ -634,8 +710,8 @@ def store_day_in_open_transaction(connection: sqlite3.Connection, day_plan: DayP
         outcome.quote_rows, outcome.end_of_day_rows, outcome.open_interest_rows = len(quotes.rows), len(end_of_day.rows), len(open_interest.rows)
         ten_o_clock_quote_rows = quotes.rows
         if outcome.status == "no_data":
-            for table_name in ("intraday_quotes", "intraday_days"):
-                connection.execute(f"DELETE FROM {table_name} WHERE trading_date = ?", (trading_date_text,))
+            delete_part_rows_of_day(connection, "intraday_quotes", trading_date_text)
+            connection.execute("DELETE FROM intraday_days WHERE trading_date = ?", (trading_date_text,))
     else:
         outcome.status, outcome.quote_rows = connection.execute("SELECT status, quote_rows FROM days WHERE trading_date = ?", (trading_date_text,)).fetchone()
         if outcome.status == "complete" and day_plan.complete_morning_parts:
@@ -649,9 +725,8 @@ def store_day_in_open_transaction(connection: sqlite3.Connection, day_plan: DayP
                     if part_result.rows:
                         outcome.reference_expiry_by_part_name[part_name] = min(row[1] for row in part_result.rows)
                 connection.execute(
-                    """UPDATE days SET quote_rows = (SELECT count(*) FROM quotes WHERE trading_date = ?), eod_rows = (SELECT count(*) FROM eod WHERE trading_date = ?),
-                       open_interest_rows = (SELECT count(*) FROM open_interest WHERE trading_date = ?), all_expiries = 1 WHERE trading_date = ?""",
-                    (trading_date_text,) * 4)
+                    "UPDATE days SET quote_rows = ?, eod_rows = ?, open_interest_rows = ?, all_expiries = 1 WHERE trading_date = ?",
+                    tuple(count_part_rows(connection, part_name, trading_date_text) for part_name in ("quotes", "eod", "open_interest")) + (trading_date_text,))
                 outcome.issue_count += settle_day_issues_after_completion(connection, trading_date_text, morning_results, stored_at_text)
                 outcome.quote_rows = connection.execute("SELECT quote_rows FROM days WHERE trading_date = ?", (trading_date_text,)).fetchone()[0]
 
@@ -663,8 +738,7 @@ def store_day_in_open_transaction(connection: sqlite3.Connection, day_plan: DayP
             stored_strike_window_pct = connection.execute("SELECT strike_window_pct FROM intraday_days WHERE trading_date = ?", (trading_date_text,)).fetchone()[0]
             intraday_quote_rows, _ = keep_intraday_quotes_within_strike_window(connection, day_plan.trading_date, intraday_quotes.rows, stored_strike_window_pct)
             outcome.added_rows_by_part_name["intraday_quotes"] = add_missing_part_rows(connection, "intraday_quotes", intraday_quote_rows)
-            outcome.intraday_quote_rows, outcome.intraday_look_count = connection.execute(
-                "SELECT count(*), count(DISTINCT look_time) FROM intraday_quotes WHERE trading_date = ?", (trading_date_text,)).fetchone()
+            outcome.intraday_quote_rows, outcome.intraday_look_count = count_intraday_rows_and_looks(connection, trading_date_text)
             connection.execute(
                 "UPDATE intraday_days SET quote_rows = ?, look_count = ?, status = CASE WHEN ? > 0 THEN 'complete' ELSE status END, all_expiries = 1 WHERE trading_date = ?",
                 (outcome.intraday_quote_rows, outcome.intraday_look_count, outcome.intraday_quote_rows, trading_date_text))
@@ -680,8 +754,8 @@ def store_day_in_open_transaction(connection: sqlite3.Connection, day_plan: DayP
             return outcome
         intraday_quote_rows, applied_strike_window_pct = keep_intraday_quotes_within_strike_window(
             connection, day_plan.trading_date, intraday_quotes.rows, strike_window_pct, ten_o_clock_quote_rows)
-        for table_name in ("intraday_quotes", "intraday_days"):
-            connection.execute(f"DELETE FROM {table_name} WHERE trading_date = ?", (trading_date_text,))
+        delete_part_rows_of_day(connection, "intraday_quotes", trading_date_text)
+        connection.execute("DELETE FROM intraday_days WHERE trading_date = ?", (trading_date_text,))
         insert_part_rows(connection, "intraday_quotes", intraday_quote_rows)
         outcome.intraday_quote_rows = len(intraday_quote_rows)
         outcome.intraday_look_count = len({row[1] for row in intraday_quote_rows})
@@ -870,10 +944,13 @@ def read_stored_data_references(connection: sqlite3.Connection) -> StoredDataRef
     """Per part, the latest day the file holds rows of, with one of its expirations."""
     references = StoredDataReferences()
     for part_name in DAY_PART_BY_NAME:
-        trading_date_text, expiry_text = connection.execute(
-            f"SELECT max(trading_date), min(expiry) FROM {part_name} WHERE trading_date = (SELECT max(trading_date) FROM {part_name})").fetchone()
-        if trading_date_text is not None:
-            references.set([part_name], datetime.date.fromisoformat(trading_date_text), expiry_text)
+        latest_key = connection.execute(f"SELECT max(key) FROM {SLICE_TABLE_BY_PART_NAME[part_name]}").fetchone()[0]
+        if latest_key is None:
+            continue
+        latest_date = slices.date_of_day_number(slices.day_number_of_key(latest_key))
+        nearest_days_to_expiry = connection.execute(f"SELECT min(key % 65536) FROM {SLICE_TABLE_BY_PART_NAME[part_name]} WHERE key BETWEEN ? AND ?",
+                                                    day_key_range(latest_date.isoformat())).fetchone()[0]
+        references.set([part_name], latest_date, (latest_date + datetime.timedelta(days=nearest_days_to_expiry)).isoformat())
     return references
 
 
@@ -978,13 +1055,12 @@ def store_day_issue_retry(connection: sqlite3.Connection, day_issue: DayIssue, r
                 rows, _ = keep_intraday_quotes_within_strike_window(connection, day_issue.trading_date, rows, stored_strike_window_pct)
             insert_part_rows(connection, day_issue.part_name, rows, replace_stored_rows=True)
             if day_issue.part_name == INTRADAY_QUOTES_PART.name:
-                quote_rows, look_count = connection.execute("SELECT count(*), count(DISTINCT look_time) FROM intraday_quotes WHERE trading_date = ?", (trading_date_text,)).fetchone()
+                quote_rows, look_count = count_intraday_rows_and_looks(connection, trading_date_text)
                 connection.execute("UPDATE intraday_days SET quote_rows = ?, look_count = ?, status = CASE WHEN ? > 0 THEN 'complete' ELSE status END WHERE trading_date = ?",
                                    (quote_rows, look_count, quote_rows, trading_date_text))
             else:
-                connection.execute(
-                    f"UPDATE days SET {ROW_COUNT_COLUMN_BY_MORNING_PART_NAME[day_issue.part_name]} = (SELECT count(*) FROM {day_issue.part_name} WHERE trading_date = ?) WHERE trading_date = ?",
-                    (trading_date_text, trading_date_text))
+                connection.execute(f"UPDATE days SET {ROW_COUNT_COLUMN_BY_MORNING_PART_NAME[day_issue.part_name]} = ? WHERE trading_date = ?",
+                                   (count_part_rows(connection, day_issue.part_name, trading_date_text), trading_date_text))
             connection.execute("DELETE FROM day_issues WHERE trading_date = ? AND part = ? AND expiry IS ?", issue_key)
             result = f"{len(rows)} rows stored" if rows else "no data for this expiration, nothing left to ask for"
         connection.execute("COMMIT")
