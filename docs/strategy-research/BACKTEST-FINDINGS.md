@@ -234,7 +234,7 @@ No report published. Scripts and results are in `tmp/edge-margin-audit/`:
   - Edge Margin's edge margin doesn't sort them by outcome, with or without the fixes.
   - An edge built on IBKR's 30-day implied volatility does at 1–5 days. Its top fifth beat the bottom fifth by 29.0 points of premium at 1 day (95% range 10.1 to 49.6) and by 18.3 at 3–5 days (2.8 to 32.6). But the top fifth still lost after costs.
   - Hedged 1-day options lost 17–19% of their premium on single stocks; on ETFs they didn't.
-- **Built.** API commit `ec5e4ff` (local, not pushed) adds two backtest session settings. Live is unchanged. Marcelo decided on 2026-10-22 to revert it, keeping `ec5e4ff` in history so the settings can be restored. The revert waits until a concurrent session's uncommitted backtest work, which touches four of the same files, is committed.
+- **Built, then removed.** API commit `ec5e4ff` added two backtest session settings; live was unchanged. Marcelo decided on 2026-10-22 to take them out again. The rules backtests' retirement on 2026-10-27 deleted the code that read them, so on 2026-10-29 the leftovers were removed by hand instead of by a revert. Restoring the settings means re-applying `ec5e4ff` by hand.
   - `model.forecastMethod`: `yang_zhang_21`, `yang_zhang_21_without_earnings` or `implied_volatility_30_day`.
   - `model.restOfDayCurve`: `measured_2026_june_to_october` or `measured_2020_to_2026`.
 

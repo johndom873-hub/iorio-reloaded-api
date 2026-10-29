@@ -159,7 +159,7 @@ describe("validateBacktestSettingsOverrides", () => {
     expect(validateBacktestSettingsOverrides({ pluto: { dailyLossBreakerPct: 3 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "pluto.dailyLossBreakerPct cannot be changed for a session." });
     expect(validateBacktestSettingsOverrides({ trading: { deltaTargetMin: 0.2 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "trading.deltaTargetMin cannot be changed for a session." });
     expect(validateBacktestSettingsOverrides({ policy: { roll: "never" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "overrides.policy is not a setting a session can change." });
-    expect(validateBacktestSettingsOverrides({ model: { forecastMethod: "implied_volatility_30_day" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "overrides.model is not a setting a session can change." });
+    expect(validateBacktestSettingsOverrides({ model: { gradeStrongMarginPct: 30 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "overrides.model is not a setting a session can change." });
     expect(validateBacktestSettingsOverrides({ kellyFraction: 0.5 }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "overrides.kellyFraction is not a setting a session can change." });
   });
 

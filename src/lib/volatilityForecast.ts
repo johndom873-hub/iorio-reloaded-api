@@ -15,12 +15,9 @@ export interface ModelVolatilityForecast {
   perSessionVariance: number;
   /** √(252 × per-session variance): the same forecast annualized on sessions. */
   annualizedVolatility: number;
-  /** modelForecastWindowDays live; a backtest session may use another window (30 for IBKR's 30-day implied volatility). */
+  /** modelForecastWindowDays, or longForecastWindowDays for the Volatility screen's FV 63d. */
   windowDays: number;
 }
-
-/** What the retired rules backtests forecast with, kept for their stored settings. */
-export type ModelForecastMethod = "yang_zhang_21" | "yang_zhang_21_without_earnings" | "implied_volatility_30_day";
 
 /** `bars` in date order, ending before the scoring day (never a partial session). Null without windowDays + 1 valid bars. */
 export function selectModelVolatilityForecast(bars: DailyOhlcvBar[], windowDays: number = modelForecastWindowDays): ModelVolatilityForecast | null {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { easternInstant } from "./easternIsoDate.js";
 import { tradingSessionsFromCalendarRows } from "./marketSessionStatus.js";
-import { earlyCloseSessionWeight, remainingSessionVariance, remainingSessionVarianceCurveMeasured2020To2026, sessionVarianceWeight, varianceSessionsToExpiry } from "./varianceClock.js";
+import { earlyCloseSessionWeight, remainingSessionVariance, sessionVarianceWeight, varianceSessionsToExpiry } from "./varianceClock.js";
 
 const at = (dateIso: string, hour: number, minute: number) => easternInstant(dateIso, hour, minute).getTime();
 const weekdays = (fromIso: string, toIso: string, rows: { dateIso: string; isOpen: boolean; closeTime: string | null }[] = []) => tradingSessionsFromCalendarRows(fromIso, toIso, rows);
@@ -54,18 +54,5 @@ describe("varianceSessionsToExpiry", () => {
   it("uses the stored close time over the early-close list", () => {
     const sessionsWithStoredClose = weekdays("2026-12-21", "2026-12-24", [{ dateIso: "2026-12-24", isOpen: true, closeTime: "13:00:00" }]);
     expect(sessionsWithStoredClose.find((session) => session.dateIso === "2026-12-24")!.closeMinutesEt).toBe(780);
-  });
-});
-
-describe("the 2020–2026 rest-of-day curve (a backtest session's choice, Edge Margin audit 2026-10-22)", () => {
-  const sessions = weekdays("2026-10-05", "2026-10-30");
-  it("reads its own points and leaves live's curve the default", () => {
-    expect(remainingSessionVariance(10 * 60, 16 * 60, remainingSessionVarianceCurveMeasured2020To2026)).toBeCloseTo(0.438, 12);
-    expect(remainingSessionVariance(12 * 60 + 15, 16 * 60, remainingSessionVarianceCurveMeasured2020To2026)).toBeCloseTo((0.232 + 0.203) / 2, 12);
-    expect(remainingSessionVariance(10 * 60)).toBeCloseTo(0.309, 12);
-  });
-  it("Thu 10:00 → Fri expiry is 1.438 sessions on it, 1.309 on live's", () => {
-    expect(varianceSessionsToExpiry(at("2026-10-08", 10, 0), "2026-10-09", sessions, remainingSessionVarianceCurveMeasured2020To2026)).toBeCloseTo(1.438, 12);
-    expect(varianceSessionsToExpiry(at("2026-10-08", 10, 0), "2026-10-09", sessions)).toBeCloseTo(1.309, 12);
   });
 });

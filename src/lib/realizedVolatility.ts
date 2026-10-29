@@ -111,46 +111,6 @@ export function computeYangZhangVolatility(bars: DailyOhlcvBar[], windowDays: nu
   };
 }
 
-/** One session of computeYangZhangVolatilityOfSessions: its bar and the close of the session before it. */
-export interface YangZhangSession {
-  bar: DailyOhlcvBar;
-  previousClose: number;
-}
-
-/**
- * The same estimator over sessions that need not follow each other (a window that leaves some out): each overnight return
- * runs from the session's own previous close. Over consecutive sessions it equals computeYangZhangVolatility.
- */
-export function computeYangZhangVolatilityOfSessions(sessions: readonly YangZhangSession[]): YangZhangResult {
-  const windowDays = sessions.length;
-  if (windowDays < 2) return { available: false, windowDays, reason: "insufficient_history", detail: `${windowDays} sessions, need 2` };
-  const invalid = sessions.find(({ bar, previousClose }) => !isValidBar(bar) || !(Number.isFinite(previousClose) && previousClose > 0));
-  if (invalid) return { available: false, windowDays, reason: "invalid_bar", detail: `invalid OHLCV bar on ${invalid.bar.tradingDate}` };
-
-  const overnightReturns: number[] = [];
-  const openToCloseReturns: number[] = [];
-  let rogersSatchellSum = 0;
-  for (const { bar, previousClose } of sessions) {
-    const { open, high, low, close } = bar;
-    overnightReturns.push(Math.log(open / previousClose));
-    openToCloseReturns.push(Math.log(close / open));
-    rogersSatchellSum += Math.log(high / close) * Math.log(high / open) + Math.log(low / close) * Math.log(low / open);
-  }
-
-  const overnightVariance = sampleVariance(overnightReturns);
-  const openToCloseVariance = sampleVariance(openToCloseReturns);
-  const rogersSatchellVariance = rogersSatchellSum / windowDays;
-  const weightK = yangZhangWeightConstant / (1.34 + (windowDays + 1) / (windowDays - 1));
-  const combinedDailyVariance = overnightVariance + weightK * openToCloseVariance + (1 - weightK) * rogersSatchellVariance;
-
-  return {
-    available: true,
-    windowDays,
-    annualizedVolatility: Math.sqrt(tradingDaysPerYear * combinedDailyVariance),
-    components: { overnightVariance, openToCloseVariance, rogersSatchellVariance, weightK, combinedDailyVariance },
-  };
-}
-
 /** The four approved windows (10/21/63/126 trading days) in one call. */
 export function computeYangZhangVolatilityAllWindows(bars: DailyOhlcvBar[]): Record<YangZhangWindowDays, YangZhangResult> {
   return {
