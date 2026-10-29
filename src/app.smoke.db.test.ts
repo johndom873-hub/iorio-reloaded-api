@@ -150,6 +150,9 @@ afterEach(() => {
 async function logIn(running: RunningApp, extraHeaders: Record<string, string> = {}): Promise<string> {
   const response = await send(running, "/auth/login", { method: "POST", body: { username: smokeUsername, password: smokeUserPassword }, headers: extraHeaders });
   expect(response.status).toBe(200);
+  // Read the whole body before using the cookie: express-session holds a login response's last byte until the session is
+  // saved, and fetch() resolves on the headers, so a request sent earlier races the save (src/lib/internalApiClient.ts).
+  await response.text();
   const cookie = sessionCookieOf(response);
   expect(cookie).not.toBeNull();
   return cookie as string;
