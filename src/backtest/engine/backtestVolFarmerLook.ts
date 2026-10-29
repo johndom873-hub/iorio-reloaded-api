@@ -66,7 +66,8 @@ import { cycleSplitFactorFor, legsOfPosition, positionsOfSymbol, type LedgerLeg,
 //   hedgeWithoutCall             the same moment (above all, once the Put has expired): the Put putChoice takes among the
 //     "cheapest_per_year"        Puts tried, with no hedge rule and protection measured to the next listed Call expiry
 //   putChoice "cheapest_per_year"  of the Puts that pass the hedge rule and minPutProtectionPct, the lowest yearly cost
-//                                (time value × 100 + commission) ÷ (S × 100) ÷ (days ÷ 365) (a tie: the more protection),
+//                                (time value × 100 + commission) ÷ (S × 100) × 252 ÷ the sessions held (a tie: the more
+//                                protection),
 //                                instead of the most protection; minPutProtectionPct applies to rule 3's rolls too
 //   maxPutCostPctOfCallPremium   > 0: a Put passes only when its fill ≤ the Call's fill × this ÷ 100 (100 = a zero-cost collar)
 //   putRoll "when_no_call"        step 2 with Puts held and no Call that passes with them: selling them at the fill rule
