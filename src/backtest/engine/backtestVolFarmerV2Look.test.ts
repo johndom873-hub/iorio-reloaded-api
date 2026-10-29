@@ -136,7 +136,7 @@ describe("Vol Farmer v2 at the looks", () => {
     const leaps = quotesAt({ todayIso, stockPrice, expiry: leapsExpiry, strikes: range(30, 120), right: "C" }).map((quote) => ({ ...quote, askSize: leapsAskSize }));
     return {
       profile: { symbol: tickerSymbol, calendarChecksApply: false, earnings: [] },
-      market: { todayIso, quotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(quotes.map((quote) => [contractKey(quote), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+      market: { todayIso, quotes, previousSessionVolumeByContract: new Map(quotes.map((quote) => [contractKey(quote), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
       adjustedDailyClosesBeforeToday: [],
       splitFactorToday: 1,
       optionContractsRepresentable: true,

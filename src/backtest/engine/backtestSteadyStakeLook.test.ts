@@ -33,7 +33,7 @@ const expiryDayQuotes = (expiry: string) => Array.from({ length: 9 }, (_, index)
 function lookSymbolOf(symbol: string, todayIso: string, quotes: SymbolFileQuote[], volume = 1_000): BacktestLookSymbol {
   return {
     profile: { symbol, calendarChecksApply: false, earnings: [] },
-    market: { todayIso, quotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), volume])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+    market: { todayIso, quotes, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), volume])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
     adjustedDailyClosesBeforeToday: [],
     splitFactorToday: 1,
     optionContractsRepresentable: true,

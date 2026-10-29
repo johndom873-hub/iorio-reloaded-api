@@ -1,14 +1,13 @@
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { readFileDailyBars, readFileIntradayPrices, type FileIntradayPrices } from "../backtestFileStockBars.js";
-import { contractKey } from "../../lib/optionContractKey.js";
 import type { StoredDailyBar } from "./backtestBarHistory.js";
 
 // Read access to one symbol's ThetaData file (docs/backtesting/DATA-FILES.md, schema versions 1 to 3): the days it
-// holds, each day's 10:00 quotes, its end-of-day rows and the open interest published for it, and, where the file has
-// them, the quotes at each look inside the day (intraday_days, intraday_quotes) and what the downloader could not
-// retrieve (day_issues, unavailable_days); and IBKR's stock bars Node keeps in it (the stock prices). Read-only; the
-// downloader and the IBKR bars step write it.
+// holds, each day's 10:00 quotes and end-of-day rows, and, where the file has them, the quotes at each look inside the
+// day (intraday_days, intraday_quotes) and what the downloader could not retrieve (day_issues, unavailable_days); and
+// IBKR's stock bars Node keeps in it (the stock prices). The open interest the files hold is not read: no rule uses it.
+// Read-only; the downloader and the IBKR bars step write it.
 
 export interface SymbolFileDay {
   tradingDate: string;
@@ -49,26 +48,28 @@ export const supportedSymbolFileSchemaVersions: readonly string[] = ["1", "2", "
 export const numberOrNull = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
 
 /**
- * The expiries the engine reads: 0..45 days out for the 10:00 and intraday quotes, 0..46 for the end of day and the open
- * interest, all that files held before the downloader kept every expiry (schema 3).
+ * The expiries the engine reads: 0..45 days out for the 10:00 and intraday quotes, 0..46 for the end of day (and the
+ * open interest's download issues), all that files held before the downloader kept every expiry (schema 3).
  */
 export const expiresWithin45DaysSql = "expiry <= date(trading_date, '+45 days')";
 const expiresWithin46DaysSql = "expiry <= date(trading_date, '+46 days')";
 /** A day's issues about what the engine reads: a whole part, or an expiration within the part's window above. */
 const issueWithinReadWindowSql = `(expiry IS NULL OR (part IN ('quotes', 'intraday_quotes') AND ${expiresWithin45DaysSql}) OR (part IN ('eod', 'open_interest') AND ${expiresWithin46DaysSql}))`;
 
-/** A day's 10:00 quotes, end-of-day rows and open interest: the statements the engine reads them with (also on the day-data reader thread). */
+/** A day's 10:00 quotes and end-of-day rows: the statements the engine reads them with (also on the day-data reader thread). */
 export const quotesOfDaySql = `SELECT expiry, strike, option_right AS right, bid, ask, bid_size AS bidSize, ask_size AS askSize FROM quotes WHERE trading_date = ? AND ${expiresWithin45DaysSql}`;
 export const endOfDayOfDaySql = `SELECT expiry, strike, option_right AS right, close, volume, bid, ask FROM eod WHERE trading_date = ? AND ${expiresWithin46DaysSql}`;
-export const openInterestOfDaySql = `SELECT expiry, strike, option_right AS right, open_interest AS openInterest FROM open_interest WHERE trading_date = ? AND ${expiresWithin46DaysSql}`;
 /** The columns an intraday look reads, in primary-key order (look time, expiry, strike, right) within the day; read with expiresWithin45DaysSql. */
 export const intradayQuotesColumnsSql = "SELECT look_time, expiry, strike, option_right, bid, ask FROM intraday_quotes";
+/** A day's first look time after the one given that has rows: one step down the primary key (also on the day-data reader thread). */
+export const nextIntradayLookTimeSql = "SELECT min(look_time) AS lookTime FROM intraday_quotes WHERE trading_date = ? AND look_time > ?";
+/** Whether a look holds a quote within the read window with a strike in a range (also on the day-data reader thread). */
+export const intradayQuoteWithinSql = `SELECT 1 AS found FROM intraday_quotes WHERE trading_date = ? AND look_time = ? AND strike BETWEEN ? AND ? AND ${expiresWithin45DaysSql} LIMIT 1`;
 
 export class BacktestSymbolFile {
   private readonly daysStatement: StatementSync;
   private readonly quotesStatement: StatementSync;
   private readonly endOfDayStatement: StatementSync;
-  private readonly openInterestStatement: StatementSync;
   /** Null on a file downloaded before the table existed. */
   private readonly dayIssuesStatement: StatementSync | null;
   private readonly unavailableDaysStatement: StatementSync | null;
@@ -76,6 +77,7 @@ export class BacktestSymbolFile {
   private readonly intradayQuotesStatement: StatementSync | null;
   private readonly intradayQuotesOfContractStatement: StatementSync | null;
   private readonly intradayQuoteWithinStatement: StatementSync | null;
+  private readonly nextIntradayLookTimeStatement: StatementSync | null;
   private readonly putExpiriesStatement: StatementSync;
   private readonly putQuotesOfExpiryStatement: StatementSync;
   private readonly intradayPutQuotesOfExpiryStatement: StatementSync | null;
@@ -91,7 +93,6 @@ export class BacktestSymbolFile {
     this.daysStatement = database.prepare("SELECT trading_date AS tradingDate, status FROM days ORDER BY trading_date");
     this.quotesStatement = database.prepare(quotesOfDaySql);
     this.endOfDayStatement = database.prepare(endOfDayOfDaySql);
-    this.openInterestStatement = database.prepare(openInterestOfDaySql);
     const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
     this.dayIssuesStatement = tableNames.has("day_issues") ? database.prepare(`SELECT trading_date AS tradingDate, part, expiry, message FROM day_issues WHERE trading_date = ? AND ${issueWithinReadWindowSql} ORDER BY part, expiry`) : null;
     this.unavailableDaysStatement = tableNames.has("unavailable_days") ? database.prepare("SELECT trading_date AS tradingDate, reason FROM unavailable_days ORDER BY trading_date") : null;
@@ -102,7 +103,8 @@ export class BacktestSymbolFile {
     this.intradayQuotesStatement?.setReturnArrays(true);
     this.intradayQuotesOfContractStatement = hasIntradayTables ? database.prepare(`${intradayQuotesColumnsSql} WHERE trading_date = ? AND look_time = ? AND expiry = ? AND strike BETWEEN ? AND ? AND option_right = ? AND ${expiresWithin45DaysSql}`) : null;
     this.intradayQuotesOfContractStatement?.setReturnArrays(true);
-    this.intradayQuoteWithinStatement = hasIntradayTables ? database.prepare(`SELECT 1 AS found FROM intraday_quotes WHERE trading_date = ? AND look_time = ? AND strike BETWEEN ? AND ? AND ${expiresWithin45DaysSql} LIMIT 1`) : null;
+    this.intradayQuoteWithinStatement = hasIntradayTables ? database.prepare(intradayQuoteWithinSql) : null;
+    this.nextIntradayLookTimeStatement = hasIntradayTables ? database.prepare(nextIntradayLookTimeSql) : null;
     // The hedge's long-dated Puts (backtestBaselineHedge.ts), past the 45-day window, one expiry at a time by the primary key.
     this.putExpiriesStatement = database.prepare("SELECT DISTINCT expiry FROM quotes WHERE trading_date = ? AND option_right = 'P' ORDER BY expiry");
     this.putQuotesOfExpiryStatement = database.prepare("SELECT strike, bid, ask, bid_size AS bidSize, ask_size AS askSize FROM quotes WHERE trading_date = ? AND expiry = ? AND option_right = 'P'");
@@ -162,12 +164,6 @@ export class BacktestSymbolFile {
     }));
   }
 
-  /** Open interest as published for the day (the previous session's close), by contractKey. */
-  loadOpenInterest(tradingDate: string): Map<string, number> {
-    const rows = this.openInterestStatement.all(tradingDate) as { expiry: string; strike: number; right: "C" | "P"; openInterest: number }[];
-    return new Map(rows.map((row) => [contractKey({ expiry: String(row.expiry), strike: Number(row.strike), right: row.right }), Number(row.openInterest)]));
-  }
-
   /** What the downloader could not retrieve of a stored day, among what the engine reads (issueWithinReadWindowSql); none on a file without the table. */
   loadDayIssues(tradingDate: string): SymbolFileDayIssue[] {
     if (!this.dayIssuesStatement) return [];
@@ -214,6 +210,12 @@ export class BacktestSymbolFile {
   /** Whether loadIntradayQuotes over a range of looks including `lookTime` holds quotes at that look for these strikes. */
   hasIntradayQuoteWithin(tradingDate: string, lookTime: string, lowestStrike: number, highestStrike: number): boolean {
     return this.intradayQuoteWithinStatement?.get(tradingDate, lookTime, lowestStrike, highestStrike) !== undefined;
+  }
+
+  /** The day's first look time after `afterLookTime` with stored rows (of any expiry); null after the last, or on a file without intraday quotes. */
+  nextIntradayLookTime(tradingDate: string, afterLookTime: string): string | null {
+    const found = this.nextIntradayLookTimeStatement?.get(tradingDate, afterLookTime) as { lookTime: string | null } | undefined;
+    return found?.lookTime ?? null;
   }
 
   /** Every Put expiry the day's 10:00 quotes hold, ascending, whatever its distance (the hedge's; files of schema 3 hold every expiry). */

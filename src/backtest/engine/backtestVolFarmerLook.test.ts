@@ -208,7 +208,7 @@ describe("the VF4 rules at the looks", () => {
     const putExpiries = [...new Set(input.puts.map((quote) => quote.expiry))].sort();
     return {
       profile: { symbol, calendarChecksApply: false, earnings: [] },
-      market: { todayIso: input.todayIso, quotes: input.calls, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(input.calls.map((quote) => [contractKey(quote), 1_000])), stockPrice: input.stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+      market: { todayIso: input.todayIso, quotes: input.calls, previousSessionVolumeByContract: new Map(input.calls.map((quote) => [contractKey(quote), 1_000])), stockPrice: input.stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
       adjustedDailyClosesBeforeToday: [],
       splitFactorToday: 1,
       optionContractsRepresentable: true,

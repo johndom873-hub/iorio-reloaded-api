@@ -198,7 +198,9 @@ export function ledgerCycleInputRows(ledger: SimulatedLedger, symbol: string, ma
     stockTradeRows: stockTradeRows(ledger, symbol),
     barRows: market.dailyCloses.map((bar) => ({ tickerId: symbol, date: bar.date, close: bar.close })),
     openPositionPremiumPnl,
-    stockCostPriceByPositionId: ledgerStockCostPriceByPositionId(ledger, symbolPositions),
+    // The same book gives the same costs whatever closes the cycles are read with (the session's records derive each
+    // symbol's cycles on several price scales): traced once per symbol and ledger revision.
+    stockCostPriceByPositionId: rememberedForRevision(ledger, `stockCostPriceByPositionId|${symbol}`, () => ledgerStockCostPriceByPositionId(ledger, symbolPositions)),
   };
 }
 

@@ -31,8 +31,6 @@ export interface BacktestDayMarket {
   todayIso: string;
   /** Every 10:00 quote of the day in the file. */
   quotes: readonly SymbolFileQuote[];
-  /** Open interest published for today, by contractKey. */
-  openInterestByContract: ReadonlyMap<string, number>;
   /** The previous session's full volume, by contractKey; null when the file has no previous session. */
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
   /** The 10:00 stock price (IBKR's 09:30 bar's close, on the day's traded scale). */

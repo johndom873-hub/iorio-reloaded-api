@@ -59,8 +59,8 @@ export interface BacktestLookContext {
   settings: EffectiveBacktestSettings;
   /** A session of per-ticker pots: each ticker's own baseline settings and its weight. Absent when the tickers share one account and the session's settings. */
   tickerSetupBySymbol?: ReadonlyMap<string, BacktestTickerSetup>;
-  /** The volatility model's tables of the day (walk-forward or current): the baseline's Edge Yield ranking and volatility edge filter read them. */
-  modelTables: VolatilityModelTables;
+  /** The volatility model's tables of the day (walk-forward or current): the baseline's Edge Yield ranking and volatility edge filter read them. Null for the other decision makers, which do not. */
+  modelTables: VolatilityModelTables | null;
   ledger: SimulatedLedger;
   /** The session day before today; null on the first. */
   previousSessionDateIso: string | null;

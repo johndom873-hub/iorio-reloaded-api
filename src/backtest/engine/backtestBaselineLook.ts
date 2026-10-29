@@ -139,6 +139,7 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
     const earningsDatesIso = baseline.earnings === "skip_spanning" && lookSymbol.profile.calendarChecksApply ? earningsNotYetReported(lookSymbol.profile.earnings, todayIso) : undefined;
     let model: BaselineModelInput | null = null;
     if (baseline.volatilityEdgeFilter !== "off" || baseline.ranking === "edge_yield") {
+      if (context.modelTables === null) throw new Error("The baseline's Edge Yield ranking and volatility edge filter read the model tables, and the session prepared none.");
       const furthestExpiry = quotes.reduce<string | null>((furthest, quote) => (furthest === null || quote.expiry > furthest ? quote.expiry : furthest), null);
       const sessions = furthestExpiry === null ? [] : context.calendar.sessionsBetween(todayIso, furthestExpiry);
       const varianceSessionsByExpiry = new Map<string, number>();

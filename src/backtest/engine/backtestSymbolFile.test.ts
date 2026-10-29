@@ -117,13 +117,12 @@ describe("BacktestSymbolFile", () => {
     expect(() => BacktestSymbolFile.open("VERFOUR")).toThrow("The data file has schema version 4; the engine reads versions 1, 2, 3.");
   });
 
-  it("reads the expiries up to 45 days out (46 for the end of day and the open interest) of a file holding every expiry", () => {
+  it("reads the expiries up to 45 days out (46 for the end of day) of a file holding every expiry", () => {
     const file = BacktestSymbolFile.open("ALLEXP");
     try {
       const expiriesOf = (expiries: string[]) => [...new Set(expiries)].sort();
       expect(expiriesOf(file.loadQuotes("2026-03-02").map((quote) => quote.expiry))).toEqual(["2026-03-12", "2026-04-16"]);
       expect(expiriesOf(file.loadEndOfDay("2026-03-02").map((row) => row.expiry))).toEqual(["2026-03-12", "2026-04-16", "2026-04-17"]);
-      expect(expiriesOf([...file.loadOpenInterest("2026-03-02").keys()].map((key) => key.split("|")[0]!))).toEqual(["2026-03-12", "2026-04-16", "2026-04-17"]);
       const looks = file.loadIntradayQuotes("2026-03-02", "09:30", "15:30", 0, 1_000);
       expect([...looks.keys()]).toEqual(["10:00", "10:30"]);
       for (const quotes of looks.values()) expect(expiriesOf(quotes.map((quote) => quote.expiry))).toEqual(["2026-03-12", "2026-04-16"]);
