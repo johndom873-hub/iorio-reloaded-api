@@ -22,7 +22,7 @@ import { db } from "../src/db/connection.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "../src/ibkr/requestMarketData.js";
 import { captureMarketDataSnapshot } from "../src/ibkr/captureMarketDataSnapshot.js";
-import { lookupLatestDailyBar, lookupRecentDailyBars } from "../src/ibkr/fetchTickerOverview.js";
+import { lookupRecentDailyBars } from "../src/ibkr/fetchTickerOverview.js";
 import { storeFreshDailyBars } from "../src/ibkr/priceBarCache.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { assessDailyBar, buildMarketDataJobOutcome, type TickerProblem } from "../src/lib/marketDataJobOutcome.js";
@@ -86,15 +86,17 @@ async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snap
     // Both bars of the 2-day window: the earlier one is a day already stored, which the split check compares.
     const recentBars = await lookupRecentDailyBars(connection, ticker.symbol, nextReqId++);
     const bar = recentBars.at(-1) ?? null;
-    // The daily IV bar isn't guaranteed the same day the price bar is (e.g. a brand-new
-    // ticker with no IV history yet), so a miss doesn't fail the ticker (price data is the
-    // higher-priority half of this job) but it is reported: IV rank and percentile rot without it.
-    const ivBar = await lookupLatestDailyBar(connection, ticker.symbol, nextReqId++, WhatToShow.OPTION_IMPLIED_VOLATILITY).catch(() => null);
-    if (ivBar === null) softProblems.push("no IV history bar");
-    const barTradingDate = bar ? new Date(bar.time * 1000).toISOString().slice(0, 10) : null;
+    const tradingDateOf = (dailyBar: { time: number }) => new Date(dailyBar.time * 1000).toISOString().slice(0, 10);
+    const barTradingDate = bar ? tradingDateOf(bar) : null;
+    // The daily IV bar isn't guaranteed the same day the price bar is (e.g. a brand-new ticker with no IV history yet, or
+    // IBKR's IV series a session behind), so each IV bar is stored under its own session, never under the price bar's.
+    // A miss doesn't fail the ticker (price data is the higher-priority half of this job) but it is reported: IV rank and
+    // percentile rot without it, and Vol Farmer v2 sells no Put without the previous session's IV.
+    const ivBars = await lookupRecentDailyBars(connection, ticker.symbol, nextReqId++, WhatToShow.OPTION_IMPLIED_VOLATILITY).catch(() => []);
+    const ivByDate = new Map<string, number>(ivBars.map((ivBar) => [tradingDateOf(ivBar), ivBar.close]));
+    if (barTradingDate === null ? ivBars.length === 0 : !ivByDate.has(barTradingDate)) softProblems.push("no IV history bar");
     const barProblem = assessDailyBar(barTradingDate, expectedSessionDate);
     if (bar && barTradingDate) {
-      const ivByDate = new Map<string, number>(ivBar ? [[barTradingDate, ivBar.close]] : []);
       const stored = await storeFreshDailyBars(connection, ticker.id, ticker.symbol, { bars: recentBars, ivByDate }, nextReqId++);
       if (stored.adjustment) console.log(`${ticker.symbol}: price history replaced after a split (${stored.replacedDays} days)`);
     }
