@@ -2,8 +2,10 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { readFileDailyBars, readFileIntradayPrices, type FileIntradayPrices } from "../backtestFileStockBars.js";
 import type { StoredDailyBar } from "./backtestBarHistory.js";
+import { SymbolFileSliceReads } from "./symbolFileSliceReads.js";
 
-// Read access to one symbol's ThetaData file (docs/backtesting/DATA-FILES.md, schema versions 1 to 3): the days it
+// Read access to one symbol's ThetaData file (docs/backtesting/DATA-FILES.md, schema versions 1 to 4; 4 through
+// symbolFileSliceReads.ts): the days it
 // holds, each day's 10:00 quotes and end-of-day rows, and, where the file has them, the quotes at each look inside the
 // day (intraday_days, intraday_quotes) and what the downloader could not retrieve (day_issues, unavailable_days); and
 // IBKR's stock bars Node keeps in it (the stock prices). The open interest the files hold is not read: no rule uses it.
@@ -62,7 +64,7 @@ export interface NextCallExpiryDay {
   previousHasVolume: boolean | null;
 }
 
-export const supportedSymbolFileSchemaVersions: readonly string[] = ["1", "2", "3"];
+export const supportedSymbolFileSchemaVersions: readonly string[] = ["1", "2", "3", "4"];
 
 export const numberOrNull = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
 
@@ -110,30 +112,32 @@ export const intradayQuoteWithinSql = `SELECT 1 AS found FROM intraday_quotes WH
 
 export class BacktestSymbolFile {
   private readonly daysStatement: StatementSync;
-  private readonly quotesStatement: StatementSync;
-  private readonly endOfDayStatement: StatementSync;
-  private readonly nextCallExpiryStatement: StatementSync;
-  private readonly quotesOfExpiryStatement: StatementSync;
-  private readonly quoteCountByRightStatement: StatementSync;
-  private readonly quoteWithAskAboveZeroStatement: StatementSync;
-  private readonly endOfDayOfExpiryStatement: StatementSync;
-  private readonly endOfDayWithVolumeStatement: StatementSync;
-  private readonly quotesOfContractStatement: StatementSync;
-  private readonly endOfDayOfContractStatement: StatementSync;
+  /** The option reads of a schema 4 file; null on earlier versions, which read with the statements below. */
+  private readonly slices: SymbolFileSliceReads | null;
+  private readonly quotesStatement!: StatementSync;
+  private readonly endOfDayStatement!: StatementSync;
+  private readonly nextCallExpiryStatement!: StatementSync;
+  private readonly quotesOfExpiryStatement!: StatementSync;
+  private readonly quoteCountByRightStatement!: StatementSync;
+  private readonly quoteWithAskAboveZeroStatement!: StatementSync;
+  private readonly endOfDayOfExpiryStatement!: StatementSync;
+  private readonly endOfDayWithVolumeStatement!: StatementSync;
+  private readonly quotesOfContractStatement!: StatementSync;
+  private readonly endOfDayOfContractStatement!: StatementSync;
   /** Null on a file downloaded before the table existed. */
   private readonly dayIssuesStatement: StatementSync | null;
   private readonly unavailableDaysStatement: StatementSync | null;
   private readonly intradayDaysStatement: StatementSync | null;
-  private readonly intradayQuotesStatement: StatementSync | null;
-  private readonly intradayQuotesOfContractStatement: StatementSync | null;
-  private readonly intradayQuoteWithinStatement: StatementSync | null;
-  private readonly nextIntradayLookTimeStatement: StatementSync | null;
-  private readonly putExpiriesStatement: StatementSync;
-  private readonly putQuotesOfExpiryStatement: StatementSync;
-  private readonly intradayPutQuotesOfExpiryStatement: StatementSync | null;
-  private readonly callExpiriesStatement: StatementSync;
-  private readonly callQuotesOfExpiryStatement: StatementSync;
-  private readonly intradayCallQuotesOfExpiryStatement: StatementSync | null;
+  private readonly intradayQuotesStatement!: StatementSync | null;
+  private readonly intradayQuotesOfContractStatement!: StatementSync | null;
+  private readonly intradayQuoteWithinStatement!: StatementSync | null;
+  private readonly nextIntradayLookTimeStatement!: StatementSync | null;
+  private readonly putExpiriesStatement!: StatementSync;
+  private readonly putQuotesOfExpiryStatement!: StatementSync;
+  private readonly intradayPutQuotesOfExpiryStatement!: StatementSync | null;
+  private readonly callExpiriesStatement!: StatementSync;
+  private readonly callQuotesOfExpiryStatement!: StatementSync;
+  private readonly intradayCallQuotesOfExpiryStatement!: StatementSync | null;
 
   constructor(private readonly database: DatabaseSync) {
     // The downloader may be committing a day: wait for its lock instead of failing.
@@ -141,6 +145,13 @@ export class BacktestSymbolFile {
     const version = (database.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined)?.value;
     if (version === undefined || !supportedSymbolFileSchemaVersions.includes(version)) throw new Error(`The data file has schema version ${version ?? "unknown"}; the engine reads versions ${supportedSymbolFileSchemaVersions.join(", ")}.`);
     this.daysStatement = database.prepare("SELECT trading_date AS tradingDate, status FROM days ORDER BY trading_date");
+    const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
+    this.dayIssuesStatement = tableNames.has("day_issues") ? database.prepare(`SELECT trading_date AS tradingDate, part, expiry, message FROM day_issues WHERE ${issueWithinReadWindowSql} ORDER BY trading_date, part, expiry`) : null;
+    this.unavailableDaysStatement = tableNames.has("unavailable_days") ? database.prepare("SELECT trading_date AS tradingDate, reason FROM unavailable_days ORDER BY trading_date") : null;
+    this.slices = version === "4" ? new SymbolFileSliceReads(database) : null;
+    const hasIntradayTables = tableNames.has("intraday_days") && (tableNames.has("intraday_quotes") || this.slices !== null);
+    this.intradayDaysStatement = hasIntradayTables ? database.prepare("SELECT trading_date AS tradingDate FROM intraday_days WHERE status = 'complete' ORDER BY trading_date") : null;
+    if (this.slices !== null) return;
     this.quotesStatement = database.prepare(quotesOfDaySql);
     this.endOfDayStatement = database.prepare(endOfDayOfDaySql);
     this.nextCallExpiryStatement = database.prepare(nextCallExpirySql);
@@ -152,11 +163,6 @@ export class BacktestSymbolFile {
     // One contract's rows by the primary key, within the window its day's read keeps.
     this.quotesOfContractStatement = database.prepare(`${quoteColumnsSql} WHERE trading_date = ? AND expiry = ? AND strike BETWEEN ? AND ? AND option_right = ? AND ${expiresWithin45DaysSql}`);
     this.endOfDayOfContractStatement = database.prepare(`${endOfDayColumnsSql} WHERE trading_date = ? AND expiry = ? AND strike BETWEEN ? AND ? AND option_right = ? AND ${expiresWithin46DaysSql}`);
-    const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
-    this.dayIssuesStatement = tableNames.has("day_issues") ? database.prepare(`SELECT trading_date AS tradingDate, part, expiry, message FROM day_issues WHERE ${issueWithinReadWindowSql} ORDER BY trading_date, part, expiry`) : null;
-    this.unavailableDaysStatement = tableNames.has("unavailable_days") ? database.prepare("SELECT trading_date AS tradingDate, reason FROM unavailable_days ORDER BY trading_date") : null;
-    const hasIntradayTables = tableNames.has("intraday_days") && tableNames.has("intraday_quotes");
-    this.intradayDaysStatement = hasIntradayTables ? database.prepare("SELECT trading_date AS tradingDate FROM intraday_days WHERE status = 'complete' ORDER BY trading_date") : null;
     // Read by the thousand rows a day and look: only what a look reads (not the sizes), each row as an array.
     this.intradayQuotesStatement = hasIntradayTables ? database.prepare(`${intradayQuotesColumnsSql} WHERE trading_date = ? AND look_time > ? AND look_time <= ? AND strike BETWEEN ? AND ? AND ${expiresWithin45DaysSql}`) : null;
     this.intradayQuotesStatement?.setReturnArrays(true);
@@ -200,15 +206,18 @@ export class BacktestSymbolFile {
   }
 
   loadQuotes(tradingDate: string): SymbolFileQuote[] {
+    if (this.slices) return this.slices.loadQuotes(tradingDate);
     return (this.quotesStatement.all(tradingDate) as Record<string, unknown>[]).map(quoteOfRow);
   }
 
   loadEndOfDay(tradingDate: string): SymbolFileEndOfDayRow[] {
+    if (this.slices) return this.slices.loadEndOfDay(tradingDate);
     return (this.endOfDayStatement.all(tradingDate) as Record<string, unknown>[]).map(endOfDayOfRow);
   }
 
   /** Vol Farmer v2's read of a day (NextCallExpiryDay), with the file day before it (null on the first). */
   loadNextCallExpiryDay(tradingDate: string, previousFileDay: string | null): NextCallExpiryDay {
+    if (this.slices) return this.slices.loadNextCallExpiryDay(tradingDate, previousFileDay);
     const expiry = (this.nextCallExpiryStatement.get(tradingDate, tradingDate, tradingDate) as { expiry: string | null }).expiry;
     return {
       expiry,
@@ -222,11 +231,13 @@ export class BacktestSymbolFile {
 
   /** One expiry and right's 10:00 quotes with a strike from `lowestStrike` to `highestStrike`: what loadQuotes holds of them, in the same order. */
   loadQuotesOfContract(tradingDate: string, contract: { expiry: string; right: "C" | "P" }, lowestStrike: number, highestStrike: number): SymbolFileQuote[] {
+    if (this.slices) return this.slices.loadQuotesOfContract(tradingDate, contract, lowestStrike, highestStrike);
     return (this.quotesOfContractStatement.all(tradingDate, contract.expiry, lowestStrike, highestStrike, contract.right) as Record<string, unknown>[]).map(quoteOfRow);
   }
 
   /** One expiry and right's end-of-day rows with a strike from `lowestStrike` to `highestStrike`: what loadEndOfDay holds of them, in the same order. */
   loadEndOfDayOfContract(tradingDate: string, contract: { expiry: string; right: "C" | "P" }, lowestStrike: number, highestStrike: number): SymbolFileEndOfDayRow[] {
+    if (this.slices) return this.slices.loadEndOfDayOfContract(tradingDate, contract, lowestStrike, highestStrike);
     return (this.endOfDayOfContractStatement.all(tradingDate, contract.expiry, lowestStrike, highestStrike, contract.right) as Record<string, unknown>[]).map(endOfDayOfRow);
   }
 
@@ -262,6 +273,7 @@ export class BacktestSymbolFile {
    * returns, also those after an early close (repeats of the closing quotes): the caller says which looks count.
    */
   loadIntradayQuotes(tradingDate: string, afterLookTime: string, throughLookTime: string, lowestStrike: number, highestStrike: number): Map<string, SymbolFileQuote[]> {
+    if (this.slices) return this.slices.loadIntradayQuotes(tradingDate, afterLookTime, throughLookTime, lowestStrike, highestStrike);
     const quotesByLookTime = new Map<string, SymbolFileQuote[]>();
     if (!this.intradayQuotesStatement) return quotesByLookTime;
     for (const [lookTime, expiry, strike, right, bid, ask] of this.intradayQuotesStatement.all(tradingDate, afterLookTime, throughLookTime, lowestStrike, highestStrike) as unknown as [string, string, number, "C" | "P", number | null, number | null][]) {
@@ -277,49 +289,58 @@ export class BacktestSymbolFile {
    * loadIntradayQuotes holds of them at that look, in the same order, read by the primary key.
    */
   loadIntradayQuotesOfContract(tradingDate: string, lookTime: string, contract: { expiry: string; right: "C" | "P" }, lowestStrike: number, highestStrike: number): SymbolFileQuote[] {
+    if (this.slices) return this.slices.loadIntradayQuotesOfContract(tradingDate, lookTime, contract, lowestStrike, highestStrike);
     if (!this.intradayQuotesOfContractStatement) return [];
     return (this.intradayQuotesOfContractStatement.all(tradingDate, lookTime, contract.expiry, lowestStrike, highestStrike, contract.right) as unknown as [string, string, number, "C" | "P", number | null, number | null][]).map(([, expiry, strike, right, bid, ask]) => ({ expiry, strike, right, bid, ask, bidSize: null, askSize: null }));
   }
 
   /** Whether loadIntradayQuotes over a range of looks including `lookTime` holds quotes at that look for these strikes. */
   hasIntradayQuoteWithin(tradingDate: string, lookTime: string, lowestStrike: number, highestStrike: number): boolean {
+    if (this.slices) return this.slices.hasIntradayQuoteWithin(tradingDate, lookTime, lowestStrike, highestStrike);
     return this.intradayQuoteWithinStatement?.get(tradingDate, lookTime, lowestStrike, highestStrike) !== undefined;
   }
 
   /** The day's first look time after `afterLookTime` with stored rows (of any expiry); null after the last, or on a file without intraday quotes. */
   nextIntradayLookTime(tradingDate: string, afterLookTime: string): string | null {
+    if (this.slices) return this.slices.nextIntradayLookTime(tradingDate, afterLookTime);
     const found = this.nextIntradayLookTimeStatement?.get(tradingDate, afterLookTime) as { lookTime: string | null } | undefined;
     return found?.lookTime ?? null;
   }
 
   /** Every Put expiry the day's 10:00 quotes hold, ascending, whatever its distance (the hedge's; files of schema 3 hold every expiry). */
   loadPutExpiries(tradingDate: string): string[] {
+    if (this.slices) return this.slices.loadPutExpiries(tradingDate);
     return (this.putExpiriesStatement.all(tradingDate) as { expiry: string }[]).map((row) => String(row.expiry));
   }
 
   /** One expiry's Puts at 10:00, with their sizes. */
   loadPutQuotesOfExpiry(tradingDate: string, expiry: string): SymbolFileQuote[] {
+    if (this.slices) return this.slices.quotesOfExpiry(tradingDate, null, expiry, "P", false);
     return (this.putQuotesOfExpiryStatement.all(tradingDate, expiry) as Record<string, unknown>[]).map((row) => ({ expiry, strike: Number(row.strike), right: "P" as const, bid: numberOrNull(row.bid), ask: numberOrNull(row.ask), bidSize: numberOrNull(row.bidSize), askSize: numberOrNull(row.askSize) }));
   }
 
   /** One expiry's Puts at a look after 10:00 ("HH:MM" Eastern), without their sizes; none on a file without intraday quotes. */
   loadIntradayPutQuotesOfExpiry(tradingDate: string, lookTime: string, expiry: string): SymbolFileQuote[] {
+    if (this.slices) return this.slices.quotesOfExpiry(tradingDate, lookTime, expiry, "P", false);
     if (!this.intradayPutQuotesOfExpiryStatement) return [];
     return (this.intradayPutQuotesOfExpiryStatement.all(tradingDate, lookTime, expiry) as Record<string, unknown>[]).map((row) => ({ expiry, strike: Number(row.strike), right: "P" as const, bid: numberOrNull(row.bid), ask: numberOrNull(row.ask), bidSize: null, askSize: null }));
   }
 
   /** Every Call expiry the day's 10:00 quotes hold, ascending, whatever its distance (Vol Farmer v2's LEAPS). */
   loadCallExpiries(tradingDate: string): string[] {
+    if (this.slices) return this.slices.loadCallExpiries(tradingDate);
     return (this.callExpiriesStatement.all(tradingDate) as { expiry: string }[]).map((row) => String(row.expiry));
   }
 
   /** One expiry's Calls at 10:00, with their sizes. */
   loadCallQuotesOfExpiry(tradingDate: string, expiry: string): SymbolFileQuote[] {
+    if (this.slices) return this.slices.quotesOfExpiry(tradingDate, null, expiry, "C", false);
     return (this.callQuotesOfExpiryStatement.all(tradingDate, expiry) as Record<string, unknown>[]).map((row) => ({ expiry, strike: Number(row.strike), right: "C" as const, bid: numberOrNull(row.bid), ask: numberOrNull(row.ask), bidSize: numberOrNull(row.bidSize), askSize: numberOrNull(row.askSize) }));
   }
 
   /** One expiry's Calls at a look after 10:00 ("HH:MM" Eastern), with their sizes (Vol Farmer v2's LEAPS at every look); none on a file without intraday quotes. */
   loadIntradayCallQuotesOfExpiry(tradingDate: string, lookTime: string, expiry: string): SymbolFileQuote[] {
+    if (this.slices) return this.slices.quotesOfExpiry(tradingDate, lookTime, expiry, "C", true);
     if (!this.intradayCallQuotesOfExpiryStatement) return [];
     return (this.intradayCallQuotesOfExpiryStatement.all(tradingDate, lookTime, expiry) as Record<string, unknown>[]).map((row) => ({ expiry, strike: Number(row.strike), right: "C" as const, bid: numberOrNull(row.bid), ask: numberOrNull(row.ask), bidSize: numberOrNull(row.bidSize), askSize: numberOrNull(row.askSize) }));
   }

@@ -42,7 +42,7 @@ beforeAll(() => {
     intradayCompleteDays: ["2026-03-02"],
   });
   writeSyntheticSymbolFile(fileOf("VERTHREE"), "VERTHREE", [day("2026-03-02")], [], { schemaVersion: "3" });
-  writeSyntheticSymbolFile(fileOf("VERFOUR"), "VERFOUR", [day("2026-03-02")], [], { schemaVersion: "4" });
+  writeSyntheticSymbolFile(fileOf("VERFIVE"), "VERFIVE", [day("2026-03-02")], [], { schemaVersion: "5" });
   // A file holding every expiry (schema 3): contracts 10, 45, 46 and 300 days out, at 10:00, at the close and at a later
   // look, and issues for a whole part and for expirations inside and beyond the engine's window.
   const everyExpiry = syntheticOptionQuotes("2026-03-02", 100, ["2026-03-12", "2026-04-16", "2026-04-17", "2026-12-27"], 0.5, 0.04, 5, 1);
@@ -110,7 +110,7 @@ describe("BacktestSymbolFile", () => {
     }
   });
 
-  it("accepts schema versions 1, 2 and 3 and refuses any other", () => {
+  it("accepts schema versions 1 to 4 and refuses any other", () => {
     const versionTwo = BacktestSymbolFile.open("VERTWO");
     try {
       expect(versionTwo.loadDayIssuesByDate()).toEqual(new Map([["2026-03-03", [{ tradingDate: "2026-03-03", part: "eod", expiry: null, message: "no data returned" }]]]));
@@ -120,7 +120,7 @@ describe("BacktestSymbolFile", () => {
     }
     expect(readBacktestDataFileContents("VERTWO")).toMatchObject({ completeDays: 2, daysWithIssues: 1, unavailableDays: 1, intradayDays: 1 });
     BacktestSymbolFile.open("VERTHREE").close();
-    expect(() => BacktestSymbolFile.open("VERFOUR")).toThrow("The data file has schema version 4; the engine reads versions 1, 2, 3.");
+    expect(() => BacktestSymbolFile.open("VERFIVE")).toThrow("The data file has schema version 5; the engine reads versions 1, 2, 3, 4.");
   });
 
   it("reads the expiries up to 45 days out (46 for the end of day) of a file holding every expiry", () => {

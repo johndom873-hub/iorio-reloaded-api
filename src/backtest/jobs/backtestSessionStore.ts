@@ -55,6 +55,7 @@ import { sqlContainsPattern } from "../../lib/sqlContainsPattern.js";
 import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { cachedSplitsBetween, readSplitScheduleCache, splitFactorOn } from "../engine/splitFactors.js";
 import { withPositionCycle, type BacktestPositionRecord } from "../engine/backtestSessionRecords.js";
+import { dailySliceLookMinute, dayNumberOf, decodeSlice, endOfDayColumns, sliceColumn, sliceKey, sliceValueAt } from "../engine/symbolFileSlices.js";
 import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment, sharesHeldAtInstant, sharesHeldAtMarks, type CashBreakEvenOptions, type SplitFactorOfDay } from "../cycleCashBreakEven.js";
 import { withHedgeMarkedAtHandOvers, type HedgePutMarkOf } from "../cycleHedgeHandOvers.js";
 import { cycleNoCallDays, recordedRunReasons, volFarmerNoteOn, volFarmerRunReasons, volFarmerV2NoteOn, volFarmerV2RunReasons } from "../cycleNoCallDays.js";
@@ -566,10 +567,24 @@ async function sessionDecisionMaker(sessionId: string): Promise<BacktestSettings
 /** A symbol's Put prices from its data file's end-of-day quotes: the closing mid, else the last trade, else the intrinsic value at the stock's close. Close it when done. */
 function hedgePutMarksFromFile(symbol: string): { markOf: HedgePutMarkOf; close(): void } {
   const file = openBacktestDataFileReadOnly(symbol);
-  const statement = file?.prepare("SELECT bid, ask, close FROM eod WHERE trading_date = ? AND expiry = ? AND option_right = 'P' AND abs(strike - ?) < 0.0005") ?? null;
+  const isSchemaFour = file?.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'end_of_day_slices'").get() !== undefined;
+  const statement = file === null || isSchemaFour ? null : file.prepare("SELECT bid, ask, close FROM eod WHERE trading_date = ? AND expiry = ? AND option_right = 'P' AND abs(strike - ?) < 0.0005");
+  const endOfDaySlice = file !== null && isSchemaFour ? file.prepare("SELECT data FROM end_of_day_slices WHERE key = ?") : null;
+  /** The first Put of the expiry within half a tenth of a cent of the strike, as the statement reads it (a schema 4 file: from its slice). */
+  const putQuoteOf = (tradingDate: string, expiry: string, strikeAsTraded: number): { bid: number | null; ask: number | null; close: number | null } | undefined => {
+    if (endOfDaySlice === null) return statement?.get(tradingDate, expiry, strikeAsTraded) as { bid: number | null; ask: number | null; close: number | null } | undefined;
+    const found = endOfDaySlice.get(sliceKey(dayNumberOf(tradingDate), dailySliceLookMinute, dayNumberOf(expiry) - dayNumberOf(tradingDate))) as { data: Uint8Array } | undefined;
+    if (found === undefined) return undefined;
+    const slice = decodeSlice(found.data, endOfDayColumns);
+    for (let index = 0; index < slice.count; index++) {
+      if (slice.puts[index] !== 1 || Math.abs(slice.columns[sliceColumn.strike]!.values[index]! - strikeAsTraded) >= 0.0005) continue;
+      return { bid: sliceValueAt(slice.columns[sliceColumn.endOfDayBid]!, index), ask: sliceValueAt(slice.columns[sliceColumn.endOfDayAsk]!, index), close: sliceValueAt(slice.columns[sliceColumn.close]!, index) };
+    }
+    return undefined;
+  };
   return {
     markOf: (tradingDate, expiry, strikeAsTraded, stockCloseAsTraded) => {
-      const quote = statement?.get(tradingDate, expiry, strikeAsTraded) as { bid: number | null; ask: number | null; close: number | null } | undefined;
+      const quote = putQuoteOf(tradingDate, expiry, strikeAsTraded);
       if (quote && quote.bid !== null && quote.ask !== null && quote.bid > 0 && quote.ask >= quote.bid) return (quote.bid + quote.ask) / 2;
       if (quote && quote.close !== null && quote.close > 0) return quote.close;
       return stockCloseAsTraded === null ? null : Math.max(0, strikeAsTraded - stockCloseAsTraded);

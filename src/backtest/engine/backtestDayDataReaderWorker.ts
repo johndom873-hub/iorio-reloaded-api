@@ -3,10 +3,13 @@ import { parentPort } from "node:worker_threads";
 import { addCalendarDays } from "../../lib/calendarDays.js";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { dayDataTransferList, type DayDataColumn, type DayDataPayload, type DayDataReaderReply, type DayDataReaderRequest, type DayDataTable } from "./backtestDayDataReader.js";
+import { dayDataEndOfDayValueColumns, dayDataIntradayValueColumns, dayDataQuoteValueColumns, dayDataTableOfSlices, DayDataStrings, sliceEndOfDayWindowDays, sliceQuoteWindowDays, SymbolFileSliceReads } from "./symbolFileSliceReads.js";
+import { dayNumberOf, endOfDayColumns, quoteColumnsOfLook, tenOClockLookMinute } from "./symbolFileSlices.js";
 import { endOfDayOfDaySql, endOfDayOfExpirySql, endOfDayWithVolumeSql, intradayQuotesColumnsSql, intradayQuoteWithinSql, nextCallExpirySql, nextIntradayLookTimeSql, numberOrNull, quoteCountByRightOf, quoteCountByRightSql, quotesOfDaySql, quotesOfExpirySql, quoteWithAskAboveZeroSql } from "./backtestSymbolFile.js";
 
 // The day-data reader thread of a session (backtestDayDataReader.ts): reads a symbol's day with BacktestSymbolFile's
-// statements, applies the same conversions, and sends the rows back as columns. A value a column cannot carry exactly
+// statements (a schema 4 file: its slices, symbolFileSliceReads.ts), applies the same conversions, and sends the rows
+// back as columns. A value a column cannot carry exactly
 // (a string where a number belongs, or the reverse) fails the day, which the session then reads from the file.
 
 if (!parentPort) throw new Error("backtestDayDataReaderWorker.ts runs as the day-data reader thread of a backtest session.");
@@ -22,14 +25,25 @@ interface OpenedFile {
   intraday: { nextLookTime: StatementSync; rowsOfLook: StatementSync; quoteWithin: StatementSync } | null;
 }
 
-const openedFiles = new Map<string, OpenedFile>();
+/** A schema 4 file, read from its slices. */
+interface OpenedSchemaFourFile {
+  database: DatabaseSync;
+  slices: SymbolFileSliceReads;
+}
 
-function fileOf(symbol: string): OpenedFile {
+const openedFiles = new Map<string, OpenedFile | OpenedSchemaFourFile>();
+
+function fileOf(symbol: string): OpenedFile | OpenedSchemaFourFile {
   let opened = openedFiles.get(symbol);
   if (!opened) {
     const database = openBacktestDataFileReadOnly(symbol);
     if (!database) throw new Error(`No data file for ${symbol}.`);
     database.exec("PRAGMA busy_timeout = 3000");
+    if ((database.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined)?.value === "4") {
+      const schemaFourFile = { database, slices: new SymbolFileSliceReads(database) };
+      openedFiles.set(symbol, schemaFourFile);
+      return schemaFourFile;
+    }
     const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
     const statements = [database.prepare(quotesOfDaySql), database.prepare(endOfDayOfDaySql), database.prepare(quotesOfExpirySql), database.prepare(endOfDayOfExpirySql)] as const;
     for (const statement of statements) statement.setReturnArrays(true);
@@ -101,8 +115,32 @@ function encodeTable(rows: readonly unknown[][], kinds: readonly CellKind[], str
 const quoteKinds: readonly CellKind[] = ["string", "number", "string", "nullableNumber", "nullableNumber", "nullableNumber", "nullableNumber"];
 const endOfDayKinds: readonly CellKind[] = ["string", "number", "string", "nullableNumber", "nullableNumber", "nullableNumber", "nullableNumber"];
 
+/** readDay on a schema 4 file: the same tables, built from the slices. */
+function readSchemaFourDay(request: DayDataReaderRequest, slices: SymbolFileSliceReads): DayDataPayload {
+  const strings = new DayDataStrings();
+  const dayNumber = dayNumberOf(request.tradingDate);
+  const quotesOf = (stored: ReturnType<SymbolFileSliceReads["quoteSlicesOf"]>) => dayDataTableOfSlices(stored, quoteColumnsOfLook, dayDataQuoteValueColumns, strings, false);
+  const endOfDayOf = (stored: ReturnType<SymbolFileSliceReads["endOfDaySlicesOf"]>) => dayDataTableOfSlices(stored, () => endOfDayColumns, dayDataEndOfDayValueColumns, strings, false);
+  let nextCallExpiryDay: DayDataPayload["nextCallExpiryDay"] = null;
+  if (request.readsNextCallExpiryOnly) {
+    const { quoteSlice, previousEndOfDaySlice, ...parts } = slices.nextCallExpiryParts(request.tradingDate, request.previousFileDay);
+    nextCallExpiryDay = { ...parts, quotes: quotesOf(quoteSlice === null ? [] : [quoteSlice]), previousEndOfDay: endOfDayOf(previousEndOfDaySlice === null ? [] : [previousEndOfDaySlice]) };
+  }
+  const check = request.intradayLookCheck;
+  return {
+    strings: strings.strings,
+    quotes: request.readsNextCallExpiryOnly ? null : quotesOf(slices.quoteSlicesOf(dayNumber, tenOClockLookMinute, sliceQuoteWindowDays)),
+    endOfDay: request.readsNextCallExpiryOnly ? null : endOfDayOf(slices.endOfDaySlicesOf(dayNumber, sliceEndOfDayWindowDays)),
+    nextCallExpiryDay,
+    intraday: request.readsIntradayQuotes ? dayDataTableOfSlices(slices.laterLookSlicesAfter(request.tradingDate, request.intradayAfterLookTime), quoteColumnsOfLook, dayDataIntradayValueColumns, strings, true) : null,
+    intradayAfterLookTime: request.intradayAfterLookTime,
+    intradayLookCheck: check ? { ...check, hasQuote: slices.hasIntradayQuoteWithin(request.tradingDate, check.lookTime, check.lowestStrike, check.highestStrike) } : null,
+  };
+}
+
 function readDay(request: DayDataReaderRequest): DayDataPayload {
   const file = fileOf(request.symbol);
+  if ("slices" in file) return readSchemaFourDay(request, file.slices);
   const strings: string[] = [];
   const stringIndex = new Map<string, number>();
   const all = (statement: StatementSync, ...parameters: string[]) => statement.all(...parameters) as unknown as unknown[][];

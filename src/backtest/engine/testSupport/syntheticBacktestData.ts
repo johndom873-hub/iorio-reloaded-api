@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { easternInstant } from "../../../lib/easternIsoDate.js";
+import { easternInstant, formatEasternIsoWithOffset } from "../../../lib/easternIsoDate.js";
 import { blackScholesPriceOnForward, maximumSpreadFractionOfMid, yearsBetweenIsoDates } from "../../../lib/impliedVolatilitySurface.js";
 import type { PlutoSettings } from "../../../pluto/settingsStore.js";
 import { plutoLadderSettingsFixture, plutoVolFarmerV2SettingsFixture } from "../../../pluto/plutoSettingsFixture.js";
@@ -162,7 +162,7 @@ export function writeSyntheticSymbolFile(filePath: string, symbol: string, days:
     for (const day of days) {
       insertDay.run(day.tradingDate, "complete", day.quotes.length, day.withoutEndOfDay ? 0 : day.quotes.length, day.quotes.length, "2026-10-12T00:00:00Z");
       for (const quote of day.quotes) {
-        insertQuote.run(day.tradingDate, quote.expiry, quote.strike, quote.right, quote.bid, quote.ask, quote.bidSize, quote.askSize, `${day.tradingDate}T09:59:58-04:00`);
+        insertQuote.run(day.tradingDate, quote.expiry, quote.strike, quote.right, quote.bid, quote.ask, quote.bidSize, quote.askSize, formatEasternIsoWithOffset(new Date(easternInstant(day.tradingDate, 10, 0).getTime() - 2000)));
         if (!day.withoutEndOfDay && !day.closingQuotes) insertEndOfDay.run(day.tradingDate, quote.expiry, quote.strike, quote.right, quote.bid === null || quote.ask === null ? null : (quote.bid + quote.ask) / 2, day.endOfDayVolume, quote.bid, quote.ask);
         insertOpenInterest.run(day.tradingDate, quote.expiry, quote.strike, quote.right, day.openInterest);
       }
