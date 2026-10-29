@@ -3,14 +3,15 @@ import { easternIsoDate, easternMinutesOfDay } from "../lib/easternIsoDate.js";
 import type { StoredDailyBar } from "./engine/backtestBarHistory.js";
 
 // IBKR's stock prices inside a symbol's data file (docs/backtesting/DATA-FILES.md, "IBKR stock bars"): daily bars with
-// the daily implied volatility for the last 20 years, and 30-minute bars from the first year the file has option data.
+// the daily implied volatility from 2000 (or the listing), and 30-minute bars from the first year the file has option data.
 // The backtests take every stock price from them, never from the option quotes (Marcelo 2026-10-14). Node writes them
 // after a download and on Update: the last month's bars over the stored ones when both agree to the cent on the days they
 // share, else the whole set at once, so every bar carries the same split adjustment (IBKR adjusts for splits as of the
 // fetch). The ThetaData downloader never touches these tables.
 
 export const fileStockBarsVersion = "1";
-export const fileDailyBarYears = 20;
+/** The first day of the daily bars a file keeps; IBKR returns less for a listing it holds from later. */
+export const fileDailyBarsStartDate = "2000-01-01";
 export const fileIntradayBarMinutes = 30;
 
 /** One 30-minute bar as IBKR sent it: its start instant and prices on IBKR's split-adjusted scale. */
@@ -82,6 +83,27 @@ export function writeFileStockBars(database: DatabaseSync, bars: FileStockBarsTo
  */
 export function addFileStockBars(database: DatabaseSync, bars: FileStockBarsToWrite): void {
   storeFileStockBars(database, bars, "add");
+}
+
+/**
+ * Adds the daily bars dated before the file's first daily bar, in one transaction, and returns how many: the stored daily
+ * bars, the 30-minute bars and the meta keys stay as they were. Only for bars on the stored bars' split adjustment: the
+ * caller has compared them on the days both have (refreshFileStockBars.ts, extendDailyBarsBack).
+ */
+export function addOlderFileDailyBars(database: DatabaseSync, daily: readonly StoredDailyBar[]): number {
+  const firstStoredDate = hasTable(database, "ibkr_daily_bars") ? (database.prepare("SELECT min(trading_date) AS first FROM ibkr_daily_bars").get() as { first: string | null }).first : null;
+  if (firstStoredDate === null) throw new Error("The file has no IBKR daily bars to add older ones before: Update it first.");
+  const older = daily.filter((bar) => bar.tradingDate < firstStoredDate);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const insertDaily = database.prepare("INSERT INTO ibkr_daily_bars VALUES (?, ?, ?, ?, ?, ?, ?)");
+    for (const bar of older) insertDaily.run(bar.tradingDate, bar.open, bar.high, bar.low, bar.close, bar.volume, bar.impliedVolatility);
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+  return older.length;
 }
 
 /** The key of a 30-minute bar: its Eastern date and start, minutes ET ("2026-10-26 570"). */

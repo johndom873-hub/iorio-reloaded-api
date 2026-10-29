@@ -3,6 +3,7 @@ import { BarSizeSetting, WhatToShow } from "@stoqey/ib";
 import type { IbkrConnection } from "../ibkr/connectIbkr.js";
 import { tradingDateOf } from "../ibkr/dailyBarSplitCheck.js";
 import { fetchHistoricalBarsRaw, type PriceBar } from "../ibkr/fetchTickerOverview.js";
+import { historyDurationReaching } from "../ibkr/historicalDataDuration.js";
 import { ivBarsToDateMap } from "../ibkr/priceBarCache.js";
 import { addCalendarDays } from "../lib/calendarDays.js";
 import { calendarDaysBetween, easternIsoDate, easternMinutesOfDay } from "../lib/easternIsoDate.js";
@@ -10,9 +11,11 @@ import { normalizeBarVolume } from "../lib/normalizeBarVolume.js";
 import { openBacktestDataFileForWriting, openBacktestDataFileReadOnly } from "./backtestDataFile.js";
 import {
   addFileStockBars,
-  fileDailyBarYears,
+  addOlderFileDailyBars,
+  fileDailyBarsStartDate,
   fileStockBarsVersion,
   intradayBarKey,
+  readFileDailyBars,
   readFileStockBarsTail,
   summarizeFileStockBars,
   writeFileStockBars,
@@ -25,7 +28,9 @@ import { ibkrEndDateTime } from "./marketStressBars.js";
 // Fetches a symbol's IBKR stock bars into its data file (backtestFileStockBars.ts): read-only historical requests through
 // the Gateway, one at a time with a pause between them (IBKR paces historical data). The last month (3 requests) is
 // written over the stored bars when the two agree to the cent on every day they share; otherwise, or when the file's bars
-// cannot take it, every bar is fetched again (2 requests and one a year) and replaces them.
+// cannot take it, every bar is fetched again (2 requests and one a year) and replaces them. With extendDailyBarsBack the
+// daily bars reaching fileDailyBarsStartDate (2 requests) are asked for instead of the last month, and the days before the
+// file's first one are added when IBKR's closes equal every stored one to the cent.
 
 const requestTimeoutMilliseconds = 120_000;
 
@@ -38,8 +43,8 @@ export class FileStockBarsCancelledError extends Error {
 
 export interface FileStockBarsRefresh {
   symbol: string;
-  /** "tail": the last month written over the stored bars; "full": every bar fetched again and replaced. */
-  kind: "tail" | "full";
+  /** "tail": the last month written over the stored bars; "older_daily_bars": the daily bars before the file's first one added (extendDailyBarsBack); "full": every bar fetched again and replaced. */
+  kind: "tail" | "older_daily_bars" | "full";
   /** Why every bar was fetched again; null after a tail. */
   fullRefreshReason: string | null;
   dailyBars: number;
@@ -58,8 +63,8 @@ const optionsBeforeStockPricesToleranceDays = 14;
 
 /**
  * Null, or why the file's options cannot be this stock's: they start more than 14 days before IBKR's first daily bar (a
- * symbol that belonged to another security first, as SPCX did before SpaceX). IBKR's daily history reaches 20 years back,
- * so an older stock's first bar is never after its options.
+ * symbol that belonged to another security first, as SPCX did before SpaceX). The daily bars reach back to 2000, so an
+ * older stock's first bar is never after its options.
  */
 /** The file's options start before IBKR's stock prices (optionsStartBeforeStockPrices): retrying cannot help. */
 export class FileOptionsPredateStockError extends Error {
@@ -87,6 +92,13 @@ export interface FileStockBarsRefreshOptions {
   onRequest?: (label: string, done: number, total: number) => void;
   isCancelled?: () => boolean;
   now?: Date;
+  /**
+   * Asks for the daily bars and implied volatility reaching fileDailyBarsStartDate instead of the last month, and adds the
+   * days before the file's first daily bar when IBKR's close equals every stored one to the cent (the same split
+   * adjustment), keeping every stored bar; else fetches every bar again, with these daily bars. For files fetched when the
+   * daily bars reached back 20 years.
+   */
+  extendDailyBarsBack?: boolean;
 }
 
 /** The tail: the last month of daily bars, implied volatility and 30-minute bars, one request each. */
@@ -129,6 +141,19 @@ export function reasonTailDiffers(stored: StoredFileStockBarsTail, daily: readon
   return `IBKR's prices changed on ${differingDaily.length} of ${sharedDaily.length} shared days and ${differingIntraday.length} of ${sharedIntraday.length} shared 30-minute bars (${example}): a split or other adjustment since the last fetch`;
 }
 
+/**
+ * Null when IBKR's daily bars share at least one day with the file's and every shared close is the same to the cent, so
+ * their older days can be added before the file's; else why they cannot.
+ */
+export function reasonDailyBarsDiffer(storedCloseByDate: ReadonlyMap<string, number | null>, daily: readonly StoredDailyBar[]): string | null {
+  const shared = daily.filter((bar) => storedCloseByDate.has(bar.tradingDate));
+  if (shared.length === 0) return "IBKR's daily bars share no day with the file's";
+  const differing = shared.filter((bar) => !sameToTheCent(bar.close, storedCloseByDate.get(bar.tradingDate)));
+  if (differing.length === 0) return null;
+  const example = differing[0]!;
+  return `IBKR's prices changed on ${differing.length} of ${shared.length} shared days (${example.tradingDate} close ${storedCloseByDate.get(example.tradingDate)} stored, ${example.close} now): a split or other adjustment since the last fetch`;
+}
+
 function readStoredTail(symbol: string, lastDateToStore: string): StoredFileStockBarsTail | null {
   const database = openBacktestDataFileReadOnly(symbol);
   if (!database) return null;
@@ -139,12 +164,25 @@ function readStoredTail(symbol: string, lastDateToStore: string): StoredFileStoc
   }
 }
 
+/** Every daily close the file holds, by date; empty when it has none. */
+function readStoredDailyCloses(symbol: string): Map<string, number | null> {
+  const database = openBacktestDataFileReadOnly(symbol);
+  if (!database) return new Map();
+  try {
+    return new Map((readFileDailyBars(database) ?? []).map((bar) => [bar.tradingDate, bar.close]));
+  } finally {
+    database.close();
+  }
+}
+
 /**
  * Brings the file's IBKR bars up to `lastDateToStore`. When the file's bars can take it (reasonToFetchEveryBar), the last
  * month of daily bars, implied volatility and 30-minute bars is fetched and, when it agrees with them (reasonTailDiffers),
- * written over the same days. Otherwise every bar is fetched again: daily bars and implied volatility for the last 20 years
- * (one request each), then 30-minute bars year by year from the first option day's year (one request a year), written over
- * the file's previous bars at once. Throws when IBKR returns no daily or no 30-minute bars: the file then keeps the bars it had.
+ * written over the same days. Otherwise every bar is fetched again: daily bars and implied volatility reaching
+ * fileDailyBarsStartDate (one request each), then 30-minute bars year by year from the first option day's year (one
+ * request a year), written over the file's previous bars at once. Throws when IBKR returns no daily or no 30-minute bars:
+ * the file then keeps the bars it had. With extendDailyBarsBack the daily bars reaching fileDailyBarsStartDate take the
+ * last month's place: only the days before the file's first one are added (reasonDailyBarsDiffer), none after its last.
  */
 export async function refreshFileStockBars(connection: IbkrConnection, symbol: string, options: FileStockBarsRefreshOptions): Promise<FileStockBarsRefresh> {
   const now = options.now ?? new Date();
@@ -158,7 +196,13 @@ export async function refreshFileStockBars(connection: IbkrConnection, symbol: s
     requestsDone += 1;
     return result;
   };
-  const isStored = (tradingDate: string) => tradingDate <= options.lastDateToStore;
+  const isStored = (tradingDate: string) => tradingDate >= fileDailyBarsStartDate && tradingDate <= options.lastDateToStore;
+  const everyDailyBarDuration = historyDurationReaching(fileDailyBarsStartDate, now);
+  const everyDailyBarSpan = `from ${fileDailyBarsStartDate}`;
+  const checkOptionsAfterStockPrices = (firstDailyBarDate: string) => {
+    const mixedSecurities = optionsStartBeforeStockPrices(symbol, options.firstOptionDay, firstDailyBarDate);
+    if (mixedSecurities) throw new FileOptionsPredateStockError(mixedSecurities);
+  };
 
   /** Daily bars and their implied volatility over `duration`; a failed implied-volatility request leaves it null. */
   const fetchDailyBars = async (duration: string, span: string, checkFirstBar: (firstDate: string) => void) => {
@@ -194,9 +238,20 @@ export async function refreshFileStockBars(connection: IbkrConnection, symbol: s
 
   const stored = readStoredTail(symbol, options.lastDateToStore);
   let fullRefreshReason = reasonToFetchEveryBar(stored, options.firstOptionDay, options.lastDateToStore);
-  if (stored && fullRefreshReason === null) {
-    const mixedSecurities = optionsStartBeforeStockPrices(symbol, options.firstOptionDay, stored.dailyFirstDate);
-    if (mixedSecurities) throw new FileOptionsPredateStockError(mixedSecurities);
+  let everyDailyBar: Awaited<ReturnType<typeof fetchDailyBars>> | null = null;
+  if (stored && fullRefreshReason === null && options.extendDailyBarsBack) {
+    checkOptionsAfterStockPrices(stored.dailyFirstDate);
+    totalRequests = 2;
+    everyDailyBar = await fetchDailyBars(everyDailyBarDuration, everyDailyBarSpan, checkOptionsAfterStockPrices);
+    if (everyDailyBar.impliedVolatilityError) throw new Error(`IBKR's implied volatility request failed (${everyDailyBar.impliedVolatilityError}): no older daily bars written.`);
+    fullRefreshReason = reasonDailyBarsDiffer(readStoredDailyCloses(symbol), everyDailyBar.daily);
+    if (fullRefreshReason === null) {
+      const { daily } = everyDailyBar;
+      const summary = writeAndSummarize((database) => addOlderFileDailyBars(database, daily));
+      return { symbol, kind: "older_daily_bars", fullRefreshReason: null, impliedVolatilityError: null, ...summary };
+    }
+  } else if (stored && fullRefreshReason === null) {
+    checkOptionsAfterStockPrices(stored.dailyFirstDate);
     totalRequests = 3;
     const { daily, impliedVolatilityError } = await fetchDailyBars(tailDuration, "last month", () => {});
     const intraday = (
@@ -215,11 +270,8 @@ export async function refreshFileStockBars(connection: IbkrConnection, symbol: s
   const lastYear = Number(options.lastDateToStore.slice(0, 4));
   const firstIntradayYear = Number(options.firstOptionDay.slice(0, 4));
   const intradayYears = Array.from({ length: Math.max(0, lastYear - firstIntradayYear + 1) }, (_, index) => firstIntradayYear + index);
-  totalRequests = requestsDone + 2 + intradayYears.length;
-  const { daily, impliedVolatilityError } = await fetchDailyBars(`${fileDailyBarYears} Y`, `${fileDailyBarYears} years`, (firstDate) => {
-    const mixedSecurities = optionsStartBeforeStockPrices(symbol, options.firstOptionDay, firstDate);
-    if (mixedSecurities) throw new FileOptionsPredateStockError(mixedSecurities);
-  });
+  totalRequests = requestsDone + (everyDailyBar ? 0 : 2) + intradayYears.length;
+  const { daily, impliedVolatilityError } = everyDailyBar ?? (await fetchDailyBars(everyDailyBarDuration, everyDailyBarSpan, checkOptionsAfterStockPrices));
 
   const intraday: FileIntradayBar[] = [];
   for (const year of intradayYears) {
@@ -244,7 +296,7 @@ export function describeFileStockBarsRefresh(result: FileStockBarsRefresh): stri
   const parts = [
     `${result.symbol}: ${result.dailyBars} daily bars ${result.dailyFirstDate} → ${result.dailyLastDate} (${result.impliedVolatilityDays} with implied volatility)`,
     `${result.intradayBars} 30-minute bars ${result.intradayFirstDate} → ${result.intradayLastDate}`,
-    result.kind === "tail" ? "last month added" : `every bar fetched again: ${result.fullRefreshReason}`,
+    result.kind === "tail" ? "last month added" : result.kind === "older_daily_bars" ? "older daily bars added before the stored ones" : `every bar fetched again: ${result.fullRefreshReason}`,
   ];
   if (result.impliedVolatilityError) parts.push(`implied volatility failed: ${result.impliedVolatilityError}`);
   return parts.join("; ");
