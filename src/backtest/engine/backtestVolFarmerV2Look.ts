@@ -13,7 +13,7 @@ import { buyLeapsCall, expirySettlementInstant, openCashSecuredPut, openCoveredC
 import { optionCommissionDollars, stockCommissionDollars } from "./ledger/ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
 import { cycleSplitFactorFor, cycleStartSplitFactor, isSymbolFlat, legsOfPosition, positionsOfSymbol, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
-import { newVolFarmerV2SymbolState, runVolFarmerV2Turn, stepImpliedVolatilityLookbackSessions, volFarmerV2BreakEven, volFarmerV2TurnOrder, type VolFarmerV2Book, type VolFarmerV2CashCut, type VolFarmerV2Market, type VolFarmerV2Position, type VolFarmerV2SymbolState } from "./volFarmerV2Steps.js";
+import { newVolFarmerV2SymbolState, runVolFarmerV2Turn, volFarmerV2BreakEven, volFarmerV2TurnOrder, type VolFarmerV2Book, type VolFarmerV2CashCut, type VolFarmerV2Market, type VolFarmerV2Position, type VolFarmerV2SymbolState } from "./volFarmerV2Steps.js";
 
 // Vol Farmer v2 in the backtest: the shared steps (volFarmerV2Steps.ts, where the rules are) on the simulated ledger, at
 // the 10:00 look only or at every look (volFarmerV2.looks; a later look reads its own quotes and price). Each order the
@@ -43,14 +43,11 @@ function stateOf(ledger: SimulatedLedger, symbol: string): VolFarmerV2SymbolStat
   return state;
 }
 
-/** IBKR's 30-day implied volatility of the latest daily bar before `todayIso`, within the last 10 sessions; null when none. */
-export function impliedVolatilityBefore(bars: BacktestBarHistory, todayIso: string): number | null {
-  const recent = bars.rowsBefore(todayIso, stepImpliedVolatilityLookbackSessions);
-  for (let index = recent.length - 1; index >= 0; index -= 1) {
-    const impliedVolatility = recent[index]!.impliedVolatility;
-    if (impliedVolatility !== null && impliedVolatility > 0) return impliedVolatility;
-  }
-  return null;
+/** IBKR's 30-day implied volatility stored for the previous session (`previousSessionIso`, the calendar's); null when its bar has none. */
+export function previousSessionImpliedVolatility(bars: BacktestBarHistory, previousSessionIso: string | null): number | null {
+  if (previousSessionIso === null) return null;
+  const impliedVolatility = bars.impliedVolatilityOn(previousSessionIso);
+  return impliedVolatility !== null && impliedVolatility > 0 ? impliedVolatility : null;
 }
 
 /**
@@ -119,7 +116,7 @@ function marketOf(context: BacktestLookContext, lookSymbol: BacktestLookSymbol, 
     yearsToTodaysClose,
     yearsToExpiry: (expiry) => Math.max(0, expirySettlementInstant(expiry).getTime() - at.getTime()) / millisecondsPerYear,
     leapsCallQuotes: lookSymbol.leapsCallQuotes,
-    stepImpliedVolatility: () => impliedVolatilityBefore(lookSymbol.bars, todayIso),
+    stepImpliedVolatility: () => previousSessionImpliedVolatility(lookSymbol.bars, context.calendar.sessionBefore(todayIso)),
     tradingSessionsThrough: (expiry) => context.calendar.sessionsHeld(todayIso, expiry),
     priceToCycleScale: cycleSplitFactorFor(ledger, symbol, lookSymbol.splitFactorToday, at) / lookSymbol.splitFactorToday,
     optionContractsRepresentable: lookSymbol.optionContractsRepresentable,

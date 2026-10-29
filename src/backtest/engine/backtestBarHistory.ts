@@ -63,6 +63,13 @@ export class BacktestBarHistory {
     return row && row.tradingDate === dateIso ? row.open : null;
   }
 
+  /** The implied volatility stored for exactly `dateIso`. */
+  impliedVolatilityOn(dateIso: string): number | null {
+    const index = this.countBefore(dateIso);
+    const row = this.rows[index];
+    return row && row.tradingDate === dateIso ? row.impliedVolatility : null;
+  }
+
   /** The last close before `dateIso` with its date (loadPreviousClose). */
   previousClose(dateIso: string): { close: number; dateIso: string } | null {
     for (let index = this.countBefore(dateIso) - 1; index >= 0; index--) {

@@ -235,9 +235,11 @@ export interface BacktestBaselineSettings {
  * per sector are shares of the capital budget, not of the account (2026-10-16). 3: a call's break-even floor is the
  * cycle's cash break-even, counting what shares that left the cycle brought in (2026-10-20). 4: every premium yield and
  * hedge Put's yearly cost is annualized over the trading sessions held ÷ 252, not the calendar days to expiry ÷ 365
- * (Marcelo 2026-10-29, tradingSessionsHeld.ts).
+ * (Marcelo 2026-10-29, tradingSessionsHeld.ts). 5: Vol Farmer v2's implied-move Step reads only the previous session's IV;
+ * without it the look sells no Put and makes no LEAPS entry, where it used the latest IV of 10 sessions or the fixed Step
+ * (Marcelo 2026-10-29).
  */
-export const backtestEngineVersion = 4;
+export const backtestEngineVersion = 5;
 
 export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", hedgePutTenorDays: 0, hedgePutExpiry: "nearest", hedgePutStrikeFrom: "stock_price", hedgePutBelowPricePct: 0, hedgePutSize: "share_level", hedgePutCoveragePct: 100, hedgePutRollDaysLeft: 7, hedgePutCovers: "entries", hedgePutStaggeredExpiries: 3, hedgePutStrikeBy: "price", hedgePutAbsDelta: 0.25, hedgePutPriceGate: "off", hedgePutCostFallShare: 0.3, hedgePutIvMultiple: 1.3, hedgeInBreakEven: "excluded", hedgePutTurnover: "sell_when_shares_leave", hedgePutTurnoverDays: 30, hedgePutFarBelowPct: 10 };
 
@@ -1475,7 +1477,8 @@ export interface BacktestCycleTimelineRow {
   positionBreakEvens?: { first: number | null; second: number | null };
   /**
    * Vol Farmer v2 with the Step at each Put sale: the Step the Put's strike was capped by, % below B-E¹, and the IV it came
-   * from (null: no IV in the 10 sessions before, the fixed Step). Absent on other rows and on sessions run before 2026-10-27.
+   * from (null only before engine 5: no IV in the 10 sessions before, the fixed Step). Absent on other rows and on sessions
+   * run before 2026-10-27.
    */
   putStep?: { stepPct: number; impliedVolatility: number | null };
   /** The shares the cycle held once the row's moment (its look's orders, or the end's marks) was done, as traded on the row's day; added when the cycle is read. */

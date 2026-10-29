@@ -1,6 +1,6 @@
 import { baselineMaxVolumeShare, baselineMinimumBid } from "../backtest/engine/baselineSaleSteps.js";
 import { ladderBudget, ladderRungCollateral, ladderStrikeCap } from "../backtest/engine/backtestBaselineLadder.js";
-import { stepImpliedVolatilityLookbackSessions, volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap } from "../backtest/engine/volFarmerV2Steps.js";
+import { volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap } from "../backtest/engine/volFarmerV2Steps.js";
 import { flatStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { tradingSessionsPerYear } from "../lib/tradingSessionsHeld.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
@@ -99,9 +99,8 @@ export interface PlutoHowItWorks {
     putsStartCallYieldPct: number;
     putMaxAbsDelta: number;
     stepRule: PlutoSettings["volFarmerV2StepRule"];
-    /** The fixed Step, and the implied-move Step's fallback. */
+    /** The fixed rule's Step. */
     stepBelowFirstBreakEvenPct: number;
-    stepLookbackSessions: number;
     leapsMinDte: number;
     leapsAbsDelta: number;
     leapsMaxAllocationPct: number;
@@ -139,7 +138,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
   }
 
 
-  const volFarmerV2Step = settings.volFarmerV2StepRule === "implied_move_at_put_sale" ? volFarmerV2ImpliedMoveStep(settings.volFarmerV2StepBelowFirstBreakEvenPct, volFarmerV2ExampleImpliedVolatility).stepPct : settings.volFarmerV2StepBelowFirstBreakEvenPct;
+  const volFarmerV2Step = settings.volFarmerV2StepRule === "implied_move_at_put_sale" ? volFarmerV2ImpliedMoveStep(volFarmerV2ExampleImpliedVolatility).stepPct : settings.volFarmerV2StepBelowFirstBreakEvenPct;
   const volFarmerV2LotCost = volFarmerV2ExampleStockPrice * 100 + flatStockCommissionEstimator.perShareDollars("buy") * 100;
 
   return {
@@ -189,7 +188,6 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       putMaxAbsDelta: settings.volFarmerV2PutMaxAbsDelta,
       stepRule: settings.volFarmerV2StepRule,
       stepBelowFirstBreakEvenPct: settings.volFarmerV2StepBelowFirstBreakEvenPct,
-      stepLookbackSessions: stepImpliedVolatilityLookbackSessions,
       leapsMinDte: settings.volFarmerV2LeapsMinDte,
       leapsAbsDelta: settings.volFarmerV2LeapsAbsDelta,
       leapsMaxAllocationPct: settings.volFarmerV2LeapsMaxAllocationPct,

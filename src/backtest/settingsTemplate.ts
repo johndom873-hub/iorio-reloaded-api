@@ -192,13 +192,13 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
   },
   { path: "volFarmerV2.putsStartCallYieldPct", label: "Puts start under", unit: "percent", editable: true, note: "% a year: Puts start while the first position's Calls yield under this. At each look where the first position needs a new Call (none open), the best Call the first position can sell (at or above its break-even, the Vol Farmer's |delta| range, the next expiry) is measured by its premium yield; under this (no Call: 0%), Puts are sold with the other half of the pot, beside the Calls" },
   { path: "volFarmerV2.putMaxAbsDelta", label: "Put |delta|", unit: "number", editable: true, note: "the Puts' highest |delta|: the Put sold is the one with the highest premium yield of the next expiry up to this |delta|, struck far enough below the first position's break-even (next row); as many contracts as half the pot secures (strike × 100 each)" },
-  { path: "volFarmerV2.stepBelowFirstBreakEvenPct", label: "Step", unit: "percent", editable: true, note: "% at least below the first break-even: a Put's strike ≤ the first position's break-even × (1 − this ÷ 100), so the second position opens lower than the first (0 to 90); the Step with the Fixed Step rule, and the implied-move rule's Step when no IV is found" },
+  { path: "volFarmerV2.stepBelowFirstBreakEvenPct", label: "Step", unit: "percent", editable: true, note: "% at least below the first break-even: a Put's strike ≤ the first position's break-even × (1 − this ÷ 100), so the second position opens lower than the first (0 to 90); the Step with the Fixed Step rule" },
   {
     path: "volFarmerV2.stepRule",
     label: "Step rule",
     unit: "choice",
     editable: true,
-    note: "Fixed: the Step above. One-month implied move: Step = IV × √(21 ÷ 252), IV being IBKR's 30-day implied volatility of the latest daily bar before the day (within 10 sessions; none: the fixed Step), taken at each Put sale. IV 30% gives a Step of 8.7%",
+    note: "Fixed: the Step above. One-month implied move: Step = IV × √(21 ÷ 252), IV being IBKR's 30-day implied volatility of the session before the day, taken at each Put sale; without it the look sells no Put and makes no LEAPS entry. IV 30% gives a Step of 8.7%",
     choices: [
       { value: "fixed", label: "Fixed" },
       { value: "implied_move_at_put_sale", label: "One-month implied move, at each Put sale" },

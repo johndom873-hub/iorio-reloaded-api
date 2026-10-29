@@ -118,12 +118,9 @@ export interface VolFarmerV2Step {
   impliedVolatility: number | null;
 }
 
-/** How many sessions back the implied-move Step looks for IBKR's 30-day IV before falling back to the fixed Step. */
-export const stepImpliedVolatilityLookbackSessions = 10;
-
-/** The one-month implied move as the Step: IV × √(21 ÷ 252), in %; the fixed Step without an IV (Marcelo 2026-10-27). */
-export function volFarmerV2ImpliedMoveStep(fixedStepPct: number, impliedVolatility: number | null): VolFarmerV2Step {
-  return impliedVolatility === null ? { stepPct: fixedStepPct, impliedVolatility: null } : { stepPct: impliedVolatility * Math.sqrt(21 / 252) * 100, impliedVolatility };
+/** The one-month implied move as the Step: IV × √(21 ÷ 252), in % (Marcelo 2026-10-27). */
+export function volFarmerV2ImpliedMoveStep(impliedVolatility: number): VolFarmerV2Step {
+  return { stepPct: impliedVolatility * Math.sqrt(21 / 252) * 100, impliedVolatility };
 }
 
 /**
@@ -158,9 +155,14 @@ export function volFarmerV2CallPremiumShare(fillPrice: number, positionContracts
   return fillPrice * sharesPerContract * positionContracts - (orderCommissionDollars * positionContracts) / orderContracts;
 }
 
-/** The Step at this look as stepRule sets it: the fixed Step, or the one-month implied move (the fixed Step without an IV). */
-function volFarmerV2StepAtLook(v2: BacktestVolFarmerV2Settings, market: Pick<VolFarmerV2Market, "stepImpliedVolatility">): VolFarmerV2Step {
-  return v2.stepRule === "implied_move_at_put_sale" ? volFarmerV2ImpliedMoveStep(v2.stepBelowFirstBreakEvenPct, market.stepImpliedVolatility()) : { stepPct: v2.stepBelowFirstBreakEvenPct, impliedVolatility: null };
+/**
+ * The Step at this look as stepRule sets it: the fixed Step, or the one-month implied move from the previous session's IV.
+ * Null when the implied-move rule finds no IV for the previous session: no Put and no LEAPS entry then (Marcelo 2026-10-29).
+ */
+function volFarmerV2StepAtLook(v2: BacktestVolFarmerV2Settings, market: Pick<VolFarmerV2Market, "stepImpliedVolatility">): VolFarmerV2Step | null {
+  if (v2.stepRule !== "implied_move_at_put_sale") return { stepPct: v2.stepBelowFirstBreakEvenPct, impliedVolatility: null };
+  const impliedVolatility = market.stepImpliedVolatility();
+  return impliedVolatility === null ? null : volFarmerV2ImpliedMoveStep(impliedVolatility);
 }
 
 /** The highest price the Step entry buys a LEAPS at, as traded today: B-E2 × (1 − Step ÷ 100) (Marcelo 2026-10-28). */
@@ -216,7 +218,7 @@ export interface VolFarmerV2Market {
   yearsToExpiry(expiry: string): number;
   /** The long-dated Calls the LEAPS is chosen from; absent when none are quoted at this look. */
   leapsCallQuotes: HedgePutQuoteSource | undefined;
-  /** IBKR's 30-day IV the implied-move Step reads; null when none is recent enough. */
+  /** IBKR's 30-day IV stored for the session before the look's, which the implied-move Step reads; null when it has none. */
   stepImpliedVolatility(): number | null;
   /** The trading sessions from today's to an expiry's, both in full: what the premium yields are annualized over (tradingSessionsHeld.ts). */
   tradingSessionsThrough(expiry: string): number;
@@ -567,23 +569,20 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
     const firstBreakEven = breakEvenAsTraded(first)!;
     const bestCall = callCandidates(firstBreakEven, false).calls[0] ?? null;
     const bestYield = bestCall?.premiumYield ?? 0;
-    if (bestYield * 100 < v2.putsStartCallYieldPct) {
-      const step = volFarmerV2StepAtLook(v2, market);
+    const trigger = bestCall === null ? `no Call at or above the first break-even ${firstBreakEven.toFixed(2)}` : `the best Call at or above the first break-even ${firstBreakEven.toFixed(2)} yields ${percent(bestYield, 2)} a year, under ${v2.putsStartCallYieldPct}%`;
+    const putsTriggered = bestYield * 100 < v2.putsStartCallYieldPct;
+    const step = putsTriggered ? volFarmerV2StepAtLook(v2, market) : null;
+    if (putsTriggered && step === null) say(`no Put: ${trigger}, but the previous session has no IV for the Step`);
+    else if (step !== null) {
       const strikeCap = volFarmerV2PutStrikeCap(firstBreakEven, step.stepPct);
       // The implied-move rule says which Step it used and records it with the Put; the fixed rule's records stay as they were.
-      const stepNote =
-        v2.stepRule === "fixed"
-          ? ""
-          : step.impliedVolatility === null
-            ? ` (Step ${step.stepPct.toFixed(1)}%: no IV in the last ${stepImpliedVolatilityLookbackSessions} sessions, the fixed Step)`
-            : ` (Step ${step.stepPct.toFixed(1)}%: IV ${percent(step.impliedVolatility)} × √(21 ÷ 252))`;
+      const stepNote = step.impliedVolatility === null ? "" : ` (Step ${step.stepPct.toFixed(1)}%: IV ${percent(step.impliedVolatility)} × √(21 ÷ 252))`;
       const stepScores: Record<string, number | null> = v2.stepRule === "fixed" ? {} : { stepPct: step.stepPct, stepImpliedVolatility: step.impliedVolatility };
       const { candidates: puts, rejections } = candidatesOf("P", { minAbsDelta: 0, maxAbsDelta: v2.putMaxAbsDelta, maximumStrike: strikeCap, heldExcluded: true });
       const freeCash = book.freeCash();
       const potContracts = (candidate: BaselineCandidate) => Math.floor(state.potDollars / 2 / (candidate.strike * sharesPerContract) + 1e-9);
       const wanted = (candidate: BaselineCandidate) => Math.min(potContracts(candidate), Math.floor(freeCash / (candidate.strike * sharesPerContract) + 1e-9));
       const put = pickByVolume(puts, wanted, (candidate) => candidate.volumeCap);
-      const trigger = bestCall === null ? `no Call at or above the first break-even ${firstBreakEven.toFixed(2)}` : `the best Call at or above the first break-even ${firstBreakEven.toFixed(2)} yields ${percent(bestYield, 2)} a year, under ${v2.putsStartCallYieldPct}%`;
       // A book that records cash cuts hears of them, and the note names them: half the pot wants a Put the free cash
       // secures no contract of, or fewer than it wants.
       const recordsCashCuts = book.noteCashCut !== undefined;
@@ -704,8 +703,9 @@ function leapsEntry(input: VolFarmerV2LookInput, secondBreakEvenAsTraded: number
   const { stockPrice } = market;
   if (stockPrice >= secondBreakEvenAsTraded) return { buys: false, reason: `no LEAPS: the price ${stockPrice.toFixed(2)} is at or above B-E2 ${secondBreakEvenAsTraded.toFixed(2)}` };
   const step = volFarmerV2StepAtLook(v2, market);
+  if (step === null) return { buys: false, reason: "no LEAPS: the previous session has no IV for the Step" };
   const priceCap = volFarmerV2LeapsEntryPriceCap(secondBreakEvenAsTraded, step.stepPct / 2);
-  const stepSource = step.impliedVolatility === null ? (v2.stepRule === "fixed" ? "the fixed Step" : `no IV in the last ${stepImpliedVolatilityLookbackSessions} sessions, the fixed Step`) : `IV ${percent(step.impliedVolatility)} × √(21 ÷ 252)`;
+  const stepSource = step.impliedVolatility === null ? "the fixed Step" : `IV ${percent(step.impliedVolatility)} × √(21 ÷ 252)`;
   const halfStep = `less half the Step ${step.stepPct.toFixed(1)}% (${stepSource}): ${priceCap.toFixed(2)}`;
   if (stockPrice <= priceCap) return { buys: true, reason: `the price ${stockPrice.toFixed(2)} is at or below the second position's break-even ${secondBreakEvenAsTraded.toFixed(2)} ${halfStep}` };
   return { buys: false, reason: `no LEAPS: the price ${stockPrice.toFixed(2)} is above B-E2 ${secondBreakEvenAsTraded.toFixed(2)} ${halfStep}` };

@@ -8,7 +8,7 @@ import { BacktestBarHistory } from "./backtestBarHistory.js";
 import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
-import { describeVolFarmerV2Run, impliedVolatilityBefore, runVolFarmerV2Look, volFarmerV2TickerShares } from "./backtestVolFarmerV2Look.js";
+import { describeVolFarmerV2Run, previousSessionImpliedVolatility, runVolFarmerV2Look, volFarmerV2TickerShares } from "./backtestVolFarmerV2Look.js";
 import { chooseVolFarmerV2Leaps, contractsAffordable, volFarmerV2BreakEven, volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2LeapsEntryPriceCap, volFarmerV2PutStrikeCap, volFarmerV2TurnOrder } from "./volFarmerV2Steps.js";
 import { alignOpenOptionLegsToSplitFactor, expirySettlementInstant, settleExpiry } from "./ledger/ledgerEvents.js";
 import { optionCommissionDollars, optionPurchaseFillPrice, optionSaleFillPrice, stockCommissionDollars } from "./ledger/ledgerFills.js";
@@ -45,22 +45,22 @@ describe("the v2 formulas", () => {
     expect(volFarmerV2PutStrikeCap(246, 15)).toBeCloseTo(209.1, 10);
   });
 
-  it("takes the one-month implied move as the Step, from the latest IV of the 10 sessions before the day", () => {
-    // IV 60%: 60 × √(21 ÷ 252) = 17.32% below the first break-even; no IV, the fixed Step.
-    expect(volFarmerV2ImpliedMoveStep(15, 0.6).stepPct).toBeCloseTo(17.3205, 4);
-    expect(volFarmerV2ImpliedMoveStep(15, null)).toEqual({ stepPct: 15, impliedVolatility: null });
-    // IV on the 1st, none on the 2nd to the 11th, IV again on the 12th.
-    const days = Array.from({ length: 12 }, (_, index) => `2026-03-${String(index + 1).padStart(2, "0")}`);
-    const bars = barsWithImpliedVolatility(days.map((day, index): [string, number | null] => [day, index === 0 ? 0.5 : index === 11 ? 0.7 : null]));
-    // On the 11th the 10 sessions before it reach back to the 1st; on the 12th they don't, and its own bar is not before it.
-    expect(impliedVolatilityBefore(bars, "2026-03-11")).toBe(0.5);
-    expect(impliedVolatilityBefore(bars, "2026-03-12")).toBeNull();
-    expect(impliedVolatilityBefore(bars, "2026-03-13")).toBe(0.7);
+  it("takes the one-month implied move as the Step, from the IV stored for the previous session only", () => {
+    // IV 60%: 60 × √(21 ÷ 252) = 17.32% below the first break-even.
+    expect(volFarmerV2ImpliedMoveStep(0.6).stepPct).toBeCloseTo(17.3205, 4);
+    // IV on Monday 2 March, a bar without one on Tuesday 3rd, an IV of 0 on Wednesday 4th, no bar on Thursday 5th.
+    const bars = barsWithImpliedVolatility([["2026-03-02", 0.5], ["2026-03-03", null], ["2026-03-04", 0]]);
+    expect(previousSessionImpliedVolatility(bars, "2026-03-02")).toBe(0.5);
+    // Monday's IV never stands in for a later session's missing one.
+    expect(previousSessionImpliedVolatility(bars, "2026-03-03")).toBeNull();
+    expect(previousSessionImpliedVolatility(bars, "2026-03-04")).toBeNull();
+    expect(previousSessionImpliedVolatility(bars, "2026-03-05")).toBeNull();
+    expect(previousSessionImpliedVolatility(bars, null)).toBeNull();
   });
 
   it("buys the LEAPS half a Step below B-E2", () => {
     // B-E2 $100, IV 60%: Step 17.32%, so the LEAPS is bought at $91.34 or lower.
-    expect(volFarmerV2LeapsEntryPriceCap(100, volFarmerV2ImpliedMoveStep(15, 0.6).stepPct / 2)).toBeCloseTo(91.3397, 4);
+    expect(volFarmerV2LeapsEntryPriceCap(100, volFarmerV2ImpliedMoveStep(0.6).stepPct / 2)).toBeCloseTo(91.3397, 4);
   });
 
   it("caps what a LEAPS spends at a share of the account", () => {
@@ -212,7 +212,7 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(assigned.actions.some((action) => action.kind === "open_cash_secured_put")).toBe(false);
   });
 
-  it("takes the Step from IBKR's IV at each Put sale, and the fixed Step without one", async () => {
+  it("takes the Step from the previous session's IV at each Put sale, and sells no Put without it", async () => {
     // IV 30% on Friday 6 March, before the cycle opens on Monday 9 March; 90% on Friday 13 March, before the Put on Monday 16 March.
     const bars = barsWithImpliedVolatility([["2026-03-06", 0.3], ["2026-03-13", 0.9]]);
     const putAfterFall = async (stepRule: VolFarmerV2StepRule, history: BacktestBarHistory) => {
@@ -224,7 +224,8 @@ describe("Vol Farmer v2 at the looks", () => {
       return { firstBreakEven: breakEvenIn(opened.actions[0]!.description, "first"), put, scores: put.candidateScores as { stepPct: number; stepImpliedVolatility: number | null } };
     };
 
-    // At the Put sale the latest IV is Friday's 90%: 90 × √(21 ÷ 252) = 25.98%, so the Put is struck lower than with the fixed 15%.
+    // At the Put sale the previous session's IV is Friday's 90%: 90 × √(21 ÷ 252) = 25.98%, so the Put is struck lower than
+    // with the fixed 15%.
     const fixed = await putAfterFall("fixed", bars);
     const atSale = await putAfterFall("implied_move_at_put_sale", bars);
     expect(atSale.scores.stepPct).toBeCloseTo(90 * Math.sqrt(21 / 252), 10);
@@ -233,10 +234,16 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(atSale.put.contract!.strike).toBeLessThan(fixed.put.contract!.strike!);
     expect(atSale.put.description).toContain("(Step 26.0%: IV 90.0% × √(21 ÷ 252))");
 
-    // No IV in the 10 sessions before the day: the fixed Step, 15%.
-    const withoutIv = await putAfterFall("implied_move_at_put_sale", barsWithImpliedVolatility([]));
-    expect(withoutIv.scores).toMatchObject({ stepPct: 15, stepImpliedVolatility: null });
-    expect(withoutIv.put.description).toContain("(Step 15.0%: no IV in the last 10 sessions, the fixed Step)");
+    // No IV for Friday 13 March, the session before the Put's day, with or without one on Thursday 12th: no Put, and the look
+    // says why.
+    for (const history of [barsWithImpliedVolatility([]), barsWithImpliedVolatility([["2026-03-06", 0.3], ["2026-03-12", 0.9]])]) {
+      const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+      await look(ledger, "2026-03-09", 100, "2026-03-13", { stepRule: "implied_move_at_put_sale" }, 10, history);
+      settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
+      const afterFall = await look(ledger, "2026-03-16", 80, "2026-03-20", { stepRule: "implied_move_at_put_sale" }, 10, history);
+      expect(afterFall.actions.some((action) => action.kind === "open_cash_secured_put")).toBe(false);
+      expect(afterFall.summary).toContain("but the previous session has no IV for the Step");
+    }
   });
 
   it("buys a LEAPS with the free cash, up to the contracts its ask offers, tops it up to the count intended, and sells it whole once the second position is called away", async () => {
@@ -338,8 +345,8 @@ describe("Vol Farmer v2 at the looks", () => {
   });
 
   it("buys the LEAPS once the price is half a Step below B-E2, whatever the Calls, and one a holding", async () => {
-    // IV 60% on Friday 6 March: a Step of 17.32% for the Put and for the LEAPS entry, which waits for half of it.
-    const bars = barsWithImpliedVolatility([["2026-03-06", 0.6]]);
+    // IV 60% on each session before a look: a Step of 17.32% for the Put and for the LEAPS entry, which waits for half of it.
+    const bars = barsWithImpliedVolatility(["2026-03-06", "2026-03-13", "2026-03-20", "2026-03-23", "2026-03-24", "2026-03-25"].map((day): [string, number] => [day, 0.6]));
     const more = { stepRule: "implied_move_at_put_sale" as const };
     const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
     await look(ledger, "2026-03-09", 100, "2026-03-13", more, 10, bars);
@@ -352,7 +359,7 @@ describe("Vol Farmer v2 at the looks", () => {
     const above = await look(ledger, "2026-03-23", 90, "2026-03-27", more, 100, bars);
     expect(leapsBought(above)).toEqual([]);
     const secondBreakEven = Number(/no LEAPS: the price 90\.00 is at or above B-E2 (\d+\.\d+)/.exec(above.summary)![1]);
-    const expectedCap = volFarmerV2LeapsEntryPriceCap(secondBreakEven, volFarmerV2ImpliedMoveStep(15, 0.6).stepPct / 2);
+    const expectedCap = volFarmerV2LeapsEntryPriceCap(secondBreakEven, volFarmerV2ImpliedMoveStep(0.6).stepPct / 2);
     // Between B-E2 less half the Step and B-E2 it waits, and the note gives the price it waits for.
     const waiting = await look(ledger, "2026-03-24", Math.round((expectedCap + secondBreakEven) * 50) / 100, "2026-03-27", more, 100, bars);
     expect(leapsBought(waiting)).toEqual([]);
@@ -364,6 +371,21 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(bought).toHaveLength(1);
     expect(bought[0]!.description).toContain(`at or below the second position's break-even ${secondBreakEven.toFixed(2)} less half the Step 17.3%`);
     expect(leapsBought(await look(ledger, "2026-03-26", Math.floor(priceCap) - 10, "2026-03-27", more, 100, bars))).toEqual([]);
+  });
+
+  it("makes no LEAPS entry without the previous session's IV, however low the price", async () => {
+    // IV for the Put's day only (Friday 13 March); none for Tuesday 24 March, the session before the look at 40.
+    const more = { stepRule: "implied_move_at_put_sale" as const };
+    const bars = barsWithImpliedVolatility([["2026-03-13", 0.6]]);
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    await look(ledger, "2026-03-09", 100, "2026-03-13", more, 10, bars);
+    settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
+    const put = (await look(ledger, "2026-03-16", 80, "2026-03-20", more, 10, bars)).actions[0]!;
+    expect(put.kind).toBe("open_cash_secured_put");
+    settleExpiry(ledger, { legId: openOption(ledger, "put")[0]!.id, expiryClose: put.contract!.strike! - 3 });
+    const result = await look(ledger, "2026-03-25", 40, "2026-03-27", more, 100, bars);
+    expect(result.actions.filter((action) => action.kind === "buy_leaps")).toEqual([]);
+    expect(result.summary).toContain("no LEAPS: the previous session has no IV for the Step");
   });
 
   it("never buys or tops up a LEAPS with the price at or above B-E2, even when no Call fits", async () => {

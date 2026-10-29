@@ -105,8 +105,10 @@ describe("Vol Farmer v2's live reads", () => {
     expect(statuses.get(open)).toEqual({ closed: false, assigned: false, strike: 55, contracts: 2 });
   });
 
-  it("takes the Step's IV from the latest daily bar before today that has one", async () => {
-    expect(await loadVolFarmerV2StepImpliedVolatility(tickerId, "2026-10-20")).toBe(0.42);
-    expect(await loadVolFarmerV2StepImpliedVolatility(tickerId, "2026-10-15")).toBeNull();
+  it("takes the Step's IV from the previous session's bar only", async () => {
+    // Thursday 15 October has an IV, Friday 16th's bar has none, and there is no bar for Monday 19th.
+    expect(await loadVolFarmerV2StepImpliedVolatility(tickerId, "2026-10-16")).toBe(0.42);
+    expect(await loadVolFarmerV2StepImpliedVolatility(tickerId, "2026-10-19")).toBeNull();
+    expect(await loadVolFarmerV2StepImpliedVolatility(tickerId, "2026-10-20")).toBeNull();
   });
 });

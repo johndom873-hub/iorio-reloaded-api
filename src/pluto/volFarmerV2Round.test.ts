@@ -23,6 +23,7 @@ const harness = vi.hoisted(() => ({
   accountFreeCash: 400_000,
   chain: { expirations: [] as string[], strikesByExpiry: new Map<string, number[]>() },
   breakEven: null as number | null,
+  stepImpliedVolatility: null as number | null,
   quotes: [] as unknown[],
   bookCounts: { workingOrders: 0, ordersToday: 0, openPositions: 0 },
   committed: 0,
@@ -105,7 +106,7 @@ vi.mock("./volFarmerV2LookLoader.js", () => ({
   },
   loadVolFarmerV2OrderOutcomes: async (actionIds: string[]) => new Map(actionIds.flatMap((id) => (harness.outcomes.has(id) ? [[id, harness.outcomes.get(id)]] : []))),
   loadVolFarmerV2LegStatuses: async () => new Map(),
-  loadVolFarmerV2StepImpliedVolatility: async () => null,
+  loadVolFarmerV2StepImpliedVolatility: async () => harness.stepImpliedVolatility,
 }));
 
 const { runVolFarmerV2Round, volFarmerV2NoCallQuotedReason } = await import("./volFarmerV2Round.js");
@@ -141,6 +142,8 @@ function withLeapsDue(tickerId: string): void {
   harness.positionsByTickerId.set(tickerId, [{ strategyKey: "covered_call", status: "open", legs: [stockLeg(`${tickerId}-s1`), stockLeg(`${tickerId}-s2`)] }]);
   harness.chain = { expirations: ["20271217"], strikesByExpiry: new Map([["20271217", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
   harness.quotes = [...(harness.quotes as SymbolFileQuote[]), ...quotesAt("C", "2027-12-17", 416)];
+  // The previous session's IV, 0.15 × √12 = 52%: a Step of exactly 15%.
+  harness.stepImpliedVolatility = 0.15 * Math.sqrt(12);
 }
 
 /** What a LEAPS contract costs at the mid of the quote the steps chose it at, its commission included. */
@@ -163,6 +166,7 @@ beforeEach(() => {
   harness.accountFreeCash = 400_000;
   harness.chain = { expirations: [], strikesByExpiry: new Map() };
   harness.breakEven = null;
+  harness.stepImpliedVolatility = null;
   harness.quotes = [...quotesAt("C"), ...quotesAt("P")];
   harness.bookCounts = { workingOrders: 0, ordersToday: 0, openPositions: 0 };
   harness.committed = 0;
@@ -294,6 +298,15 @@ describe("runVolFarmerV2Round", () => {
     const contracts = Math.floor(10_000 / leapsContractCost(leaps!));
     expect(leaps!.quantity).toBe(contracts);
     expect(harness.lastRounds.get("t-VFT")!.notes).toContain(`the free cash ($10,000) held the LEAPS to ${contracts} of the ${Math.floor(25_000 / leapsContractCost(leaps!))} contracts its cap allows`);
+  });
+
+  it("buys no LEAPS without the previous session's IV, and says why", async () => {
+    harness.enabled = [v2Ticker("VFT")];
+    withLeapsDue("t-VFT");
+    harness.stepImpliedVolatility = null;
+    await round();
+    expect(harness.executed.some((order) => order.kind === "leaps_buy")).toBe(false);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toContain("no LEAPS: the previous session has no IV for the Step");
   });
 });
 

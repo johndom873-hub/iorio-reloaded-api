@@ -1,8 +1,8 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import type { VolFarmerV2LegStatus } from "../backtest/engine/volFarmerV2Steps.js";
-import { stepImpliedVolatilityLookbackSessions } from "../backtest/engine/volFarmerV2Steps.js";
 import { settlesAssigned } from "../lib/cycleBreakEven.js";
+import { previousOpenSessionDate } from "../lib/marketSessionStatus.js";
 import { orderFillsPendingSql } from "../lib/orderFills.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { volFarmerV2MemoryFromStored, type VolFarmerV2Memory, type VolFarmerV2OrderOutcome } from "./volFarmerV2LiveBook.js";
@@ -138,12 +138,11 @@ export async function loadVolFarmerV2LegStatuses(legIds: readonly string[], conn
   return statuses;
 }
 
-/** IBKR's 30-day implied volatility of the latest daily bar before today, within the Step's lookback; null when none. */
+/** IBKR's 30-day implied volatility stored for the session before today (market calendar); null when its bar has none. */
 export async function loadVolFarmerV2StepImpliedVolatility(tickerId: string, todayIso: string, connection: Knex = db): Promise<number | null> {
-  const rows: { implied_volatility: string | null }[] = await connection("daily_price_bars").where({ ticker_id: tickerId }).where("trading_date", "<", todayIso).orderBy("trading_date", "desc").limit(stepImpliedVolatilityLookbackSessions).select("implied_volatility");
-  for (const row of rows) {
-    const impliedVolatility = row.implied_volatility === null ? null : Number(row.implied_volatility);
-    if (impliedVolatility !== null && impliedVolatility > 0) return impliedVolatility;
-  }
-  return null;
+  const previousSessionIso = await previousOpenSessionDate(todayIso);
+  const row: { implied_volatility: string | null } | undefined = await connection("daily_price_bars").where({ ticker_id: tickerId, trading_date: previousSessionIso }).first("implied_volatility");
+  const stored = row?.implied_volatility ?? null;
+  const impliedVolatility = stored === null ? null : Number(stored);
+  return impliedVolatility !== null && impliedVolatility > 0 ? impliedVolatility : null;
 }

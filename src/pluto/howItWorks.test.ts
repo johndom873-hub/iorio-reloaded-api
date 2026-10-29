@@ -45,7 +45,7 @@ describe("buildPlutoHowItWorks", () => {
     const { example, ...values } = buildPlutoHowItWorks(settings, figures).volFarmerV2;
     expect(values).toEqual({
       callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, maxSpreadPctOfMid: 50, minimumBid: 0.05, maxVolumeSharePct: 20,
-      putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepRule: "implied_move_at_put_sale", stepBelowFirstBreakEvenPct: 15, stepLookbackSessions: 10,
+      putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepRule: "implied_move_at_put_sale", stepBelowFirstBreakEvenPct: 15,
       leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAllocationPct: 10,
     });
     // Pot 2,000,000 × 20% × 50% = 200,000: floor(100,000 ÷ 10,000.50) = 9 lots. Step 60% × √(21 ÷ 252) = 17.32%, so the
