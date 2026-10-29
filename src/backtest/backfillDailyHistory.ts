@@ -6,6 +6,7 @@ import { ibkrNoSecurityDefinitionErrorCode } from "../ibkr/fetchNewTickerData.js
 import { UnknownSymbolError } from "../ibkr/findOrCreateTicker.js";
 import { detectPriceAdjustment, tradingDateOf, type StoredBarPrices } from "../ibkr/dailyBarSplitCheck.js";
 import { fetchHistoricalBarsRaw, type PriceBar } from "../ibkr/fetchTickerOverview.js";
+import { historyDurationReaching } from "../ibkr/historicalDataDuration.js";
 import { ivBarsToDateMap, storeFreshDailyBars } from "../ibkr/priceBarCache.js";
 import { summarizeBackfillBars } from "../lib/backfillBarSummary.js";
 import { normalizeBarVolume } from "../lib/normalizeBarVolume.js";
@@ -20,12 +21,6 @@ import { normalizeBarVolume } from "../lib/normalizeBarVolume.js";
 // storeFreshDailyBars, which replaces it with a fresh full fetch so the two price bases never mix.
 
 export const backtestHistoryStartDate = "2016-01-01";
-
-/** IBKR's duration for daily bars reaching back to `startDateIso` (whole years: longer durations must be in years). */
-export function historyDurationReaching(startDateIso: string, now: Date): string {
-  const years = (now.getTime() - Date.parse(`${startDateIso}T00:00:00Z`)) / (365.25 * 86_400_000);
-  return `${Math.max(1, Math.ceil(years))} Y`;
-}
 
 export interface BacktestHistoryBackfillResult {
   symbol: string;

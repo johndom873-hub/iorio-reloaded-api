@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { easternInstant } from "../lib/easternIsoDate.js";
-import { addFileStockBars, describeFileStockBars, FileIntradayPrices, intradayBarKey, readFileDailyBars, readFileIntradayPrices, readFileStockBarsTail, summarizeFileStockBars, writeFileStockBars, type FileIntradayBar } from "./backtestFileStockBars.js";
+import { addFileStockBars, addOlderFileDailyBars, describeFileStockBars, FileIntradayPrices, intradayBarKey, readFileDailyBars, readFileIntradayPrices, readFileStockBarsTail, summarizeFileStockBars, writeFileStockBars, type FileIntradayBar } from "./backtestFileStockBars.js";
 
 const dailyBar = (tradingDate: string, close: number) => ({ tradingDate, open: close - 1, high: close + 1, low: close - 2, close, volume: 1_000_000, impliedVolatility: 0.5 });
 const intradayBar = (dateIso: string, startsAt: string, close: number): FileIntradayBar => ({ barStart: easternInstant(dateIso, Number(startsAt.slice(0, 2)), Number(startsAt.slice(3))), open: close, high: close, low: close, close, volume: 1_000 });
@@ -98,6 +98,20 @@ describe("a data file's IBKR stock bars", () => {
       intradayFirstDate: "2026-03-02",
       intradayLastDate: "2026-03-04",
     });
+  });
+
+  it("adds the daily bars before the first stored one, leaving the stored bars, the 30-minute bars and the meta keys as they were", () => {
+    writeFileStockBars(database, first);
+    const added = addOlderFileDailyBars(database, [dailyBar("2026-02-26", 98), { ...dailyBar("2026-02-27", 99), impliedVolatility: null }, dailyBar("2026-03-02", 250)]);
+    expect(added).toBe(2);
+    expect(readFileDailyBars(database)).toEqual([dailyBar("2026-02-26", 98), { ...dailyBar("2026-02-27", 99), impliedVolatility: null }, dailyBar("2026-03-02", 100), dailyBar("2026-03-03", 101)]);
+    expect(readFileIntradayPrices(database, "2026-03-01", "2026-03-31")!.priceAt("2026-03-03", "10:00")).toBe(100.5);
+    expect(metaValue(database, "ibkr_bars_fetched_at")).toBe("2026-10-14T01:00:00.000Z");
+    expect(addOlderFileDailyBars(database, [dailyBar("2026-02-27", 99)])).toBe(0);
+  });
+
+  it("adds no older daily bars to a file without daily bars", () => {
+    expect(() => addOlderFileDailyBars(database, [dailyBar("2026-02-26", 98)])).toThrow("The file has no IBKR daily bars to add older ones before: Update it first.");
   });
 
   it("reads the closes from a date on, the extent of every bar and their version, to check a tail against", () => {

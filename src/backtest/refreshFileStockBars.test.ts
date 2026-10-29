@@ -9,7 +9,7 @@ import type { PriceBar } from "../ibkr/fetchTickerOverview.js";
 import { addCalendarDays } from "../lib/calendarDays.js";
 import { easternInstant } from "../lib/easternIsoDate.js";
 import { intradayBarKey, type FileIntradayBar, type StoredFileStockBarsTail } from "./backtestFileStockBars.js";
-import { optionsStartBeforeStockPrices, reasonTailDiffers, reasonToFetchEveryBar, refreshFileStockBars } from "./refreshFileStockBars.js";
+import { optionsStartBeforeStockPrices, reasonDailyBarsDiffer, reasonTailDiffers, reasonToFetchEveryBar, refreshFileStockBars, type FileStockBarsRefreshOptions } from "./refreshFileStockBars.js";
 
 const fetchHistoricalBarsRaw = vi.hoisted(() => vi.fn());
 vi.mock("../ibkr/fetchTickerOverview.js", () => ({ fetchHistoricalBarsRaw }));
@@ -81,14 +81,49 @@ describe("whether the last month agrees with the file's bars", () => {
   });
 });
 
+describe("whether IBKR's daily bars from 2000 agree with the file's", () => {
+  const dailyBar = (tradingDate: string, close: number) => ({ tradingDate, open: close, high: close, low: close, close, volume: 1_000, impliedVolatility: 0.4 });
+  const storedCloseByDate = new Map<string, number | null>([
+    ["2006-11-01", 50.12],
+    ["2026-10-23", 101.5],
+  ]);
+
+  it("agree when every shared close is the same to the cent, whatever IBKR sends for the older days", () => {
+    expect(reasonDailyBarsDiffer(storedCloseByDate, [dailyBar("2000-01-03", 20), dailyBar("2006-11-01", 50.1249), dailyBar("2026-10-23", 101.5)])).toBeNull();
+  });
+
+  it("differ after a split, which rescales every shared close, on a one-cent change, and when they share no day", () => {
+    expect(reasonDailyBarsDiffer(storedCloseByDate, [dailyBar("2006-11-01", 25.06), dailyBar("2026-10-23", 50.75)])).toBe(
+      "IBKR's prices changed on 2 of 2 shared days (2006-11-01 close 50.12 stored, 25.06 now): a split or other adjustment since the last fetch",
+    );
+    expect(reasonDailyBarsDiffer(storedCloseByDate, [dailyBar("2006-11-01", 50.12), dailyBar("2026-10-23", 101.51)])).toMatch(/^IBKR's prices changed on 1 of 2 shared days \(2026-10-23 close 101.5 stored, 101.51 now\)/);
+    expect(reasonDailyBarsDiffer(storedCloseByDate, [dailyBar("2000-01-03", 20)])).toBe("IBKR's daily bars share no day with the file's");
+  });
+});
+
 describe("refreshing a data file's IBKR bars", () => {
   // IBKR's history in this test: every weekday of 2026 to Monday 26 October, two 30-minute bars a day (09:30 and 15:30).
-  const historyDates: string[] = [];
-  for (let date = "2026-01-02"; date <= "2026-10-26"; date = addCalendarDays(date, 1)) if (![0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay())) historyDates.push(date);
+  // With `ibkrHoldsOlderDays` it also holds the weekdays of the second half of 2025 (daily bars only), and with
+  // `ibkrSendsDayBefore2000` a daily bar on 31 December 1999, as a whole-year duration reaching 2000 brings.
+  const weekdaysBetween = (from: string, to: string) => {
+    const dates: string[] = [];
+    for (let date = from; date <= to; date = addCalendarDays(date, 1)) if (![0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay())) dates.push(date);
+    return dates;
+  };
+  const historyDates = weekdaysBetween("2026-01-02", "2026-10-26");
+  const olderDates = weekdaysBetween("2025-07-01", "2025-12-31");
   const now = new Date("2026-10-27T03:00:00Z");
   let priceScale = 1;
+  let ibkrHoldsOlderDays = false;
+  let ibkrSendsDayBefore2000 = false;
   const closeOn = (index: number) => Math.round((100 + index * 0.37) * 100) / 100;
-  const dailyHistory = (): PriceBar[] => historyDates.map((date, index) => ({ time: Date.parse(`${date}T00:00:00Z`) / 1000, open: closeOn(index) * priceScale, high: closeOn(index) * priceScale, low: closeOn(index) * priceScale, close: closeOn(index) * priceScale, volume: 1_000 }));
+  const olderCloseOn = (index: number) => Math.round((60 + index * 0.25) * 100) / 100;
+  const dailyBarOn = (date: string, close: number): PriceBar => ({ time: Date.parse(`${date}T00:00:00Z`) / 1000, open: close, high: close, low: close, close, volume: 1_000 });
+  const dailyHistory = (): PriceBar[] => [
+    ...(ibkrSendsDayBefore2000 ? [dailyBarOn("1999-12-31", 40 * priceScale)] : []),
+    ...(ibkrHoldsOlderDays ? olderDates.map((date, index) => dailyBarOn(date, olderCloseOn(index) * priceScale)) : []),
+    ...historyDates.map((date, index) => dailyBarOn(date, closeOn(index) * priceScale)),
+  ];
   const intradayHistory = (): PriceBar[] =>
     historyDates.flatMap((date, index) =>
       [
@@ -96,21 +131,21 @@ describe("refreshing a data file's IBKR bars", () => {
         [15, 30, closeOn(index)],
       ].map(([hour, minute, close]) => ({ time: easternInstant(date, hour!, minute!).getTime() / 1000, open: close! * priceScale, high: close! * priceScale, low: close! * priceScale, close: close! * priceScale, volume: 100 })),
     );
-  /** IBKR as this test sees it: "1 M" is the last 30 days, "1 Y" the year up to endDateTime, "20 Y" everything. */
+  /** IBKR as this test sees it: "1 M" is the last 30 days, "N Y" the N years up to endDateTime. */
   const fakeIbkr = (_connection: unknown, _symbol: string, barSize: string, duration: string, _requestId: number, whatToShow: WhatToShow, options: { endDateTime?: string } = {}) => {
     const bars = barSize === "30 mins" ? intradayHistory() : dailyHistory().map((bar) => (whatToShow === WhatToShow.OPTION_IMPLIED_VOLATILITY ? { ...bar, close: 0.4 } : bar));
     const end = options.endDateTime ? Date.parse(`${options.endDateTime.slice(0, 4)}-${options.endDateTime.slice(4, 6)}-${options.endDateTime.slice(6, 8)}T${options.endDateTime.slice(9)}Z`) : now.getTime();
-    const days = duration === "1 M" ? 30 : duration === "1 Y" ? 366 : 20 * 366;
+    const days = duration === "1 M" ? 30 : Number.parseInt(duration, 10) * 366;
     return Promise.resolve(bars.filter((bar) => bar.time * 1000 <= end && bar.time * 1000 > end - days * 86_400_000));
   };
 
   let directory: string;
   let previousDataDirectory: string | undefined;
   let requestLabels: string[];
-  const refresh = (lastDateToStore: string) => {
+  const refresh = (lastDateToStore: string, more: Partial<FileStockBarsRefreshOptions> = {}) => {
     requestLabels = [];
     let requestId = 1;
-    return refreshFileStockBars({} as IbkrConnection, "TEST", { firstOptionDay: "2026-01-05", lastDateToStore, nextRequestId: () => requestId++, pause: async () => {}, onRequest: (label) => requestLabels.push(label), now });
+    return refreshFileStockBars({} as IbkrConnection, "TEST", { firstOptionDay: "2026-01-05", lastDateToStore, nextRequestId: () => requestId++, pause: async () => {}, onRequest: (label) => requestLabels.push(label), now, ...more });
   };
   const storedDailyCloses = () => {
     const database = new DatabaseSync(path.join(directory, "TEST.sqlite"), { readOnly: true });
@@ -123,6 +158,8 @@ describe("refreshing a data file's IBKR bars", () => {
 
   beforeEach(() => {
     priceScale = 1;
+    ibkrHoldsOlderDays = false;
+    ibkrSendsDayBefore2000 = false;
     fetchHistoricalBarsRaw.mockReset().mockImplementation(fakeIbkr);
     directory = mkdtempSync(path.join(tmpdir(), "file-stock-bars-"));
     previousDataDirectory = process.env.BACKTEST_DATA_DIR;
@@ -141,7 +178,7 @@ describe("refreshing a data file's IBKR bars", () => {
   it("fetches every bar for a file without any, then adds only the last month on the next Update", async () => {
     const first = await refresh("2026-10-16");
     expect(first).toMatchObject({ kind: "full", fullRefreshReason: "the file has no IBKR bars yet", dailyLastDate: "2026-10-16", intradayFirstDate: "2026-01-02" });
-    expect(requestLabels).toEqual(["IBKR daily bars, 20 years", "IBKR implied volatility, 20 years", "IBKR 30-minute bars, 2026"]);
+    expect(requestLabels).toEqual(["IBKR daily bars, from 2000-01-01", "IBKR implied volatility, from 2000-01-01", "IBKR 30-minute bars, 2026"]);
 
     const second = await refresh("2026-10-26");
     expect(second).toMatchObject({ kind: "tail", fullRefreshReason: null, dailyBars: historyDates.length, dailyFirstDate: "2026-01-02", dailyLastDate: "2026-10-26", impliedVolatilityDays: historyDates.length, intradayBars: 2 * historyDates.length, intradayLastDate: "2026-10-26" });
@@ -155,7 +192,7 @@ describe("refreshing a data file's IBKR bars", () => {
     const result = await refresh("2026-10-26");
     expect(result.kind).toBe("full");
     expect(result.fullRefreshReason).toMatch(/^IBKR's prices changed on 15 of 15 shared days and 30 of 30 shared 30-minute bars .*: a split or other adjustment since the last fetch$/);
-    expect(requestLabels).toEqual(["IBKR daily bars, last month", "IBKR implied volatility, last month", "IBKR 30-minute bars, last month", "IBKR daily bars, 20 years", "IBKR implied volatility, 20 years", "IBKR 30-minute bars, 2026"]);
+    expect(requestLabels).toEqual(["IBKR daily bars, last month", "IBKR implied volatility, last month", "IBKR 30-minute bars, last month", "IBKR daily bars, from 2000-01-01", "IBKR implied volatility, from 2000-01-01", "IBKR 30-minute bars, 2026"]);
     expect(storedDailyCloses()).toEqual(dailyHistory().map((bar, index) => ({ tradingDate: historyDates[index], close: bar.close })));
     expect(storedDailyCloses()[0]!.close).toBe(50);
   });
@@ -164,7 +201,7 @@ describe("refreshing a data file's IBKR bars", () => {
     await refresh("2026-09-30");
     const result = await refresh("2026-10-26");
     expect(result).toMatchObject({ kind: "full", fullRefreshReason: "its bars end 2026-09-30, more than 14 days before 2026-10-26" });
-    expect(requestLabels).toEqual(["IBKR daily bars, 20 years", "IBKR implied volatility, 20 years", "IBKR 30-minute bars, 2026"]);
+    expect(requestLabels).toEqual(["IBKR daily bars, from 2000-01-01", "IBKR implied volatility, from 2000-01-01", "IBKR 30-minute bars, 2026"]);
   });
 
   it("keeps the stored implied volatility when the last month's request for it fails", async () => {
@@ -172,5 +209,54 @@ describe("refreshing a data file's IBKR bars", () => {
     fetchHistoricalBarsRaw.mockImplementation((...args: Parameters<typeof fakeIbkr>) => (args[5] === WhatToShow.OPTION_IMPLIED_VOLATILITY ? Promise.reject(new Error("Historical data timeout for TEST")) : fakeIbkr(...args)));
     const result = await refresh("2026-10-26");
     expect(result).toMatchObject({ kind: "tail", impliedVolatilityError: "Historical data timeout for TEST", dailyBars: historyDates.length, impliedVolatilityDays: historyDates.indexOf("2026-10-16") + 1 });
+  });
+
+  it("adds IBKR's older daily bars before the file's first one when every day both have closes the same, keeping every stored bar", async () => {
+    await refresh("2026-10-26");
+    const storedBefore = storedDailyCloses();
+    ibkrHoldsOlderDays = true;
+    const result = await refresh("2026-10-26", { extendDailyBarsBack: true });
+    expect(result).toMatchObject({
+      kind: "older_daily_bars",
+      fullRefreshReason: null,
+      dailyBars: olderDates.length + historyDates.length,
+      dailyFirstDate: "2025-07-01",
+      dailyLastDate: "2026-10-26",
+      impliedVolatilityDays: olderDates.length + historyDates.length,
+      intradayBars: 2 * historyDates.length,
+      intradayFirstDate: "2026-01-02",
+    });
+    expect(requestLabels).toEqual(["IBKR daily bars, from 2000-01-01", "IBKR implied volatility, from 2000-01-01"]);
+    expect(storedDailyCloses().slice(olderDates.length)).toEqual(storedBefore);
+    expect(storedDailyCloses()[0]).toEqual({ tradingDate: "2025-07-01", close: 60 });
+  });
+
+  it("fetches every bar again, with the daily bars it already fetched, when IBKR's prices changed since the file's were fetched", async () => {
+    await refresh("2026-10-26");
+    ibkrHoldsOlderDays = true;
+    priceScale = 0.5;
+    const result = await refresh("2026-10-26", { extendDailyBarsBack: true });
+    expect(result).toMatchObject({
+      kind: "full",
+      fullRefreshReason: `IBKR's prices changed on ${historyDates.length} of ${historyDates.length} shared days (2026-01-02 close 100 stored, 50 now): a split or other adjustment since the last fetch`,
+      dailyFirstDate: "2025-07-01",
+    });
+    expect(requestLabels).toEqual(["IBKR daily bars, from 2000-01-01", "IBKR implied volatility, from 2000-01-01", "IBKR 30-minute bars, 2026"]);
+    expect(storedDailyCloses()[0]).toEqual({ tradingDate: "2025-07-01", close: 30 });
+    expect(storedDailyCloses()[olderDates.length]).toEqual({ tradingDate: "2026-01-02", close: 50 });
+  });
+
+  it("adds nothing when IBKR holds no older day, and never stores a bar before 2000-01-01", async () => {
+    ibkrSendsDayBefore2000 = true;
+    expect(await refresh("2026-10-26")).toMatchObject({ kind: "full", dailyBars: historyDates.length, dailyFirstDate: "2026-01-02" });
+    expect(await refresh("2026-10-26", { extendDailyBarsBack: true })).toMatchObject({ kind: "older_daily_bars", dailyBars: historyDates.length, dailyFirstDate: "2026-01-02" });
+  });
+
+  it("writes no older bars when their implied-volatility request fails, so a later run adds both", async () => {
+    await refresh("2026-10-26");
+    ibkrHoldsOlderDays = true;
+    fetchHistoricalBarsRaw.mockImplementation((...args: Parameters<typeof fakeIbkr>) => (args[5] === WhatToShow.OPTION_IMPLIED_VOLATILITY ? Promise.reject(new Error("Historical data timeout for TEST")) : fakeIbkr(...args)));
+    await expect(refresh("2026-10-26", { extendDailyBarsBack: true })).rejects.toThrow("IBKR's implied volatility request failed (Historical data timeout for TEST): no older daily bars written.");
+    expect(storedDailyCloses()[0]!.tradingDate).toBe("2026-01-02");
   });
 });

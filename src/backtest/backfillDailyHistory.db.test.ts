@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import knexLibrary, { type Knex } from "knex";
 import { EventName, WhatToShow } from "@stoqey/ib";
 import type { IbkrConnection } from "../ibkr/connectIbkr.js";
+import { historyDurationReaching } from "../ibkr/historicalDataDuration.js";
 
 // The backtest history backfill against the test database, with a stand-in IBKR connection that answers the two
 // historical requests: missing days are inserted, stored prices and implied volatility are never changed.
@@ -14,7 +15,7 @@ vi.mock("../db/connection.js", async () => {
 });
 
 const { db } = await import("../db/connection.js");
-const { backfillDailyHistoryForBacktest, historyDurationReaching, isIbkrNoSuchContractError, isIbkrPacingOrOutageError } = await import("./backfillDailyHistory.js");
+const { backfillDailyHistoryForBacktest, isIbkrNoSuchContractError, isIbkrPacingOrOutageError } = await import("./backfillDailyHistory.js");
 const { UnknownSymbolError } = await import("../ibkr/findOrCreateTicker.js");
 const testDb: Knex = db;
 
