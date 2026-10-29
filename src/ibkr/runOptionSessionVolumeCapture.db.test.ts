@@ -7,7 +7,8 @@ import type { CapturedOptionQuote, CaptureQuoteWindow, OptionContractRequest } f
 
 // The after-close volume capture end to end on a private copy of the test tables, with IBKR replaced by a fake window: what
 // it quotes the first night (no IV known: the whole universe), what it stores, how the next day reads it, and that the
-// second night quotes only the band from the IVs the first one stored.
+// second night quotes only the band from the IVs the first one stored, for a CC + Put Ladder ticker; and that a Vol Farmer
+// v2 ticker is captured on its next listed expiry only.
 vi.mock("../db/connection.js", async () => {
   const { createIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
   return { db: await createIsolatedTestDatabase() };
@@ -28,6 +29,8 @@ beforeAll(async () => {
   await testDb("users").insert({ id: userId, username: "volume-capture", display_name: "Volume Capture", password_hash: "x" });
   await testDb("tickers").insert({ id: tickerId, symbol: "VOL", company_name: "Volume Co" });
   await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: userId, bot_enabled: true });
+  // VOL runs the CC + Put Ladder, so its universe is the ladder's days-to-expiry range (a ticker with no strategy set runs Vol Farmer v2).
+  await testDb("pluto_ticker_settings").insert({ ticker_id: tickerId, strategy: "cc_put_ladder" });
   await testDb("market_calendar").insert(["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-19", "2026-10-20"].map((calendar_date) => ({ calendar_date, is_open: true })));
   await testDb("option_chain_params").insert({ ticker_id: tickerId, expirations: ["20261016", "20261120"], fetched_at: new Date("2026-10-14T09:00:00Z") });
   await testDb("option_chain_expiry_strikes").insert([
@@ -55,7 +58,7 @@ function fakeDependencies(nowIso: string, quoted: OptionContractRequest[][]) {
     dependencies: {
       connect: async () => ({ ib, disconnect: () => {} }),
       openQuoteWindow: () => window,
-      fetchStockPrices: async () => ({ VOL: 100 }),
+      fetchStockPrices: async () => ({ VOL: 100, FARM: 100 }),
       reserveLines: async (wanted: number) => wanted,
       renewLines: async () => {},
       releaseLines: released,
@@ -104,5 +107,24 @@ describe("the after-close option volume capture", () => {
     const { dependencies } = fakeDependencies("2026-10-16T21:30:00Z", []);
     const result = await runOptionSessionVolumeCapture(dependencies);
     expect(result.tickers.map((ticker) => [ticker.symbol, ticker.error])).toEqual([["NOCH", "no stored option chain"], ["VOL", null]]);
+  });
+
+  it("captures a Vol Farmer v2 ticker on its next listed expiry only", async () => {
+    const farmerTickerId = randomUUID();
+    await testDb("tickers").insert({ id: farmerTickerId, symbol: "FARM", company_name: "Farmer Co" });
+    await testDb("shortlist_entries").insert({ ticker_id: farmerTickerId, added_by_user_id: userId, bot_enabled: true });
+    await testDb("pluto_ticker_settings").insert({ ticker_id: farmerTickerId, strategy: "vol_farmer_v2" });
+    await testDb("option_chain_params").insert({ ticker_id: farmerTickerId, expirations: ["20261023", "20261120"], fetched_at: new Date("2026-10-19T09:00:00Z") });
+    await testDb("option_chain_expiry_strikes").insert([
+      { ticker_id: farmerTickerId, expiry: "20261023", strikes: [90, 95, 100, 105, 110], fetched_at: new Date("2026-10-19T09:00:00Z") },
+      { ticker_id: farmerTickerId, expiry: "20261120", strikes: [70, 85, 100, 115, 140], fetched_at: new Date("2026-10-19T09:00:00Z") },
+    ]);
+    const { dependencies } = fakeDependencies("2026-10-19T21:30:00Z", []);
+    const result = await runOptionSessionVolumeCapture(dependencies);
+    // For 20 Oct both 23 Oct and 20 Nov are ahead, and v2 sells the first: 5 strikes × 2 rights. No IV known yet, so the 5
+    // Calls and the 2 Puts below the $100 price ($90, $95) are requested.
+    expect(result.tickers.find((ticker) => ticker.symbol === "FARM")).toMatchObject({ universe: 10, requested: 7, unknownIv: 10, withVolume: 7, withImpliedVolatility: 7, stockPrice: 100, error: null });
+    const storedContracts = [...(await loadSessionVolumeByContract(farmerTickerId, "2026-10-19"))!.keys()].sort();
+    expect(storedContracts).toEqual(["2026-10-23|100|C", "2026-10-23|105|C", "2026-10-23|110|C", "2026-10-23|90|C", "2026-10-23|90|P", "2026-10-23|95|C", "2026-10-23|95|P"]);
   });
 });
