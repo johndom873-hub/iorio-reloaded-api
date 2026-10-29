@@ -70,6 +70,8 @@ export const numberOrNull = (value: unknown): number | null => (value === null |
 export const quoteOfRow = (row: Record<string, unknown>): SymbolFileQuote => ({ expiry: String(row.expiry), strike: Number(row.strike), right: row.right as "C" | "P", bid: numberOrNull(row.bid), ask: numberOrNull(row.ask), bidSize: numberOrNull(row.bidSize), askSize: numberOrNull(row.askSize) });
 export const endOfDayOfRow = (row: Record<string, unknown>): SymbolFileEndOfDayRow => ({ expiry: String(row.expiry), strike: Number(row.strike), right: row.right as "C" | "P", close: numberOrNull(row.close), volume: numberOrNull(row.volume), bid: numberOrNull(row.bid), ask: numberOrNull(row.ask) });
 
+const dayIssueOfRow = (row: Record<string, unknown>): SymbolFileDayIssue => ({ tradingDate: String(row.tradingDate), part: row.part as SymbolFileDayIssue["part"], expiry: row.expiry === null || row.expiry === undefined ? null : String(row.expiry), message: String(row.message) });
+
 /** Each right's count from quoteCountByRightSql's rows. */
 export const quoteCountByRightOf = (rows: readonly { right: string; count: number }[]): { C: number; P: number } => ({ C: Number(rows.find((row) => row.right === "C")?.count ?? 0), P: Number(rows.find((row) => row.right === "P")?.count ?? 0) });
 
@@ -151,7 +153,7 @@ export class BacktestSymbolFile {
     this.quotesOfContractStatement = database.prepare(`${quoteColumnsSql} WHERE trading_date = ? AND expiry = ? AND strike BETWEEN ? AND ? AND option_right = ? AND ${expiresWithin45DaysSql}`);
     this.endOfDayOfContractStatement = database.prepare(`${endOfDayColumnsSql} WHERE trading_date = ? AND expiry = ? AND strike BETWEEN ? AND ? AND option_right = ? AND ${expiresWithin46DaysSql}`);
     const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
-    this.dayIssuesStatement = tableNames.has("day_issues") ? database.prepare(`SELECT trading_date AS tradingDate, part, expiry, message FROM day_issues WHERE trading_date = ? AND ${issueWithinReadWindowSql} ORDER BY part, expiry`) : null;
+    this.dayIssuesStatement = tableNames.has("day_issues") ? database.prepare(`SELECT trading_date AS tradingDate, part, expiry, message FROM day_issues WHERE ${issueWithinReadWindowSql} ORDER BY trading_date, part, expiry`) : null;
     this.unavailableDaysStatement = tableNames.has("unavailable_days") ? database.prepare("SELECT trading_date AS tradingDate, reason FROM unavailable_days ORDER BY trading_date") : null;
     const hasIntradayTables = tableNames.has("intraday_days") && tableNames.has("intraday_quotes");
     this.intradayDaysStatement = hasIntradayTables ? database.prepare("SELECT trading_date AS tradingDate FROM intraday_days WHERE status = 'complete' ORDER BY trading_date") : null;
@@ -228,10 +230,18 @@ export class BacktestSymbolFile {
     return (this.endOfDayOfContractStatement.all(tradingDate, contract.expiry, lowestStrike, highestStrike, contract.right) as Record<string, unknown>[]).map(endOfDayOfRow);
   }
 
-  /** What the downloader could not retrieve of a stored day, among what the engine reads (issueWithinReadWindowSql); none on a file without the table. */
-  loadDayIssues(tradingDate: string): SymbolFileDayIssue[] {
-    if (!this.dayIssuesStatement) return [];
-    return (this.dayIssuesStatement.all(tradingDate) as Record<string, unknown>[]).map((row) => ({ tradingDate: String(row.tradingDate), part: row.part as SymbolFileDayIssue["part"], expiry: row.expiry === null || row.expiry === undefined ? null : String(row.expiry), message: String(row.message) }));
+  /**
+   * What the downloader could not retrieve of each stored day, among what the engine reads (issueWithinReadWindowSql),
+   * by date: the days without issues are left out. None on a file without the table.
+   */
+  loadDayIssuesByDate(): Map<string, SymbolFileDayIssue[]> {
+    const issuesByDate = new Map<string, SymbolFileDayIssue[]>();
+    for (const issue of ((this.dayIssuesStatement?.all() ?? []) as Record<string, unknown>[]).map(dayIssueOfRow)) {
+      const issues = issuesByDate.get(issue.tradingDate);
+      if (issues) issues.push(issue);
+      else issuesByDate.set(issue.tradingDate, [issue]);
+    }
+    return issuesByDate;
   }
 
   /** Days the downloader could not retrieve, ascending: no 10:00 quotes (the day has no `days` row) or no intraday quotes (it has one). None on a file without the table. */

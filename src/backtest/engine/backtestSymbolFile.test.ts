@@ -75,7 +75,7 @@ describe("BacktestSymbolFile", () => {
     const file = BacktestSymbolFile.open("OLDF");
     try {
       expect(file.loadDays().map((entry) => entry.tradingDate)).toEqual(["2026-03-02", "2026-03-03"]);
-      expect(file.loadDayIssues("2026-03-02")).toEqual([]);
+      expect(file.loadDayIssuesByDate()).toEqual(new Map());
       expect(file.loadUnavailableDays()).toEqual([]);
     } finally {
       file.close();
@@ -85,12 +85,18 @@ describe("BacktestSymbolFile", () => {
   it("reads the day issues and the unavailable days of a newer file", () => {
     const file = BacktestSymbolFile.open("NEWF");
     try {
-      expect(file.loadDayIssues("2026-03-05")).toEqual([{ tradingDate: "2026-03-05", part: "eod", expiry: null, message: "HTTP 500" }]);
-      expect(file.loadDayIssues("2026-03-06")).toEqual([
-        { tradingDate: "2026-03-06", part: "eod", expiry: "2026-03-20", message: "timeout" },
-        { tradingDate: "2026-03-06", part: "open_interest", expiry: "2026-03-13", message: "timeout" },
-      ]);
-      expect(file.loadDayIssues("2026-03-02")).toEqual([]);
+      expect(file.loadDayIssuesByDate()).toEqual(
+        new Map([
+          ["2026-03-05", [{ tradingDate: "2026-03-05", part: "eod", expiry: null, message: "HTTP 500" }]],
+          [
+            "2026-03-06",
+            [
+              { tradingDate: "2026-03-06", part: "eod", expiry: "2026-03-20", message: "timeout" },
+              { tradingDate: "2026-03-06", part: "open_interest", expiry: "2026-03-13", message: "timeout" },
+            ],
+          ],
+        ]),
+      );
       expect(file.loadUnavailableDays()).toEqual([
         { tradingDate: "2026-03-04", reason: "no 10:00 quotes" },
         { tradingDate: "2026-03-09", reason: "no intraday quotes" },
@@ -107,7 +113,7 @@ describe("BacktestSymbolFile", () => {
   it("accepts schema versions 1, 2 and 3 and refuses any other", () => {
     const versionTwo = BacktestSymbolFile.open("VERTWO");
     try {
-      expect(versionTwo.loadDayIssues("2026-03-03")).toEqual([{ tradingDate: "2026-03-03", part: "eod", expiry: null, message: "no data returned" }]);
+      expect(versionTwo.loadDayIssuesByDate()).toEqual(new Map([["2026-03-03", [{ tradingDate: "2026-03-03", part: "eod", expiry: null, message: "no data returned" }]]]));
       expect(versionTwo.loadUnavailableDays()).toEqual([{ tradingDate: "2026-03-04", reason: "quotes at 10:00: HTTP 500" }]);
     } finally {
       versionTwo.close();
@@ -134,7 +140,9 @@ describe("BacktestSymbolFile", () => {
   it("reads only the issues about what it reads: a whole part, or an expiration within the part's window", () => {
     const file = BacktestSymbolFile.open("ALLEXP");
     try {
-      expect(file.loadDayIssues("2026-03-02").map((issue) => `${issue.part} ${issue.expiry ?? "all"}`)).toEqual(["eod all", "eod 2026-04-17", "quotes 2026-04-16"]);
+      const issuesByDate = file.loadDayIssuesByDate();
+      expect([...issuesByDate.keys()]).toEqual(["2026-03-02"]);
+      expect(issuesByDate.get("2026-03-02")!.map((issue) => `${issue.part} ${issue.expiry ?? "all"}`)).toEqual(["eod all", "eod 2026-04-17", "quotes 2026-04-16"]);
     } finally {
       file.close();
     }

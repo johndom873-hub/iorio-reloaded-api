@@ -273,15 +273,15 @@ function volumeByContract(endOfDayRows: readonly SymbolFileEndOfDayRow[] | null)
  * volume rule reads: a day stored without them (or without some expirations) leaves that volume unknown, and the rule
  * refuses the contracts. Today's own missing parts are named too.
  */
-function describeDataGaps(file: BacktestSymbolFile, todayIso: string, previousFileDay: string | null, previousSessionHasVolume: boolean): string[] {
+function describeDataGaps(dayIssuesByDate: ReadonlyMap<string, SymbolFileDayIssue[]>, todayIso: string, previousFileDay: string | null, previousSessionHasVolume: boolean): string[] {
   const notes: string[] = [];
   const expiriesOf = (issues: readonly SymbolFileDayIssue[]) => issues.map((issue) => issue.expiry).filter((expiry): expiry is string => expiry !== null);
   if (previousFileDay !== null) {
-    const endOfDayIssues = file.loadDayIssues(previousFileDay).filter((issue) => issue.part === "eod");
+    const endOfDayIssues = (dayIssuesByDate.get(previousFileDay) ?? []).filter((issue) => issue.part === "eod");
     if (endOfDayIssues.some((issue) => issue.expiry === null) || !previousSessionHasVolume) notes.push(`volume unknown for every contract (refused by the volume rule): the file has no end-of-day data for ${previousFileDay}`);
     else if (endOfDayIssues.length > 0) notes.push(`volume unknown for the expiries ${expiriesOf(endOfDayIssues).join(", ")} (refused by the volume rule): their end-of-day data of ${previousFileDay} could not be downloaded`);
   }
-  const todaysIssues = file.loadDayIssues(todayIso);
+  const todaysIssues = dayIssuesByDate.get(todayIso) ?? [];
   for (const [part, what] of [["quotes", "10:00 quotes"], ["open_interest", "open interest"]] as const) {
     const issues = todaysIssues.filter((issue) => issue.part === part);
     if (issues.length === 0) continue;
@@ -356,6 +356,8 @@ interface SessionSymbol {
   endOfDayRows(tradingDate: string): readonly SymbolFileEndOfDayRow[];
   /** The complete file day before each complete day; null for the first. */
   previousFileDayOf: Map<string, string | null>;
+  /** The file's day issues by date (loadDayIssuesByDate), read once. */
+  dayIssuesByDate: Map<string, SymbolFileDayIssue[]>;
   /** The symbol's complete days inside the session, ascending: what the reader thread reads ahead. */
   ownSessionDays: string[];
   /** The days the reader thread read for the symbol, the last few kept (a day's end-of-day rows are read again the next day). */
@@ -499,6 +501,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         intradayDays: file.loadIntradayDays(),
         endOfDayRows,
         previousFileDayOf: new Map(completeDays.map((dateIso, index) => [dateIso, index > 0 ? completeDays[index - 1]! : null])),
+        dayIssuesByDate: file.loadDayIssuesByDate(),
         ownSessionDays,
         prefetchedDays,
         captureByDay: new Map(),
@@ -972,7 +975,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         }
         const previousBarDate = entry.bars.previousClose(todayIso)?.dateIso ?? null;
         if (previousFileDay !== null && previousBarDate !== null && previousBarDate < previousFileDay) notes.push(noteFor(entry, `IBKR bars end ${previousBarDate}: the forecast and the day's move use that close`));
-        notes.push(...describeDataGaps(entry.file, todayIso, previousFileDay, capture!.previousSessionHasVolume).map((note) => noteFor(entry, note)));
+        notes.push(...describeDataGaps(entry.dayIssuesByDate, todayIso, previousFileDay, capture!.previousSessionHasVolume).map((note) => noteFor(entry, note)));
         const hedgePutQuotes = hedgePutQuotesAt(entry, captureLookTimeEt);
         const leapsCallQuotes = leapsCallQuotesAt(entry, captureLookTimeEt);
         const nextSessionIso = sessionDays[dayIndex + 1];
