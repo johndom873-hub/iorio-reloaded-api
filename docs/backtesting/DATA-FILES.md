@@ -10,11 +10,11 @@ Local-only (Marcelo's Mac). Decisions: `project_backtesting_design_decisions_202
 - `fred-DTB3.json` — the 3-month T-bill series cache (risk-free rate and interest on cash), written by the engine.
 - `tables/<YEAR>.json` — walk-forward model tables built from history before 1 January of YEAR, written by the engine.
 
-## Symbol file (`<SYMBOL>.sqlite`, schema version 3)
+## Symbol file (`<SYMBOL>.sqlite`, schema version 4)
 
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
--- keys: symbol, schema_version ('3'), quote_time_et ('10:00:00'), max_dte ('all'), created_at (ISO UTC),
+-- keys: symbol, schema_version ('4'), quote_time_et ('10:00:00'), max_dte ('all'), created_at (ISO UTC),
 --       intraday_interval ('30m'), intraday_window ('10:00-15:30')
 
 CREATE TABLE days (
@@ -24,34 +24,32 @@ CREATE TABLE days (
   eod_rows INTEGER NOT NULL,
   open_interest_rows INTEGER NOT NULL,
   fetched_at TEXT NOT NULL,               -- ISO UTC
-  all_expiries INTEGER NOT NULL DEFAULT 0 -- 1 = its quotes, eod and open_interest rows hold every expiry; 0 = stored with the 45-day cap, to be completed
+  all_expiries INTEGER NOT NULL DEFAULT 0 -- 1 = its 10:00 quotes, end of day and open interest hold every expiry; 0 = stored with the 45-day cap, to be completed
 );
 
--- Every contract's last NBBO at or before 10:00:00 ET, every expiry from trading_date on (0..45 days in a day stored with the cap).
-CREATE TABLE quotes (
-  trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
-  option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')),
-  bid REAL, ask REAL, bid_size INTEGER, ask_size INTEGER,
-  quoted_at TEXT,                         -- the NBBO's own timestamp, ISO with offset
-  PRIMARY KEY (trading_date, expiry, strike, option_right)
-) WITHOUT ROWID;
+-- The option data is stored as slices: one row per day, look and expiry holding that expiry's contracts (see "Slices").
+-- key = day × 2^32 + look minute × 2^16 + days to expiry: the day as days since 1970-01-01, the look as minutes after
+-- midnight ET (600 = 10:00; 0 in the end-of-day and open-interest tables). One integer key, so a day's look up to an
+-- expiry window is one range read.
 
--- That day's end-of-day per contract (ThetaData builds it ~17:15 ET), every expiry (0..46 days in a day stored with the cap).
-CREATE TABLE eod (
-  trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
-  option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')),
-  close REAL, volume INTEGER, bid REAL, ask REAL,   -- bid/ask = closing NBBO
-  PRIMARY KEY (trading_date, expiry, strike, option_right)
-) WITHOUT ROWID;
+-- Every contract's last NBBO at or before 10:00:00 ET, every expiry from trading_date on (0..45 days in a day stored with the cap).
+CREATE TABLE ten_oclock_quote_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL,
+  has_ask_above_zero INTEGER NOT NULL, data BLOB NOT NULL);
+
+-- Every contract's NBBO at each look: the last quote at or before the look time, the same values
+-- option_at_time_quote gives for that time. Looks every 30 minutes from 10:00 to 15:30 ET, the 10:00 look included (on
+-- a few days it differs from the 10:00 quotes), every expiry (0..45 days in a day stored with the cap).
+CREATE TABLE intraday_quote_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL,
+  data BLOB NOT NULL);
+
+-- That day's end of day per contract (ThetaData builds it ~17:15 ET), every expiry (0..46 days in a day stored with the cap).
+CREATE TABLE end_of_day_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL,
+  has_volume INTEGER NOT NULL, data BLOB NOT NULL);
 
 -- Open interest as ThetaData reports it for trading_date (the previous session's closing OI, published ~06:30 ET),
 -- i.e. what Pluto sees at 10:00. Every expiry (0..46 days in a day stored with the cap).
-CREATE TABLE open_interest (
-  trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
-  option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')),
-  open_interest INTEGER NOT NULL,
-  PRIMARY KEY (trading_date, expiry, strike, option_right)
-) WITHOUT ROWID;
+CREATE TABLE open_interest_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL,
+  data BLOB NOT NULL);
 
 -- One row per day whose intraday quotes are stored; only days with days.status = 'complete' get one.
 CREATE TABLE intraday_days (
@@ -61,20 +59,8 @@ CREATE TABLE intraday_days (
   quote_rows INTEGER NOT NULL,
   strike_window_pct REAL,                 -- the --intraday-strike-window-pct applied to this day; NULL = every strike
   fetched_at TEXT NOT NULL,               -- ISO UTC
-  all_expiries INTEGER NOT NULL DEFAULT 0 -- 1 = its intraday_quotes rows hold every expiry; 0 = stored with the 45-day cap, to be completed
+  all_expiries INTEGER NOT NULL DEFAULT 0 -- 1 = its intraday quotes hold every expiry; 0 = stored with the 45-day cap, to be completed
 );
-
--- Every contract's NBBO at each look: the last quote at or before the look time, the same values
--- option_at_time_quote gives for that time. Looks every 30 minutes from 10:00 to 15:30 ET, every expiry (0..45 days in a
--- day stored with the cap).
-CREATE TABLE intraday_quotes (
-  trading_date TEXT NOT NULL, look_time TEXT NOT NULL,   -- 'HH:MM' Eastern
-  expiry TEXT NOT NULL, strike REAL NOT NULL,
-  option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')),
-  bid REAL, ask REAL, bid_size INTEGER, ask_size INTEGER,
-  quoted_at TEXT,                         -- always NULL: ThetaData stamps these rows with the look time, not the quote's own
-  PRIMARY KEY (trading_date, look_time, expiry, strike, option_right)
-) WITHOUT ROWID;
 
 -- What a stored day lacks (see "Days ThetaData cannot serve"). Each row is asked for again on up to 3 later runs.
 CREATE TABLE day_issues (
@@ -96,34 +82,17 @@ CREATE TABLE unavailable_days (
 );
 ```
 
-`schema_version` `'3'` is a file with every table and column above. `intraday_days`, `intraday_quotes`, `day_issues` and `unavailable_days` were added after the first downloads, `day_issues.attempts` after those (version `'2'`), and the `all_expiries` flags when the downloader began keeping every expiry (version `'3'`). Before that it kept expiries 0..45 days after the trading date for the 10:00 and intraday quotes, 0..46 for the end of day and the open interest (`max_dte` `'45'`). When it opens an older file, the downloader creates what the file lacks (and the two intraday meta keys), adds the flags at 0 (1 for `no_data` days, which have nothing to complete), and sets `max_dte` to `'all'` and `schema_version` to `'3'`. Schema 4 (below) replaced it on 2026-10-29: every file was converted, and the downloader writes schema 4 and refuses an earlier file. Readers accept versions 1 to 4.
-
 The engine reads expiries 0..45 days out (0..46 for the end of day and the open interest) whatever the file holds, and of the `day_issues` only those about a whole part or an expiration in that window, so a file completed to every expiry replays every session as before. Longer-dated contracts are read once a strategy uses them.
 
-### Schema version 4: slices (Marcelo 2026-10-29)
+Slices:
 
-The same data as schema 3 in about a sixth of the space, read with about a tenth of the CPU: each option table becomes a table of slices, one row per day, look and expiry holding that expiry's contracts. Every other table (`meta`, `days`, `intraday_days`, `day_issues`, `unavailable_days`, the IBKR bars) is as in schema 3. Pages are 16 KB.
-
-```sql
--- key = day × 2^32 + look minute × 2^16 + days to expiry: the day as days since 1970-01-01, the look as minutes after
--- midnight ET (600 = 10:00; 0 in the end-of-day and open-interest tables). One integer key, so a day's look up to an
--- expiry window is one range read.
-CREATE TABLE ten_oclock_quote_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL,
-  has_ask_above_zero INTEGER NOT NULL, data BLOB NOT NULL);   -- schema 3's quotes
-CREATE TABLE intraday_quote_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL,
-  data BLOB NOT NULL);                                        -- intraday_quotes, every look (10:00 included)
-CREATE TABLE end_of_day_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL,
-  has_volume INTEGER NOT NULL, data BLOB NOT NULL);           -- eod
-CREATE TABLE open_interest_slices (key INTEGER PRIMARY KEY, call_count INTEGER NOT NULL, put_count INTEGER NOT NULL,
-  data BLOB NOT NULL);                                        -- open_interest
-```
-
-- `data` holds the contracts in the order schema 3 stores them (strike, the Call before the Put) as columns, each in the narrowest width its values need within the slice; the byte layout is in `src/backtest/engine/symbolFileSlices.ts`. Columns: 10:00 quotes: strike, right, bid, ask, bid size, ask size, quote time; intraday quotes: the same without the quote time; end of day: strike, right, close, volume, bid, ask; open interest: strike, right, open interest.
+- `data` holds the slice's contracts in strike order (the Call before the Put) as columns, each in the narrowest width its values need within the slice; the byte layout is in `src/backtest/engine/symbolFileSlices.ts`. Columns: 10:00 quotes: strike, right, bid, ask, bid size, ask size, quote time; intraday quotes: the same without the quote time; end of day: strike, right, close, volume, closing bid, closing ask; open interest: strike, right, open interest.
 - Units: strikes in thousandths of a dollar, prices in cents, sizes, volumes and open interest as counts. A slice holding a value not exact in its unit keeps that column as the stored numbers (none did when the files were converted).
-- The quote time (`quoted_at`) is kept as the milliseconds from the quote's own time to 10:00:00 ET on the trading day; its schema 3 text (ISO, milliseconds, Eastern offset) is rebuilt exactly from it. Intraday quotes have none, as in schema 3.
+- The quote time is the 10:00 NBBO's own timestamp, kept as the milliseconds from it to 10:00:00 ET on the trading day; its ISO text (milliseconds, Eastern offset) is rebuilt exactly from it (`quoted_at_text_of` in `scripts/backtest/symbol_file_slices.py`). Intraday quotes have none: ThetaData stamps them with the look time.
 - `call_count`/`put_count` and the flags answer Vol Farmer v2's checks (the next Call expiry, the counts within 45 days, any ask above 0, any volume the day before) without opening a slice.
-- The schema 3 files were converted on 2026-10-29 (`src/backtest/symbolFileSchemaFourConversion.ts`, run by `tmp/data-file-format-v4/convertDataFiles.ts`): each copy passed a check of every row and value of every table against the original, and a replay of the engine's reads, before replacing it.
-- The downloader writes schema 4: `scripts/backtest/symbol_file_slices.py` packs the same bytes as `symbolFileSlices.ts` (`test_symbol_file_slices.py` holds bytes the engine wrote). A new file gets 16 KB pages. A part written again replaces the day's slices of that part; a retried piece is merged into its slices (a contract stored already takes the new values); completing a day keeps the contracts it holds.
+- The downloader writes them with `scripts/backtest/symbol_file_slices.py`, the same bytes as `symbolFileSlices.ts` (`test_symbol_file_slices.py` holds bytes the engine wrote). A part written again replaces the day's slices of that part; a retried piece is merged into its slices (a contract stored already takes the new values); completing a day keeps the contracts it holds. A new file gets 16 KB pages.
+
+Versions. The first downloads had no `intraday_days`, intraday quotes, `day_issues` or `unavailable_days`; `day_issues.attempts` came with version `'2'`, and the `all_expiries` flags with version `'3'`, when the downloader began keeping every expiry (before, it kept expiries 0..45 days after the trading date for the 10:00 and intraday quotes, 0..46 for the end of day and the open interest: `max_dte` `'45'`). Versions 1 to 3 stored the option data one row per contract (tables `quotes`, `intraday_quotes`, `eod`, `open_interest`). Version `'4'` (Marcelo 2026-10-29) holds the same data as slices in about a sixth of the space, read with about a tenth of the CPU. Every file was converted on 2026-10-29, each copy checked against its original row for row and value for value, and by a replay of the engine's reads, before replacing it. The engine and the downloader read and write version 4 only and refuse any other file; the conversion (`src/backtest/symbolFileSchemaFourConversion.ts`) is in the git history.
 
 Rules:
 

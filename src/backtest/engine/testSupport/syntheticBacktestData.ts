@@ -1,5 +1,5 @@
-import { DatabaseSync } from "node:sqlite";
-import { easternInstant, formatEasternIsoWithOffset } from "../../../lib/easternIsoDate.js";
+import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { easternInstant } from "../../../lib/easternIsoDate.js";
 import { blackScholesPriceOnForward, maximumSpreadFractionOfMid, yearsBetweenIsoDates } from "../../../lib/impliedVolatilitySurface.js";
 import type { PlutoSettings } from "../../../pluto/settingsStore.js";
 import { plutoLadderSettingsFixture, plutoVolFarmerV2SettingsFixture } from "../../../pluto/plutoSettingsFixture.js";
@@ -8,9 +8,10 @@ import { fileIntradayBarMinutes, writeFileStockBars, type FileIntradayBar } from
 import type { StoredDailyBar } from "../backtestBarHistory.js";
 import { computeParityStockPrice } from "../backtestBook.js";
 import { BacktestSymbolFile, type SymbolFileQuote } from "../backtestSymbolFile.js";
+import { dailySliceLookMinute, dayNumberOf, endOfDayColumns, intradayQuoteColumns, lookMinuteOf, openInterestColumns, packSlice, schemaFourSliceTablesSql, sliceColumn, sliceKey, sliceRowFlags, tenOClockLookMinute, tenOClockQuoteColumns, type SliceColumnKind, type SliceRow } from "../symbolFileSlices.js";
 
 // Synthetic market data for the engine's tests: a seeded random-walk bar history, Black-Scholes option quotes at a flat
-// implied volatility, settings shaped like the dev database's, a schema-version-1 symbol file and its IBKR bars.
+// implied volatility, settings shaped like the dev database's, a schema 4 symbol file and its IBKR bars.
 
 /** Deterministic standard normal draws (LCG + Box-Muller), so a test's data is the same on every run. */
 export function seededNormalGenerator(seed: number): () => number {
@@ -122,81 +123,95 @@ export interface SyntheticSymbolFileDay {
   openInterest: number;
   /** The day is stored complete with no end-of-day rows (the downloader could not retrieve that part). */
   withoutEndOfDay?: boolean;
-  /** The quotes at the looks after 10:00, by look time ("HH:MM"): the day then has intraday quotes, its 10:00 look being `quotes`. */
+  /** The quotes at the looks after 10:00, by look time ("HH:MM"): the day then has intraday quotes, its 10:00 look being `quotes` unless given. */
   intradayQuotes?: Record<string, SymbolFileQuote[]>;
   /** The closing quotes, when they differ from the 10:00 ones. */
   closingQuotes?: SymbolFileQuote[];
 }
 
-/** What the downloader records of the data it could not retrieve; giving it creates the tables a newer file has. */
+/** What the downloader records of the data it could not retrieve. */
 export interface SyntheticSymbolFileQuality {
   dayIssues?: { tradingDate: string; part: "quotes" | "eod" | "open_interest" | "intraday_quotes"; expiry: string | null; message: string }[];
   unavailableDays?: { tradingDate: string; reason: string }[];
-  /** Days with complete intraday quotes (the quotes themselves are not written). */
-  intradayCompleteDays?: string[];
-  /** "1" unless given; a version-2 file's day_issues also counts the attempts. */
+  /** "4" unless given: any other makes a file the engine refuses. */
   schemaVersion?: string;
 }
 
+/** A day's contracts at one look as slices, one per expiry in date order, each in strike order (the Call before the Put): key, Calls, Puts, the flag, the bytes. */
+export function contractSlicesOf(tradingDate: string, lookMinute: number, contracts: readonly { expiry: string; row: SliceRow }[], kinds: readonly SliceColumnKind[], flag: { column: number; kind: "askAboveZero" | "volume" }): [number, number, number, number, Uint8Array][] {
+  const dayNumber = dayNumberOf(tradingDate);
+  const rowsByExpiry = new Map<string, SliceRow[]>();
+  for (const { expiry, row } of contracts) {
+    const rows = rowsByExpiry.get(expiry);
+    if (rows) rows.push(row);
+    else rowsByExpiry.set(expiry, [row]);
+  }
+  return [...rowsByExpiry.entries()]
+    .sort(([first], [second]) => (first < second ? -1 : 1))
+    .map(([expiry, rows]) => {
+      const daysToExpiry = dayNumberOf(expiry) - dayNumber;
+      if (daysToExpiry < 0 || daysToExpiry > 65_535) throw new Error(`${tradingDate}: expiry ${expiry} cannot be stored`);
+      rows.sort((first, second) => (first[sliceColumn.strike] as number) - (second[sliceColumn.strike] as number) || (first[sliceColumn.right] === second[sliceColumn.right] ? 0 : first[sliceColumn.right] === "C" ? -1 : 1));
+      rows.forEach((row, index) => {
+        if (index > 0 && row[sliceColumn.strike] === rows[index - 1]![sliceColumn.strike] && row[sliceColumn.right] === rows[index - 1]![sliceColumn.right]) throw new Error(`${tradingDate}: the ${expiry} ${String(row[sliceColumn.strike])} ${String(row[sliceColumn.right])} is given twice`);
+      });
+      const flags = sliceRowFlags(rows, flag.column, flag.kind);
+      return [sliceKey(dayNumber, lookMinute, daysToExpiry), flags.callCount, flags.putCount, flags.flagged ? 1 : 0, packSlice(rows, kinds)];
+    });
+}
+
 /**
- * Writes a symbol file (docs/backtesting/DATA-FILES.md): schema version 1 with the first downloads' tables, plus the
- * data-quality tables when `quality` is given and the intraday tables when a day has intraday quotes.
+ * Writes a symbol file (docs/backtesting/DATA-FILES.md) as the downloader leaves it, schema version 4: every table it
+ * creates, each day's 10:00 quotes (taken 2 seconds before 10:00), end of day and open interest as slices, the
+ * intraday quotes of the days that have them, and what `quality` records.
  */
 export function writeSyntheticSymbolFile(filePath: string, symbol: string, days: SyntheticSymbolFileDay[], noDataDates: string[] = [], quality: SyntheticSymbolFileQuality | null = null): void {
   const database = new DatabaseSync(filePath);
   try {
     database.exec(`
       CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE days (trading_date TEXT PRIMARY KEY, status TEXT NOT NULL CHECK (status IN ('complete', 'no_data')), quote_rows INTEGER NOT NULL, eod_rows INTEGER NOT NULL, open_interest_rows INTEGER NOT NULL, fetched_at TEXT NOT NULL);
-      CREATE TABLE quotes (trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL, option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')), bid REAL, ask REAL, bid_size INTEGER, ask_size INTEGER, quoted_at TEXT, PRIMARY KEY (trading_date, expiry, strike, option_right)) WITHOUT ROWID;
-      CREATE TABLE eod (trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL, option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')), close REAL, volume INTEGER, bid REAL, ask REAL, PRIMARY KEY (trading_date, expiry, strike, option_right)) WITHOUT ROWID;
-      CREATE TABLE open_interest (trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL, option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')), open_interest INTEGER NOT NULL, PRIMARY KEY (trading_date, expiry, strike, option_right)) WITHOUT ROWID;
+      CREATE TABLE days (trading_date TEXT PRIMARY KEY, status TEXT NOT NULL CHECK (status IN ('complete', 'no_data')), quote_rows INTEGER NOT NULL, eod_rows INTEGER NOT NULL, open_interest_rows INTEGER NOT NULL, fetched_at TEXT NOT NULL, all_expiries INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE intraday_days (trading_date TEXT PRIMARY KEY, status TEXT NOT NULL CHECK (status IN ('complete', 'no_data')), look_count INTEGER NOT NULL, quote_rows INTEGER NOT NULL, strike_window_pct REAL, fetched_at TEXT NOT NULL, all_expiries INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE day_issues (trading_date TEXT NOT NULL, part TEXT NOT NULL CHECK (part IN ('quotes', 'eod', 'open_interest', 'intraday_quotes')), expiry TEXT, message TEXT NOT NULL, recorded_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 1);
+      CREATE TABLE unavailable_days (trading_date TEXT PRIMARY KEY, reason TEXT NOT NULL, attempts INTEGER NOT NULL, last_attempt_at TEXT NOT NULL);
+      ${schemaFourSliceTablesSql}
     `);
     const insertMeta = database.prepare("INSERT INTO meta (key, value) VALUES (?, ?)");
-    const meta: [string, string][] = [["symbol", symbol], ["schema_version", quality?.schemaVersion ?? "1"], ["quote_time_et", "10:00:00"], ["max_dte", "45"], ["created_at", "2026-10-12T00:00:00Z"]];
+    const meta: [string, string][] = [["symbol", symbol], ["schema_version", quality?.schemaVersion ?? "4"], ["quote_time_et", "10:00:00"], ["max_dte", "45"], ["created_at", "2026-10-12T00:00:00Z"]];
     for (const [key, value] of meta) insertMeta.run(key, value);
-    const insertDay = database.prepare("INSERT INTO days VALUES (?, ?, ?, ?, ?, ?)");
-    const insertQuote = database.prepare("INSERT INTO quotes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    const insertEndOfDay = database.prepare("INSERT INTO eod VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-    const insertOpenInterest = database.prepare("INSERT INTO open_interest VALUES (?, ?, ?, ?, ?)");
+    const insertDay = database.prepare("INSERT INTO days VALUES (?, ?, ?, ?, ?, '2026-10-12T00:00:00Z', 1)");
+    const insertIntradayDay = database.prepare("INSERT INTO intraday_days VALUES (?, 'complete', ?, ?, NULL, '2026-10-12T00:00:00Z', 1)");
+    const insertTenOClockSlice = database.prepare("INSERT INTO ten_oclock_quote_slices (key, call_count, put_count, has_ask_above_zero, data) VALUES (?, ?, ?, ?, ?)");
+    const insertIntradaySlice = database.prepare("INSERT INTO intraday_quote_slices (key, call_count, put_count, data) VALUES (?, ?, ?, ?)");
+    const insertEndOfDaySlice = database.prepare("INSERT INTO end_of_day_slices (key, call_count, put_count, has_volume, data) VALUES (?, ?, ?, ?, ?)");
+    const insertOpenInterestSlice = database.prepare("INSERT INTO open_interest_slices (key, call_count, put_count, data) VALUES (?, ?, ?, ?)");
+    const insertAll = (insert: StatementSync, withFlag: boolean, slices: [number, number, number, number, Uint8Array][]) => {
+      for (const [key, calls, puts, flagged, data] of slices) {
+        if (withFlag) insert.run(key, calls, puts, flagged, data);
+        else insert.run(key, calls, puts, data);
+      }
+    };
+    const askAboveZero = { column: sliceColumn.ask, kind: "askAboveZero" } as const;
     for (const day of days) {
-      insertDay.run(day.tradingDate, "complete", day.quotes.length, day.withoutEndOfDay ? 0 : day.quotes.length, day.quotes.length, "2026-10-12T00:00:00Z");
-      for (const quote of day.quotes) {
-        insertQuote.run(day.tradingDate, quote.expiry, quote.strike, quote.right, quote.bid, quote.ask, quote.bidSize, quote.askSize, formatEasternIsoWithOffset(new Date(easternInstant(day.tradingDate, 10, 0).getTime() - 2000)));
-        if (!day.withoutEndOfDay && !day.closingQuotes) insertEndOfDay.run(day.tradingDate, quote.expiry, quote.strike, quote.right, quote.bid === null || quote.ask === null ? null : (quote.bid + quote.ask) / 2, day.endOfDayVolume, quote.bid, quote.ask);
-        insertOpenInterest.run(day.tradingDate, quote.expiry, quote.strike, quote.right, day.openInterest);
+      const closingQuotes = day.closingQuotes ?? day.quotes;
+      insertDay.run(day.tradingDate, "complete", day.quotes.length, day.withoutEndOfDay ? 0 : closingQuotes.length, day.quotes.length);
+      insertAll(insertTenOClockSlice, true, contractSlicesOf(day.tradingDate, tenOClockLookMinute, day.quotes.map((quote) => ({ expiry: quote.expiry, row: [quote.strike, quote.right, quote.bid, quote.ask, quote.bidSize, quote.askSize, 2_000] })), tenOClockQuoteColumns, askAboveZero));
+      if (!day.withoutEndOfDay) insertAll(insertEndOfDaySlice, true, contractSlicesOf(day.tradingDate, dailySliceLookMinute, closingQuotes.map((quote) => ({ expiry: quote.expiry, row: [quote.strike, quote.right, quote.bid === null || quote.ask === null ? null : (quote.bid + quote.ask) / 2, day.endOfDayVolume, quote.bid, quote.ask] })), endOfDayColumns, { column: sliceColumn.volume, kind: "volume" }));
+      insertAll(insertOpenInterestSlice, false, contractSlicesOf(day.tradingDate, dailySliceLookMinute, day.quotes.map((quote) => ({ expiry: quote.expiry, row: [quote.strike, quote.right, day.openInterest] })), openInterestColumns, { column: sliceColumn.openInterest, kind: "volume" }));
+      if (day.intradayQuotes === undefined) continue;
+      const quotesByLookTime = { "10:00": day.quotes, ...day.intradayQuotes };
+      let quoteRows = 0;
+      for (const [lookTime, quotes] of Object.entries(quotesByLookTime)) {
+        insertAll(insertIntradaySlice, false, contractSlicesOf(day.tradingDate, lookMinuteOf(lookTime), quotes.map((quote) => ({ expiry: quote.expiry, row: [quote.strike, quote.right, quote.bid, quote.ask, quote.bidSize, quote.askSize] })), intradayQuoteColumns, askAboveZero));
+        quoteRows += quotes.length;
       }
-      if (!day.withoutEndOfDay) for (const quote of day.closingQuotes ?? []) insertEndOfDay.run(day.tradingDate, quote.expiry, quote.strike, quote.right, quote.bid === null || quote.ask === null ? null : (quote.bid + quote.ask) / 2, day.endOfDayVolume, quote.bid, quote.ask);
+      insertIntradayDay.run(day.tradingDate, Object.keys(quotesByLookTime).length, quoteRows);
     }
-    for (const dateIso of noDataDates) insertDay.run(dateIso, "no_data", 0, 0, 0, "2026-10-12T00:00:00Z");
-    const daysWithIntradayQuotes = days.filter((day) => day.intradayQuotes !== undefined);
-    if (quality || daysWithIntradayQuotes.length > 0) database.exec("CREATE TABLE intraday_days (trading_date TEXT PRIMARY KEY, status TEXT NOT NULL CHECK (status IN ('complete', 'no_data')), look_count INTEGER NOT NULL, quote_rows INTEGER NOT NULL, strike_window_pct REAL, fetched_at TEXT NOT NULL);");
-    if (daysWithIntradayQuotes.length > 0) {
-      database.exec("CREATE TABLE intraday_quotes (trading_date TEXT NOT NULL, look_time TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL, option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')), bid REAL, ask REAL, bid_size INTEGER, ask_size INTEGER, quoted_at TEXT, PRIMARY KEY (trading_date, look_time, expiry, strike, option_right)) WITHOUT ROWID;");
-      const insertIntradayQuote = database.prepare("INSERT INTO intraday_quotes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)");
-      const insertIntradayDay = database.prepare("INSERT INTO intraday_days VALUES (?, ?, ?, ?, ?, ?)");
-      for (const day of daysWithIntradayQuotes) {
-        const quotesByLookTime = { "10:00": day.quotes, ...day.intradayQuotes };
-        let quoteRows = 0;
-        for (const [lookTime, quotes] of Object.entries(quotesByLookTime)) {
-          for (const quote of quotes) insertIntradayQuote.run(day.tradingDate, lookTime, quote.expiry, quote.strike, quote.right, quote.bid, quote.ask, quote.bidSize, quote.askSize);
-          quoteRows += quotes.length;
-        }
-        insertIntradayDay.run(day.tradingDate, "complete", Object.keys(quotesByLookTime).length, quoteRows, null, "2026-10-12T00:00:00Z");
-      }
-    }
-    if (quality) {
-      database.exec(`
-        CREATE TABLE day_issues (trading_date TEXT NOT NULL, part TEXT NOT NULL CHECK (part IN ('quotes', 'eod', 'open_interest', 'intraday_quotes')), expiry TEXT, message TEXT NOT NULL, recorded_at TEXT NOT NULL${quality.schemaVersion === "2" ? ", attempts INTEGER NOT NULL DEFAULT 1" : ""});
-        CREATE TABLE unavailable_days (trading_date TEXT PRIMARY KEY, reason TEXT NOT NULL, attempts INTEGER NOT NULL, last_attempt_at TEXT NOT NULL);
-      `);
-      const insertIssue = database.prepare("INSERT INTO day_issues (trading_date, part, expiry, message, recorded_at) VALUES (?, ?, ?, ?, ?)");
-      for (const issue of quality.dayIssues ?? []) insertIssue.run(issue.tradingDate, issue.part, issue.expiry, issue.message, "2026-10-12T00:00:00Z");
-      const insertUnavailable = database.prepare("INSERT INTO unavailable_days VALUES (?, ?, ?, ?)");
-      for (const day of quality.unavailableDays ?? []) insertUnavailable.run(day.tradingDate, day.reason, 1, "2026-10-12T00:00:00Z");
-      const insertIntradayDay = database.prepare("INSERT INTO intraday_days VALUES (?, ?, ?, ?, ?, ?)");
-      for (const dateIso of quality.intradayCompleteDays ?? []) insertIntradayDay.run(dateIso, "complete", 12, 0, 20, "2026-10-12T00:00:00Z");
-    }
+    for (const dateIso of noDataDates) insertDay.run(dateIso, "no_data", 0, 0, 0);
+    const insertIssue = database.prepare("INSERT INTO day_issues (trading_date, part, expiry, message, recorded_at) VALUES (?, ?, ?, ?, '2026-10-12T00:00:00Z')");
+    for (const issue of quality?.dayIssues ?? []) insertIssue.run(issue.tradingDate, issue.part, issue.expiry, issue.message);
+    const insertUnavailable = database.prepare("INSERT INTO unavailable_days VALUES (?, ?, 1, '2026-10-12T00:00:00Z')");
+    for (const day of quality?.unavailableDays ?? []) insertUnavailable.run(day.tradingDate, day.reason);
   } finally {
     database.close();
   }

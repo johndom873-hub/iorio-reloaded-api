@@ -24,9 +24,9 @@ import {
   type SliceNumberColumn,
 } from "./symbolFileSlices.js";
 
-// BacktestSymbolFile's option reads on a schema 4 file (symbolFileSlices.ts): the same rows, in the same order and with
-// the same values as its statements give on a schema 3 file. The 10:00 quotes are read from ten_oclock_quote_slices,
-// every intraday look (10:00 included) from intraday_quote_slices, as schema 3 reads quotes and intraday_quotes.
+// BacktestSymbolFile's option reads, from the file's slices (symbolFileSlices.ts): the 10:00 quotes from
+// ten_oclock_quote_slices, every intraday look (10:00 included) from intraday_quote_slices, the end of day from
+// end_of_day_slices. The day-data reader threads read the same slices (backtestDayDataReaderWorker.ts).
 
 /** The expiries the engine reads: 0..45 days out for the 10:00 and intraday quotes, 0..46 for the end of day. */
 const quoteWindowDays = 45;
@@ -264,7 +264,7 @@ export class SymbolFileSliceReads {
   }
 }
 
-/** Shares one strings table across a day's tables, as the reader thread's encoding does. */
+/** One strings table shared by a day's tables on the reader thread. */
 export class DayDataStrings {
   readonly strings: string[] = [];
   private readonly indexByString = new Map<string, number>();
@@ -282,7 +282,7 @@ export class DayDataStrings {
 
 /**
  * Slices as one of the reader thread's tables: [look time when `withLookTime`], expiry, strike, right, then the number
- * columns asked for (positions in the slice), each as BacktestSymbolFile's conversions give them.
+ * columns asked for (positions in the slice), each value as BacktestSymbolFile reads it.
  */
 export function dayDataTableOfSlices(slices: readonly StoredSlice[], kinds: readonly SliceColumnKind[], valueColumns: readonly number[], strings: DayDataStrings, withLookTime: boolean): DayDataTable {
   let rowCount = 0;

@@ -1,10 +1,8 @@
-import { easternInstant } from "../../lib/easternIsoDate.js";
-
 // Schema 4 of the symbol files (docs/backtesting/DATA-FILES.md): a day's option rows stored as slices, one SQLite row
 // per day, look and expiry, its contracts packed as columns in strike order (the Call before the Put), each column in
-// the narrowest width its values need within the slice. The four slice tables hold what schema 3's quotes,
-// intraday_quotes, eod and open_interest hold. BacktestSymbolFile and the day-data reader threads read them; the
-// downloader and the schema 3 conversion write them.
+// the narrowest width its values need within the slice. Four slice tables: the 10:00 quotes, the quotes at every
+// intraday look (10:00 included), the end of day and the open interest. BacktestSymbolFile and the day-data reader
+// threads read them; the downloader writes them (scripts/backtest/symbol_file_slices.py, the same bytes).
 //
 // A slice's bytes (little-endian): u32 contract count, then each column in order:
 // - the right: a bitmap (bit set = Put), padded to 4 bytes;
@@ -287,13 +285,3 @@ export function sliceRowFlags(rows: readonly SliceRow[], flagColumn: number, fla
   }
   return { callCount, putCount: rows.length - callCount, flagged };
 }
-
-/** Milliseconds from a quote's own time (ISO with offset) to 10:00:00 Eastern on the trading date: what a 10:00 slice keeps of quoted_at. */
-export function millisecondsBeforeTenOClock(tradingDate: string, quotedAtIso: string): number {
-  const quotedAtMs = Date.parse(quotedAtIso);
-  if (Number.isNaN(quotedAtMs)) throw new Error(`quoted_at ${quotedAtIso} is not a time`);
-  return easternInstant(tradingDate, 10, 0).getTime() - quotedAtMs;
-}
-
-/** The quote's own time from a 10:00 slice's milliseconds before 10:00. */
-export const quotedAtOf = (tradingDate: string, millisecondsBeforeTen: number): Date => new Date(easternInstant(tradingDate, 10, 0).getTime() - millisecondsBeforeTen);

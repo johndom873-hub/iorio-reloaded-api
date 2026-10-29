@@ -3,11 +3,10 @@ import { engineWorkerExecArgv, engineWorkerModuleUrl } from "./engineWorkerThrea
 import type { NextCallExpiryDay, SymbolFileEndOfDayRow, SymbolFileQuote } from "./backtestSymbolFile.js";
 
 // Reading the symbol files ahead of the session (Marcelo 2026-10-12): a day's 10:00 quotes, end-of-day rows and
-// intraday quotes are read on threads of their own, a few days before the session reaches them, with the statements
-// BacktestSymbolFile reads them with (backtestDayDataReaderWorker.ts). They come back as columns in transferred
-// buffers, and the session's thread only builds the rows from them, in the order and with the values the file would
-// have given. A day a thread could not read, or one with a value the columns cannot carry, is read from the file as
-// before.
+// intraday quotes are read on threads of their own, a few days before the session reaches them, from the file's slices
+// as BacktestSymbolFile reads them (backtestDayDataReaderWorker.ts). They come back as columns in transferred buffers,
+// and the session's thread only builds the rows from them, in the order and with the values the file would have given.
+// A day a thread could not read is read from the file as before.
 
 export type DayDataColumn = { kind: "string"; indices: Int32Array } | { kind: "number"; values: Float64Array; nulls: Uint8Array };
 
@@ -39,10 +38,10 @@ export interface DayDataPayload {
   endOfDay: DayDataTable | null;
   /** NextCallExpiryDay, its rows as columns; null when the threads read the day in full. */
   nextCallExpiryDay: (Omit<NextCallExpiryDay, "quotes" | "previousEndOfDay"> & { quotes: DayDataTable; previousEndOfDay: DayDataTable }) | null;
-  /** Every intraday row of the day after `intradayAfterLookTime`, in primary-key order; null on a file without intraday tables, or when the session does not read them. */
+  /** Every intraday row of the day after `intradayAfterLookTime`, look by look in the file's order; null when the session does not read them. */
   intraday: DayDataTable | null;
   intradayAfterLookTime: string;
-  /** The request's look check with its answer; null when it asked none, or the file has no intraday tables. */
+  /** The request's look check with its answer; null when it asked none. */
   intradayLookCheck: (IntradayLookCheck & { hasQuote: boolean }) | null;
 }
 
@@ -106,9 +105,8 @@ export class PrefetchedSymbolDay {
 
   /**
    * BacktestSymbolFile.loadIntradayQuotes: the rows after `afterLookTime` through `throughLookTime` with a strike from
-   * `lowestStrike` to `highestStrike` (the statement's comparisons, on the same strings and numbers), in the file's
-   * order. Null when the day was read after another look time, without its intraday rows, or the file has no intraday
-   * tables: the caller reads the file then.
+   * `lowestStrike` to `highestStrike` (the same comparisons, on the same strings and numbers), in the file's order. Null
+   * when the day was read after another look time or without its intraday rows: the caller reads the file then.
    */
   intradayQuotes(afterLookTime: string, throughLookTime: string, lowestStrike: number, highestStrike: number): Map<string, SymbolFileQuote[]> | null {
     const table = this.payload.intraday;

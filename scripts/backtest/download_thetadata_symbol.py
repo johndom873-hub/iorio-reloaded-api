@@ -386,7 +386,7 @@ def keep_strikes_within_window(intraday_quote_rows: list[tuple], at_the_money_st
 
 
 # Schema 4 keeps each option part as slices (symbol_file_slices.py, docs/backtesting/DATA-FILES.md): one row per day,
-# look and expiry. The functions below take and give rows in PART_COLUMN_NAMES' order, as schema 3 stored them.
+# look and expiry. The functions below take and give a contract as a row in PART_COLUMN_NAMES' order.
 SLICE_TABLE_BY_PART_NAME = {"quotes": "ten_oclock_quote_slices", "intraday_quotes": "intraday_quote_slices", "eod": "end_of_day_slices", "open_interest": "open_interest_slices"}
 SLICE_COLUMNS_BY_PART_NAME = {"quotes": slices.TEN_O_CLOCK_QUOTE_COLUMNS, "intraday_quotes": slices.INTRADAY_QUOTE_COLUMNS, "eod": slices.END_OF_DAY_COLUMNS,
                               "open_interest": slices.OPEN_INTEREST_COLUMNS}
@@ -455,7 +455,7 @@ def delete_part_rows_of_day(connection: sqlite3.Connection, part_name: str, trad
 
 def merge_part_rows(connection: sqlite3.Connection, part_name: str, rows: list[tuple], on_stored_contract: str) -> int:
     """Adds rows to their slices. A contract stored already (or twice among the rows) raises IntegrityError
-    ('fail', as schema 3's INSERT), keeps its stored values ('keep') or takes the new ones ('replace'). Returns how many
+    ('fail'), keeps its stored values ('keep') or takes the new ones ('replace'). Returns how many
     contracts were added."""
     rows_by_key: dict[int, list[tuple]] = collections.defaultdict(list)
     for row in rows:
@@ -488,7 +488,7 @@ def add_missing_part_rows(connection: sqlite3.Connection, part_name: str, rows: 
 
 
 def read_part_rows(connection: sqlite3.Connection, part_name: str, trading_date_text: str | None = None) -> list[tuple]:
-    """The part's rows of one day (or of every day), in PART_COLUMN_NAMES' order and schema 3's key order."""
+    """The part's rows of one day (or of every day), in PART_COLUMN_NAMES' order, by day, look, expiry, strike and right."""
     first_key, last_key = day_key_range(trading_date_text) if trading_date_text is not None else (0, 2 ** 62)
     return [part_row_of_slice_row(part_name, key, slice_row) for key, slice_rows in read_slices(connection, part_name, first_key, last_key) for slice_row in slice_rows]
 
@@ -520,12 +520,12 @@ def open_symbol_file(file_path: Path, symbol: str, now_utc: datetime.datetime) -
     connection = sqlite3.connect(file_path, isolation_level=None)
     try:
         connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MILLISECONDS}")
-        # Only schema 4 files are written; an earlier file is converted first (every file was on 2026-10-29).
+        # Only schema 4 files are written: an earlier file is refused.
         has_meta = connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").fetchone() is not None
         stored_version = connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() if has_meta else None
         if stored_version is not None and stored_version[0] != SCHEMA_VERSION:
-            raise DownloadFailed(f"{file_path} has schema version {stored_version[0]}; this downloader writes version {SCHEMA_VERSION}: convert the file first "
-                                 "(src/backtest/symbolFileSchemaFourConversion.ts)")
+            raise DownloadFailed(f"{file_path} has schema version {stored_version[0]}; this downloader writes version {SCHEMA_VERSION}: move the file away "
+                                 "and download the symbol again")
         if connection.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0:
             connection.execute(f"PRAGMA page_size = {NEW_FILE_PAGE_SIZE}")
         connection.execute("BEGIN IMMEDIATE")

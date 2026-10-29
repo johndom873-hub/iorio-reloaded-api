@@ -518,8 +518,8 @@ class StrikeWindowTests(unittest.TestCase):
         self.assertEqual([row[3] for row in downloader.keep_strikes_within_window(intraday_rows, 50.0, 40.0)], [30.0, 50.0, 70.0])
 
 
-def create_schema_three_tables(connection):
-    """The file's slices as TEMP tables named and laid out as schema 3's option tables, so a test reads them as rows."""
+def create_option_row_tables(connection):
+    """The file's slices as TEMP tables of rows, one per contract, named and laid out as PART_COLUMN_NAMES, so a test reads them as rows."""
     for part_name, column_names in downloader.PART_COLUMN_NAMES.items():
         connection.execute(f"CREATE TEMP TABLE {part_name} ({', '.join(column_names)})")
         connection.executemany(f"INSERT INTO temp.{part_name} VALUES ({', '.join('?' * len(column_names))})", downloader.read_part_rows(connection, part_name))
@@ -592,7 +592,7 @@ class SymbolFileTests(unittest.TestCase):
                 earlier_file = sqlite3.connect(self.file_path)
                 earlier_file.executescript(FIRST_VERSION_SCHEMA.replace("('schema_version', '1')", f"('schema_version', '{version}')"))
                 earlier_file.close()
-                with self.assertRaisesRegex(downloader.DownloadFailed, f"has schema version {version}; this downloader writes version 4: convert the file first"):
+                with self.assertRaisesRegex(downloader.DownloadFailed, f"has schema version {version}; this downloader writes version 4: move the file away and download the symbol again"):
                     self.open_file()
                 check = sqlite3.connect(self.file_path)
                 try:
@@ -698,7 +698,7 @@ class DownloadRunTests(unittest.TestCase):
     def read_database(self, query, parameters=()):
         connection = sqlite3.connect(self.data_directory / "INTC.sqlite")
         try:
-            create_schema_three_tables(connection)
+            create_option_row_tables(connection)
             return connection.execute(query, parameters).fetchall()
         finally:
             connection.close()
@@ -815,7 +815,7 @@ class DownloadRunTests(unittest.TestCase):
 
     def store_with_the_earlier_cap(self, extra_arguments=()):
         """A complete download of the days without the 300-day expiry, its days then flagged as stored with the earlier
-        45-day cap (all_expiries 0, as the conversion keeps them), and one stored quote changed."""
+        45-day cap (all_expiries 0), and one stored quote changed."""
         self.run_downloader(FakeThetaData(self.frames_by_date), extra_arguments=extra_arguments)
         connection = sqlite3.connect(self.data_directory / "INTC.sqlite")
         connection.executescript("UPDATE days SET all_expiries = 0 WHERE status = 'complete'; UPDATE intraday_days SET all_expiries = 0;")

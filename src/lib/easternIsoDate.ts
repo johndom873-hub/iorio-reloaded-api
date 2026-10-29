@@ -23,8 +23,7 @@ const easternOffsetFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "Ame
 /** New York's offset changes only on whole UTC hours (02:00 local, EST or EDT), so one reading serves its UTC hour. */
 const easternOffsetMinutesByUtcHour = new Map<number, number>();
 
-/** New York's offset from UTC at an instant, in minutes (-300 EST, -240 EDT). */
-export function easternOffsetMinutesAt(at: Date): number {
+function easternOffsetMinutesAt(at: Date): number {
   const utcHour = Math.floor(at.getTime() / 3_600_000);
   const cached = easternOffsetMinutesByUtcHour.get(utcHour);
   if (cached !== undefined) return cached;
@@ -35,15 +34,6 @@ export function easternOffsetMinutesAt(at: Date): number {
   if (easternOffsetMinutesByUtcHour.size >= easternCacheLimit) easternOffsetMinutesByUtcHour.clear();
   easternOffsetMinutesByUtcHour.set(utcHour, offsetMinutes);
   return offsetMinutes;
-}
-
-/** An instant as ISO text on the America/New_York clock with milliseconds and its offset, e.g. "2025-01-02T09:59:59.167-05:00". */
-export function formatEasternIsoWithOffset(at: Date): string {
-  const offsetMinutes = easternOffsetMinutesAt(at);
-  const local = new Date(at.getTime() + offsetMinutes * 60_000).toISOString().slice(0, 23);
-  const sign = offsetMinutes < 0 ? "-" : "+";
-  const absoluteMinutes = Math.abs(offsetMinutes);
-  return `${local}${sign}${String(Math.floor(absoluteMinutes / 60)).padStart(2, "0")}:${String(absoluteMinutes % 60).padStart(2, "0")}`;
 }
 
 /**

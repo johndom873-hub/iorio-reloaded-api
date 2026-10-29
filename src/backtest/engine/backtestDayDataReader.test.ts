@@ -38,7 +38,7 @@ beforeAll(() => {
     },
     // The next file day: Vol Farmer v2 reads the previous day's end of day with it.
     { tradingDate: "2026-03-03", quotes: syntheticOptionQuotes("2026-03-03", 102, expiries, 0.5, 0.04, 2.5, 8), endOfDayVolume: 50, openInterest: 200 },
-  ], [], { schemaVersion: "3" });
+  ]);
   reader = new BacktestDayDataReader({ readsIntradayQuotes: true, readsNextCallExpiryOnly: false, threadCount: 1 });
   readerWithoutIntraday = new BacktestDayDataReader({ readsIntradayQuotes: false, readsNextCallExpiryOnly: false, threadCount: 1 });
 });

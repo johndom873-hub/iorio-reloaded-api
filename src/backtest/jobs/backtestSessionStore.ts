@@ -567,12 +567,10 @@ async function sessionDecisionMaker(sessionId: string): Promise<BacktestSettings
 /** A symbol's Put prices from its data file's end-of-day quotes: the closing mid, else the last trade, else the intrinsic value at the stock's close. Close it when done. */
 function hedgePutMarksFromFile(symbol: string): { markOf: HedgePutMarkOf; close(): void } {
   const file = openBacktestDataFileReadOnly(symbol);
-  const isSchemaFour = file?.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'end_of_day_slices'").get() !== undefined;
-  const statement = file === null || isSchemaFour ? null : file.prepare("SELECT bid, ask, close FROM eod WHERE trading_date = ? AND expiry = ? AND option_right = 'P' AND abs(strike - ?) < 0.0005");
-  const endOfDaySlice = file !== null && isSchemaFour ? file.prepare("SELECT data FROM end_of_day_slices WHERE key = ?") : null;
-  /** The first Put of the expiry within half a tenth of a cent of the strike, as the statement reads it (a schema 4 file: from its slice). */
+  const endOfDaySlice = file?.prepare("SELECT data FROM end_of_day_slices WHERE key = ?") ?? null;
+  /** The first Put of the expiry within half a tenth of a cent of the strike, from the day's slice of that expiry. */
   const putQuoteOf = (tradingDate: string, expiry: string, strikeAsTraded: number): { bid: number | null; ask: number | null; close: number | null } | undefined => {
-    if (endOfDaySlice === null) return statement?.get(tradingDate, expiry, strikeAsTraded) as { bid: number | null; ask: number | null; close: number | null } | undefined;
+    if (endOfDaySlice === null) return undefined;
     const found = endOfDaySlice.get(sliceKey(dayNumberOf(tradingDate), dailySliceLookMinute, dayNumberOf(expiry) - dayNumberOf(tradingDate))) as { data: Uint8Array } | undefined;
     if (found === undefined) return undefined;
     const slice = decodeSlice(found.data, endOfDayColumns);

@@ -6,22 +6,24 @@ import { readBacktestDataFileContents, readBacktestDataFilePeriodContents } from
 import { BacktestSymbolFile } from "./backtestSymbolFile.js";
 import { syntheticOptionQuotes, writeSyntheticSymbolFile, type SyntheticSymbolFileDay } from "./testSupport/syntheticBacktestData.js";
 
-// Symbol files as the downloader leaves them: the first downloads' tables only, or with its record of what it could not
-// retrieve (day_issues, unavailable_days) and of the days that have intraday quotes.
+// Symbol files as the downloader leaves them (schema 4): their days and quotes, its record of what it could not retrieve
+// (day_issues, unavailable_days) and the days that have intraday quotes.
 
 let dataDirectory: string;
 let previousDataDirectory: string | undefined;
 const day = (tradingDate: string, withoutEndOfDay = false): SyntheticSymbolFileDay => ({ tradingDate, quotes: syntheticOptionQuotes(tradingDate, 100, ["2026-03-13"], 0.5, 0.04, 5, 2), endOfDayVolume: 100, openInterest: 200, withoutEndOfDay });
 const fileOf = (symbol: string) => path.join(dataDirectory, `${symbol}.sqlite`);
+const edgeQuotes = syntheticOptionQuotes("2026-03-02", 100, ["2026-03-13", "2026-04-16", "2026-04-17", "2026-12-27"], 0.5, 0.04, 2.5, 2);
 
 beforeAll(() => {
   dataDirectory = mkdtempSync(path.join(tmpdir(), "backtest-symbol-file-"));
   previousDataDirectory = process.env.BACKTEST_DATA_DIR;
   process.env.BACKTEST_DATA_DIR = dataDirectory;
-  writeSyntheticSymbolFile(fileOf("OLDF"), "OLDF", [day("2026-03-02"), day("2026-03-03")]);
+  writeSyntheticSymbolFile(fileOf("PLAIN"), "PLAIN", [day("2026-03-02"), day("2026-03-03")]);
   // 4 March could not be retrieved at all; the 5th is stored without its end-of-day part; the 6th lacks one expiration's
   // open interest; the 9th has its 10:00 parts but no intraday quotes.
-  writeSyntheticSymbolFile(fileOf("NEWF"), "NEWF", [day("2026-03-02"), day("2026-03-03"), day("2026-03-05", true), day("2026-03-06"), day("2026-03-09")], [], {
+  const withIntradayQuotes = (stored: SyntheticSymbolFileDay): SyntheticSymbolFileDay => ({ ...stored, intradayQuotes: { "10:30": stored.quotes } });
+  writeSyntheticSymbolFile(fileOf("GAPS"), "GAPS", [withIntradayQuotes(day("2026-03-02")), withIntradayQuotes(day("2026-03-03")), withIntradayQuotes(day("2026-03-05", true)), day("2026-03-06"), day("2026-03-09")], [], {
     dayIssues: [
       { tradingDate: "2026-03-05", part: "eod", expiry: null, message: "HTTP 500" },
       { tradingDate: "2026-03-06", part: "open_interest", expiry: "2026-03-13", message: "timeout" },
@@ -31,24 +33,20 @@ beforeAll(() => {
       { tradingDate: "2026-03-04", reason: "no 10:00 quotes" },
       { tradingDate: "2026-03-09", reason: "no intraday quotes" },
     ],
-    intradayCompleteDays: ["2026-03-02", "2026-03-03", "2026-03-05"],
-  });
-  // A file reopened by the newer downloader: version 2, day_issues counts its attempts, a complete day without
-  // end-of-day rows says "no data returned", and the reasons of unavailable days name the part.
-  writeSyntheticSymbolFile(fileOf("VERTWO"), "VERTWO", [day("2026-03-02"), day("2026-03-03", true)], [], {
-    schemaVersion: "2",
-    dayIssues: [{ tradingDate: "2026-03-03", part: "eod", expiry: null, message: "no data returned" }],
-    unavailableDays: [{ tradingDate: "2026-03-04", reason: "quotes at 10:00: HTTP 500" }],
-    intradayCompleteDays: ["2026-03-02"],
   });
   writeSyntheticSymbolFile(fileOf("VERTHREE"), "VERTHREE", [day("2026-03-02")], [], { schemaVersion: "3" });
   writeSyntheticSymbolFile(fileOf("VERFIVE"), "VERFIVE", [day("2026-03-02")], [], { schemaVersion: "5" });
-  // A file holding every expiry (schema 3): contracts 10, 45, 46 and 300 days out, at 10:00, at the close and at a later
-  // look, and issues for a whole part and for expirations inside and beyond the engine's window.
+  // Quotes without a bid, without an ask, a crossed one and one at a half cent.
+  edgeQuotes[1] = { ...edgeQuotes[1]!, bid: null };
+  edgeQuotes[4] = { ...edgeQuotes[4]!, ask: null, askSize: null };
+  edgeQuotes[6] = { ...edgeQuotes[6]!, bid: 2.5, ask: 2.4 };
+  edgeQuotes[8] = { ...edgeQuotes[8]!, bid: 1.005 };
+  writeSyntheticSymbolFile(fileOf("EDGES"), "EDGES", [{ ...day("2026-03-02"), quotes: edgeQuotes }]);
+  // A file holds every expiry: contracts 10, 45, 46 and 300 days out, at 10:00, at the close and at a later look, and
+  // issues for a whole part and for expirations inside and beyond the engine's window.
   const everyExpiry = syntheticOptionQuotes("2026-03-02", 100, ["2026-03-12", "2026-04-16", "2026-04-17", "2026-12-27"], 0.5, 0.04, 5, 1);
   const allExpiriesIssue = (part: "quotes" | "eod" | "open_interest" | "intraday_quotes", expiry: string | null) => ({ tradingDate: "2026-03-02", part, expiry, message: "timeout" });
   writeSyntheticSymbolFile(fileOf("ALLEXP"), "ALLEXP", [{ ...day("2026-03-02"), quotes: everyExpiry, intradayQuotes: { "10:30": everyExpiry } }], [], {
-    schemaVersion: "3",
     dayIssues: [
       allExpiriesIssue("quotes", "2026-04-16"),
       allExpiriesIssue("quotes", "2026-04-17"),
@@ -71,8 +69,8 @@ afterAll(() => {
 });
 
 describe("BacktestSymbolFile", () => {
-  it("reads a file from before the downloader recorded what it could not retrieve: no issues, no unavailable days", () => {
-    const file = BacktestSymbolFile.open("OLDF");
+  it("reads no issues and no unavailable days from a file with none recorded", () => {
+    const file = BacktestSymbolFile.open("PLAIN");
     try {
       expect(file.loadDays().map((entry) => entry.tradingDate)).toEqual(["2026-03-02", "2026-03-03"]);
       expect(file.loadDayIssuesByDate()).toEqual(new Map());
@@ -82,8 +80,8 @@ describe("BacktestSymbolFile", () => {
     }
   });
 
-  it("reads the day issues and the unavailable days of a newer file", () => {
-    const file = BacktestSymbolFile.open("NEWF");
+  it("reads the day issues and the unavailable days", () => {
+    const file = BacktestSymbolFile.open("GAPS");
     try {
       expect(file.loadDayIssuesByDate()).toEqual(
         new Map([
@@ -110,17 +108,20 @@ describe("BacktestSymbolFile", () => {
     }
   });
 
-  it("accepts schema versions 1 to 4 and refuses any other", () => {
-    const versionTwo = BacktestSymbolFile.open("VERTWO");
+  it("refuses a file of another schema version", () => {
+    expect(() => BacktestSymbolFile.open("VERTHREE")).toThrow("The data file has schema version 3; the engine reads version 4.");
+    expect(() => BacktestSymbolFile.open("VERFIVE")).toThrow("The data file has schema version 5; the engine reads version 4.");
+  });
+
+  it("gives back the quotes as written, by expiry, strike and right, those up to 45 days out", () => {
+    const file = BacktestSymbolFile.open("EDGES");
     try {
-      expect(versionTwo.loadDayIssuesByDate()).toEqual(new Map([["2026-03-03", [{ tradingDate: "2026-03-03", part: "eod", expiry: null, message: "no data returned" }]]]));
-      expect(versionTwo.loadUnavailableDays()).toEqual([{ tradingDate: "2026-03-04", reason: "quotes at 10:00: HTTP 500" }]);
+      expect(file.loadQuotes("2026-03-02")).toStrictEqual(edgeQuotes.filter((quote) => quote.expiry <= "2026-04-16"));
+      expect(file.loadPutQuotesOfExpiry("2026-03-02", "2026-12-27")).toStrictEqual(edgeQuotes.filter((quote) => quote.expiry === "2026-12-27" && quote.right === "P"));
+      expect(file.loadEndOfDay("2026-03-02").map(({ strike, right, bid, ask }) => ({ strike, right, bid, ask }))).toStrictEqual(edgeQuotes.filter((quote) => quote.expiry <= "2026-04-17").map(({ strike, right, bid, ask }) => ({ strike, right, bid, ask })));
     } finally {
-      versionTwo.close();
+      file.close();
     }
-    expect(readBacktestDataFileContents("VERTWO")).toMatchObject({ completeDays: 2, daysWithIssues: 1, unavailableDays: 1, intradayDays: 1 });
-    BacktestSymbolFile.open("VERTHREE").close();
-    expect(() => BacktestSymbolFile.open("VERFIVE")).toThrow("The data file has schema version 5; the engine reads versions 1, 2, 3, 4.");
   });
 
   it("reads the expiries up to 45 days out (46 for the end of day) of a file holding every expiry", () => {
@@ -153,11 +154,11 @@ describe("BacktestSymbolFile", () => {
 
 describe("readBacktestDataFileContents", () => {
   it("counts the days with issues, the unavailable days and the days with intraday quotes", () => {
-    expect(readBacktestDataFileContents("NEWF")).toEqual({ firstDate: "2026-03-02", lastDate: "2026-03-09", completeDays: 5, missingWeekdays: 1, daysWithIssues: 2, unavailableDays: 2, intradayDays: 3 });
+    expect(readBacktestDataFileContents("GAPS")).toEqual({ firstDate: "2026-03-02", lastDate: "2026-03-09", completeDays: 5, missingWeekdays: 1, daysWithIssues: 2, unavailableDays: 2, intradayDays: 3 });
   });
 
-  it("reads zero issues and unavailable days, and no intraday count, from a file without those tables", () => {
-    expect(readBacktestDataFileContents("OLDF")).toEqual({ firstDate: "2026-03-02", lastDate: "2026-03-03", completeDays: 2, missingWeekdays: 0, daysWithIssues: 0, unavailableDays: 0, intradayDays: null });
+  it("reads zero issues, unavailable days and intraday days from a file with none", () => {
+    expect(readBacktestDataFileContents("PLAIN")).toEqual({ firstDate: "2026-03-02", lastDate: "2026-03-03", completeDays: 2, missingWeekdays: 0, daysWithIssues: 0, unavailableDays: 0, intradayDays: 0 });
   });
 });
 
@@ -183,15 +184,13 @@ describe("the quotes at the looks inside a day", () => {
     }
   });
 
-  it("are none in a file downloaded before they existed", () => {
-    for (const symbol of ["OLDF", "NEWF"]) {
-      const file = BacktestSymbolFile.open(symbol);
-      try {
-        expect(file.loadIntradayDays().size).toBe(0);
-        expect(file.loadIntradayQuotes("2026-03-02", "10:00", "15:30", 0, 1_000).size).toBe(0);
-      } finally {
-        file.close();
-      }
+  it("are none in a file without them", () => {
+    const file = BacktestSymbolFile.open("PLAIN");
+    try {
+      expect(file.loadIntradayDays().size).toBe(0);
+      expect(file.loadIntradayQuotes("2026-03-02", "10:00", "15:30", 0, 1_000).size).toBe(0);
+    } finally {
+      file.close();
     }
   });
 });
@@ -206,9 +205,7 @@ describe("readBacktestDataFilePeriodContents", () => {
   });
 
   it("reads a file without intraday quotes as having none on any day, and no file as null", () => {
-    expect(readBacktestDataFilePeriodContents("OLDF", "2026-03-02", "2026-03-03")).toEqual({ missingWeekdays: 0, firstMissingWeekday: null, lastMissingWeekday: null, completeDays: 2, completeDaysWithoutIntradayQuotes: 2 });
-    // NEWF lists days as having intraday quotes but holds no quotes table: none can be read, so none counts.
-    expect(readBacktestDataFilePeriodContents("NEWF", "2026-03-02", "2026-03-09")).toMatchObject({ missingWeekdays: 0, completeDays: 5, completeDaysWithoutIntradayQuotes: 5 });
+    expect(readBacktestDataFilePeriodContents("PLAIN", "2026-03-02", "2026-03-03")).toEqual({ missingWeekdays: 0, firstMissingWeekday: null, lastMissingWeekday: null, completeDays: 2, completeDaysWithoutIntradayQuotes: 2 });
     expect(readBacktestDataFilePeriodContents("NOFILE", "2026-03-02", "2026-03-03")).toBeNull();
   });
 });
