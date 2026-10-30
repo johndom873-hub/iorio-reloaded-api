@@ -14,6 +14,8 @@ import { hasPreviousSessionVolumeForOneContract, optionRequoteBand, selectOption
 //                       CC + Put Ladder   its days-to-expiry range (ladderMinDte–ladderMaxDte)
 //                       Vol Farmer v2     the next listed expiry after the session, the only one it sells (a LEAPS is
 //                                         quoted when its steps ask for one, volFarmerV2Round.ts)
+//                     An expiry the after-close capture has no volume for is taken whole: the rule is lifted on it for
+//                     the day (Marcelo 2026-10-30; expiriesWithoutPreviousSessionVolume)
 //   last-seen IV      the contract's own IV at its latest quote today (the mid's IV on the expiry's forward, Pluto's
 //                     10:00 parity forward moved with the stock: forwardAtSpot); else last night's IBKR IV plus the
 //                     expiry's median shift today (own IV today − IBKR IV last night, over the expiry's contracts that
@@ -58,9 +60,22 @@ export function optionQuoteBandExpiryContracts(input: { expirations: readonly st
   return contracts;
 }
 
-/** The day's universe: the rule's expiries, then the previous session's volume (hasPreviousSessionVolumeForOneContract). */
-export function optionQuoteBandDayUniverse(input: Parameters<typeof optionQuoteBandExpiryContracts>[0] & { previousSessionVolumeByContract: ReadonlyMap<string, number> }): OptionQuoteBandUniverseContract[] {
-  return optionQuoteBandExpiryContracts(input).filter((contract) => hasPreviousSessionVolumeForOneContract(input.previousSessionVolumeByContract.get(contractKey(contract)) ?? null));
+/**
+ * The expiries the previous session's after-close capture has no volume for (Marcelo 2026-10-30): Pluto lifts the 20% volume
+ * rule on them for the day, so a ticker switched on after the capture, a strategy switched to an expiry it did not cover, or a
+ * failed capture still trades. An expiry the capture covered keeps the rule, contract by contract. Example: NVDA switched on
+ * after the 28 Oct capture has no volume at all on 29 Oct, so its 30 Oct expiry is sold without the rule that day.
+ */
+export function expiriesWithoutPreviousSessionVolume(expiries: Iterable<string>, previousSessionVolumeByContract: ReadonlyMap<string, number> | null): Set<string> {
+  const covered = new Set([...(previousSessionVolumeByContract?.keys() ?? [])].map((key) => key.slice(0, key.indexOf("|"))));
+  return new Set([...expiries].filter((expiry) => !covered.has(expiry)));
+}
+
+/** The day's universe: the rule's expiries, then the previous session's volume (hasPreviousSessionVolumeForOneContract) on the expiries it covers. */
+export function optionQuoteBandDayUniverse(input: Parameters<typeof optionQuoteBandExpiryContracts>[0] & { previousSessionVolumeByContract: ReadonlyMap<string, number> | null }): OptionQuoteBandUniverseContract[] {
+  const contracts = optionQuoteBandExpiryContracts(input);
+  const lifted = expiriesWithoutPreviousSessionVolume(new Set(contracts.map((contract) => contract.expiry)), input.previousSessionVolumeByContract);
+  return contracts.filter((contract) => lifted.has(contract.expiry) || hasPreviousSessionVolumeForOneContract(input.previousSessionVolumeByContract?.get(contractKey(contract)) ?? null));
 }
 
 export interface LadderClock {

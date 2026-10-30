@@ -78,9 +78,12 @@ describe("createOptionQuoteBandPlanner", () => {
     expect(loadChain).toHaveBeenCalledTimes(2);
   });
 
-  it("without the previous session's volumes, the ticker's universe is empty: the 20% rule sells none of an unknown volume", async () => {
+  it("without the previous session's volumes, the ticker's expiry is taken whole: the 20% rule is lifted on it for the day", async () => {
+    const withVolumes = createOptionQuoteBandPlanner(dependencies());
+    // The volumes above give the $80, $90, $100 Puts and the $100 Call; without any, the $80 and $90 Calls join them.
+    expect((await withVolumes.plan(todayIso, new Map([["t1", 100]]), now)).get("t1")!.plan.universeCount).toBe(4);
     const planner = createOptionQuoteBandPlanner(dependencies({ loadPreviousSessionVolume: async () => null }));
-    expect((await planner.plan(todayIso, new Map([["t1", 100]]), now)).get("t1")!.plan).toMatchObject({ universeCount: 0, contracts: [] });
+    expect((await planner.plan(todayIso, new Map([["t1", 100]]), now)).get("t1")!.plan.universeCount).toBe(6);
   });
 });
 

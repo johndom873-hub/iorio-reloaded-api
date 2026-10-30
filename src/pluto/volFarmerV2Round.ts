@@ -23,7 +23,7 @@ import { frozenSymbolSet } from "../lib/tickerFreeze.js";
 import { loadInFlightNotionals, loadInFlightNotionalsBySymbol, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
 import { executePlutoOrder, watchPlutoOrder, type ExecuteInput } from "./executor.js";
 import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
-import { nextListedExpiryAfter, optionQuoteBandDayUniverse } from "./optionQuoteBandPlan.js";
+import { expiriesWithoutPreviousSessionVolume, nextListedExpiryAfter, optionQuoteBandDayUniverse } from "./optionQuoteBandPlan.js";
 import { loadFinishedOptionQuoteBandCycle, loadOptionQuoteBandQuotes } from "./optionQuoteBandQuotes.js";
 import { latestCycleQuotes } from "./ladderLook.js";
 import { loadOpenPositionFigures } from "./ladderLookSnapshot.js";
@@ -63,8 +63,9 @@ import { loadVolFarmerV2LegStatuses, loadVolFarmerV2Memory, loadVolFarmerV2Order
 
 /**
  * Why the option quote band has no Call after today for v2 to look at (it quotes v2's next listed expiry,
- * optionQuoteBandPlan.ts). Example: AAPL enabled at 09:48 SGT on 28 Oct, after the 27 Oct close's volume capture, has no
- * previous-session volume, so none of its 30 Oct (2DTE) options is quoted that day.
+ * optionQuoteBandPlan.ts). An expiry without the previous session's volume is quoted whole (the 20% rule is lifted on it),
+ * so only a captured expiry can lack a Call that traded enough. Example: a 30 Oct (2DTE) Call that traded 4 contracts the day
+ * before is under the 5 one contract needs.
  */
 export function volFarmerV2NoCallQuotedReason(input: {
   todayIso: string;
@@ -78,7 +79,6 @@ export function volFarmerV2NoCallQuotedReason(input: {
   const nextExpiry = nextListedExpiryAfter(input.expirations, input.todayIso);
   if (nextExpiry === null) return "no Call expiry listed after today";
   const expiry = describeExpiry(nextExpiry, input.todayIso);
-  if (input.previousSessionVolumeByContract === null) return `no ${expiry} option is quoted today: no option volume was captured after the previous session's close (the capture covers the tickers enabled then), so none can be sold before the next session`;
   const universe = optionQuoteBandDayUniverse({ expirations: input.expirations, strikesByExpiry: input.strikesByExpiry, sessionIso: input.todayIso, expiryRule: { kind: "next_listed_expiry" }, previousSessionVolumeByContract: input.previousSessionVolumeByContract });
   if (!universe.some((contract) => contract.right === "C")) return `no ${expiry} Call traded enough in the previous session to sell one (the 20% volume rule needs a volume of 5 or more)`;
   if (!input.bandCycleFinished) return `no ${expiry} option is quoted yet today`;
@@ -307,6 +307,10 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
     .filter((expiry) => expiry >= clock.todayIso)
     .sort();
   const { farmer, v2 } = volFarmerV2RulesOf(settings);
+  // The expiry v2 sells, without the previous session's volume: the 20% volume rule is lifted on it for the day.
+  const soldExpiry = nextListedExpiryAfter(chain.expirations, clock.todayIso);
+  const volumeLimitLiftedExpiries = expiriesWithoutPreviousSessionVolume(soldExpiry === null ? [] : [soldExpiry], previousSessionVolumeByContract);
+  if (pass === "cycles_calls_puts" && soldExpiry !== null && volumeLimitLiftedExpiries.has(soldExpiry)) note(`no previous-session volume for ${describeExpiry(soldExpiry, clock.todayIso)}: the 20% volume rule is off for it today`);
   const noCallQuotedReason = quotes.some((quote) => quote.right === "C" && quote.expiry > clock.todayIso)
     ? undefined
     : volFarmerV2NoCallQuotedReason({ todayIso: clock.todayIso, expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, previousSessionVolumeByContract, bandCycleFinished: bandCycle !== null });
@@ -319,6 +323,7 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
     quotes,
     forwardAnchors,
     previousSessionVolumeByContract,
+    volumeLimitLiftedExpiries,
     yearsToTodaysClose: yearsToSessionClose(now, clock.closeMinutesEt),
     yearsToExpiry: (expiry) => yearsBetweenIsoDates(clock.todayIso, expiry),
     leapsCallQuotes: {

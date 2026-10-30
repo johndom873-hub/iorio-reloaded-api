@@ -12,15 +12,17 @@ import { addCalendarDays } from "../lib/calendarDays.js";
 import { contractKey } from "../lib/optionContractKey.js";
 import { loadLastSeenImpliedVolatilityByContract, saveOptionSessionVolumes, type OptionSessionVolumeRow } from "../lib/optionSessionVolumeStore.js";
 import { loadPlutoSettings } from "../pluto/settingsStore.js";
-import { loadEnabledPlutoTickerSettings } from "../pluto/tickerSettingsStore.js";
+import { loadShortlistedPlutoTickerSettings } from "../pluto/tickerSettingsStore.js";
 import { optionRequoteBand, selectOptionRequoteContracts, type OptionRequoteBand } from "../pluto/optionRequoteBand.js";
 import { optionQuoteBandExpiryContracts, type OptionQuoteBandExpiryRule } from "../pluto/optionQuoteBandPlan.js";
 import { optionQuoteBandScopeOf } from "../pluto/optionQuoteBandPlanLoader.js";
 
-// The after-close option volume capture (Marcelo 2026-10-15): for every ticker Pluto is enabled on, whichever strategy is
-// active, each contract's full-session volume (IBKR tick 8, read under FROZEN after the close: it holds the whole day
-// then and resets overnight, measured 2026-10-14/15) and its IBKR implied volatility, stored as the previous session's
-// volume for the next day's option quote band and both strategies' 20% rule, and as each contract's last-seen IV.
+// The after-close option volume capture (Marcelo 2026-10-15): for every shortlisted ticker, whether Pluto is enabled on it
+// or not (Marcelo 2026-10-30: one enabled the next day then trades with its volumes), under the strategy set for it, each
+// contract's full-session volume (IBKR tick 8, read under FROZEN after the close: it holds the whole day then and resets
+// overnight, measured 2026-10-14/15) and its IBKR implied volatility, stored as the previous session's volume for the next
+// day's option quote band and both strategies' 20% rule, and as each contract's last-seen IV. Only the enabled tickers'
+// failures alert: without its volumes a ticker trades the next day with the rule lifted (optionQuoteBandPlan.ts).
 //
 // Which contracts: the option quote band's universe for the next session under the ticker's strategy (every listed
 // strike, both rights, of the expiries it sells counted from that session: the CC + Put Ladder's days-to-expiry range,
@@ -78,6 +80,8 @@ export function planSessionVolumeContracts(input: {
 
 export interface SessionVolumeTickerResult {
   symbol: string;
+  /** Pluto is enabled on it: only these tickers' failures alert. */
+  enabled: boolean;
   universe: number;
   requested: number;
   unknownIv: number;
@@ -127,16 +131,16 @@ export const defaultSessionVolumeCaptureDependencies: SessionVolumeCaptureDepend
   now: () => new Date(),
 };
 
-/** The whole capture: plans every enabled ticker, quotes them on one FROZEN connection, stores every requested contract's row. */
+/** The whole capture: plans every shortlisted ticker, quotes them on one FROZEN connection, stores every requested contract's row. */
 export async function runOptionSessionVolumeCapture(dependencies: SessionVolumeCaptureDependencies = defaultSessionVolumeCaptureDependencies): Promise<SessionVolumeCaptureResult> {
   const startedAtMs = dependencies.now().getTime();
   const sessionDateIso = easternIsoDate(dependencies.now());
   const [nextSessionIso] = await loadOpenDaysBetween(addCalendarDays(sessionDateIso, 1), addCalendarDays(sessionDateIso, 14));
   if (!nextSessionIso) throw new Error(`no open session in the market calendar within 14 days after ${sessionDateIso}`);
-  const [settings, enabledTickers, riskFreeRate] = await Promise.all([loadPlutoSettings(), loadEnabledPlutoTickerSettings(), getRiskFreeRateForJob()]);
+  const [settings, tickers, riskFreeRate] = await Promise.all([loadPlutoSettings(), loadShortlistedPlutoTickerSettings(), getRiskFreeRateForJob()]);
   if (riskFreeRate === null) throw new Error("no risk-free rate available (FRED)");
   const results: SessionVolumeTickerResult[] = [];
-  if (enabledTickers.length === 0) return { sessionDateIso, nextSessionIso, tickers: results, concurrency: 0, elapsedSeconds: 0 };
+  if (tickers.length === 0) return { sessionDateIso, nextSessionIso, tickers: results, concurrency: 0, elapsedSeconds: 0 };
 
   const concurrency = await dependencies.reserveLines(maximumConcurrency);
   if (concurrency === 0) throw new Error(`fewer than ${minimumConcurrency} IBKR market-data lines free`);
@@ -154,13 +158,13 @@ export async function runOptionSessionVolumeCapture(dependencies: SessionVolumeC
     const { ib } = connection;
     ib.reqMarketDataType(MarketDataType.FROZEN);
     ib.once(EventName.disconnected, onDisconnected);
-    const stockPriceBySymbol = await dependencies.fetchStockPrices(ib, enabledTickers.map((ticker) => ticker.symbol));
+    const stockPriceBySymbol = await dependencies.fetchStockPrices(ib, tickers.map((ticker) => ticker.symbol));
     window = dependencies.openQuoteWindow(ib, concurrency);
     const quoteWindow = window;
     await Promise.all(
-      enabledTickers.map(async (ticker) => {
+      tickers.map(async (ticker) => {
         const stockPrice = stockPriceBySymbol[ticker.symbol] ?? null;
-        const result: SessionVolumeTickerResult = { symbol: ticker.symbol, universe: 0, requested: 0, unknownIv: 0, withVolume: 0, withImpliedVolatility: 0, stockPrice, error: null };
+        const result: SessionVolumeTickerResult = { symbol: ticker.symbol, enabled: ticker.enabled, universe: 0, requested: 0, unknownIv: 0, withVolume: 0, withImpliedVolatility: 0, stockPrice, error: null };
         results.push(result);
         try {
           const chain = await loadStoredOptionChain(ticker.tickerId);
@@ -206,12 +210,17 @@ export async function runOptionSessionVolumeCapture(dependencies: SessionVolumeC
   return { sessionDateIso, nextSessionIso, tickers: results, concurrency, elapsedSeconds: Math.round((dependencies.now().getTime() - startedAtMs) / 1000) };
 }
 
-/** The job's outcome: a failure when no ticker was captured, completed with errors when some were not. */
+/**
+ * The job's outcome, from the tickers Pluto is enabled on (a shortlisted ticker it is not enabled on is only logged): a
+ * failure when none of them was captured, completed with errors when some were not.
+ */
 export function describeSessionVolumeCaptureOutcome(result: SessionVolumeCaptureResult): { failureMessage?: string; completedWithErrors?: { errorCount: number; message: string } } {
-  const failed = result.tickers.filter((ticker) => ticker.error !== null);
-  if (result.tickers.length === 0) return {};
-  if (failed.length === result.tickers.length) return { failureMessage: `no ticker's option volume was captured: ${failed.map((ticker) => `${ticker.symbol} (${ticker.error})`).join(", ")}` };
-  if (failed.length > 0) return { completedWithErrors: { errorCount: failed.length, message: `no option volume for ${failed.map((ticker) => `${ticker.symbol} (${ticker.error})`).join(", ")}: the ladder sells nothing on them tomorrow` } };
+  const enabled = result.tickers.filter((ticker) => ticker.enabled);
+  const failed = enabled.filter((ticker) => ticker.error !== null);
+  const listed = failed.map((ticker) => `${ticker.symbol} (${ticker.error})`).join(", ");
+  if (enabled.length === 0) return {};
+  if (failed.length === enabled.length) return { failureMessage: `no enabled ticker's option volume was captured, so the 20% volume rule is off for them tomorrow: ${listed}` };
+  if (failed.length > 0) return { completedWithErrors: { errorCount: failed.length, message: `no option volume for ${listed}: the 20% volume rule is off for them tomorrow` } };
   return {};
 }
 

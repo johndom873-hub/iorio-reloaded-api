@@ -25,6 +25,8 @@ const harness = vi.hoisted(() => ({
   breakEven: null as number | null,
   stepImpliedVolatility: null as number | null,
   quotes: [] as unknown[],
+  /** No after-close capture for the previous session: its volumes are unknown. */
+  previousSessionVolumeMissing: false,
   bookCounts: { workingOrders: 0, ordersToday: 0, openPositions: 0 },
   committed: 0,
   actions: [] as Record<string, unknown>[],
@@ -82,7 +84,7 @@ vi.mock("./optionQuoteBandPlanLoader.js", () => ({
   defaultOptionQuoteBandPlannerDependencies: {
     loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 960, riskFreeRate: 0.04 }),
     loadForwardAnchors: async () => new Map(),
-    loadPreviousSessionVolume: async () => new Map((harness.quotes as SymbolFileQuote[]).map((quote) => [contractKey(quote), 1_000])),
+    loadPreviousSessionVolume: async () => (harness.previousSessionVolumeMissing ? null : new Map((harness.quotes as SymbolFileQuote[]).map((quote) => [contractKey(quote), 1_000]))),
   },
 }));
 vi.mock("./optionQuoteBandQuotes.js", () => ({ loadOptionQuoteBandQuotes: async () => [], loadFinishedOptionQuoteBandCycle: async () => ({ cycleNumber: 1, startedAt: new Date(0), finishedAt: new Date(0) }) }));
@@ -168,6 +170,7 @@ beforeEach(() => {
   harness.breakEven = null;
   harness.stepImpliedVolatility = null;
   harness.quotes = [...quotesAt("C"), ...quotesAt("P")];
+  harness.previousSessionVolumeMissing = false;
   harness.bookCounts = { workingOrders: 0, ordersToday: 0, openPositions: 0 };
   harness.committed = 0;
   harness.actions.length = 0;
@@ -189,6 +192,21 @@ describe("runVolFarmerV2Round", () => {
     // Pot $250,000; committed: the exposure, 30,000; free cash: the budget's $500,000 at most the account's $400,000; LEAPS cap 10% of the pot.
     expect(harness.lastRounds.get("t-VFT")).toEqual({ notes: [expect.stringContaining("VFT Sell $105 Call")], figures: { potDollars: 250_000, committedDollars: 30_000, freeCashDollars: 400_000, leapsCapDollars: 25_000 } });
     expect(harness.lastRounds.has("t-LAD")).toBe(false);
+  });
+
+  it("without the previous session's volume, sells the expiry it sells with the 20% rule lifted for the day, and says so", async () => {
+    harness.chain = { expirations: ["20261106"], strikesByExpiry: new Map([["20261106", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
+    harness.previousSessionVolumeMissing = true;
+    await round();
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "ladder_open", strategyKey: "covered_call", plan: expect.objectContaining({ quantity: 12 }) })]);
+    expect(harness.lastRounds.get("t-VFT")!.notes[0]).toBe("no previous-session volume for 6 Nov (10DTE): the 20% volume rule is off for it today");
+  });
+
+  it("with the previous session's volume, keeps the 20% rule and says nothing of it", async () => {
+    harness.chain = { expirations: ["20261106"], strikesByExpiry: new Map([["20261106", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
+    await round();
+    expect(harness.executed).toHaveLength(1);
+    expect(harness.lastRounds.get("t-VFT")!.notes.some((note) => note.includes("20% volume rule is off"))).toBe(false);
   });
 
   it("counts an order still working as planned, and opens afresh once it ended unfilled", async () => {
@@ -314,10 +332,9 @@ describe("volFarmerV2NoCallQuotedReason", () => {
   // Wed 28 Oct 2026: the next listed expiry is Fri 30 Oct (2DTE).
   const base = { todayIso: "2026-10-28", expirations: ["20261106", "20261030", "20261028"], strikesByExpiry: new Map([["20261030", [95, 105]], ["20261106", [105]], ["20261028", [105]]]) };
 
-  it("names the missing previous-session volume when the ticker was enabled after the capture", () => {
-    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: null, bandCycleFinished: false })).toBe(
-      "no 30 Oct (2DTE) option is quoted today: no option volume was captured after the previous session's close (the capture covers the tickers enabled then), so none can be sold before the next session",
-    );
+  it("without the previous session's volume (a ticker enabled after the capture), the expiry is quoted whole: no volume reason", () => {
+    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: null, bandCycleFinished: false })).toBe("no 30 Oct (2DTE) option is quoted yet today");
+    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: null, bandCycleFinished: true })).toBe("no 30 Oct (2DTE) Call is near v2's Call |delta| range at this price, so none is quoted");
   });
 
   it("tells the 20% volume rule, quotes not in yet, and the |delta| band apart", () => {

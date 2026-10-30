@@ -9,11 +9,10 @@ import type { PlutoSettings } from "./settingsStore.js";
 // with its key (payload.ladderNotice); a notice whose key is already in today's log (Eastern date) is not sent again, so a
 // restart does not resend it. The texts carry no figures; the look's notes and the event log hold the details.
 
-export type LadderTickerNoticeReason = "no_previous_session_volume" | "no_shock" | "stale_band_quotes" | "split_guard" | "held_by_ticker_cap" | "blocked_on_live_check";
+export type LadderTickerNoticeReason = "no_shock" | "stale_band_quotes" | "split_guard" | "held_by_ticker_cap" | "blocked_on_live_check";
 export type LadderBookNoticeReason = "book_committed_capital" | "book_open_positions" | "book_orders_per_day";
 
 const tickerNoticeTexts: Record<LadderTickerNoticeReason, (symbol: string) => string> = {
-  no_previous_session_volume: (symbol) => `${symbol} can't trade today: no previous-session option volume was captured, so no sale passes the volume rule.`,
   no_shock: (symbol) => `${symbol} can't trade: it has no shock (no override, and no daily closes for a recommended one).`,
   stale_band_quotes: (symbol) => `${symbol} can't trade for now: its latest option quotes are older than Pluto's quote-age limit.`,
   split_guard: (symbol) => `${symbol} is stopped: its price is about a split's factor away from the previous close with no split recorded. A person needs to look.`,

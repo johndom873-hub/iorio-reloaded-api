@@ -125,6 +125,8 @@ export interface BaselineCandidateInput {
   riskFreeRate: number;
   /** The previous session's volume by contractKey; null when unknown (nothing passes the volume limit). */
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
+  /** Pluto only (Marcelo 2026-10-30): expiries without the previous session's volume, on which the volume limit is lifted for the day; the lab always has the volumes. */
+  volumeLimitLiftedExpiries?: ReadonlySet<string>;
   settings: Pick<BacktestBaselineSettings, "minAbsDelta" | "maxAbsDelta" | "minDte" | "maxDte" | "maxSpreadPctOfMid">;
   /** λ: the share of the half-spread a fill gives up. */
   spreadShareCharged: number;
@@ -272,7 +274,7 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
     if (!quoteFigures) lookFigures.byQuote.set(quote, (quoteFigures = {}));
     if (quoteFigures.volumeCap === undefined) {
       const volume = input.previousSessionVolumeByContract?.get(contractKey(quote)) ?? null;
-      quoteFigures.volumeCap = volume === null ? 0 : Math.floor(volume * baselineMaxVolumeShare);
+      quoteFigures.volumeCap = input.volumeLimitLiftedExpiries?.has(quote.expiry) ? Number.POSITIVE_INFINITY : volume === null ? 0 : Math.floor(volume * baselineMaxVolumeShare);
     }
     const volumeCap = quoteFigures.volumeCap;
     if (volumeCap < 1) {
@@ -440,6 +442,8 @@ export function makeBaselineSelector(input: {
   stockPrice: number;
   riskFreeRate: number;
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
+  /** Pluto only: see BaselineCandidateInput. */
+  volumeLimitLiftedExpiries?: ReadonlySet<string>;
   baseline: BacktestBaselineSettings;
   spreadShareCharged: number;
   isHeld(contract: { expiry: string; strike: number }): boolean;
@@ -447,7 +451,7 @@ export function makeBaselineSelector(input: {
   model: BaselineModelInput | null;
   tradingSessionsThrough(expiry: string): number;
 }): BaselineSelect {
-  const { quotes, forwardAnchors, commissions, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract, baseline, spreadShareCharged, isHeld, earningsDatesIso, model, tradingSessionsThrough } = input;
+  const { quotes, forwardAnchors, commissions, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract, volumeLimitLiftedExpiries, baseline, spreadShareCharged, isHeld, earningsDatesIso, model, tradingSessionsThrough } = input;
   // The calls on held shares are held to the margin only when every sale is.
   const callsModel = model && baseline.volatilityEdgeFilter === "entries" ? { ...model, minVolatilityEdge: null } : model;
   // With their own range every Call uses it, the Covered Call entry's included (Marcelo 2026-10-15).
@@ -459,7 +463,7 @@ export function makeBaselineSelector(input: {
   const settingsFor = (right: "C" | "P", ladderPut: boolean) => (right === "C" ? callsSettings : ladderPut ? ladderPutsSettings : baseline);
   const lookFigures = newBaselineLookFigures();
   return (right: "C" | "P", minimumStrike: number | null = null, forEntry = true, maximumStrike: number | null = null, byPremiumYield = false, options = {}) => {
-    const selectionInput: BaselineCandidateInput = { lookFigures, quotes, forwardAnchors, commissions, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: settingsFor(right, options.ladderPut === true), spreadShareCharged, isHeld, tradingSessionsThrough, minimumStrike, maximumStrike, minimumPremiumYield: minimumYieldFor(right, forEntry, options.ladderPut === true), ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" };
+    const selectionInput: BaselineCandidateInput = { lookFigures, quotes, forwardAnchors, commissions, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, ...(volumeLimitLiftedExpiries ? { volumeLimitLiftedExpiries } : {}), settings: settingsFor(right, options.ladderPut === true), spreadShareCharged, isHeld, tradingSessionsThrough, minimumStrike, maximumStrike, minimumPremiumYield: minimumYieldFor(right, forEntry, options.ladderPut === true), ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" };
     return { ...selectBaselineCandidates(selectionInput), describeRules: () => describeBaselineRules(selectionInput) };
   };
 }

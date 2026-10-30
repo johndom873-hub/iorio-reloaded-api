@@ -193,6 +193,15 @@ describe("selectBaselineCandidates", () => {
     expect(rejections).toEqual({ outsideExpiryRange: 1, noUsableQuote: 1, spreadTooWide: 1, tooLittleVolume: 1, noImpliedVolatility: 0, outsideDeltaRange: 1, noTimeValue: 0, alreadyHeld: 1, belowCost: 0, aboveCeiling: 0, belowMinimumYield: 0, spansEarnings: 0, noForecast: 0, belowVolatilityEdge: 0 });
   });
 
+  it("Pluto only: an expiry with the volume limit lifted passes without volume and uncapped; another expiry keeps the limit", () => {
+    // No previous-session volume at all: 6 Mar is lifted (Pluto had no capture for it), 13 Mar is not.
+    const quotes = [quote("2026-03-06", 100, "P"), quote("2026-03-06", 97, "P"), quote("2026-03-13", 100, "P")];
+    const { candidates, rejections } = selectBaselineCandidates(input(quotes, { previousSessionVolumeByContract: new Map(), volumeLimitLiftedExpiries: new Set(["2026-03-06"]) }));
+    expect(candidates.map((candidate) => `${candidate.expiry} ${candidate.strike}`).sort()).toEqual(["2026-03-06 100", "2026-03-06 97"]);
+    expect(candidates.map((candidate) => candidate.volumeCap)).toEqual([Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY]);
+    expect(rejections.tooLittleVolume).toBe(1);
+  });
+
   it("leaves out expiries that span a known earnings date when earnings are given", () => {
     const quotes = [quote("2026-03-06", 100, "P"), quote("2026-03-27", 100, "P")];
     const { candidates, rejections } = selectBaselineCandidates(input(quotes, { earningsDatesIso: ["2026-03-10"] }));

@@ -127,4 +127,18 @@ describe("the after-close option volume capture", () => {
     const storedContracts = [...(await loadSessionVolumeByContract(farmerTickerId, "2026-10-19"))!.keys()].sort();
     expect(storedContracts).toEqual(["2026-10-23|100|C", "2026-10-23|105|C", "2026-10-23|110|C", "2026-10-23|90|C", "2026-10-23|90|P", "2026-10-23|95|C", "2026-10-23|95|P"]);
   });
+
+  it("captures a shortlisted ticker Pluto is not enabled on, under the strategy set for it, so it trades with its volumes once enabled", async () => {
+    const idleTickerId = randomUUID();
+    await testDb("tickers").insert({ id: idleTickerId, symbol: "IDLE", company_name: "Idle Co" });
+    await testDb("shortlist_entries").insert({ ticker_id: idleTickerId, added_by_user_id: userId, bot_enabled: false });
+    await testDb("option_chain_params").insert({ ticker_id: idleTickerId, expirations: ["20261023"], fetched_at: new Date("2026-10-19T09:00:00Z") });
+    await testDb("option_chain_expiry_strikes").insert({ ticker_id: idleTickerId, expiry: "20261023", strikes: [95, 100, 105], fetched_at: new Date("2026-10-19T09:00:00Z") });
+    const { dependencies } = fakeDependencies("2026-10-19T21:30:00Z", []);
+    const result = await runOptionSessionVolumeCapture(dependencies);
+    // No strategy set: Vol Farmer v2, the default, on its next listed expiry (23 Oct); no price, so every contract.
+    expect(result.tickers.find((ticker) => ticker.symbol === "IDLE")).toMatchObject({ enabled: false, universe: 6, requested: 6, error: null });
+    expect(result.tickers.find((ticker) => ticker.symbol === "VOL")).toMatchObject({ enabled: true });
+    expect((await loadSessionVolumeByContract(idleTickerId, "2026-10-19"))!.size).toBe(6);
+  });
 });

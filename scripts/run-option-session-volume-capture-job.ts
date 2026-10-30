@@ -1,5 +1,5 @@
-// Scheduled job: each option contract's full-session volume after the close, for the CC + Put Ladder's 20% rule
-// (src/ibkr/runOptionSessionVolumeCapture.ts). IBKR's quote volume holds the whole day only after the close and reads 0
+// Scheduled job: each option contract's full-session volume after the close, on every shortlisted ticker, for both
+// strategies' 20% rule (src/ibkr/runOptionSessionVolumeCapture.ts). IBKR's quote volume holds the whole day only after the close and reads 0
 // again by 04:00 ET (measured 2026-10-15), so the job runs at 21:30 UTC: 17:30 ET in summer, 16:30 ET in winter, both
 // after the ~16:20 ET final volume, and before the 22:00 UTC market data job.
 //

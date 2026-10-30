@@ -90,6 +90,16 @@ export async function loadEnabledPlutoTickerSettings(connection: Knex = db): Pro
   return rows.map(rowToTickerSettings);
 }
 
+/** Every shortlisted ticker with its settings, and whether Pluto is enabled on it (the after-close volume capture covers them all). */
+export async function loadShortlistedPlutoTickerSettings(connection: Knex = db): Promise<(PlutoTickerSettings & { enabled: boolean })[]> {
+  const rows = await tickerSettingsQuery(connection)
+    .join("shortlist_entries as se", "se.ticker_id", "t.id")
+    .whereNull("se.removed_at")
+    .select("se.bot_enabled")
+    .orderBy("t.symbol");
+  return rows.map((row) => ({ ...rowToTickerSettings(row), enabled: row.bot_enabled === true }));
+}
+
 /** Each enabled ticker's allocation, % of Pluto's capital budget (the pool): the lab's rule (tickerAllocation.ts). */
 export { effectiveAllocationPctBySymbol };
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import type { OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
-import { bandQuoteOwnImpliedVolatility, lastSeenImpliedVolatilities, nextListedExpiryAfter, optionQuoteBandDayUniverse, planOptionQuoteBand, type LadderClock } from "./optionQuoteBandPlan.js";
+import { bandQuoteOwnImpliedVolatility, expiriesWithoutPreviousSessionVolume, lastSeenImpliedVolatilities, nextListedExpiryAfter, optionQuoteBandDayUniverse, planOptionQuoteBand, type LadderClock } from "./optionQuoteBandPlan.js";
 
 const clock: LadderClock = { todayIso: "2026-10-20", closeMinutesEt: 16 * 60, riskFreeRate: 0.04 };
 const expiry = "2026-11-20";
@@ -35,6 +35,23 @@ describe("optionQuoteBandDayUniverse", () => {
     expect(optionQuoteBandDayUniverse({ ...chain, sessionIso: clock.todayIso, expiryRule: { kind: "next_listed_expiry" }, previousSessionVolumeByContract: volume })).toEqual([{ expiry: "2026-10-23", strike: 95, right: "C" }]);
     expect(nextListedExpiryAfter(chain.expirations, "2026-10-20")).toBe("2026-10-23");
     expect(nextListedExpiryAfter(chain.expirations, "2026-12-31")).toBeNull();
+  });
+
+  it("takes an expiry the previous session's capture has no volume for whole: the 20% rule is lifted on it for the day", () => {
+    // The capture covered 20 Nov only (as for a strategy switched to 23 Oct after it): 23 Oct is taken whole, 20 Nov keeps the rule.
+    const novemberOnly = new Map([["2026-11-20|90|P", 5], ["2026-11-20|110|C", 4]]);
+    expect(optionQuoteBandDayUniverse({ ...chain, sessionIso: clock.todayIso, expiryRule: ladderExpiryRule, previousSessionVolumeByContract: novemberOnly })).toEqual([
+      { expiry, strike: 90, right: "P" },
+      { expiry: "2026-10-23", strike: 95, right: "C" },
+      { expiry: "2026-10-23", strike: 95, right: "P" },
+    ]);
+    // Nothing captured (a ticker enabled after the capture, or a failed capture): every expiry whole.
+    expect(optionQuoteBandDayUniverse({ ...chain, sessionIso: clock.todayIso, expiryRule: { kind: "next_listed_expiry" }, previousSessionVolumeByContract: null })).toEqual([
+      { expiry: "2026-10-23", strike: 95, right: "C" },
+      { expiry: "2026-10-23", strike: 95, right: "P" },
+    ]);
+    expect(expiriesWithoutPreviousSessionVolume(["2026-10-23", "2026-11-20"], novemberOnly)).toEqual(new Set(["2026-10-23"]));
+    expect(expiriesWithoutPreviousSessionVolume(["2026-10-23"], null)).toEqual(new Set(["2026-10-23"]));
   });
 });
 

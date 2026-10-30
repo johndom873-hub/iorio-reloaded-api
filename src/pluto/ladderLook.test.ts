@@ -77,12 +77,25 @@ describe("runLadderLook", () => {
     expect(result.stoppedBecause).toBe("LADR trades at 25.10 against a previous close of 50.00, about a 2-for-1 split with none recorded: the ladder stops on it until a person looks");
   });
 
-  it("sells nothing without the previous session's volumes, and says why", () => {
+  it("without the previous session's volumes, sells with the 20% rule lifted on the expiry for the day, and says so", () => {
+    const withVolumes = runLadderLook(input());
     const result = runLadderLook(input({ previousSessionVolumeByContract: null }));
+    const sales = (planned: typeof result.planned) => planned.map(({ expiry, strike, right, contracts }) => ({ expiry, strike, right, contracts }));
+    expect(sales(result.planned)).toEqual(sales(withVolumes.planned));
+    expect(result.planned.length).toBeGreaterThan(0);
+    // No volume limit on the lifted expiry (1,000 traded allowed 200 contracts).
+    expect(result.planned[0]!.scores.bestCandidateVolumeCap).toBe(Number.POSITIVE_INFINITY);
+    expect(withVolumes.planned[0]!.scores.bestCandidateVolumeCap).toBe(200);
+    expect(result.notes[0]).toBe("LADR: no previous-session volume for 20 Nov (31DTE): the 20% volume rule is off for it today");
+    expect(result.cannotTradeBecause).toBeNull();
+    expect(withVolumes.notes.some((note) => note.includes("20% volume rule is off"))).toBe(false);
+  });
+
+  it("keeps the 20% rule on an expiry the capture covered: too little volume sells nothing there", () => {
+    const tooLittle = new Map(bandQuotes.map((quote) => [contractKey(quote), 4]));
+    const result = runLadderLook(input({ previousSessionVolumeByContract: tooLittle }));
     expect(result.planned).toEqual([]);
-    expect(result.notes[0]).toBe("LADR: no previous-session option volume was captured, so nothing can be sold (the 20% rule)");
-    expect(result.cannotTradeBecause).toBe("no_previous_session_volume");
-    expect(runLadderLook(input()).cannotTradeBecause).toBeNull();
+    expect(result.notes.some((note) => note.includes("20% volume rule is off"))).toBe(false);
   });
 
   it("plans nothing when the band's latest quotes are older than Pluto's quote-age limit (B2), and says why", () => {

@@ -68,12 +68,18 @@ describe("isSessionVolumeQuoteSettled", () => {
 });
 
 describe("describeSessionVolumeCaptureOutcome", () => {
-  const ticker = (symbol: string, error: string | null) => ({ symbol, universe: 10, requested: 10, unknownIv: 0, withVolume: error ? 0 : 10, withImpliedVolatility: 10, stockPrice: 100, error });
+  const ticker = (symbol: string, error: string | null, enabled = true) => ({ symbol, enabled, universe: 10, requested: 10, unknownIv: 0, withVolume: error ? 0 : 10, withImpliedVolatility: 10, stockPrice: 100, error });
   const result = (tickers: ReturnType<typeof ticker>[]) => ({ sessionDateIso: "2026-10-14", nextSessionIso: "2026-10-15", tickers, concurrency: 40, elapsedSeconds: 60 });
-  it("fails when no ticker was captured, completes with errors when some were not", () => {
+  it("fails when no enabled ticker was captured, completes with errors when some were not; the 20% rule is off for them tomorrow", () => {
     expect(describeSessionVolumeCaptureOutcome(result([ticker("HOOD", null), ticker("SMCI", null)]))).toEqual({});
-    expect(describeSessionVolumeCaptureOutcome(result([ticker("HOOD", null), ticker("SMCI", "no stored option chain")]))).toEqual({ completedWithErrors: { errorCount: 1, message: "no option volume for SMCI (no stored option chain): the ladder sells nothing on them tomorrow" } });
-    expect(describeSessionVolumeCaptureOutcome(result([ticker("SMCI", "no stored option chain")])).failureMessage).toMatch(/no ticker's option volume was captured/);
+    expect(describeSessionVolumeCaptureOutcome(result([ticker("HOOD", null), ticker("SMCI", "no stored option chain")]))).toEqual({ completedWithErrors: { errorCount: 1, message: "no option volume for SMCI (no stored option chain): the 20% volume rule is off for them tomorrow" } });
+    expect(describeSessionVolumeCaptureOutcome(result([ticker("SMCI", "no stored option chain")]))).toEqual({ failureMessage: "no enabled ticker's option volume was captured, so the 20% volume rule is off for them tomorrow: SMCI (no stored option chain)" });
     expect(describeSessionVolumeCaptureOutcome(result([]))).toEqual({});
+  });
+
+  it("only logs a shortlisted ticker Pluto is not enabled on", () => {
+    expect(describeSessionVolumeCaptureOutcome(result([ticker("HOOD", null), ticker("GOOG", "no stored option chain", false)]))).toEqual({});
+    expect(describeSessionVolumeCaptureOutcome(result([ticker("GOOG", "no stored option chain", false)]))).toEqual({});
+    expect(describeSessionVolumeCaptureOutcome(result([ticker("HOOD", "timeout"), ticker("GOOG", null, false)])).failureMessage).toMatch(/^no enabled ticker's option volume was captured/);
   });
 });

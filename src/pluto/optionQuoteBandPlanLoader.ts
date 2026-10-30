@@ -112,8 +112,8 @@ export function createOptionQuoteBandPlanner(dependencies: OptionQuoteBandPlanne
       dependencies.loadOvernightImpliedVolatility(ticker.tickerId, tradingDateIso),
       dependencies.loadForwardAnchors(ticker.tickerId, tradingDateIso),
     ]);
-    // No volume captured for the previous session: every volume is unknown and the 20% rule sells nothing, so nothing is quoted.
-    const universe = volume === null ? [] : optionQuoteBandDayUniverse({ expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, sessionIso: tradingDateIso, expiryRule: scope.expiryRule, previousSessionVolumeByContract: volume });
+    // An expiry without the previous session's volume is quoted whole: the 20% rule is lifted on it for the day.
+    const universe = optionQuoteBandDayUniverse({ expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, sessionIso: tradingDateIso, expiryRule: scope.expiryRule, previousSessionVolumeByContract: volume });
     const entry: TickerDay = { universe, overnightImpliedVolatilityByContract: overnight, anchors, strategy, callDeltaRange: scope.callDeltaRange };
     day!.byTicker.set(ticker.tickerId, entry);
     return entry;

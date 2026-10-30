@@ -15,7 +15,7 @@ vi.mock("../db/connection.js", async () => {
 
 const { db } = await import("../db/connection.js");
 const { plutoRouter } = await import("../routes/pluto.js");
-const { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings } = await import("./tickerSettingsStore.js");
+const { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadShortlistedPlutoTickerSettings } = await import("./tickerSettingsStore.js");
 
 const testDb: Knex = db;
 const suffix = `${Date.now() % 100000}`;
@@ -64,6 +64,14 @@ afterAll(async () => {
   await testDb("pluto_settings_audit").where({ user_id: userId }).del();
   await testDb("users").where({ id: userId }).del();
   await testDb.destroy();
+});
+
+describe("the shortlist's settings for the after-close volume capture", () => {
+  it("lists every shortlisted ticker with its settings and whether Pluto is enabled on it", async () => {
+    const ours = (await loadShortlistedPlutoTickerSettings()).filter((ticker) => ticker.symbol === enabledSymbol || ticker.symbol === otherSymbol);
+    expect(ours.map((ticker) => [ticker.symbol, ticker.enabled])).toEqual([[enabledSymbol, true], [otherSymbol, false]]);
+    expect((await loadEnabledPlutoTickerSettings()).some((ticker) => ticker.symbol === otherSymbol)).toBe(false);
+  });
 });
 
 describe("ticker settings routes", () => {

@@ -212,6 +212,8 @@ export interface VolFarmerV2Market {
   quotesLeftUnreadByRight?: { C: number; P: number };
   forwardAnchors: ReadonlyMap<string, BaselineForwardAnchor>;
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
+  /** Pluto only (Marcelo 2026-10-30): expiries without the previous session's volume, sold without the volume limit for the day. */
+  volumeLimitLiftedExpiries?: ReadonlySet<string>;
   /** Years from the look to today's close: a same-day expiry's time. */
   yearsToTodaysClose: number;
   /** Years from the look to an expiry's settlement: the LEAPS' time. */
@@ -475,6 +477,7 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
       stockPrice,
       riskFreeRate,
       previousSessionVolumeByContract: market.previousSessionVolumeByContract,
+      ...(market.volumeLimitLiftedExpiries ? { volumeLimitLiftedExpiries: market.volumeLimitLiftedExpiries } : {}),
       settings: { minAbsDelta: limits.minAbsDelta, maxAbsDelta: limits.maxAbsDelta, minDte: dte, maxDte: dte, maxSpreadPctOfMid: farmer.maxSpreadPctOfMid },
       spreadShareCharged: market.spreadShareCharged,
       isHeld: (contract) => limits.heldExcluded && heldContracts.has(contractKeyOf(contract)),

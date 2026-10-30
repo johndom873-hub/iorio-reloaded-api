@@ -2,11 +2,11 @@ import { defaultBacktestBaselineSettings, type BacktestBaselineSettings } from "
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
 import { makeBaselineSelector, planBaselineSales, type BaselineForwardAnchor } from "../backtest/engine/baselineSaleSteps.js";
 import { describePriceAdjustment } from "../ibkr/dailyBarSplitCheck.js";
-import { daysToExpiry } from "../lib/optionContractLabel.js";
+import { daysToExpiry, describeExpiry } from "../lib/optionContractLabel.js";
 import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { splitSuggestedByPrice } from "../lib/stockSplits.js";
 import type { OptionQuoteBandCycle, OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
-import type { LadderClock } from "./optionQuoteBandPlan.js";
+import { expiriesWithoutPreviousSessionVolume, type LadderClock } from "./optionQuoteBandPlan.js";
 import { nextLadderCycleMemory, type LadderCycleMemory } from "./ladderCycleMemory.js";
 import { createLadderLookBook, type LadderLookSnapshot, type PlannedLadderSale } from "./ladderLookBook.js";
 import type { LadderBaselineSettings } from "./ladderSettings.js";
@@ -41,7 +41,7 @@ export interface LadderLookInput {
   bandCycle: OptionQuoteBandCycle | null;
   /** Pluto's 10:00 forwards by expiry. */
   forwardAnchors: ReadonlyMap<string, BaselineForwardAnchor>;
-  /** The previous session's volume per contractKey; null when it was not captured (nothing can be sold). */
+  /** The previous session's volume per contractKey; null when none was captured (the 20% rule is lifted on every expiry). */
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
   /** The trading sessions from today's to an expiry's (liveTradingSessions.ts): what the premium yields are annualized over. */
   tradingSessionsThrough(expiry: string): number;
@@ -50,7 +50,7 @@ export interface LadderLookInput {
 }
 
 /** Why a looked-at ticker can sell nothing this look (Telegram once a day per reason: ladderNotices.ts). */
-export type LadderCannotTradeReason = "no_previous_session_volume" | "stale_band_quotes";
+export type LadderCannotTradeReason = "stale_band_quotes";
 
 export interface LadderLookResult {
   /** Why the ticker is stopped this look (nothing planned), or null. */
@@ -89,6 +89,8 @@ export function runLadderLook(input: LadderLookInput): LadderLookResult {
   if (stale) return { stoppedBecause: null, memory, planned: [], notes: [`${input.symbol}: the band's latest quotes are older than ${input.maxQuoteAgeMinutes} minutes, so nothing is planned`], cannotTradeBecause: "stale_band_quotes" };
   const forwardAnchors = new Map(input.forwardAnchors);
   const yearsToTodaysClose = yearsToSessionClose(input.now, input.clock.closeMinutesEt);
+  // The quoted expiries without the previous session's volume: the 20% volume rule is lifted on them for the day.
+  const volumeLimitLiftedExpiries = expiriesWithoutPreviousSessionVolume(new Set(quotes.map((quote) => quote.expiry)), input.previousSessionVolumeByContract);
   const select = makeBaselineSelector({
     quotes,
     forwardAnchors,
@@ -97,7 +99,8 @@ export function runLadderLook(input: LadderLookInput): LadderLookResult {
     yearsToTodaysClose,
     stockPrice: input.stockPrice,
     riskFreeRate: input.clock.riskFreeRate,
-    previousSessionVolumeByContract: input.previousSessionVolumeByContract ?? new Map(),
+    previousSessionVolumeByContract: input.previousSessionVolumeByContract,
+    volumeLimitLiftedExpiries,
     baseline,
     spreadShareCharged: 0,
     isHeld: book.book.isHeld,
@@ -106,10 +109,13 @@ export function runLadderLook(input: LadderLookInput): LadderLookResult {
     tradingSessionsThrough: input.tradingSessionsThrough,
   });
   const notes: string[] = [];
-  if (input.previousSessionVolumeByContract === null) notes.push(`${input.symbol}: no previous-session option volume was captured, so nothing can be sold (the 20% rule)`);
+  if (volumeLimitLiftedExpiries.size > 0) {
+    const expiries = [...volumeLimitLiftedExpiries].sort().map((expiry) => describeExpiry(expiry, input.clock.todayIso));
+    notes.push(`${input.symbol}: no previous-session volume for ${expiries.join(", ")}: the 20% volume rule is off for ${expiries.length === 1 ? "it" : "them"} today`);
+  }
   const ladderState = { startedOn: memory.startedOn, accountValueAtStart: memory.accountValueAtStart, shock: memory.shock ?? 0 };
   planBaselineSales({ symbol: input.symbol, commissions: input.book.commissions, todayIso: input.clock.todayIso, atMs: input.now.getTime(), stockPrice: input.stockPrice, priceToCycleScale: 1, baseline, select, book: book.book, ladderState, notes });
   // A same-day expiry is sold only while it still has time to the close.
   const planned = book.planned.filter((sale) => daysToExpiry(sale.expiry, input.clock.todayIso) > 0 || yearsToTodaysClose > 0);
-  return { stoppedBecause: null, memory, planned, notes, cannotTradeBecause: input.previousSessionVolumeByContract === null ? "no_previous_session_volume" : null };
+  return { stoppedBecause: null, memory, planned, notes, cannotTradeBecause: null };
 }
