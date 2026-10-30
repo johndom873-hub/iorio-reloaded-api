@@ -70,7 +70,7 @@ async function completeSettings(stored: BacktestSettings, connection: Knex): Pro
     trading: withCodeKeys(live.trading, stored.trading),
     kellyFraction: stored.kellyFraction ?? live.kellyFraction,
     policy: withCodeKeys(defaultBacktestPolicySettings, stored.policy),
-    decisionMaker: stored.decisionMaker ?? "baseline",
+    decisionMaker: stored.decisionMaker ?? "vol_farmer_v2",
     model: withCodeKeys(defaultBacktestModelSettings, stored.model),
     baseline: withCodeKeys(defaultBacktestBaselineSettings, stored.baseline),
     steadyStake: withCodeKeys(defaultBacktestSteadyStakeSettings, stored.steadyStake),
@@ -265,7 +265,7 @@ export function tickerOverridesGlobalPath(path: string, overrides: Pick<Backtest
   return overrides !== null && tickerFields.some((field) => overrides[field] !== null && globalPathsByTickerField[field].includes(path));
 }
 
-/** The global values a ticker's analysis reads: it runs the Baseline wheel whatever the lab's decision maker. */
+/** The global values a ticker's analysis reads: it runs the CC + Put Ladder whatever the lab's decision maker. */
 const analysisReadPaths: ReadonlySet<string> = new Set(["lab.defaultPotDollars", "trading.spreadCostChargedPct", "pluto.windowStartEt", "pluto.windowEndEt"]);
 export const analysisReadsLabPath = (path: string) => path.startsWith("baseline.") || path.startsWith("model.") || analysisReadPaths.has(path);
 

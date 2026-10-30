@@ -135,11 +135,11 @@ describe("lab settings routes", () => {
   });
 
   it("refuses the retired rules' values and decision makers in the lab, and a save of the decision maker alone re-runs no analysis", async () => {
-    for (const overrides of [{ kellyFraction: 0.3 }, { policy: { roll: "never" } }, { pluto: { capitalBudgetPct: 40 } }, { decisionMaker: "rules" }, { decisionMaker: "llm" }]) {
+    for (const overrides of [{ kellyFraction: 0.3 }, { policy: { roll: "never" } }, { pluto: { capitalBudgetPct: 40 } }, { decisionMaker: "rules" }, { decisionMaker: "llm" }, { decisionMaker: "vol_farmer" }]) {
       expect((await call("PUT", "/lab-settings", { overrides })).status).toBe(400);
     }
     const before = await call<BacktestLabSettingsView>("GET", "/lab-settings");
-    const decisionMaker = before.body.settings.decisionMaker === "vol_farmer" ? "steady_stake" : "vol_farmer";
+    const decisionMaker = before.body.settings.decisionMaker === "steady_stake" ? "vol_farmer_v2" : "steady_stake";
     const body = { overrides: { decisionMaker } };
 
     type Preview = { changes: (BacktestLabChange & { reruns: string[] })[]; reruns: string[] };

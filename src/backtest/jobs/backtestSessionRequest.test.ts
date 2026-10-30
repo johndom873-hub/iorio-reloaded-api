@@ -168,10 +168,11 @@ describe("validateBacktestSettingsOverrides", () => {
   });
 
   it("refuses the retired rules and AI model as decision makers, and takes the others", () => {
-    const retired = { ok: false, error: "The rules and llm backtests were retired with Signals; their past sessions stay readable." };
+    const retired = { ok: false, error: "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026); its past sessions stay readable." };
     expect(validateBacktestSettingsOverrides({ decisionMaker: "rules" }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
     expect(validateBacktestSettingsOverrides({ decisionMaker: "llm" }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "decisionMaker must be baseline, steady_stake, vol_farmer or vol_farmer_v2." });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer" }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "decisionMaker must be baseline, steady_stake or vol_farmer_v2." });
     expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer_v2" }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: {} });
     expect(validateBacktestSettingsOverrides({ decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } } });
     expect(validateBacktestSettingsOverrides({ baseline: { minAbsDelta: 0.7 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "baseline.minAbsDelta must not be above baseline.maxAbsDelta." });
@@ -190,8 +191,8 @@ describe("validateBacktestSettingsOverrides", () => {
     expect(validateBacktestSettingsOverrides({ steadyStake: { stakePct: 0 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "steadyStake.stakePct must be a number from 1 to 100." });
     expect(validateBacktestSettingsOverrides({ steadyStake: { ladderRungs: 3 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "steadyStake.ladderRungs is not a Steady Stake setting." });
     expect(validateBacktestSettingsOverrides({ steadyStake: 70 }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "overrides.steadyStake must be an object." });
-    // The Vol Farmer: only the values that differ from the defaults are kept; ranges in order, Calls up to the 45 days the engine reads.
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer", volFarmer: { putMinDte: 30, putMaxDte: 360, protectionFallPct: 20 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { decisionMaker: "vol_farmer", volFarmer: { putMinDte: 30 } } });
+    // The original Vol Farmer's values (v2 reads three of them): only those that differ from the defaults are kept; ranges in order, Calls up to the 45 days the engine reads.
+    expect(validateBacktestSettingsOverrides({ volFarmer: { putMinDte: 30, putMaxDte: 360, protectionFallPct: 20 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmer: { putMinDte: 30 } } });
     expect(validateBacktestSettingsOverrides({ volFarmer: { putMinDte: 400 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.putMinDte must not be above volFarmer.putMaxDte." });
     expect(validateBacktestSettingsOverrides({ volFarmer: { callMaxDte: 60 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.callMaxDte must be a whole number from 0 to 45 (the Calls the engine reads)." });
     expect(validateBacktestSettingsOverrides({ volFarmer: { putMaxStrikeAbovePricePct: 12 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.putMaxStrikeAbovePricePct must be a number from −20 to 10." });

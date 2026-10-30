@@ -13,20 +13,21 @@ export type BacktestTablesMode = "walk_forward" | "current";
 
 /**
  * Who decides a session's trades. "baseline": the naive wheel of BacktestBaselineSettings (Marcelo 2026-10-13), the CC +
- * Put Ladder. "steady_stake": the Steady Stake of BacktestSteadyStakeSettings. "vol_farmer": the Vol Farmer of
- * BacktestVolFarmerSettings; "vol_farmer_v2": Vol Farmer v2 of BacktestVolFarmerV2Settings (research). "rules" (Pluto's
- * stand-in rules on the Signals model, BacktestPolicySettings) and "llm" (the AI model through the subscription) were
- * retired with Signals (Marcelo 2026-10-27): their past sessions stay readable, none is created or run again.
+ * Put Ladder. "steady_stake": the Steady Stake of BacktestSteadyStakeSettings. "vol_farmer_v2": Vol Farmer v2 of
+ * BacktestVolFarmerV2Settings. Retired, their past sessions readable but none created or run again: "rules" (Pluto's
+ * stand-in rules on the Signals model, BacktestPolicySettings) and "llm" (the AI model through the subscription) with
+ * Signals (Marcelo 2026-10-27), and "vol_farmer", the original Vol Farmer of BacktestVolFarmerSettings (Marcelo
+ * 2026-10-30; v2 still reads three of its values).
  */
 export type BacktestDecisionMaker = "rules" | "llm" | "baseline" | "steady_stake" | "vol_farmer" | "vol_farmer_v2";
 
 /** The decision makers a session can still be created and run with. */
-export const activeBacktestDecisionMakers = ["baseline", "steady_stake", "vol_farmer", "vol_farmer_v2"] as const satisfies readonly BacktestDecisionMaker[];
+export const activeBacktestDecisionMakers = ["baseline", "steady_stake", "vol_farmer_v2"] as const satisfies readonly BacktestDecisionMaker[];
 
-export const retiredBacktestDecisionMakerMessage = "The rules and llm backtests were retired with Signals; their past sessions stay readable.";
+export const retiredBacktestDecisionMakerMessage = "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026); its past sessions stay readable.";
 
 export function isRetiredBacktestDecisionMaker(decisionMaker: BacktestDecisionMaker): boolean {
-  return decisionMaker === "rules" || decisionMaker === "llm";
+  return !(activeBacktestDecisionMakers as readonly BacktestDecisionMaker[]).includes(decisionMaker);
 }
 
 /**
@@ -858,9 +859,9 @@ export interface BacktestSettingChoice {
 }
 
 /** One row of the New session settings table. `path` addresses the value inside BacktestSettings, e.g. "baseline.ladderRungs" or "trading.spreadCostChargedPct". */
-export type BacktestSettingGroup = "How the session runs" | "Put ladder" | "Calls and Covered Calls" | "Contract choice" | "Entry filters" | "Exits" | "Hedge" | "Steady Stake" | "Vol Farmer" | "Vol Farmer v2";
+export type BacktestSettingGroup = "How the session runs" | "Put ladder" | "Calls and Covered Calls" | "Contract choice" | "Entry filters" | "Exits" | "Hedge" | "Steady Stake" | "Original Vol Farmer (retired)" | "Vol Farmer v2";
 
-/** "baseline_wheel": rows a Baseline wheel session (the CC + Put Ladder) reads, a few shared with the others;
+/** "baseline_wheel": rows a CC + Put Ladder session reads, a few shared with the others;
  *  "steady_stake": rows only the Steady Stake reads; "vol_farmer": rows the Vol Farmer reads (a few Vol Farmer v2 too);
  *  "vol_farmer_v2": rows only Vol Farmer v2 reads. */
 export type BacktestSettingSection = "baseline_wheel" | "steady_stake" | "vol_farmer" | "vol_farmer_v2";

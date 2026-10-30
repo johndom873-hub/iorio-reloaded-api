@@ -186,7 +186,7 @@ export function validateBacktestSettingsOverrides(raw: unknown, snapshot: Backte
   }
 
   if (raw.decisionMaker !== undefined) {
-    if (raw.decisionMaker === "rules" || raw.decisionMaker === "llm") return { ok: false, error: retiredBacktestDecisionMakerMessage };
+    if (raw.decisionMaker === "rules" || raw.decisionMaker === "llm" || raw.decisionMaker === "vol_farmer") return { ok: false, error: retiredBacktestDecisionMakerMessage };
     if (!(activeBacktestDecisionMakers as readonly unknown[]).includes(raw.decisionMaker)) return { ok: false, error: `decisionMaker must be ${activeBacktestDecisionMakers.slice(0, -1).join(", ")} or ${activeBacktestDecisionMakers.at(-1)}.` };
     if (raw.decisionMaker !== (snapshot.decisionMaker ?? "rules")) overrides.decisionMaker = raw.decisionMaker as BacktestSettingsOverrides["decisionMaker"];
   }

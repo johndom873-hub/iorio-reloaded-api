@@ -14,7 +14,7 @@ export async function loadCurrentBacktestSettings(connection: Knex = db): Promis
   const [pluto, tradingRow] = await Promise.all([loadPlutoSettings(connection), connection("trading_settings").first()]);
   if (!tradingRow) throw new Error("No trading_settings row found.");
   const trading = mapTradingSettingsRow(tradingRow);
-  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "baseline", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings }, steadyStake: { ...defaultBacktestSteadyStakeSettings }, volFarmer: { ...defaultBacktestVolFarmerSettings }, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings } };
+  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "vol_farmer_v2", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings }, steadyStake: { ...defaultBacktestSteadyStakeSettings }, volFarmer: { ...defaultBacktestVolFarmerSettings }, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings } };
 }
 
 type RowDefinition = Omit<BacktestSettingRow, "now" | "group" | "section" | "appliesWhen"> & { fixedValue?: number | string };
@@ -35,11 +35,10 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Decision maker",
     unit: "choice",
     editable: true,
-    note: "who decides the session's trades. The Steady Stake, the Vol Farmer and Vol Farmer v2: only their own group's values, at the 10:00 look (Vol Farmer v2 also reads the Vol Farmer's Calls' |delta| and spread)",
+    note: "who decides the session's trades. The Steady Stake and Vol Farmer v2: only their own group's values, at the 10:00 look",
     choices: [
-      { value: "baseline", label: "Baseline wheel (no Pluto rules, no Signals)" },
+      { value: "baseline", label: "CC + Put Ladder (Covered Calls on the shares, a ladder of Puts below)" },
       { value: "steady_stake", label: "Steady Stake (a steady share stake, Calls and Puts on expiry days)" },
-      { value: "vol_farmer", label: "Vol Farmer (shares, a Covered Call and a long Put hedge)" },
       { value: "vol_farmer_v2", label: "Vol Farmer v2 (two Covered Calls at different levels, a LEAPS Call; research)" },
     ],
   },
@@ -612,11 +611,11 @@ const onlyWithLadder: BacktestSettingApplicability = { allOf: [ladderOn], explan
 const onlyWithHistoryShock: BacktestSettingApplicability = { allOf: [ladderOn, { path: "baseline.ladderShock", oneOf: ["history"] }], explanation: "Applies only with the ladder's Stock shock set to the stock's Max drawdown." };
 
 /**
- * The groups in order, each row's place in them, and when a Baseline wheel row is read at all (as the engine reads them:
+ * The groups in order, each row's place in them, and when a CC + Put Ladder row is read at all (as the engine reads them:
  * backtestBaselineLook, baselineSaleSteps, backtestBaselineLadder). The New session table and the lab's settings show this.
  */
-/** The Vol Farmer rows Vol Farmer v2 reads too: its Calls' |delta| range and the spread limit. */
-const volFarmerV2ReadsIt: ReadonlySet<string> = new Set(["volFarmer.callMinAbsDelta", "volFarmer.callMaxAbsDelta", "volFarmer.maxSpreadPctOfMid"]);
+/** The original Vol Farmer's rows Vol Farmer v2 reads (its Calls' |delta| range and the spread limit): shown in v2's group, their paths kept. */
+const volFarmerV2ReadsIt: ReadonlySet<string> = new Set<string>(["volFarmer.callMinAbsDelta", "volFarmer.callMaxAbsDelta", "volFarmer.maxSpreadPctOfMid"]);
 
 export const backtestSettingLayout: readonly { group: BacktestSettingGroup; section: BacktestSettingSection; rows: readonly { path: string; appliesWhen?: BacktestSettingApplicability }[] }[] = [
   {
@@ -624,7 +623,7 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
     section: "baseline_wheel",
     rows: [
       { path: "decisionMaker" },
-      { path: "baseline.looks", appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["baseline"] }], explanation: "Applies only with the Baseline wheel as decision maker." } },
+      { path: "baseline.looks", appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["baseline"] }], explanation: "Applies only with the CC + Put Ladder as decision maker." } },
       { path: "pluto.windowStartEt" },
       { path: "pluto.windowEndEt" },
       { path: "baseline.entry" },
@@ -739,21 +738,21 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
     })),
   },
   {
-    group: "Vol Farmer",
+    group: "Original Vol Farmer (retired)",
     section: "vol_farmer",
-    rows: ["volFarmer.callMinAbsDelta", "volFarmer.callMaxAbsDelta", "volFarmer.callMinDte", "volFarmer.callMaxDte", "volFarmer.callExpiry", "volFarmer.putMinDte", "volFarmer.putMaxDte", "volFarmer.putMaxStrikeAbovePricePct", "volFarmer.protectionFallPct", "volFarmer.maxSpreadPctOfMid", "volFarmer.putCashReservePct", "volFarmer.crossing", "volFarmer.putExpiry", "volFarmer.hedgeRuleCallPremiums", "volFarmer.minPutProtectionPct", "volFarmer.hedgeWithoutCall", "volFarmer.putChoice", "volFarmer.maxPutCostPctOfCallPremium", "volFarmer.putRoll", "volFarmer.hedgeAfterExpiry", "volFarmer.afterAssignment", "volFarmer.hedgeRuleStockPnl", "volFarmer.putCashIn", "volFarmer.cashInPutMinProtectionPct", "volFarmer.hedge"].map((path) => ({
+    rows: ["volFarmer.callMinDte", "volFarmer.callMaxDte", "volFarmer.callExpiry", "volFarmer.putMinDte", "volFarmer.putMaxDte", "volFarmer.putMaxStrikeAbovePricePct", "volFarmer.protectionFallPct", "volFarmer.putCashReservePct", "volFarmer.crossing", "volFarmer.putExpiry", "volFarmer.hedgeRuleCallPremiums", "volFarmer.minPutProtectionPct", "volFarmer.hedgeWithoutCall", "volFarmer.putChoice", "volFarmer.maxPutCostPctOfCallPremium", "volFarmer.putRoll", "volFarmer.hedgeAfterExpiry", "volFarmer.afterAssignment", "volFarmer.hedgeRuleStockPnl", "volFarmer.putCashIn", "volFarmer.cashInPutMinProtectionPct", "volFarmer.hedge"].map((path) => ({
       path,
-      appliesWhen: volFarmerV2ReadsIt.has(path)
-        ? { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer", "vol_farmer_v2"] }], explanation: "Applies only with the Vol Farmer or Vol Farmer v2 as decision maker." }
-        : { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer"] }], explanation: "Applies only with the Vol Farmer as decision maker." },
+      appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer"] }], explanation: "Applies only with the original Vol Farmer (retired 30 Oct 2026) as decision maker." },
     })),
   },
   {
     group: "Vol Farmer v2",
     section: "vol_farmer_v2",
-    rows: ["volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta", "volFarmerV2.leapsMaxAccountPct", "volFarmerV2.leapsSpreadCostChargedPct", "volFarmerV2.looks", "volFarmerV2.excessAllowancePct"].map((path) => ({
+    rows: [...volFarmerV2ReadsIt, "volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta", "volFarmerV2.leapsMaxAccountPct", "volFarmerV2.leapsSpreadCostChargedPct", "volFarmerV2.looks", "volFarmerV2.excessAllowancePct"].map((path) => ({
       path,
-      appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v2"] }], explanation: "Applies only with Vol Farmer v2 as decision maker." },
+      appliesWhen: volFarmerV2ReadsIt.has(path)
+        ? { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer", "vol_farmer_v2"] }], explanation: "Applies only with Vol Farmer v2 (or the original Vol Farmer) as decision maker." }
+        : { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v2"] }], explanation: "Applies only with Vol Farmer v2 as decision maker." },
     })),
   },
 ];
