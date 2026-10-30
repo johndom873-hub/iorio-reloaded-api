@@ -101,14 +101,14 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   }
   if (checks.failures.length > 0) return { ...(await skip(checks.failures.join(" | "), checks.checks)), skippedOnSystemChecks: true };
 
-  // Market stress (design round 4, item 72): a broad intraday drop stops the ladder's sales for as long as it lasts.
+  // Market stress (design round 4, item 72; a Safety Limit): a broad intraday drop stops Pluto opening anything for as long as it lasts.
   // Recorded as a check, not a breaker, so it lifts on its own when SPY recovers.
   const spyDayChangePct = context.marketWatch.spyDayChangePct();
   const stressOverridden = checks.context.state.stressOverrideDate === checks.context.todayEasternIso;
-  const ladderStress = spyDayChangePct !== null && spyDayChangePct <= -settings.ladderSpyStressBreakerPct && !stressOverridden;
+  const marketStress = spyDayChangePct !== null && spyDayChangePct <= -settings.safetySpyStressBreakerPct && !stressOverridden;
   checks.checks.market_stress = {
-    ok: !ladderStress,
-    detail: `${spyDayChangePct === null ? "SPY day change unknown" : `SPY ${spyDayChangePct.toFixed(2)}% (the ladder stops at -${settings.ladderSpyStressBreakerPct}%)`}${stressOverridden ? ` — override on for today${checks.context.state.stressOverrideByDisplayName ? ` by ${checks.context.state.stressOverrideByDisplayName}` : ""}` : ""}`,
+    ok: !marketStress,
+    detail: `${spyDayChangePct === null ? "SPY day change unknown" : `SPY ${spyDayChangePct.toFixed(2)}% (Pluto stops opening at -${settings.safetySpyStressBreakerPct}%)`}${stressOverridden ? ` — override on for today${checks.context.state.stressOverrideByDisplayName ? ` by ${checks.context.state.stressOverrideByDisplayName}` : ""}` : ""}`,
   };
 
   // 2. The strategies (Marcelo 2026-10-14/15 and 2026-10-27): rules only. Their orders wait for today's opening look. Under
@@ -116,8 +116,8 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   if (request.heldPositionsOnly) return skip("the strategies' orders wait for today's opening look", checks.checks);
   if (checks.context.netLiquidationValue === null) return skip("no net liquidation value for the strategies' pots", checks.checks);
   const roundInput = { passId, settings, api: context.api, marketWatch: context.marketWatch, trackWatch: context.trackWatch, now, todayIso: checks.context.todayEasternIso, totalCashValue: checks.context.totalCashValue, netLiquidationValue: checks.context.netLiquidationValue, cancelByMs: checks.context.session.cancelByMs, symbols: request.symbols };
-  const ladder = ladderStress ? null : await runLadderRound(roundInput);
-  const volFarmerV2 = await runVolFarmerV2Round({ ...roundInput, stressed: ladderStress });
+  const ladder = marketStress ? null : await runLadderRound(roundInput);
+  const volFarmerV2 = await runVolFarmerV2Round({ ...roundInput, stressed: marketStress });
   const sent = (ladder?.outcomes.filter((outcome) => outcome.outcome === "confirmed").length ?? 0) + volFarmerV2.sent;
   const planned = (ladder?.planned ?? 0) + volFarmerV2.planned;
   const looked = (ladder?.looked.length ?? 0) + volFarmerV2.looked.length;
@@ -125,7 +125,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const skippedReason =
     sent > 0
       ? null
-      : ladderStress && planned === 0
+      : marketStress && planned === 0
         ? "market stress: Pluto opens nothing while SPY is down"
         : planned === 0
           ? `no order planned (${looked} ticker(s) looked at${notes.length > 0 ? `; ${notes.join("; ")}` : ""})`

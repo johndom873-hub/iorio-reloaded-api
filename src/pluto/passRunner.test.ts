@@ -36,7 +36,7 @@ vi.mock("../db/connection.js", () => {
   query.select = async () => harness.enabledSymbols.map((symbol) => ({ symbol }));
   return { db: () => query };
 });
-vi.mock("./settingsStore.js", () => ({ loadPlutoSettings: async () => ({ ladderSpyStressBreakerPct: 5 }) }));
+vi.mock("./settingsStore.js", () => ({ loadPlutoSettings: async () => ({ safetySpyStressBreakerPct: 5 }) }));
 vi.mock("./ledger.js", () => ({
   startPlutoPass: vi.fn(async () => "pass-1"),
   finishPlutoPass: vi.fn(async () => {

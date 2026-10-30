@@ -1,12 +1,10 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { baselineExpiryInRange, baselineMinimumBid, baselineMinimumSaleYield, baselineQuoteRejection, baselineSaleYield, type BaselineCommissions } from "../backtest/engine/baselineSaleSteps.js";
-import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { formatWholeDollars } from "../lib/formatWholeDollars.js";
 import { ladderDeltaVerdict, type LadderDeltaContext } from "../lib/ladderOrderGates.js";
 import { daysToExpiry } from "../lib/optionContractLabel.js";
 import { ladderBookCapitalVerdict } from "../lib/orderLimits.js";
-import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import type { LiveOptionQuote } from "../lib/optionContractKey.js";
 import type { ExecuteLadderOpenInput, ExecuteResult } from "./executor.js";
 import type { PlutoGateResult, RecordPlutoActionInput } from "./ledger.js";
@@ -14,17 +12,19 @@ import { loadWorkingLadderSales } from "./ladderLookLoader.js";
 import type { LadderSale, PlannedLadderSale } from "./ladderLookBook.js";
 import type { LadderBaselineSettings } from "./ladderSettings.js";
 import { midLimitPrice } from "./postModelGates.js";
+import { plutoOrdersSentToday, type SafetyLimitCounts } from "./safetyLimits.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 // The CC + Put Ladder's orders (Marcelo 2026-10-15 and 2026-10-21): the sales a look planned go out in order through
 // Pluto's executor (the order routes and every gate), each re-quoted live first and priced at its mid on the option's
-// tick, within the ladder's caps; the tightest binds and the rest wait for a later look:
-//   working orders  at most ladderMaxWorkingOrdersPerTicker of the ticker's ladder orders work at once (the look counts
+// tick, within Pluto's Safety Limits (safetyLimits.ts counts both strategies' orders); the tightest binds and the rest
+// wait for a later look:
+//   working orders  at most safetyMaxWorkingOrdersPerTicker of the ticker's ladder orders work at once (the look counts
 //                   the working ones as filled)
-//   orders a day    at most ladderMaxOrdersPerTickerPerDay sent per ticker per day, every one counting, re-prices included;
-//                   at most ladderMaxOrdersPerDay across the book
-//   open positions  at most ladderMaxOpenPositionsPerTicker on the ticker, each sale opening one; across the book, at most
-//                   ladderMaxOpenPositions open positions plus working ladder orders
+//   orders a day    at most safetyMaxOrdersPerTickerPerDay sent per ticker per day, every one counting, re-prices included;
+//                   at most safetyMaxOrdersPerDay across the book
+//   open positions  at most safetyMaxOpenPositionsPerTicker on the ticker, each sale opening one; across the book, at most
+//                   safetyMaxOpenPositions open positions plus Pluto's working orders
 //   capital         every ladder ticker's exposure and working orders together, after the sale, at most Pluto's capital
 //                   budget × the account's value (ladderBookCapitalVerdict; the order gate checks it again at confirm)
 // The live quote is held to the ladder's own contract rules once more (the bid's minimum, the spread, the expiry range,
@@ -32,53 +32,18 @@ import type { PlutoSettings } from "./settingsStore.js";
 // afresh at a later look, never re-ranked or resized. An unfilled order is left to the 15-minute sweep and planned afresh
 // at a later look; a partial fill moves on.
 
-export interface LadderOrderCounts {
-  workingOrders: number;
-  ordersToday: number;
-  openPositions: number;
-}
-
-/** Pluto's strategies, whose orders the caps count together (Marcelo 2026-10-27: Vol Farmer v2's under the ladder's caps). */
-const plutoStrategiesUnderCaps = ["cc_put_ladder", "vol_farmer_v2"];
-
-/** Pluto's open-order rows (open_* order requests of actions taken under its strategies) still working or not yet confirmed. */
-function workingLadderOrderRows(connection: Knex) {
-  return connection("order_requests as orq").join("pluto_actions as pa", "pa.id", "orq.pluto_action_id").whereIn("pa.execution_strategy", plutoStrategiesUnderCaps).whereIn("orq.status", [...activeOrderRequestStatuses]).whereRaw("orq.request_type like 'open_%'");
-}
-
-/** Pluto's orders sent on the Eastern date of `now`, under either strategy, on `symbol` or (null) across the book: every order built counts. */
-export function ladderOrdersSentToday(now: Date, symbol: string | null, connection: Knex = db) {
-  const query = connection("pluto_actions").whereIn("execution_strategy", plutoStrategiesUnderCaps).whereNotNull("order_request_id").whereRaw("(created_at at time zone 'America/New_York')::date = ?::date", [easternIsoDate(now)]);
-  return (symbol === null ? query : query.where({ symbol })).count({ count: "*" }).first();
-}
-
-/** Ladder orders sent today across the book, as the book's daily cap counts them (the screen's "Orders today"). */
-export async function loadLadderOrdersSentToday(now: Date, connection: Knex = db): Promise<number> {
-  return Number((await ladderOrdersSentToday(now, null, connection))?.count ?? 0);
-}
-
-export async function loadLadderTickerOrderCounts(ticker: { tickerId: string; symbol: string }, now: Date, connection: Knex = db): Promise<LadderOrderCounts> {
+export async function loadLadderTickerOrderCounts(ticker: { tickerId: string; symbol: string }, now: Date, connection: Knex = db): Promise<SafetyLimitCounts> {
   const [working, ordersToday, openPositions] = await Promise.all([
     loadWorkingLadderSales(ticker.symbol, connection),
-    ladderOrdersSentToday(now, ticker.symbol, connection),
+    plutoOrdersSentToday(now, ticker.symbol, connection),
     connection("positions").where({ ticker_id: ticker.tickerId, status: "open" }).count({ count: "*" }).first(),
   ]);
   return { workingOrders: working.length, ordersToday: Number(ordersToday?.count ?? 0), openPositions: Number(openPositions?.count ?? 0) };
 }
 
-/** The book's counts: open positions on the ladder's tickers, the ladder's working orders on them, and its orders sent today. */
-export async function loadLadderBookOrderCounts(tickers: readonly { tickerId: string; symbol: string }[], now: Date, connection: Knex = db): Promise<LadderOrderCounts> {
-  const [working, ordersToday, openPositions] = await Promise.all([
-    workingLadderOrderRows(connection).whereRaw("orq.payload->>'symbol' = any(?)", [tickers.map((ticker) => ticker.symbol)]).count({ count: "*" }).first(),
-    ladderOrdersSentToday(now, null, connection),
-    connection("positions").whereIn("ticker_id", tickers.map((ticker) => ticker.tickerId)).where({ status: "open" }).count({ count: "*" }).first(),
-  ]);
-  return { workingOrders: Number(working?.count ?? 0), ordersToday: Number(ordersToday?.count ?? 0), openPositions: Number(openPositions?.count ?? 0) };
-}
-
 /** The book as the round sees it: its counts, the capital its tickers commit, and Pluto's capital budget. Incremented as the round sends. */
 export interface LadderBookRoom {
-  counts: LadderOrderCounts;
+  counts: SafetyLimitCounts;
   committedCapitalDollars: number;
   /** Pluto's capital budget as a share of the account (0.5 = 50%). */
   budgetFraction: number;
@@ -99,20 +64,20 @@ export function ladderSaleNotional(sale: Pick<LadderSale, "strategyKey" | "strik
   return sale.strategyKey === "cash_secured_put" ? Math.max(0, sale.strike - optionPrice) * 100 * sale.contracts : sale.sharesBought * Math.max(0, sale.stockPrice - optionPrice);
 }
 
-type LadderCapSettings = Pick<PlutoSettings, "ladderMaxWorkingOrdersPerTicker" | "ladderMaxOrdersPerTickerPerDay" | "ladderMaxOpenPositionsPerTicker" | "ladderMaxOpenPositions" | "ladderMaxOrdersPerDay">;
+type SafetyLimitCapSettings = Pick<PlutoSettings, "safetyMaxWorkingOrdersPerTicker" | "safetyMaxOrdersPerTickerPerDay" | "safetyMaxOpenPositionsPerTicker" | "safetyMaxOpenPositions" | "safetyMaxOrdersPerDay">;
 
 /**
  * Pure: the planned sales the caps let go now, in the look's order, and why the rest wait. The counted caps (the ticker's
  * and the book's) let the first `room` sales go, the tightest binding; the book's capital then lets them go in order up to
  * the first that would take it over Pluto's capital budget (at the sale's planned price), which waits with every one after it.
  */
-export function admitLadderSales(planned: readonly PlannedLadderSale[], ticker: LadderOrderCounts, book: LadderBookRoom, settings: LadderCapSettings): { send: PlannedLadderSale[]; waiting: LadderWaitingSale[] } {
+export function admitLadderSales(planned: readonly PlannedLadderSale[], ticker: SafetyLimitCounts, book: LadderBookRoom, settings: SafetyLimitCapSettings): { send: PlannedLadderSale[]; waiting: LadderWaitingSale[] } {
   const caps: { cap: LadderCap; room: number; reason: string }[] = [
-    { cap: "ticker_working_orders", room: settings.ladderMaxWorkingOrdersPerTicker - ticker.workingOrders, reason: `${ticker.workingOrders} of the ticker's orders are working, at most ${settings.ladderMaxWorkingOrdersPerTicker} at once` },
-    { cap: "ticker_orders_per_day", room: settings.ladderMaxOrdersPerTickerPerDay - ticker.ordersToday, reason: `${ticker.ordersToday} of the ticker's ${settings.ladderMaxOrdersPerTickerPerDay} orders a day are sent` },
-    { cap: "ticker_open_positions", room: settings.ladderMaxOpenPositionsPerTicker - ticker.openPositions - ticker.workingOrders, reason: `the ticker has ${ticker.openPositions} open position(s) and ${ticker.workingOrders} working order(s), at most ${settings.ladderMaxOpenPositionsPerTicker} positions` },
-    { cap: "book_open_positions", room: settings.ladderMaxOpenPositions - book.counts.openPositions - book.counts.workingOrders, reason: `the ladder's tickers have ${book.counts.openPositions} open position(s) and ${book.counts.workingOrders} working order(s), at most ${settings.ladderMaxOpenPositions} across the book` },
-    { cap: "book_orders_per_day", room: settings.ladderMaxOrdersPerDay - book.counts.ordersToday, reason: `${book.counts.ordersToday} of the book's ${settings.ladderMaxOrdersPerDay} ladder orders a day are sent` },
+    { cap: "ticker_working_orders", room: settings.safetyMaxWorkingOrdersPerTicker - ticker.workingOrders, reason: `${ticker.workingOrders} of the ticker's orders are working, at most ${settings.safetyMaxWorkingOrdersPerTicker} at once` },
+    { cap: "ticker_orders_per_day", room: settings.safetyMaxOrdersPerTickerPerDay - ticker.ordersToday, reason: `${ticker.ordersToday} of the ticker's ${settings.safetyMaxOrdersPerTickerPerDay} orders a day are sent` },
+    { cap: "ticker_open_positions", room: settings.safetyMaxOpenPositionsPerTicker - ticker.openPositions - ticker.workingOrders, reason: `the ticker has ${ticker.openPositions} open position(s) and ${ticker.workingOrders} working order(s), at most ${settings.safetyMaxOpenPositionsPerTicker} positions` },
+    { cap: "book_open_positions", room: settings.safetyMaxOpenPositions - book.counts.openPositions - book.counts.workingOrders, reason: `Pluto's tickers have ${book.counts.openPositions} open position(s) and ${book.counts.workingOrders} working order(s), at most ${settings.safetyMaxOpenPositions}` },
+    { cap: "book_orders_per_day", room: settings.safetyMaxOrdersPerDay - book.counts.ordersToday, reason: `${book.counts.ordersToday} of Pluto's ${settings.safetyMaxOrdersPerDay} orders a day are sent` },
   ];
   const binding = caps.reduce((tightest, cap) => (cap.room < tightest.room ? cap : tightest));
   const sendCount = Math.min(planned.length, Math.max(0, binding.room));

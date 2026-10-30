@@ -428,7 +428,7 @@ export class PlutoAgent {
     const outcome = (result as { outcome?: string } | null)?.outcome ?? "unknown";
     this.queueForcedRound("order_ended", { symbol, outcome }, null);
     const filled = outcome === "filled" || outcome === "partially_filled" || outcome === "cancelled_partially_filled";
-    const cooldownMinutes = this.settings?.ladderTickerCooldownMinutes ?? 0;
+    const cooldownMinutes = this.settings?.safetyTickerCooldownMinutes ?? 0;
     if (!filled || cooldownMinutes <= 0) return;
     const timer = setTimeout(() => {
       this.cooldownTimers.delete(timer);

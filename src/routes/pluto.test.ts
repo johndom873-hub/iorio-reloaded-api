@@ -117,9 +117,9 @@ describe("PUT /pluto/settings: ladder-only settings", () => {
 });
 
 describe("GET /pluto/state: today's orders against the ladder's daily cap", () => {
-  it("counts the ladder's orders sent today against ladderMaxOrdersPerDay", async () => {
+  it("counts the ladder's orders sent today against safetyMaxOrdersPerDay", async () => {
     const [{ json: state }, { json: settings }] = await Promise.all([get("/state"), get("/settings")]);
-    expect(state.counters).toEqual({ ordersToday: expect.any(Number), maxOrdersPerDay: settings.ladderMaxOrdersPerDay });
+    expect(state.counters).toEqual({ ordersToday: expect.any(Number), maxOrdersPerDay: settings.safetyMaxOrdersPerDay });
   });
 });
 

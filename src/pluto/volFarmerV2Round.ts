@@ -27,7 +27,7 @@ import { expiriesWithoutPreviousSessionVolume, nextListedExpiryAfter, optionQuot
 import { loadFinishedOptionQuoteBandCycle, loadOptionQuoteBandQuotes } from "./optionQuoteBandQuotes.js";
 import { latestCycleQuotes } from "./ladderLook.js";
 import { loadOpenPositionFigures } from "./ladderLookSnapshot.js";
-import { ladderOrdersSentToday, loadLadderBookOrderCounts } from "./ladderOrders.js";
+import { loadSafetyLimitBookCounts, plutoOrdersSentToday } from "./safetyLimits.js";
 import { recordPlutoAction, recordPlutoEvent, type PlutoActionKind, type PlutoGateResult } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { tickerCooldownStatus } from "./postModelGates.js";
@@ -48,8 +48,8 @@ import { loadVolFarmerV2LegStatuses, loadVolFarmerV2Memory, loadVolFarmerV2Order
 
 // One Pluto round under Vol Farmer v2 (Marcelo 2026-10-27): every enabled ticker running v2 gets a look at every round
 // (its rules at every look, as the lab's "every look"), on its live book (volFarmerV2LiveBook.ts) and the market quote
-// loop's band quotes, and the orders the shared steps place go out within the caps the CC + Put Ladder's orders count
-// under too (Marcelo 2026-10-27, answer d): the ticker's working orders, orders a day and open positions, the book's open
+// loop's band quotes, and the orders the shared steps place go out within the Safety Limits' caps, counted with the CC +
+// Put Ladder's orders (safetyLimits.ts; Marcelo 2026-10-27, answer d): the ticker's working orders, orders a day and open positions, the book's open
 // positions and orders a day, and Pluto's capital budget. Each order is re-quoted live, held to v2's spread limit and
 // |delta| ranges (a LEAPS to its spread limit only), priced at the mid on the option's tick and sent through Pluto's
 // executor; one that fails a check, or a cap holds, is undone and planned afresh at a later round. While SPY's stress
@@ -141,7 +141,7 @@ export async function runVolFarmerV2Round(input: VolFarmerV2RoundInput): Promise
   const turnOrder = volFarmerV2TurnOrder(v2Tickers.map((ticker) => ticker.symbol), Math.round(Date.parse(`${input.todayIso}T00:00:00Z`) / 86_400_000));
   const tickers = [...v2Tickers].sort((a, b) => turnOrder.indexOf(a.symbol) - turnOrder.indexOf(b.symbol));
   const allocationBySymbol = effectiveAllocationPctBySymbol(enabled);
-  const [bookCounts, bookCommittedAtStart, inFlightAtStart] = await Promise.all([loadLadderBookOrderCounts(enabled, now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol)), loadInFlightNotionalsBySymbol()]);
+  const [bookCounts, bookCommittedAtStart, inFlightAtStart] = await Promise.all([loadSafetyLimitBookCounts(enabled, now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol)), loadInFlightNotionalsBySymbol()]);
   // What the round's own orders commit is counted once: the book's commitment and the orders in flight are read at its
   // start, and each order it sends adds to them as it goes.
   const round = {
@@ -167,8 +167,8 @@ export async function runVolFarmerV2Round(input: VolFarmerV2RoundInput): Promise
         lastRound.notes.push("frozen (a split is pending), not traded");
         continue;
       }
-      const cooldown = tickerCooldownStatus(lastFilledAtBySymbol.get(ticker.symbol) ?? null, now.getTime(), settings.ladderTickerCooldownMinutes);
-      if (settings.ladderTickerCooldownMinutes > 0 && !cooldown.cooledDown) {
+      const cooldown = tickerCooldownStatus(lastFilledAtBySymbol.get(ticker.symbol) ?? null, now.getTime(), settings.safetyTickerCooldownMinutes);
+      if (settings.safetyTickerCooldownMinutes > 0 && !cooldown.cooledDown) {
         lastRound.notes.push(`ticker cooldown, ${cooldown.detail}`);
         continue;
       }
@@ -194,7 +194,7 @@ interface LastRound {
 }
 
 type RoundState = {
-  bookCounts: Awaited<ReturnType<typeof loadLadderBookOrderCounts>>;
+  bookCounts: Awaited<ReturnType<typeof loadSafetyLimitBookCounts>>;
   bookCommitted: number;
   committedThisRound: number;
   /** The notional of every order in flight on the account when the round began. */
@@ -381,7 +381,7 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
     replaceVolFarmerV2LegRef(state, order.ref, unsent.ref);
     settleVolFarmerV2Order(state, unsent, unfilledVolFarmerV2Outcome);
   };
-  const tickerCounts = { working: pending.length, ordersToday: Number(((await ladderOrdersSentToday(now, symbol)) as { count?: string | number } | undefined)?.count ?? 0), openPositions: positions.length };
+  const tickerCounts = { working: pending.length, ordersToday: Number(((await plutoOrdersSentToday(now, symbol)) as { count?: string | number } | undefined)?.count ?? 0), openPositions: positions.length };
   for (const order of look.planned) {
     if (!sendsOrder(order)) {
       undo(order);
@@ -473,11 +473,11 @@ async function sendOrder(context: {
   // The caps the ladder's orders count under; a LEAPS sale only reduces what is held.
   if (opening) {
     const caps: [number, string][] = [
-      [settings.ladderMaxWorkingOrdersPerTicker - tickerCounts.working, `${tickerCounts.working} of the ticker's orders are working, at most ${settings.ladderMaxWorkingOrdersPerTicker} at once`],
-      [settings.ladderMaxOrdersPerTickerPerDay - tickerCounts.ordersToday, `${tickerCounts.ordersToday} of the ticker's ${settings.ladderMaxOrdersPerTickerPerDay} orders a day are sent`],
-      [settings.ladderMaxOpenPositionsPerTicker - tickerCounts.openPositions - tickerCounts.working, `the ticker has ${tickerCounts.openPositions} open position(s) and ${tickerCounts.working} working order(s), at most ${settings.ladderMaxOpenPositionsPerTicker} positions`],
-      [settings.ladderMaxOpenPositions - round.bookCounts.openPositions - round.bookCounts.workingOrders, `Pluto's tickers have ${round.bookCounts.openPositions} open position(s) and ${round.bookCounts.workingOrders} working order(s), at most ${settings.ladderMaxOpenPositions}`],
-      [settings.ladderMaxOrdersPerDay - round.bookCounts.ordersToday, `${round.bookCounts.ordersToday} of Pluto's ${settings.ladderMaxOrdersPerDay} orders a day are sent`],
+      [settings.safetyMaxWorkingOrdersPerTicker - tickerCounts.working, `${tickerCounts.working} of the ticker's orders are working, at most ${settings.safetyMaxWorkingOrdersPerTicker} at once`],
+      [settings.safetyMaxOrdersPerTickerPerDay - tickerCounts.ordersToday, `${tickerCounts.ordersToday} of the ticker's ${settings.safetyMaxOrdersPerTickerPerDay} orders a day are sent`],
+      [settings.safetyMaxOpenPositionsPerTicker - tickerCounts.openPositions - tickerCounts.working, `the ticker has ${tickerCounts.openPositions} open position(s) and ${tickerCounts.working} working order(s), at most ${settings.safetyMaxOpenPositionsPerTicker} positions`],
+      [settings.safetyMaxOpenPositions - round.bookCounts.openPositions - round.bookCounts.workingOrders, `Pluto's tickers have ${round.bookCounts.openPositions} open position(s) and ${round.bookCounts.workingOrders} working order(s), at most ${settings.safetyMaxOpenPositions}`],
+      [settings.safetyMaxOrdersPerDay - round.bookCounts.ordersToday, `${round.bookCounts.ordersToday} of Pluto's ${settings.safetyMaxOrdersPerDay} orders a day are sent`],
     ];
     const held = caps.find(([room]) => room < 1);
     if (held) return { actionId: null, sent: false, detail: `${description} waits for a later round: ${held[1]}` };

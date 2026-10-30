@@ -10,18 +10,19 @@ import { runLadderLook } from "./ladderLook.js";
 import { loadLadderLookInput } from "./ladderLookLoader.js";
 import { loadCommittedCapitalOnSymbols } from "../lib/orderLimits.js";
 import { noticeLadderBook, noticeLadderTicker, type LadderBookNoticeReason } from "./ladderNotices.js";
-import { admitLadderSales, ladderSaleNotional, loadLadderBookOrderCounts, loadLadderTickerOrderCounts, sendLadderSales, type LadderBookRoom, type LadderSaleOutcome } from "./ladderOrders.js";
+import { admitLadderSales, ladderSaleNotional, loadLadderTickerOrderCounts, sendLadderSales, type LadderBookRoom, type LadderSaleOutcome } from "./ladderOrders.js";
 import { recordPlutoAction, recordPlutoEvent } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { tickerCooldownStatus } from "./postModelGates.js";
+import { loadSafetyLimitBookCounts } from "./safetyLimits.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings, tickerPotFraction } from "./tickerSettingsStore.js";
 
 // One Pluto round under the CC + Put Ladder (Marcelo 2026-10-14/15): rules only, no model. Every enabled ticker gets a
 // look (ladderLook.ts) on its live book and the Day Signals loop's band quotes, and the sales it plans go out within the
-// ladder's caps (ladderOrders.ts), the ticker's and the book's: the book's counts and the capital its tickers commit are
+// Safety Limits' caps (ladderOrders.ts, safetyLimits.ts), the ticker's and the book's: the book's counts and the capital its tickers commit are
 // read once per round and moved on as the round sends. Pluto's own checks (breakers, window, worker, reconciliation,
-// readiness) ran before this; the ladder's SPY stress level is checked by the caller. A frozen ticker (a split pending)
+// readiness) ran before this; the SPY stress breaker is checked by the caller. A frozen ticker (a split pending)
 // is never looked at. What stops a ticker or holds its sales goes to Telegram once a day (ladderNotices.ts).
 
 export interface LadderRoundInput {
@@ -61,7 +62,7 @@ export async function runLadderRound(input: LadderRoundInput): Promise<LadderRou
   const allocationBySymbol = effectiveAllocationPctBySymbol(enabled);
   const summary: LadderRoundSummary = { looked: [], planned: 0, outcomes: [], notes: [] };
   // The book: every ticker enabled in Pluto, frozen ones included (their positions still commit capital).
-  const [bookCounts, bookCommitted, inFlightAtStart] = await Promise.all([loadLadderBookOrderCounts(enabled, input.now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol)), loadInFlightNotionalsBySymbol()]);
+  const [bookCounts, bookCommitted, inFlightAtStart] = await Promise.all([loadSafetyLimitBookCounts(enabled, input.now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol)), loadInFlightNotionalsBySymbol()]);
   const book: LadderBookRoom = { counts: bookCounts, committedCapitalDollars: bookCommitted, budgetFraction: settings.capitalBudgetPct / 100, netLiquidationValue: input.netLiquidationValue };
   const bookNotices = new Set<LadderBookNoticeReason>();
   // What this round's earlier tickers just sent: the cash they commit is gone for the next ones. The orders in flight are
@@ -75,8 +76,8 @@ export async function runLadderRound(input: LadderRoundInput): Promise<LadderRou
       summary.notes.push(`${ticker.symbol}: frozen (a split is pending), not traded`);
       continue;
     }
-    const cooldown = tickerCooldownStatus(lastFilledAtBySymbol.get(ticker.symbol) ?? null, input.now.getTime(), settings.ladderTickerCooldownMinutes);
-    if (settings.ladderTickerCooldownMinutes > 0 && !cooldown.cooledDown) {
+    const cooldown = tickerCooldownStatus(lastFilledAtBySymbol.get(ticker.symbol) ?? null, input.now.getTime(), settings.safetyTickerCooldownMinutes);
+    if (settings.safetyTickerCooldownMinutes > 0 && !cooldown.cooledDown) {
       summary.notes.push(`${ticker.symbol}: ticker cooldown, ${cooldown.detail}`);
       continue;
     }

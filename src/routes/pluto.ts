@@ -17,7 +17,7 @@ import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetP
 import { plutoEventCategories, plutoEventCategoryByType, plutoEventTypesInCategories, recordPlutoEvent, type PlutoEventCategory } from "../pluto/ledger.js";
 import { cancelPlutoOrders, countPlutoWorkingOrders, loadPlutoWorkingOrders } from "../pluto/orders.js";
 import { loadPlutoOrdersTodayBreakdown } from "../pluto/counters.js";
-import { loadLadderOrdersSentToday } from "../pluto/ladderOrders.js";
+import { loadPlutoOrdersSentToday } from "../pluto/safetyLimits.js";
 import { computePlutoActionExposure, loadPlutoOrderRequestsByActionId, type PlutoActionOrderRequest } from "../pluto/actionExposure.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
@@ -39,11 +39,11 @@ async function currentUserDisplayName(request: Request): Promise<string> {
 }
 
 plutoRouter.get("/state", async (_request: Request, response: Response) => {
-  const [state, settings, working, ladderOrdersToday, ordersToday, workingOrders, agentHealth, enabledCount, book, lastSnapshot, lastModeChange, lastCheckedPass, unfilledCancelMinutes] = await Promise.all([
+  const [state, settings, working, plutoOrdersToday, ordersToday, workingOrders, agentHealth, enabledCount, book, lastSnapshot, lastModeChange, lastCheckedPass, unfilledCancelMinutes] = await Promise.all([
     loadPlutoState(),
     loadPlutoSettings(),
     countPlutoWorkingOrders(),
-    loadLadderOrdersSentToday(new Date()),
+    loadPlutoOrdersSentToday(new Date()),
     loadPlutoOrdersTodayBreakdown(),
     loadPlutoWorkingOrders(),
     db("worker_health").where({ process_name: "pluto_agent" }).first(),
@@ -70,8 +70,8 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
     ordersToday,
     workingOrders,
     unfilledCancelMinutes,
-    // The ladder's daily cap across the book, and its own count of today's orders.
-    counters: { ordersToday: ladderOrdersToday, maxOrdersPerDay: settings.ladderMaxOrdersPerDay },
+    // The Safety Limits' daily cap across the book, and its own count of today's orders.
+    counters: { ordersToday: plutoOrdersToday, maxOrdersPerDay: settings.safetyMaxOrdersPerDay },
     enabledTickers: { count: enabledCount, max: settings.maxEnabledTickers },
     session: {
       ...session,

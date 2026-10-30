@@ -23,12 +23,13 @@ const figures = { unfilledOrderCancelMinutes: 15 };
 describe("buildPlutoHowItWorks", () => {
   it("quotes every number the tab shows, at today's defaults and constants", () => {
     const { ladder, volFarmerV2: _volFarmerV2, ...rest } = buildPlutoHowItWorks(settings, figures);
-    expect(rest).toEqual({ shared: { windowStartEt: "10:45", windowEndEt: "15:30", windowEndMinutesBeforeCloseAtLeast: 30, capitalBudgetPct: 50, excessAllowancePct: 0, dailyLossBreakerPct: 2, unfilledOrderCancelMinutes: 15, premiumYieldSessionsPerYear: 252 } });
+    expect(rest).toEqual({ shared: { windowStartEt: "10:45", windowEndEt: "15:30", windowEndMinutesBeforeCloseAtLeast: 30, capitalBudgetPct: 50, excessAllowancePct: 0, dailyLossBreakerPct: 2, unfilledOrderCancelMinutes: 15, premiumYieldSessionsPerYear: 252 },
+      safetyLimits: { maxWorkingOrdersPerTicker: 10, maxOrdersPerTickerPerDay: 30, maxOpenPositionsPerTicker: 30, maxOpenPositions: 120, maxOrdersPerDay: 100, spyStressBreakerPct: 5, tickerCooldownMinutes: 0 },
+    });
     const { example: ladderExample, ...ladderValues } = ladder;
     expect(ladderValues).toEqual({
       minAbsDelta: 0.05, maxAbsDelta: 0.3, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 50, minimumBid: 0.05, maxVolumeSharePct: 20,
       rungs: 5, sharesPct: 50, shockMinPct: 60, shockMaxPct: 80, shockNoHistoryPct: 90, shockLookbackYears: 10, putOverCallYieldMarginPct: 0, minEntryYieldPct: 20, maxQuoteAgeMinutes: 10,
-      maxWorkingOrdersPerTicker: 10, maxOrdersPerTickerPerDay: 30, maxOpenPositionsPerTicker: 30, maxOpenPositions: 120, maxOrdersPerDay: 100, spyStressBreakerPct: 5, tickerCooldownMinutes: 0,
     });
     expect(ladderExample).toMatchObject({ accountValue: 2_000_000, allocationPct: 20, pot: 200_000, sharesBudget: 100_000, reserve: 100_000, rungCollateral: 20_000, averageCost: 104, breakEven: 100, shockPct: 70 });
   });

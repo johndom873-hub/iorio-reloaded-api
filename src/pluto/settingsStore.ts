@@ -44,19 +44,20 @@ export interface PlutoSettings {
   ladderShockMaxPct: number;
   ladderShockNoHistoryPct: number;
   ladderShockLookbackYears: number;
-  /** At most this many of a ticker's ladder orders work at once; the rest go at the next looks. */
-  ladderMaxWorkingOrdersPerTicker: number;
-  /** The ladder's SPY stress breaker. */
-  ladderSpyStressBreakerPct: number;
-  /** Minutes after a filled ladder order on a ticker before the ladder may act on it again; 0 = no cooldown. */
-  ladderTickerCooldownMinutes: number;
-  ladderMaxOpenPositionsPerTicker: number;
-  /** Every ladder order sent on a ticker in a day counts, re-prices included. */
-  ladderMaxOrdersPerTickerPerDay: number;
-  /** Across every ladder ticker: open positions plus the ladder's working orders. */
-  ladderMaxOpenPositions: number;
-  /** Across every ladder ticker: ladder orders sent in a day, counted as the per-ticker daily cap counts them. */
-  ladderMaxOrdersPerDay: number;
+  // Safety Limits: they hold every Pluto strategy (safetyLimits.ts counts the orders of both together).
+  /** At most this many of a ticker's orders work at once; the rest go at the next looks. */
+  safetyMaxWorkingOrdersPerTicker: number;
+  /** While SPY is down this much on the day, the ladder sends nothing and Vol Farmer v2 opens nothing. */
+  safetySpyStressBreakerPct: number;
+  /** Minutes after a filled Pluto order on a ticker before either strategy may act on it again; 0 = no cooldown. */
+  safetyTickerCooldownMinutes: number;
+  safetyMaxOpenPositionsPerTicker: number;
+  /** Every Pluto order sent on a ticker in a day counts, re-prices included. */
+  safetyMaxOrdersPerTickerPerDay: number;
+  /** Across every Pluto ticker: open positions plus Pluto's working orders. */
+  safetyMaxOpenPositions: number;
+  /** Across every Pluto ticker: Pluto's orders sent in a day, counted as the per-ticker daily cap counts them. */
+  safetyMaxOrdersPerDay: number;
   // Vol Farmer v2 (the backtest's volFarmerV2 keys with a "volFarmerV2" prefix, and the Vol Farmer's Call keys it reads;
   // volFarmerV2Settings.ts maps them back). Set once from the lab's values of 2026-10-27; never synced with the lab.
   volFarmerV2PutsStartCallYieldPct: number;
@@ -103,13 +104,13 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   ladderShockMaxPct: { column: "ladder_shock_max_pct", kind: "number", min: 1, max: 99 },
   ladderShockNoHistoryPct: { column: "ladder_shock_no_history_pct", kind: "number", min: 1, max: 99 },
   ladderShockLookbackYears: { column: "ladder_shock_lookback_years", kind: "integer", min: 1, max: 30 },
-  ladderMaxWorkingOrdersPerTicker: { column: "ladder_max_working_orders_per_ticker", kind: "integer", min: 1, max: 100 },
-  ladderSpyStressBreakerPct: { column: "ladder_spy_stress_breaker_pct", kind: "number", min: 0, max: 100 },
-  ladderTickerCooldownMinutes: { column: "ladder_ticker_cooldown_minutes", kind: "integer", min: 0 },
-  ladderMaxOpenPositionsPerTicker: { column: "ladder_max_open_positions_per_ticker", kind: "integer", min: 1, max: 1000 },
-  ladderMaxOrdersPerTickerPerDay: { column: "ladder_max_orders_per_ticker_per_day", kind: "integer", min: 1, max: 1000 },
-  ladderMaxOpenPositions: { column: "ladder_max_open_positions", kind: "integer", min: 1, max: 10000 },
-  ladderMaxOrdersPerDay: { column: "ladder_max_orders_per_day", kind: "integer", min: 1, max: 10000 },
+  safetyMaxWorkingOrdersPerTicker: { column: "safety_max_working_orders_per_ticker", kind: "integer", min: 1, max: 100 },
+  safetySpyStressBreakerPct: { column: "safety_spy_stress_breaker_pct", kind: "number", min: 0, max: 100 },
+  safetyTickerCooldownMinutes: { column: "safety_ticker_cooldown_minutes", kind: "integer", min: 0 },
+  safetyMaxOpenPositionsPerTicker: { column: "safety_max_open_positions_per_ticker", kind: "integer", min: 1, max: 1000 },
+  safetyMaxOrdersPerTickerPerDay: { column: "safety_max_orders_per_ticker_per_day", kind: "integer", min: 1, max: 1000 },
+  safetyMaxOpenPositions: { column: "safety_max_open_positions", kind: "integer", min: 1, max: 10000 },
+  safetyMaxOrdersPerDay: { column: "safety_max_orders_per_day", kind: "integer", min: 1, max: 10000 },
   // Vol Farmer v2's bounds are the backtest's (validateVolFarmerV2Settings, validateVolFarmerSettings).
   volFarmerV2PutsStartCallYieldPct: { column: "vol_farmer_v2_puts_start_call_yield_pct", kind: "number", min: 0, max: 500 },
   volFarmerV2PutMaxAbsDelta: { column: "vol_farmer_v2_put_max_abs_delta", kind: "number", min: 0.01, max: 0.99 },
@@ -131,6 +132,8 @@ const timeOfDayPattern = /^([01]\d|2[0-3]):[0-5]\d$/;
 function rowToSettings(row: Record<string, unknown>): PlutoSettings {
   const out: Record<string, unknown> = {};
   for (const [field, spec] of Object.entries(plutoSettingsColumns)) {
+    // A missing column would read as NaN, and a cap of NaN never holds: code older than the schema fails instead.
+    if (!(spec.column in row)) throw new Error(`pluto_settings has no ${spec.column} column.`);
     const raw = row[spec.column];
     out[field] = spec.kind === "text" ? String(raw) : Number(raw);
   }

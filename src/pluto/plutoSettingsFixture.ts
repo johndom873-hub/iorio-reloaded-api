@@ -14,13 +14,13 @@ export const plutoLadderSettingsFixture = {
   ladderShockMaxPct: 80,
   ladderShockNoHistoryPct: 90,
   ladderShockLookbackYears: 10,
-  ladderMaxWorkingOrdersPerTicker: 10,
-  ladderSpyStressBreakerPct: 5,
-  ladderTickerCooldownMinutes: 0,
-  ladderMaxOpenPositionsPerTicker: 30,
-  ladderMaxOrdersPerTickerPerDay: 30,
-  ladderMaxOpenPositions: 120,
-  ladderMaxOrdersPerDay: 100,
+  safetyMaxWorkingOrdersPerTicker: 10,
+  safetySpyStressBreakerPct: 5,
+  safetyTickerCooldownMinutes: 0,
+  safetyMaxOpenPositionsPerTicker: 30,
+  safetyMaxOrdersPerTickerPerDay: 30,
+  safetyMaxOpenPositions: 120,
+  safetyMaxOrdersPerDay: 100,
 } as const satisfies Partial<PlutoSettings>;
 
 // Vol Farmer v2's settings at their migration defaults (20261027900001, the lab's values of 2026-10-27).

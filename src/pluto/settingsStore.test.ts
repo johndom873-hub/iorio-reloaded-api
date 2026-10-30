@@ -47,7 +47,7 @@ describe("validatePlutoSettingsInput", () => {
     expect(validatePlutoSettingsInput({ ladderRungs: 2.5 }, current)).toMatch(/whole number/);
     expect(validatePlutoSettingsInput({ ladderSharesPct: 100 }, current)).toMatch(/cannot be above 99/);
     expect(validatePlutoSettingsInput({ ladderShockMinPct: 85 }, current)).toMatch(/ladderShockMinPct cannot exceed/);
-    expect(validatePlutoSettingsInput({ ladderMaxWorkingOrdersPerTicker: 0 }, current)).toMatch(/cannot be below 1/);
+    expect(validatePlutoSettingsInput({ safetyMaxWorkingOrdersPerTicker: 0 }, current)).toMatch(/cannot be below 1/);
   });
 
   it("every settings field has a column mapping", () => {

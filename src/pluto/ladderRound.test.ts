@@ -57,9 +57,9 @@ vi.mock("./ladderNotices.js", () => ({
   noticeLadderTicker: async (symbol: string, reason: string) => (harness.tickerNotices.push(`${reason}:${symbol}`), true),
   noticeLadderBook: async (reason: string) => (harness.bookNotices.push(reason), true),
 }));
+vi.mock("./safetyLimits.js", () => ({ loadSafetyLimitBookCounts: async () => ({ ...harness.bookCounts }) }));
 vi.mock("./ladderOrders.js", async (original) => ({
   ...(await original<object>()),
-  loadLadderBookOrderCounts: async () => ({ ...harness.bookCounts }),
   loadLadderTickerOrderCounts: async () => ({ ...harness.tickerCounts }),
   sendLadderSales: async (input: { symbol: string; sales: PlannedLadderSale[] }): Promise<LadderSaleOutcome[]> => {
     harness.sent.push({ symbol: input.symbol, strikes: input.sales.map((sale) => sale.strike) });
@@ -71,7 +71,7 @@ vi.mock("./ladderOrders.js", async (original) => ({
 
 const { runLadderRound } = await import("./ladderRound.js");
 
-const settings = { capitalBudgetPct: 50, excessAllowancePct: 0, ladderTickerCooldownMinutes: 0, maxQuoteAgeMinutes: 10, telegramVerbosity: "actions", ladderMaxWorkingOrdersPerTicker: 10, ladderMaxOrdersPerTickerPerDay: 30, ladderMaxOpenPositionsPerTicker: 30, ladderMaxOpenPositions: 120, ladderMaxOrdersPerDay: 100 };
+const settings = { capitalBudgetPct: 50, excessAllowancePct: 0, safetyTickerCooldownMinutes: 0, maxQuoteAgeMinutes: 10, telegramVerbosity: "actions", safetyMaxWorkingOrdersPerTicker: 10, safetyMaxOrdersPerTickerPerDay: 30, safetyMaxOpenPositionsPerTicker: 30, safetyMaxOpenPositions: 120, safetyMaxOrdersPerDay: 100 };
 const now = new Date("2026-10-21T15:00:00Z");
 
 const put = (strike: number, contracts = 1): PlannedLadderSale => ({ strategyKey: "cash_secured_put", step: "ladder_put", expiry: "2026-11-20", strike, right: "P", contracts, optionPrice: 0.8, sharesBought: 0, stockPrice: 50, candidate: {} as never, eligibleCount: 1, chosenBecause: "test", scores: {} });
@@ -115,7 +115,7 @@ describe("runLadderRound", () => {
     harness.looks.set("BBB", look([put(30)]));
     const summary = await round();
     expect(harness.sent).toEqual([{ symbol: "AAA", strikes: [45] }, { symbol: "BBB", strikes: [] }]);
-    expect(summary.notes).toEqual(expect.arrayContaining(["AAA: 1 sale(s) wait for a later look (99 of the book's 100 ladder orders a day are sent)", "BBB: 1 sale(s) wait for a later look (100 of the book's 100 ladder orders a day are sent)"]));
+    expect(summary.notes).toEqual(expect.arrayContaining(["AAA: 1 sale(s) wait for a later look (99 of Pluto's 100 orders a day are sent)", "BBB: 1 sale(s) wait for a later look (100 of Pluto's 100 orders a day are sent)"]));
     // Once a day per book-wide limit, however many tickers it holds.
     expect(harness.bookNotices).toEqual(["book_orders_per_day"]);
   });

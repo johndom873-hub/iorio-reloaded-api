@@ -587,6 +587,11 @@ Plain language: the price strip at the top of the Ticker modal showed how many s
 - **Verified:** paper Gateway probe (AAPL/HOOD/INTC/TLT, REALTIME and FROZEN, all four ticks within 1–2.5 s after the close); real `streamTickerDetail` for AAPL locally; affected API test files (220 tests); /ui-ux at 1706/1440/390 px in both themes, text 5.78:1 (dark) / 4.83:1 (light).
 - **Deploy:** push the API before the app; the strip reads `optionActivity` without a fallback.
 
+## Pluto Settings: "Safety Limits" and a new group order (Marcelo 2026-10-30; built, tested and committed; deploy: API before the app)
+Plain language: the "Ladder safety" settings (the caps on orders and positions, the SPY stress breaker and the ticker cooldown) always held both of Pluto's strategies, not only the CC + Put Ladder, so they are now called **Safety Limits**. The Settings tab's groups now read: Capital, Vol Farmer, CC + Put Ladder, Safety Limits, Session & Breakers, Quotes & Lines, Operations. Nothing about how Pluto trades changed.
+- Code: settings `ladderMax…`/`ladderSpyStressBreakerPct`/`ladderTickerCooldownMinutes` → `safety…`, columns renamed by migration `20261030300001_pluto_safety_limit_settings` (values kept); the counts both strategies share moved to `src/pluto/safetyLimits.ts`; How it works returns them under `safetyLimits`. Older audit rows under the `ladder…` names keep their labels.
+- Loading Pluto's settings now fails if a column is missing, instead of reading it as NaN (a cap of NaN never holds).
+
 ## Open decisions — Juan's Iorio Upgrades feedback (2026-08-24)
 Full IBKR trading-book/depth visibility, full option chain w/ all bid-ask, richer trade tab, and a new upcoming-events tab. Broken into independently-decidable pieces:
 - [x] **Order confirmation needs real-time prices and the live option chain (Juan) — built, corrected 2026-09-25.** This was stale: `OrderReviewPanel.tsx` has had a live-streaming "Live Quote" card (bid/ask/greeks/IV via genuine SSE) since app commit `e9e8d07` (2026-08-25) — a month before this checkbox's own "unblocked 2026-09-14" note was even added.

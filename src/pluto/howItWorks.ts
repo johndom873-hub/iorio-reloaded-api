@@ -46,6 +46,17 @@ export interface PlutoHowItWorks {
     /** A premium yield a year is the sale's return × this ÷ the trading sessions it is held (tradingSessionsHeld.ts). */
     premiumYieldSessionsPerYear: number;
   };
+  /** The Safety Limits: they hold every Pluto strategy, both strategies' orders counted together (safetyLimits.ts). */
+  safetyLimits: {
+    maxWorkingOrdersPerTicker: number;
+    maxOrdersPerTickerPerDay: number;
+    maxOpenPositionsPerTicker: number;
+    /** Across every Pluto ticker: open positions plus working orders, and orders sent in a day. */
+    maxOpenPositions: number;
+    maxOrdersPerDay: number;
+    spyStressBreakerPct: number;
+    tickerCooldownMinutes: number;
+  };
   ladder: {
     /** The Calls' |delta| range; the ladder's Puts have none (the rung's cap bounds them). */
     minAbsDelta: number;
@@ -67,14 +78,6 @@ export interface PlutoHowItWorks {
     minEntryYieldPct: number;
     /** A band quote older than this is left out of the look. */
     maxQuoteAgeMinutes: number;
-    maxWorkingOrdersPerTicker: number;
-    maxOrdersPerTickerPerDay: number;
-    maxOpenPositionsPerTicker: number;
-    /** Across every ladder ticker: open positions plus working orders, and orders sent in a day. */
-    maxOpenPositions: number;
-    maxOrdersPerDay: number;
-    spyStressBreakerPct: number;
-    tickerCooldownMinutes: number;
     example: {
       accountValue: number;
       allocationPct: number;
@@ -152,6 +155,15 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       unfilledOrderCancelMinutes: figures.unfilledOrderCancelMinutes,
       premiumYieldSessionsPerYear: tradingSessionsPerYear,
     },
+    safetyLimits: {
+      maxWorkingOrdersPerTicker: settings.safetyMaxWorkingOrdersPerTicker,
+      maxOrdersPerTickerPerDay: settings.safetyMaxOrdersPerTickerPerDay,
+      maxOpenPositionsPerTicker: settings.safetyMaxOpenPositionsPerTicker,
+      maxOpenPositions: settings.safetyMaxOpenPositions,
+      maxOrdersPerDay: settings.safetyMaxOrdersPerDay,
+      spyStressBreakerPct: settings.safetySpyStressBreakerPct,
+      tickerCooldownMinutes: settings.safetyTickerCooldownMinutes,
+    },
     ladder: {
       minAbsDelta: settings.ladderMinAbsDelta,
       maxAbsDelta: settings.ladderMaxAbsDelta,
@@ -169,13 +181,6 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       putOverCallYieldMarginPct: ladderFixedBaselineChoices.ladderPutYieldMarginPct,
       minEntryYieldPct: ladderFixedBaselineChoices.minCallYieldPct,
       maxQuoteAgeMinutes: settings.maxQuoteAgeMinutes,
-      maxWorkingOrdersPerTicker: settings.ladderMaxWorkingOrdersPerTicker,
-      maxOrdersPerTickerPerDay: settings.ladderMaxOrdersPerTickerPerDay,
-      maxOpenPositionsPerTicker: settings.ladderMaxOpenPositionsPerTicker,
-      maxOpenPositions: settings.ladderMaxOpenPositions,
-      maxOrdersPerDay: settings.ladderMaxOrdersPerDay,
-      spyStressBreakerPct: settings.ladderSpyStressBreakerPct,
-      tickerCooldownMinutes: settings.ladderTickerCooldownMinutes,
       example: { accountValue: ladderExampleAccountValue, allocationPct: ladderExampleAllocationPct, pot, sharesBudget, reserve, rungCollateral, averageCost: ladderExampleAverageCost, breakEven: ladderExampleBreakEven, shockPct, floor, rungs },
     },
     volFarmerV2: {

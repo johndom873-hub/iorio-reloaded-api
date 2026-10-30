@@ -13,7 +13,7 @@ const now = new Date("2026-10-20T15:00:00Z");
 const expiry = "2026-11-20";
 const years = yearsBetweenIsoDates(todayIso, expiry);
 const deltaContext: Omit<LadderDeltaContext, "forwardAnchor"> = { minAbsDelta: 0.05, maxAbsDelta: 0.3, riskFreeRate: 0.04, todayIso, closeMinutesEt: 960 };
-const settings = { ladderMaxWorkingOrdersPerTicker: 5, ladderMaxOrdersPerTickerPerDay: 30, ladderMaxOpenPositionsPerTicker: 5, ladderMaxOpenPositions: 120, ladderMaxOrdersPerDay: 100 };
+const settings = { safetyMaxWorkingOrdersPerTicker: 5, safetyMaxOrdersPerTickerPerDay: 30, safetyMaxOpenPositionsPerTicker: 5, safetyMaxOpenPositions: 120, safetyMaxOrdersPerDay: 100 };
 // The fixed choices: entries only above a 20% premium yield a year, the Calls on held shares and the ladder's Puts at any.
 const baseline = ladderBaselineFromPlutoSettings(plutoLadderSettingsFixture as unknown as PlutoSettings);
 const commissions = { option: flatCommissionEstimator, stock: flatStockCommissionEstimator };
@@ -58,10 +58,10 @@ describe("admitLadderSales", () => {
     const planned = [sale(45), sale(44), sale(43)];
     const positions = admitLadderSales(planned, noTickerCounts, { ...emptyBook, counts: { workingOrders: 8, ordersToday: 0, openPositions: 111 } }, settings);
     expect(positions.send.map((entry) => entry.strike)).toEqual([45]);
-    expect(positions.waiting[0]).toMatchObject({ cap: "book_open_positions", reason: "the ladder's tickers have 111 open position(s) and 8 working order(s), at most 120 across the book" });
+    expect(positions.waiting[0]).toMatchObject({ cap: "book_open_positions", reason: "Pluto's tickers have 111 open position(s) and 8 working order(s), at most 120" });
     const orders = admitLadderSales(planned, noTickerCounts, { ...emptyBook, counts: { workingOrders: 0, ordersToday: 98, openPositions: 0 } }, settings);
     expect(orders.send).toHaveLength(2);
-    expect(orders.waiting[0]).toMatchObject({ cap: "book_orders_per_day", reason: "98 of the book's 100 ladder orders a day are sent" });
+    expect(orders.waiting[0]).toMatchObject({ cap: "book_orders_per_day", reason: "98 of Pluto's 100 orders a day are sent" });
   });
 
   it("holds a sale that would take the book's committed capital over Pluto's capital budget (A1), and every one after it", () => {

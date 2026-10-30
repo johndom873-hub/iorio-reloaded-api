@@ -90,7 +90,7 @@ vi.mock("./optionQuoteBandPlanLoader.js", () => ({
 vi.mock("./optionQuoteBandQuotes.js", () => ({ loadOptionQuoteBandQuotes: async () => [], loadFinishedOptionQuoteBandCycle: async () => ({ cycleNumber: 1, startedAt: new Date(0), finishedAt: new Date(0) }) }));
 vi.mock("./ladderLook.js", () => ({ latestCycleQuotes: () => ({ quotes: harness.quotes, stale: false }) }));
 vi.mock("./ladderLookSnapshot.js", () => ({ loadOpenPositionFigures: async (tickerId: string) => harness.positionsByTickerId.get(tickerId) ?? harness.positions }));
-vi.mock("./ladderOrders.js", () => ({ loadLadderBookOrderCounts: async () => ({ ...harness.bookCounts }), ladderOrdersSentToday: async () => ({ count: 0 }) }));
+vi.mock("./safetyLimits.js", () => ({ loadSafetyLimitBookCounts: async () => ({ ...harness.bookCounts }), plutoOrdersSentToday: async () => ({ count: 0 }) }));
 vi.mock("../lib/orderLimits.js", async (original) => ({ ...(await original<object>()), loadCommittedCapitalOnSymbols: async () => harness.committed }));
 vi.mock("./ledger.js", () => ({
   recordPlutoAction: vi.fn(async (input: Record<string, unknown>) => (harness.actions.push(input), `action-${harness.actions.length}`)),
