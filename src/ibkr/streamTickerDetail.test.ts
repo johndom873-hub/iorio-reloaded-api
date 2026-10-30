@@ -317,12 +317,20 @@ describe("streamTickerDetail technicals", () => {
     mocks.chartBarsByRange["1Y"] = dailyBars;
     startStream(["technicals"]);
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(events[0]).toEqual({ type: "technicals", data: { movingAverages: { ma7: 1, ma25: 2, ma99: 3 }, rsi: 55, macdSignal: "Bullish", supportResistance: { support: [], resistance: [] } } });
+    expect(events[0]).toEqual({ type: "technicals", data: { movingAverages: { ma7: 1, ma25: 2, ma99: 3 }, rsi: 55, macdSignal: "Bullish", supportResistance: { support: [], resistance: [] }, lastRegularSessionClose: { tradingDate: "1970-01-01", close: 30 } } });
     const callArgs = (name: string) => mocks.technicalsCalls.find((call) => call.name === name)!.args;
     expect(callArgs("computeRsi")).toEqual([[10, 20, 30]]);
     expect(callArgs("computeMacd")).toEqual([[10, 20, 30]]);
     expect(callArgs("computeMovingAverages")).toEqual([[10, 20, 30]]);
     expect(callArgs("computeSupportResistance")[0]).toBe(hourly);
+  });
+
+  it("reports the newest daily bar's trading date and close as the last regular session's close", async () => {
+    mocks.chartBarsByRange["3M"] = hourlyBars(7200);
+    mocks.chartBarsByRange["1Y"] = [bar(Date.parse("2026-10-28T00:00:00Z") / 1000, 28.84), bar(Date.parse("2026-10-29T00:00:00Z") / 1000, 26.25)];
+    startStream(["technicals"]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(events[0]).toMatchObject({ type: "technicals", data: { lastRegularSessionClose: { tradingDate: "2026-10-29", close: 26.25 } } });
   });
 
   it("scores against the first spot price when the spot stream delivers one", async () => {

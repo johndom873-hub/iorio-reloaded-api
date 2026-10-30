@@ -47,6 +47,7 @@ const mocks = vi.hoisted(() => {
     borrow: vi.fn(),
     allocateReqId: vi.fn(),
     requestRealtimeMarketData: vi.fn(),
+    fetchExtendedHoursChartBars: vi.fn(),
   };
 });
 
@@ -59,6 +60,12 @@ vi.mock("./sharedReadConnection.js", () => ({
 vi.mock("./requestMarketData.js", () => ({ requestRealtimeMarketData: mocks.requestRealtimeMarketData }));
 vi.mock("./fetchTickerOverview.js", () => ({ fetchHistoricalBarsRaw: mocks.fetchHistoricalBarsRaw }));
 vi.mock("../lib/marketSessionStatus.js", () => ({ lastCompletedSessionDate: mocks.lastCompletedSessionDate }));
+// The 30 second cache is covered in extendedHoursChartBars.test.ts; here every call goes through to the fetch.
+vi.mock("./extendedHoursChartBars.js", () => ({
+  isExtendedHoursChartRange: (range: string) => range === "1D" || range === "5D",
+  cachedExtendedHoursChartBars: (_symbol: string, _range: string, load: () => Promise<unknown>) => load(),
+  fetchExtendedHoursChartBars: mocks.fetchExtendedHoursChartBars,
+}));
 
 const {
   dailyBarsAreCurrent,
@@ -160,6 +167,8 @@ beforeEach(() => {
   mocks.allocateReqId.mockReset();
   mocks.allocateReqId.mockReturnValue(77);
   mocks.requestRealtimeMarketData.mockReset();
+  mocks.fetchExtendedHoursChartBars.mockReset();
+  mocks.fetchExtendedHoursChartBars.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -372,7 +381,7 @@ describe("dailyBarsAreCurrent", () => {
 describe("needsLiveFetch", () => {
   it("always needs a live fetch for a symbol with no tickers row", async () => {
     expect(await needsLiveFetch(null, uniqueSymbol(), "1Y")).toBe(true);
-    expect(await needsLiveFetch(null, uniqueSymbol(), "5D")).toBe(true);
+    expect(await needsLiveFetch(null, uniqueSymbol(), "1M")).toBe(true);
     expect(mocks.queries).toEqual([]);
   });
 
@@ -405,9 +414,9 @@ describe("needsLiveFetch", () => {
 
   it("needs a live fetch for an intraday range with no cached bar", async () => {
     const symbol = uniqueSymbol();
-    markLiveFetched(symbol, "1D");
+    markLiveFetched(symbol, "1M");
     canned.latestIntraday = null;
-    expect(await needsLiveFetch(tickerId, symbol, "1D")).toBe(true);
+    expect(await needsLiveFetch(tickerId, symbol, "1M")).toBe(true);
   });
 
   it("needs a live fetch for an intraday range that is cached but not freshly fetched, and skips it once marked", async () => {
@@ -561,8 +570,8 @@ describe("getCachedChartBars with no tickers row", () => {
   });
 
   it("fetches an intraday range live with its own bar size and full duration", async () => {
-    expect(await getCachedChartBars(connection, uniqueSymbol(), "5D")).toEqual(liveBars);
-    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, expect.any(String), BarSizeSetting.MINUTES_FIVE, "7 D", 1]);
+    expect(await getCachedChartBars(connection, uniqueSymbol(), "1M")).toEqual(liveBars);
+    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, expect.any(String), BarSizeSetting.MINUTES_THIRTY, "1 M", 1]);
     expect(queriesOn("intraday_price_bars")).toEqual([]);
   });
 });
@@ -713,15 +722,15 @@ describe("getCachedChartBars for intraday ranges", () => {
     canned.intradayRows = intradayRows;
     mocks.fetchHistoricalBarsRaw.mockResolvedValue([liveBar("2026-10-06T14:55:00Z", 500.5, 1200.4)]);
 
-    const bars = await getCachedChartBars(connection, symbol, "5D", 6);
+    const bars = await getCachedChartBars(connection, symbol, "1M", 6);
 
     expect(mocks.fetchHistoricalBarsRaw).toHaveBeenCalledTimes(1);
-    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, symbol, BarSizeSetting.MINUTES_FIVE, "7 D", 6]);
+    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, symbol, BarSizeSetting.MINUTES_THIRTY, "1 M", 6]);
     expect(insertedRows("intraday_price_bars")).toEqual([
-      { ticker_id: tickerId, bar_size: BarSizeSetting.MINUTES_FIVE, bar_time: new Date("2026-10-06T14:55:00Z"), open_price: 500, high_price: 501, low_price: 499.5, close_price: 500.5, volume: 1200 },
+      { ticker_id: tickerId, bar_size: BarSizeSetting.MINUTES_THIRTY, bar_time: new Date("2026-10-06T14:55:00Z"), open_price: 500, high_price: 501, low_price: 499.5, close_price: 500.5, volume: 1200 },
     ]);
     const readQuery = queriesOn("intraday_price_bars").find((query) => operationArgs(query, "orderBy").length > 0)!;
-    expect(operationArgs(readQuery, "andWhere")).toEqual([["bar_time", ">=", new Date("2026-09-29T15:00:00Z")]]);
+    expect(operationArgs(readQuery, "andWhere")).toEqual([["bar_time", ">=", new Date("2026-09-06T15:00:00Z")]]);
     expect(bars).toEqual([
       { time: epochSeconds("2026-10-06T14:55:00Z"), open: 500.1, high: 500.9, low: 499.8, close: 500.5, volume: 1200 },
       { time: epochSeconds("2026-10-06T15:00:00Z"), open: 500.5, high: 501, low: 500, close: 500.75, volume: 900 },
@@ -730,15 +739,15 @@ describe("getCachedChartBars for intraday ranges", () => {
 
   it("floors bar times to whole seconds when reading", async () => {
     canned.latestIntraday = "2026-10-06T14:00:00Z";
-    markLiveFetched("FLOOR", "1D");
+    markLiveFetched("FLOOR", "3M");
     canned.intradayRows = [{ bar_time: new Date("2026-10-06T14:55:00.900Z"), open_price: 1, high_price: 1, low_price: 1, close_price: 1, volume: 1 }];
-    const [bar] = await getCachedChartBars(connection, "FLOOR", "1D");
+    const [bar] = await getCachedChartBars(connection, "FLOOR", "3M");
     expect(bar!.time).toBe(epochSeconds("2026-10-06T14:55:00Z"));
   });
 
-  it("tops up only the gap when the cache is warm but not freshly fetched (newest bar 3 days old, 5D config 2 D: 3 + 1 = 4 D)", async () => {
+  it("tops up only the gap when the cache is warm but not freshly fetched (newest bar 3 days old, 1M config 3 D: 3 + 1 = 4 D)", async () => {
     canned.latestIntraday = "2026-10-03T15:00:00Z";
-    await getCachedChartBars(connection, uniqueSymbol(), "5D");
+    await getCachedChartBars(connection, uniqueSymbol(), "1M");
     expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]![3]).toBe("4 D");
   });
 
@@ -767,15 +776,13 @@ describe("getCachedChartBars for intraday ranges", () => {
 
   it("uses a different bar size for every intraday range", async () => {
     const barSizes: Record<string, BarSizeSetting> = {};
-    for (const range of ["1D", "5D", "1M", "3M", "6M"] as const) {
+    for (const range of ["1M", "3M", "6M"] as const) {
       mocks.fetchHistoricalBarsRaw.mockClear();
       canned.latestIntraday = null;
       await getCachedChartBars(connection, uniqueSymbol(), range);
       barSizes[range] = mocks.fetchHistoricalBarsRaw.mock.calls[0]![2];
     }
     expect(barSizes).toEqual({
-      "1D": BarSizeSetting.MINUTES_ONE,
-      "5D": BarSizeSetting.MINUTES_FIVE,
       "1M": BarSizeSetting.MINUTES_THIRTY,
       "3M": BarSizeSetting.HOURS_ONE,
       "6M": BarSizeSetting.HOURS_TWO,
@@ -784,8 +791,21 @@ describe("getCachedChartBars for intraday ranges", () => {
 
   it("writes nothing when IBKR returns no new bars", async () => {
     canned.latestIntraday = null;
-    expect(await getCachedChartBars(connection, uniqueSymbol(), "1D")).toEqual([]);
+    expect(await getCachedChartBars(connection, uniqueSymbol(), "6M")).toEqual([]);
     expect(insertedRows("intraday_price_bars")).toEqual([]);
+  });
+});
+
+describe("getCachedChartBars for 1D / 5D", () => {
+  const extendedBars = [{ time: epochSeconds("2026-10-06T12:00:00Z"), open: 1, high: 1, low: 1, close: 1, volume: 1, session: "extended" }];
+
+  it.each(["1D", "5D"] as const)("fetches %s live with extended hours on the given connection and request id, touching no table", async (range) => {
+    const symbol = uniqueSymbol();
+    mocks.fetchExtendedHoursChartBars.mockResolvedValue(extendedBars);
+    expect(await getCachedChartBars(connection, symbol, range, 12)).toEqual(extendedBars);
+    expect(mocks.fetchExtendedHoursChartBars).toHaveBeenCalledWith(connection, symbol, range, 12);
+    expect(mocks.fetchHistoricalBarsRaw).not.toHaveBeenCalled();
+    expect(mocks.queries).toEqual([]);
   });
 });
 
@@ -804,9 +824,9 @@ describe("fetchCachedPriceBars", () => {
 
   it("reads from the cache without connecting when the symbol was just fetched, for an intraday range", async () => {
     const symbol = uniqueSymbol();
-    markLiveFetched(symbol, "1D");
+    markLiveFetched(symbol, "1M");
     canned.latestIntraday = "2026-10-06T14:59:00Z";
-    await fetchCachedPriceBars(symbol, "1D");
+    await fetchCachedPriceBars(symbol, "1M");
     expect(mocks.borrow).not.toHaveBeenCalled();
     expect(mocks.fetchHistoricalBarsRaw).not.toHaveBeenCalled();
   });
@@ -850,6 +870,27 @@ describe("fetchCachedPriceBars", () => {
     expect(mocks.requestRealtimeMarketData).toHaveBeenCalledWith(ib);
     expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]![4]).toBe(1);
     expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("fetches 1D through the shared read connection with extended hours, releases it, and reads no table", async () => {
+    const release = vi.fn();
+    const ib = {};
+    mocks.borrow.mockResolvedValue({ ib, release });
+    const symbol = uniqueSymbol();
+
+    await fetchCachedPriceBars(symbol, "1D");
+
+    expect(mocks.fetchExtendedHoursChartBars).toHaveBeenCalledWith({ ib, disconnect: expect.any(Function) }, symbol, "1D", 77);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(mocks.queries).toEqual([]);
+  });
+
+  it("releases the shared connection when the 5D fetch fails and passes the error on", async () => {
+    const release = vi.fn();
+    mocks.borrow.mockResolvedValue({ ib: {}, release });
+    mocks.fetchExtendedHoursChartBars.mockRejectedValue(new Error("Historical data timeout for TST"));
+    await expect(fetchCachedPriceBars(uniqueSymbol(), "5D")).rejects.toThrow("Historical data timeout");
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
   it("goes to IBKR for a symbol with no tickers row", async () => {

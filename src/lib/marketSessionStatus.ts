@@ -114,6 +114,9 @@ export function hhmmParts(hhmm: string): { hour: number; minute: number } {
   return { hour: hour ?? 0, minute: minute ?? 0 };
 }
 
+/** 09:30 ET in minutes after midnight ET (570), the regular session's open on every trading day. */
+export const regularOpenMinutesEt = REGULAR_OPEN.hour * 60 + REGULAR_OPEN.minute;
+
 export const regularCloseEt = `${String(REGULAR_CLOSE.hour).padStart(2, "0")}:${String(REGULAR_CLOSE.minute).padStart(2, "0")}`;
 
 // market_calendar.close_time (a Postgres time, "13:00:00") is written from IBKR's liquid hours every trading

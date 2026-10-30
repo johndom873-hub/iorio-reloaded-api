@@ -23,6 +23,8 @@ export interface TickerTechnicals {
   rsi: number;
   macdSignal: MacdSignal;
   supportResistance: SupportResistanceResult;
+  /** The official close of the newest finished regular session (its stored daily bar): the chart's pre-market/after-hours change is measured from it. */
+  lastRegularSessionClose: { tradingDate: string; close: number } | null;
 }
 
 export type TickerDetailStreamEvent =
@@ -230,6 +232,7 @@ export async function streamTickerDetail(
         }
 
         const closes = dailyBars.map((bar) => bar.close);
+        const lastDailyBar = dailyBars[dailyBars.length - 1];
         const lastHourlyBar = hourlyBars[hourlyBars.length - 1]!;
         const currentCandleIsOpen = Date.now() / 1000 - lastHourlyBar.time < oneHourInSeconds;
 
@@ -240,6 +243,7 @@ export async function streamTickerDetail(
             rsi: computeRsi(closes),
             macdSignal: computeMacd(closes),
             supportResistance: computeSupportResistance(hourlyBars, currentPrice, currentCandleIsOpen),
+            lastRegularSessionClose: lastDailyBar ? { tradingDate: new Date(lastDailyBar.time * 1000).toISOString().slice(0, 10), close: lastDailyBar.close } : null,
           },
         });
       } catch (error) {

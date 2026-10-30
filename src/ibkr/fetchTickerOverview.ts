@@ -207,8 +207,11 @@ export async function fetchHistoricalBarsRaw(
   duration: string,
   reqId = 1,
   whatToShow: WhatToShow = WhatToShow.TRADES,
-  /** `endDateTime`: the instant the bars end at ("yyyyMMdd-HH:mm:ss", UTC); now when omitted. `timeoutMs`: for a request of a long history. */
-  options: { endDateTime?: string; timeoutMs?: number } = {},
+  /**
+   * `endDateTime`: the instant the bars end at ("yyyyMMdd-HH:mm:ss", UTC); now when omitted. `timeoutMs`: for a request of a long history.
+   * `includeExtendedHours`: also return pre-market and after-hours bars (04:00-20:00 ET); regular hours only when omitted.
+   */
+  options: { endDateTime?: string; timeoutMs?: number; includeExtendedHours?: boolean } = {},
 ): Promise<PriceBar[]> {
   const { ib } = connection;
 
@@ -252,7 +255,7 @@ export async function fetchHistoricalBarsRaw(
 
     ib.on(EventName.historicalData, onHistoricalData);
     ib.on(EventName.error, onError);
-    ib.reqHistoricalData(reqId, new Stock(symbol, "SMART", "USD"), options.endDateTime ?? "", duration, barSize, whatToShow, 1, 2, false);
+    ib.reqHistoricalData(reqId, new Stock(symbol, "SMART", "USD"), options.endDateTime ?? "", duration, barSize, whatToShow, options.includeExtendedHours ? 0 : 1, 2, false);
   });
 }
 

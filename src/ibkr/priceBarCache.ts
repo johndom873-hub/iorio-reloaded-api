@@ -12,6 +12,7 @@ import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { storeDailyBarsCheckingForSplit, type DailyBarStoreResult, type DailyHistory, type StoredBarPrices } from "./dailyBarSplitCheck.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { recordStockSplit } from "../lib/stockSplits.js";
+import { cachedExtendedHoursChartBars, fetchExtendedHoursChartBars, isExtendedHoursChartRange } from "./extendedHoursChartBars.js";
 import type { Knex } from "knex";
 
 // MA99 (technicalIndicators.ts) is the deeper of the two indicator
@@ -31,8 +32,9 @@ type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
  * Two cache tables, chosen to reuse what already existed rather than adding
  * a table per granularity:
  * - `intraday_price_bars` (new): minute/hour bars, one row per
- *   (ticker, bar_size, bar_time). Backs 1D/5D/1M/3M/6M — each maps to a
- *   distinct IBKR bar size, so no collisions within the table.
+ *   (ticker, bar_size, bar_time). Backs 1M/3M/6M — each maps to a
+ *   distinct IBKR bar size, so no collisions within the table. 1D/5D include
+ *   extended hours and are fetched live, never stored (extendedHoursChartBars.ts).
  * - `daily_price_bars` (already existed, fed nightly by the daily job with
  *   just the latest bar): now also backfilled here with real history on
  *   first use, and used for all three of 1Y/5Y/All — 1Y reads it directly,
@@ -65,11 +67,9 @@ export function markLiveFetched(symbol: string, range: ChartRange): void {
   lastLiveFetchAtByKey.set(`${symbol}:${range}`, Date.now());
 }
 
-type IntradayRange = Exclude<ChartRange, "1Y" | "5Y" | "All">;
+type IntradayRange = Exclude<ChartRange, "1D" | "5D" | "1Y" | "5Y" | "All">;
 
 const intradayConfig: Record<IntradayRange, { barSize: BarSizeSetting; fullDuration: string; topUpDuration: string }> = {
-  "1D": { barSize: BarSizeSetting.MINUTES_ONE, fullDuration: "2 D", topUpDuration: "2 D" },
-  "5D": { barSize: BarSizeSetting.MINUTES_FIVE, fullDuration: "7 D", topUpDuration: "2 D" },
   "1M": { barSize: BarSizeSetting.MINUTES_THIRTY, fullDuration: "1 M", topUpDuration: "3 D" },
   "3M": { barSize: BarSizeSetting.HOURS_ONE, fullDuration: "3 M", topUpDuration: "5 D" },
   "6M": { barSize: BarSizeSetting.HOURS_TWO, fullDuration: "6 M", topUpDuration: "5 D" },
@@ -385,7 +385,7 @@ async function readWeeklyResampledBars(tickerId: string, since: Date | null): Pr
 // and fetchCachedIvBars decide whether a live fetch is needed at all *before*
 // paying for the connect. A tickerId-less symbol always needs a live fetch
 // (no cache to read from).
-export async function needsLiveFetch(tickerId: string | null, symbol: string, range: ChartRange): Promise<boolean> {
+export async function needsLiveFetch(tickerId: string | null, symbol: string, range: Exclude<ChartRange, "1D" | "5D">): Promise<boolean> {
   if (!tickerId) return true;
   if (range === "1Y" || range === "5Y" || range === "All") return dailyCacheNeedsRefresh(await getLatestDailyBarDate(tickerId), symbol, range);
   return intradayCacheNeedsRefresh(await getLatestIntradayBarTime(tickerId, intradayConfig[range].barSize), symbol, range);
@@ -407,7 +407,7 @@ function intradayCacheNeedsRefresh(latestCached: Date | null, symbol: string, ra
 // confirmed cache hit (needsLiveFetch === false) can read straight from the
 // DB without ever touching IBKR. Only valid to call once needsLiveFetch has
 // already confirmed the cache is warm and fresh for this tickerId/range.
-async function readCachedBarsOnly(tickerId: string, range: ChartRange): Promise<PriceBar[]> {
+async function readCachedBarsOnly(tickerId: string, range: Exclude<ChartRange, "1D" | "5D">): Promise<PriceBar[]> {
   if (range === "1Y") return readDailyBars(tickerId, subtractDuration(new Date(), "1 Y"));
   if (range === "5Y") return readWeeklyResampledBars(tickerId, subtractDuration(new Date(), "5 Y"));
   if (range === "All") return readWeeklyResampledBars(tickerId, null);
@@ -461,6 +461,7 @@ export async function topUpDailyBars(connection: IbkrConnection, tickerId: strin
  * caching and fetches live directly, rather than blocking the chart on it.
  */
 export async function getCachedChartBars(connection: IbkrConnection, symbol: string, range: ChartRange, reqId = 1): Promise<PriceBar[]> {
+  if (isExtendedHoursChartRange(range)) return cachedExtendedHoursChartBars(symbol, range, () => fetchExtendedHoursChartBars(connection, symbol, range, reqId));
   const tickerId = await resolveTickerId(symbol);
 
   if (range === "1Y" || range === "5Y" || range === "All") {
@@ -508,14 +509,22 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
  * to IBKR entirely.
  */
 export async function fetchCachedPriceBars(symbol: string, range: ChartRange): Promise<PriceBar[]> {
+  // 1D/5D: a view repeated within 30 seconds reuses the last answer without connecting.
+  if (isExtendedHoursChartRange(range)) {
+    return cachedExtendedHoursChartBars(symbol, range, () => withChartReadConnection((connection, reqId) => fetchExtendedHoursChartBars(connection, symbol, range, reqId)));
+  }
+
   const tickerId = await resolveTickerId(symbol);
   if (tickerId && !(await needsLiveFetch(tickerId, symbol, range))) {
     return readCachedBarsOnly(tickerId, range);
   }
+  return withChartReadConnection((connection, reqId) => getCachedChartBars(connection, symbol, range, reqId));
+}
 
-  // Tries the shared read connection first (sharedReadConnection.ts — reused
-  // across requests, no per-call connect cost) and falls back to a one-shot
-  // connection only when the shared one isn't available.
+// Tries the shared read connection first (sharedReadConnection.ts — reused
+// across requests, no per-call connect cost) and falls back to a one-shot
+// connection only when the shared one isn't available.
+async function withChartReadConnection<Result>(run: (connection: IbkrConnection, reqId: number) => Promise<Result>): Promise<Result> {
   let borrowed: Awaited<ReturnType<typeof sharedReadConnection.borrow>> | null = null;
   try {
     borrowed = await sharedReadConnection.borrow();
@@ -529,7 +538,7 @@ export async function fetchCachedPriceBars(symbol: string, range: ChartRange): P
     const { ib, release } = borrowed;
     try {
       requestRealtimeMarketData(ib);
-      return await getCachedChartBars({ ib, disconnect: () => {} }, symbol, range, sharedReadConnection.allocateReqId());
+      return await run({ ib, disconnect: () => {} }, sharedReadConnection.allocateReqId());
     } finally {
       release();
     }
@@ -538,7 +547,7 @@ export async function fetchCachedPriceBars(symbol: string, range: ChartRange): P
   const connection = await connectToIbkrGateway();
   try {
     requestRealtimeMarketData(connection.ib);
-    return await getCachedChartBars(connection, symbol, range);
+    return await run(connection, 1);
   } finally {
     connection.disconnect();
   }
