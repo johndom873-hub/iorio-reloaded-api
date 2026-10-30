@@ -119,7 +119,7 @@ describe("validateCreateBacktestSessionRequest", () => {
     expect(several({ symbols: ["HOOD", "OLDF"] })).toEqual({ ok: false, error: "The data files do not overlap: HOOD starts 2021-07-29, after OLDF ends 2019-12-31." });
     expect(several({ symbols: [] })).toEqual({ ok: false, error: "Give the session at least one symbol." });
     expect(several({ symbols: "AAOI" })).toEqual({ ok: false, error: "Give the session at least one symbol." });
-    expect(several({ symbols: Array.from({ length: 31 }, (_, index) => `S${String.fromCharCode(65 + (index % 26))}${String.fromCharCode(65 + Math.floor(index / 26))}`) })).toEqual({ ok: false, error: "A session takes at most 30 symbols." });
+    expect(several({ symbols: Array.from({ length: 61 }, (_, index) => `S${String.fromCharCode(65 + (index % 26))}${String.fromCharCode(65 + Math.floor(index / 26))}`) })).toEqual({ ok: false, error: "A session takes at most 60 symbols." });
   });
 
   it.each([

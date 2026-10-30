@@ -949,7 +949,7 @@ export interface BacktestLabAuditRow {
 }
 
 /** The most symbols one session runs on its book. */
-export const backtestMaxSymbolsPerSession = 30;
+export const backtestMaxSymbolsPerSession = 60;
 
 /** What POST /backtest/sessions answers: the session, its job, and what the session will do differently because of what its data files hold (it still runs). */
 export interface CreateBacktestSessionResponse {
