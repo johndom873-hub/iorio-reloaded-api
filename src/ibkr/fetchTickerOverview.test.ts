@@ -94,19 +94,17 @@ describe("lookupPricingSnapshot", () => {
     price(7, 95);
     price(9, 98);
     price(14, 97);
-    ib.emit(EventName.tickSize, 2, 8, 12_345);
     ib.emit(EventName.tickSnapshotEnd, 2);
-    expect(await result).toEqual({ last: 100, bid: 99.5, ask: 100.5, open: 97, high: 105, low: 95, previousClose: 98, volume: 12_345 });
+    expect(await result).toEqual({ last: 100, bid: 99.5, ask: 100.5, open: 97, high: 105, low: 95, previousClose: 98 });
   });
 
-  it("accepts the delayed tick types (66, 67, 68, 72, 73, 75, 76, 74) too", async () => {
+  it("accepts the delayed tick types (66, 67, 68, 72, 73, 75, 76) too", async () => {
     const ib = new FakeIbApi();
     const result = lookupPricingSnapshot(asConnection(ib), "AAPL", 2);
     await vi.advanceTimersByTimeAsync(0);
     for (const [tickType, value] of [[66, 1], [67, 2], [68, 3], [72, 4], [73, 5], [75, 6], [76, 7]] as const) ib.emit(EventName.tickPrice, 2, tickType, value);
-    ib.emit(EventName.tickSize, 2, 74, 500);
     ib.emit(EventName.tickSnapshotEnd, 2);
-    expect(await result).toEqual({ bid: 1, ask: 2, last: 3, high: 4, low: 5, previousClose: 6, open: 7, volume: 500 });
+    expect(await result).toEqual({ bid: 1, ask: 2, last: 3, high: 4, low: 5, previousClose: 6, open: 7 });
   });
 
   it("turns IBKR's -1 and 0 'no data' prices into null, clearing an earlier real value", async () => {
@@ -120,29 +118,18 @@ describe("lookupPricingSnapshot", () => {
     expect(await result).toMatchObject({ bid: null, ask: null });
   });
 
-  it("ignores ticks, sizes and snapshot ends for other requests", async () => {
+  it("ignores ticks and snapshot ends for other requests", async () => {
     const ib = new FakeIbApi();
     const result = lookupPricingSnapshot(asConnection(ib), "AAPL", 2);
     await vi.advanceTimersByTimeAsync(0);
     ib.emit(EventName.tickPrice, 9, 4, 500);
-    ib.emit(EventName.tickSize, 9, 8, 500);
     ib.emit(EventName.tickSnapshotEnd, 9);
     let settled = false;
     void result.then(() => (settled = true), () => (settled = true));
     await vi.advanceTimersByTimeAsync(100);
     expect(settled).toBe(false);
     ib.emit(EventName.tickSnapshotEnd, 2);
-    expect(await result).toMatchObject({ last: null, volume: null });
-  });
-
-  it("ignores a size tick with no size, and non-volume size ticks", async () => {
-    const ib = new FakeIbApi();
-    const result = lookupPricingSnapshot(asConnection(ib), "AAPL", 2);
-    await vi.advanceTimersByTimeAsync(0);
-    ib.emit(EventName.tickSize, 2, 8, undefined);
-    ib.emit(EventName.tickSize, 2, 0, 77);
-    ib.emit(EventName.tickSnapshotEnd, 2);
-    expect(await result).toMatchObject({ volume: null });
+    expect(await result).toMatchObject({ last: null });
   });
 
   it("records each real last price as the shared live price", async () => {
@@ -164,7 +151,7 @@ describe("lookupPricingSnapshot", () => {
     ib.emit(EventName.tickPrice, 2, 4, -1);
     ib.emit(EventName.tickPrice, 2, 4, 100);
     ib.emit(EventName.tickPrice, 2, 2, 101);
-    expect(await result).toEqual({ last: 100, bid: 99, ask: null, open: null, high: null, low: null, previousClose: null, volume: null });
+    expect(await result).toEqual({ last: 100, bid: 99, ask: null, open: null, high: null, low: null, previousClose: null });
     expect(ib.cancelMktData).toHaveBeenCalledWith(2);
     expect(ib.listenerCount(EventName.tickPrice)).toBe(0);
     expect(ib.listenerCount(EventName.tickSnapshotEnd)).toBe(0);

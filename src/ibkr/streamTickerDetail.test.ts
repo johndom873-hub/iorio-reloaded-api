@@ -75,7 +75,7 @@ import { streamTickerDetail, type TickerDetailStreamEvent } from "./streamTicker
 
 const fakeIb = { id: "fake-ib" };
 const quote = (overrides: Partial<PooledQuote> = {}): PooledQuote => ({
-  last: 190, bid: 189.9, ask: 190.1, bidSize: null, askSize: null, delta: null, gamma: null, vega: null, theta: null, impliedVolatility: null, underlyingPrice: null, open: 188, high: 191, low: 187, previousClose: 186, volume: 1_000_000, ...overrides,
+  last: 190, bid: 189.9, ask: 190.1, bidSize: null, askSize: null, delta: null, gamma: null, vega: null, theta: null, impliedVolatility: null, underlyingPrice: null, open: 188, high: 191, low: 187, previousClose: 186, callOptionVolume: 8_100, putOptionVolume: 4_200, callOpenInterest: 140_000, putOpenInterest: 70_000, ...overrides,
 });
 const bar = (time: number, close: number): PriceBar => ({ time, open: close, high: close, low: close, close, volume: 1 });
 const nowSeconds = () => Date.now() / 1000;
@@ -158,7 +158,16 @@ describe("streamTickerDetail overview", () => {
     expect(mocks.quoteSubscriptions[0]!.contract).toEqual({ key: "AAPL", legType: "stock", symbol: "AAPL" });
     mocks.quoteSubscriptions[0]!.push(quote());
     expect(events).toEqual([
-      { type: "overview", data: { companyName: "APPLE INC", sector: "Computers", pricing: { last: 190, bid: 189.9, ask: 190.1, open: 188, high: 191, low: 187, previousClose: 186, volume: 1_000_000 }, isShortlisted: true } },
+      {
+        type: "overview",
+        data: {
+          companyName: "APPLE INC",
+          sector: "Computers",
+          pricing: { last: 190, bid: 189.9, ask: 190.1, open: 188, high: 191, low: 187, previousClose: 186 },
+          optionActivity: { callVolume: 8_100, putVolume: 4_200, callOpenInterest: 140_000, putOpenInterest: 70_000 },
+          isShortlisted: true,
+        },
+      },
     ]);
   });
 
@@ -171,11 +180,13 @@ describe("streamTickerDetail overview", () => {
     expect(mocks.shortlistQueries).toContainEqual(["whereNull", "se.removed_at"]);
   });
 
-  it("maps a pooled quote's missing fields to null pricing", async () => {
+  it("maps a pooled quote's missing fields to null pricing and option activity", async () => {
     startStream(["overview"]);
     await vi.advanceTimersByTimeAsync(0);
-    mocks.quoteSubscriptions[0]!.push(quote({ last: null, bid: null, ask: null, open: null, high: null, low: null, previousClose: null, volume: null }));
-    expect((events[0] as { data: { pricing: unknown } }).data.pricing).toEqual({ last: null, bid: null, ask: null, open: null, high: null, low: null, previousClose: null, volume: null });
+    mocks.quoteSubscriptions[0]!.push(quote({ last: null, bid: null, ask: null, open: null, high: null, low: null, previousClose: null, callOptionVolume: null, putOptionVolume: null, callOpenInterest: null, putOpenInterest: null }));
+    const data = (events[0] as { data: { pricing: unknown; optionActivity: unknown } }).data;
+    expect(data.pricing).toEqual({ last: null, bid: null, ask: null, open: null, high: null, low: null, previousClose: null });
+    expect(data.optionActivity).toEqual({ callVolume: null, putVolume: null, callOpenInterest: null, putOpenInterest: null });
   });
 
   it("does not request chart bars or the spot stream for an overview-only stream", async () => {

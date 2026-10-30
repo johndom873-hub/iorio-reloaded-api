@@ -308,7 +308,7 @@ describe("collectReadinessChecks timeouts", () => {
 });
 
 function quote(overrides: Partial<PooledQuote> = {}): PooledQuote {
-  return { last: null, bid: null, ask: null, bidSize: null, askSize: null, delta: null, gamma: null, vega: null, theta: null, impliedVolatility: null, underlyingPrice: null, open: null, high: null, low: null, previousClose: null, volume: null, ...overrides };
+  return { last: null, bid: null, ask: null, bidSize: null, askSize: null, delta: null, gamma: null, vega: null, theta: null, impliedVolatility: null, underlyingPrice: null, open: null, high: null, low: null, previousClose: null, callOptionVolume: null, putOptionVolume: null, callOpenInterest: null, putOpenInterest: null, ...overrides };
 }
 
 function queriesOn(table: string) {

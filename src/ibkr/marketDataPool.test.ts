@@ -161,7 +161,7 @@ describe("subscribing and the line budget", () => {
     expect(pool.marketDataPoolSnapshot()).toEqual({ contractCount: 0, subscriberCount: 0, pausedCount: 0, openLineCount: 0, restricted: false });
   });
 
-  it("reserves one line per contract under the pool holder and opens a plain stock subscription", async () => {
+  it("reserves one line per contract under the pool holder and opens a stock subscription with option volume and open interest", async () => {
     const pool = await loadPool();
     const onUpdate = vi.fn();
     await pool.subscribeToPooledQuote(stockAlpha, onUpdate);
@@ -174,15 +174,16 @@ describe("subscribing and the line budget", () => {
     const [reqId, contract, genericTicks, snapshot, regulatorySnapshot] = ib.reqMktData.mock.calls[0]!;
     expect(reqId).toBe(1000);
     expect(contract).toMatchObject({ symbol: "ALPHA", secType: "STK", exchange: "SMART", currency: "USD" });
-    expect([genericTicks, snapshot, regulatorySnapshot]).toEqual(["", false, false]);
+    expect([genericTicks, snapshot, regulatorySnapshot]).toEqual(["100,101", false, false]);
     expect(pool.marketDataPoolSnapshot()).toEqual({ contractCount: 1, subscriberCount: 1, pausedCount: 0, openLineCount: 1, restricted: false });
   });
 
-  it("opens an option subscription with its expiry, strike and right", async () => {
+  it("opens a plain option subscription with its expiry, strike and right", async () => {
     const pool = await loadPool();
     await pool.subscribeToPooledQuote(optionAlpha, () => {});
     await settle();
     expect(ib.reqMktData.mock.calls[0]![1]).toMatchObject({ symbol: "ALPHA", secType: "OPT", lastTradeDateOrContractMonth: "20261120", strike: 50, right: "C", exchange: "SMART" });
+    expect(ib.reqMktData.mock.calls[0]![2]).toBe("");
   });
 
   it("shares one line between subscribers of the same contract and gives a late joiner the current quote at once", async () => {
@@ -396,25 +397,28 @@ describe("tick handling", () => {
     expect(pool.peekPooledQuote(stockAlpha)).toEqual(pool.emptyPooledQuote);
   });
 
-  it("reads volume from size ticks 8 and 74 only and maps a negative size to null", async () => {
-    const { pool, reqId } = await subscribedStock();
+  it("reads option volume (29 Call, 30 Put) and open interest (27 Call, 28 Put) from size ticks and maps a negative size to null", async () => {
+    const { pool, onUpdate, reqId } = await subscribedStock();
+    ib.emit(EventName.tickSize, reqId, 29, 8_100);
+    ib.emit(EventName.tickSize, reqId, 30, 4_200);
+    ib.emit(EventName.tickSize, reqId, 27, 140_000);
+    ib.emit(EventName.tickSize, reqId, 28, 70_000);
+    expect(pool.peekPooledQuote(stockAlpha)).toMatchObject({ callOptionVolume: 8_100, putOptionVolume: 4_200, callOpenInterest: 140_000, putOpenInterest: 70_000 });
+    expect(onUpdate).toHaveBeenCalledTimes(4);
     ib.emit(EventName.tickSize, reqId, 8, 1_200);
-    expect(pool.peekPooledQuote(stockAlpha)?.volume).toBe(1_200);
-    ib.emit(EventName.tickSize, reqId, 74, 1_500);
-    expect(pool.peekPooledQuote(stockAlpha)?.volume).toBe(1_500);
-    ib.emit(EventName.tickSize, reqId, 0, 77);
     ib.emit(EventName.tickSize, reqId, undefined, 77);
-    ib.emit(EventName.tickSize, reqId, 8, undefined);
-    expect(pool.peekPooledQuote(stockAlpha)?.volume).toBe(1_500);
-    ib.emit(EventName.tickSize, reqId, 8, -1);
-    expect(pool.peekPooledQuote(stockAlpha)?.volume).toBeNull();
+    ib.emit(EventName.tickSize, reqId, 29, undefined);
+    expect(pool.peekPooledQuote(stockAlpha)?.callOptionVolume).toBe(8_100);
+    expect(onUpdate).toHaveBeenCalledTimes(4);
+    ib.emit(EventName.tickSize, reqId, 29, -1);
+    expect(pool.peekPooledQuote(stockAlpha)?.callOptionVolume).toBeNull();
   });
 
   it("reads bid and ask sizes from real-time (0, 3) and delayed (69, 70) size ticks", async () => {
     const { pool, reqId } = await subscribedStock();
     ib.emit(EventName.tickSize, reqId, 0, 6);
     ib.emit(EventName.tickSize, reqId, 3, 10);
-    expect(pool.peekPooledQuote(stockAlpha)).toMatchObject({ bidSize: 6, askSize: 10, volume: null });
+    expect(pool.peekPooledQuote(stockAlpha)).toMatchObject({ bidSize: 6, askSize: 10, callOptionVolume: null });
     ib.emit(EventName.tickSize, reqId, 69, 7);
     ib.emit(EventName.tickSize, reqId, 70, 11);
     expect(pool.peekPooledQuote(stockAlpha)).toMatchObject({ bidSize: 7, askSize: 11 });

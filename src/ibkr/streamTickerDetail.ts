@@ -15,7 +15,16 @@ export interface TickerOverview {
   companyName: string | null;
   sector: string | null;
   pricing: TickerPricing;
+  optionActivity: TickerOptionActivity;
   isShortlisted: boolean;
+}
+
+/** Totals across all of the ticker's options: contracts traded today, and open interest (the previous day's figure). */
+export interface TickerOptionActivity {
+  callVolume: number | null;
+  putVolume: number | null;
+  callOpenInterest: number | null;
+  putOpenInterest: number | null;
 }
 
 export interface TickerTechnicals {
@@ -52,7 +61,15 @@ function toTickerPricing(quote: PooledQuote | null): TickerPricing {
     high: quote?.high ?? null,
     low: quote?.low ?? null,
     previousClose: quote?.previousClose ?? null,
-    volume: quote?.volume ?? null,
+  };
+}
+
+function toTickerOptionActivity(quote: PooledQuote | null): TickerOptionActivity {
+  return {
+    callVolume: quote?.callOptionVolume ?? null,
+    putVolume: quote?.putOptionVolume ?? null,
+    callOpenInterest: quote?.callOpenInterest ?? null,
+    putOpenInterest: quote?.putOpenInterest ?? null,
   };
 }
 const chartReqId = 3;
@@ -186,7 +203,10 @@ export async function streamTickerDetail(
         const readyTimer = setTimeout(() => resolveReady(latestPricing), overviewReadyWaitMs);
         const unsubscribe = await subscribeToPooledQuote({ key: symbol, legType: "stock", symbol }, (quote) => {
           latestPricing = toTickerPricing(quote);
-          onEvent({ type: "overview", data: { companyName: contractDetails.companyName, sector: contractDetails.sector, pricing: latestPricing, isShortlisted } });
+          onEvent({
+            type: "overview",
+            data: { companyName: contractDetails.companyName, sector: contractDetails.sector, pricing: latestPricing, optionActivity: toTickerOptionActivity(quote), isShortlisted },
+          });
           if (latestPricing.last !== null || latestPricing.previousClose !== null) {
             clearTimeout(readyTimer);
             resolveReady(latestPricing);

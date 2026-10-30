@@ -109,7 +109,13 @@ const highTickTypes = [6, 72];
 const lowTickTypes = [7, 73];
 const closeTickTypes = [9, 75];
 const openTickTypes = [14, 76];
-const volumeTickTypes = [8, 74];
+// Option activity across ALL of a stock's options, sent on the stock's own line (generic ticks 100 and 101, requested for
+// stock contracts only). No delayed variants. Volume is today's running count; open interest is the previous day's.
+const callOptionVolumeTickType = 29;
+const putOptionVolumeTickType = 30;
+const callOpenInterestTickType = 27;
+const putOpenInterestTickType = 28;
+const stockGenericTicks = "100,101";
 const bidSizeTickTypes = [0, 69];
 const askSizeTickTypes = [3, 70];
 
@@ -133,7 +139,11 @@ export interface PooledQuote {
   high: number | null;
   low: number | null;
   previousClose: number | null;
-  volume: number | null;
+  // Option contracts traded today and open (stocks only; see stockGenericTicks).
+  callOptionVolume: number | null;
+  putOptionVolume: number | null;
+  callOpenInterest: number | null;
+  putOpenInterest: number | null;
 }
 
 export const emptyPooledQuote: PooledQuote = {
@@ -152,7 +162,10 @@ export const emptyPooledQuote: PooledQuote = {
   high: null,
   low: null,
   previousClose: null,
-  volume: null,
+  callOptionVolume: null,
+  putOptionVolume: null,
+  callOpenInterest: null,
+  putOpenInterest: null,
 };
 
 interface PoolEntry {
@@ -204,7 +217,10 @@ function quoteEqual(a: PooledQuote, b: PooledQuote): boolean {
     a.high === b.high &&
     a.low === b.low &&
     a.previousClose === b.previousClose &&
-    a.volume === b.volume
+    a.callOptionVolume === b.callOptionVolume &&
+    a.putOptionVolume === b.putOptionVolume &&
+    a.callOpenInterest === b.callOpenInterest &&
+    a.putOpenInterest === b.putOpenInterest
   );
 }
 
@@ -510,7 +526,10 @@ function attachListeners(ib: IBApi): void {
     const poolKey = reqIdToPoolKey.get(reqId);
     if (!poolKey) return;
     const value = size >= 0 ? size : null;
-    if (volumeTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { volume: value });
+    if (tickType === callOptionVolumeTickType) updateEntry(poolKey, reqId, { callOptionVolume: value });
+    else if (tickType === putOptionVolumeTickType) updateEntry(poolKey, reqId, { putOptionVolume: value });
+    else if (tickType === callOpenInterestTickType) updateEntry(poolKey, reqId, { callOpenInterest: value });
+    else if (tickType === putOpenInterestTickType) updateEntry(poolKey, reqId, { putOpenInterest: value });
     else if (bidSizeTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { bidSize: value });
     else if (askSizeTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { askSize: value });
   });
@@ -604,12 +623,12 @@ async function subscribeUnsubscribedEntries(): Promise<void> {
     entry.answered = false;
     entry.lastError = null;
     reqIdToPoolKey.set(entry.reqId, poolKey);
-    // Empty generic tick list: IBKR sends bid/ask/last AND the computed
-    // greeks (for an option contract) on a plain subscription — no special
-    // tick request needed for anything this pool tracks. Open interest
-    // (tick 27/28, generic tick 101) is deliberately not requested here —
-    // nothing live needs it; only the nightly capture job does, and it
-    // stays on its own separate, bounded, already-budgeted subscription.
-    borrowed.ib.reqMktData(entry.reqId, buildIbkrContract(entry.contract), "", false, false);
+    // IBKR sends bid/ask/last AND the computed greeks (for an option
+    // contract) on a plain subscription. A stock also asks for its options'
+    // total volume and open interest (generic ticks 100/101: no extra line).
+    // An option contract's own open interest stays off: only the nightly
+    // capture job needs it, on its own budgeted subscription.
+    const genericTicks = entry.contract.legType === "stock" ? stockGenericTicks : "";
+    borrowed.ib.reqMktData(entry.reqId, buildIbkrContract(entry.contract), genericTicks, false, false);
   }
 }

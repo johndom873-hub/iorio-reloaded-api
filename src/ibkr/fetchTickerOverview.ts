@@ -13,7 +13,6 @@ export interface TickerPricing {
   high: number | null;
   low: number | null;
   previousClose: number | null;
-  volume: number | null;
 }
 
 export interface PriceBar {
@@ -102,7 +101,6 @@ async function lookupPricingSnapshotUnbudgeted(connection: IbkrConnection, symbo
       high: null,
       low: null,
       previousClose: null,
-      volume: null,
     };
     let lastError: string | null = null;
     // Also runs on timeout (it used to leave all four listeners and the
@@ -116,7 +114,6 @@ async function lookupPricingSnapshotUnbudgeted(connection: IbkrConnection, symbo
     function cleanup() {
       clearTimeout(timer);
       ib.removeListener(EventName.tickPrice, onTickPrice);
-      ib.removeListener(EventName.tickSize, onTickSize);
       ib.removeListener(EventName.tickSnapshotEnd, onSnapshotEnd);
       ib.removeListener(EventName.error, onError);
     }
@@ -152,11 +149,6 @@ async function lookupPricingSnapshotUnbudgeted(connection: IbkrConnection, symbo
       if (tickType === 9 || tickType === 75) pricing.previousClose = value;
       if (tickType === 14 || tickType === 76) pricing.open = value;
     }
-    function onTickSize(id: number, tickType?: number, size?: number) {
-      if (id !== reqId || size === undefined) return;
-      // Real-time volume = 8, delayed = 74.
-      if (tickType === 8 || tickType === 74) pricing.volume = size;
-    }
     function onSnapshotEnd(id: number) {
       if (id !== reqId) return;
       cleanup();
@@ -179,7 +171,6 @@ async function lookupPricingSnapshotUnbudgeted(connection: IbkrConnection, symbo
     }
 
     ib.on(EventName.tickPrice, onTickPrice);
-    ib.on(EventName.tickSize, onTickSize);
     // .on(), not .once() — on a connection shared with other in-flight
     // requests, once() fires (and self-removes) on the first
     // tickSnapshotEnd for ANY reqId, orphaning this lookup until its

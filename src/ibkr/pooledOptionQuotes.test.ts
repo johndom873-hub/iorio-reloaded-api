@@ -4,7 +4,7 @@ import type { PooledQuote } from "./marketDataPool.js";
 import type { OptionQuote } from "./fetchOptionChain.js";
 
 const pool = vi.hoisted(() => {
-  const emptyPooledQuote = { last: null, bid: null, ask: null, bidSize: null, askSize: null, delta: null, gamma: null, vega: null, theta: null, impliedVolatility: null, underlyingPrice: null, open: null, high: null, low: null, previousClose: null, volume: null };
+  const emptyPooledQuote = { last: null, bid: null, ask: null, bidSize: null, askSize: null, delta: null, gamma: null, vega: null, theta: null, impliedVolatility: null, underlyingPrice: null, open: null, high: null, low: null, previousClose: null, callOptionVolume: null, putOptionVolume: null, callOpenInterest: null, putOpenInterest: null };
   return {
     emptyPooledQuote,
     graceMs: 1_000,
