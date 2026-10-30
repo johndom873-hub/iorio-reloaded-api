@@ -232,7 +232,7 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Entry with free cash",
     unit: "choice",
     editable: true,
-    note: "only with the baseline wheel as decision maker. At every look free round lots get the call with the highest premium yield, free cash the entry with the highest premium yield; everything is held to expiry. With the ladder, a Cash-Secured Put entry's collateral stays within the ladder's Shares at most, and the ladder starts once it is assigned. Whichever ranks higher: at each look the best put (in the entry |delta| range) and the best Covered Call (in the Calls' range, under the Entry call strike rule) are compared by the Ranking, and the look's entry is the winner's kind only",
+    note: "only with the CC + Put Ladder as decision maker. At every look free round lots get the call with the highest premium yield, free cash the entry with the highest premium yield; everything is held to expiry. With the ladder, a Cash-Secured Put entry's collateral stays within the ladder's Shares at most, and the ladder starts once it is assigned. Whichever ranks higher: at each look the best put (in the entry |delta| range) and the best Covered Call (in the Calls' range, under the Entry call strike rule) are compared by the Ranking, and the look's entry is the winner's kind only",
     choices: [
       { value: "put", label: "Cash-Secured Put" },
       { value: "covered_call", label: "Covered Call (100 shares bought and one call sold on them)" },
