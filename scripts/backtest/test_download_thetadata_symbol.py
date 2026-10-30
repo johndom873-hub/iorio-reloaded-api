@@ -291,8 +291,57 @@ class FetchFrameWithRetriesTests(unittest.TestCase):
         self.assertEqual((frame, attempts), ("frame", ["client"] * 3))
 
     def test_retries_used_up_raise_request_failed(self):
+        with self.assertRaisesRegex(downloader.RequestFailed, "UNAVAILABLE: Stream removed"):
+            self.fetch([FakeRpcError(grpc.StatusCode.UNAVAILABLE, "Stream removed")] * (len(NO_RETRY_DELAYS) + 1))
+
+    def test_stored_data_thetadata_cannot_read_is_not_retried(self):
+        corrupt = FakeRpcError(grpc.StatusCode.INTERNAL, "Corrupt FIT data: record has more fields than the established tick width (6) near position 3478")
         with self.assertRaisesRegex(downloader.RequestFailed, "INTERNAL: Corrupt FIT data"):
-            self.fetch([FakeRpcError(grpc.StatusCode.INTERNAL, "Corrupt FIT data")] * (len(NO_RETRY_DELAYS) + 1))
+            self.fetch([corrupt, None])
+        attempts = []
+
+        def corrupt_request(client):
+            attempts.append(client)
+            raise corrupt
+
+        with self.assertRaises(downloader.RequestFailed):
+            downloader.fetch_frame_with_retries(session_with("client"), corrupt_request, "quotes INTC 2024-06-21", NO_RETRY_DELAYS)
+        self.assertEqual(attempts, ["client"])
+
+    def test_a_request_waiting_out_a_retry_holds_no_request_slot(self):
+        session = session_with("client")
+        free_slots_while_waiting = []
+
+        def count_free_slots(delay_seconds):
+            taken = [session.request_slots.acquire(blocking=False) for _ in range(downloader.MAX_REQUESTS_IN_FLIGHT + 1)]
+            free_slots_while_waiting.append(sum(taken))
+            for was_taken in taken:
+                if was_taken:
+                    session.request_slots.release()
+
+        errors = [FakeRpcError(grpc.StatusCode.DEADLINE_EXCEEDED, "Deadline Exceeded")]
+
+        def fails_once(client):
+            if errors:
+                raise errors.pop()
+            return "frame"
+
+        frame = downloader.fetch_frame_with_retries(session, fails_once, "quotes INTC 2024-06-21", (1,), sleep=count_free_slots)
+        self.assertEqual((frame, free_slots_while_waiting), ("frame", [downloader.MAX_REQUESTS_IN_FLIGHT]))
+
+    def test_each_request_is_timed_and_counted(self):
+        session = session_with("client")
+
+        def no_data(client):
+            raise NoDataFoundError("No data found")
+
+        with self.assertLogs("download_thetadata_symbol", level="INFO") as logs:
+            downloader.fetch_frame_with_retries(session, lambda client: pl.DataFrame({"strike": [1.0, 2.0]}), "quotes INTC 2024-06-21 all expirations")
+            downloader.fetch_frame_with_retries(session, no_data, "eod INTC 2024-06-21 all expirations")
+        self.assertRegex(logs.output[0], r"quotes INTC 2024-06-21 all expirations: 2 rows in \d+\.\d s$")
+        self.assertRegex(logs.output[1], r"eod INTC 2024-06-21 all expirations: no data in \d+\.\d s$")
+        count_by_kind, _, _ = session.statistics.snapshot()
+        self.assertEqual(dict(count_by_kind), {"quotes": 1, "eod": 1})
 
     def test_an_error_that_does_not_pass_is_not_retried(self):
         with self.assertRaisesRegex(downloader.RequestFailed, "INVALID_ARGUMENT: Invalid interval"):
@@ -707,6 +756,12 @@ class DownloadRunTests(unittest.TestCase):
         return self.read_database("""SELECT d.trading_date, d.status, d.quote_rows, d.eod_rows, d.open_interest_rows, i.status, i.look_count, i.quote_rows
                                      FROM days d LEFT JOIN intraday_days i ON i.trading_date = d.trading_date ORDER BY d.trading_date""")
 
+    def assert_service_checked_once(self, service, part_name, earlier_day):
+        """Before asking expiration by expiration, the service was checked once: with the earlier day's part for one
+        expiration, when that day was stored by then, or else (days are fetched ahead) with a second expirations request."""
+        expiration_requests = sum(1 for called_part, _, _ in service.calls if called_part == "expirations")
+        self.assertIn((service.calls_for(part_name, earlier_day), expiration_requests), [(["*", near_expiry(earlier_day)], 1), (["*"], 2)])
+
     def assert_every_stored_day_is_whole(self):
         mismatches = self.read_database("""
             SELECT d.trading_date FROM days d
@@ -863,9 +918,10 @@ class DownloadRunTests(unittest.TestCase):
         service = FakeThetaData(self.frames_with_leaps(), failures={("quotes", failing_day, "*"): self.corrupt})
         exit_code, events = self.run_downloader(service)
         self.assertEqual((exit_code, events[-1]["daysDone"]), (0, 5))
-        # Every listed expiration beyond 45 days, the 300-day expiries of the other days included (no data that day).
-        self.assertEqual(service.calls_for("quotes", failing_day)[:len(NO_RETRY_DELAYS) + 1], ["*"] * (len(NO_RETRY_DELAYS) + 1))
-        self.assertEqual(sorted(service.calls_for("quotes", failing_day)[len(NO_RETRY_DELAYS) + 1:]),
+        # Asked for once (ThetaData cannot read it), then every listed expiration beyond 45 days, the 300-day expiries of the
+        # other days included (no data that day).
+        self.assertEqual(service.calls_for("quotes", failing_day)[0], "*")
+        self.assertEqual(sorted(service.calls_for("quotes", failing_day)[1:]),
                          [expiration for expiration in service.expirations() if expiration > (failing_day + datetime.timedelta(days=45)).isoformat()])
         self.assertEqual(self.read_database("SELECT count(*) FROM day_issues"), [(0,)])
         self.assertEqual(self.read_database("SELECT count(*) FROM quotes WHERE trading_date = ?", (failing_day.isoformat(),)), [(CONTRACTS_PER_DAY + 2,)])
@@ -928,20 +984,64 @@ class DownloadRunTests(unittest.TestCase):
 
     # --- a day ThetaData cannot serve
 
-    def test_a_request_for_all_expirations_that_keeps_failing_is_made_expiration_by_expiration(self):
-        corrupt_day = self.trading_dates[1]
-        service = FakeThetaData(self.frames_by_date, failures={("quotes", corrupt_day, "*"): self.corrupt})
+    def test_a_request_for_all_expirations_that_keeps_failing_is_retried_then_made_expiration_by_expiration(self):
+        failing_day = self.trading_dates[1]
+        service = FakeThetaData(self.frames_by_date, failures={("quotes", failing_day, "*"): FakeRpcError(grpc.StatusCode.UNAVAILABLE, "Stream removed")})
         exit_code, events = self.run_downloader(service)
         self.assertEqual(exit_code, 0)
         self.assertEqual(events[-1], {"type": "done", "daysDone": 5, "daysTotal": 5, "unavailableDays": 0, "daysWithIssues": 0})
         self.assertEqual(self.stored_days()[1], ("2024-03-26",) + self.whole_day)
         self.assertEqual(self.read_database("SELECT count(*) FROM day_issues"), [(0,)])
-        quote_calls = service.calls_for("quotes", corrupt_day)
+        quote_calls = service.calls_for("quotes", failing_day)
         self.assertEqual(quote_calls[:len(NO_RETRY_DELAYS) + 1], ["*"] * (len(NO_RETRY_DELAYS) + 1))
         self.assertEqual(sorted(quote_calls[len(NO_RETRY_DELAYS) + 1:]), [expiration for expiration in service.expirations() if expiration >= "2024-03-26"])
-        # The service was checked with data already stored: the day before, one expiration.
-        self.assertEqual(service.calls_for("quotes", self.trading_dates[0]), ["*", near_expiry(self.trading_dates[0])])
+        self.assert_service_checked_once(service, "quotes", self.trading_dates[0])
         self.assert_every_stored_day_is_whole()
+
+    def test_a_request_for_all_expirations_thetadata_cannot_read_is_made_expiration_by_expiration_at_once(self):
+        corrupt_day = self.trading_dates[1]
+        service = FakeThetaData(self.frames_by_date, failures={("quotes", corrupt_day, "*"): self.corrupt}, call_duration_seconds=0.02)
+        exit_code, events = self.run_downloader(service)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(events[-1], {"type": "done", "daysDone": 5, "daysTotal": 5, "unavailableDays": 0, "daysWithIssues": 0})
+        self.assertEqual(self.stored_days()[1], ("2024-03-26",) + self.whole_day)
+        quote_calls = service.calls_for("quotes", corrupt_day)
+        self.assertEqual(quote_calls[0], "*")
+        self.assertEqual(sorted(quote_calls[1:]), [expiration for expiration in service.expirations() if expiration >= "2024-03-26"])
+        self.assert_service_checked_once(service, "quotes", self.trading_dates[0])
+        self.assertEqual(service.max_requests_in_flight, downloader.MAX_REQUESTS_IN_FLIGHT)
+        self.assert_every_stored_day_is_whole()
+
+    def test_expirations_asked_for_one_by_one_use_both_request_slots_and_keep_their_order(self):
+        corrupt_day = self.trading_dates[1]
+        lock = threading.Lock()
+        in_flight, most_in_flight = [0], [0]
+
+        def track(part_name, trading_date, expiration_key):
+            if expiration_key != "*":
+                with lock:
+                    in_flight[0] += 1
+                    most_in_flight[0] = max(most_in_flight[0], in_flight[0])
+                time.sleep(0.02)
+                with lock:
+                    in_flight[0] -= 1
+
+        service = FakeThetaData(self.frames_with_leaps(), failures={("quotes", corrupt_day, "*"): self.corrupt, ("quotes", corrupt_day, near_expiry(corrupt_day)): self.corrupt},
+                                on_request=track)
+        session = downloader.ThetaDataSession(service.log_in, threading.Event(), NO_WAITS_BEFORE_LOGIN)
+        expiration_dates = [datetime.date.fromisoformat(expiration) for expiration in service.expirations()]
+        quotes = downloader.DAY_PART_BY_NAME["quotes"]
+        result = downloader.fetch_day_part(session, "INTC", corrupt_day, quotes, expiration_dates, downloader.StoredDataReferences(), NO_RETRY_DELAYS,
+                                           NO_EXPIRATION_BY_EXPIRATION_RETRY_DELAYS)
+        self.assertEqual(most_in_flight[0], downloader.MAX_REQUESTS_IN_FLIGHT)
+        # As when the expirations were asked for one after another: rows and issues in expiration order.
+        in_range = [expiration for expiration in expiration_dates if corrupt_day <= expiration <= corrupt_day + datetime.timedelta(days=downloader.EXPIRATION_BY_EXPIRATION_MAX_DAYS_TO_EXPIRY)]
+        one_after_another = []
+        for expiration in in_range:
+            if expiration.isoformat() != near_expiry(corrupt_day):
+                one_after_another.extend(downloader.map_quote_rows(self.frames_with_leaps()[corrupt_day]["quotes"].filter(pl.col("expiration") == expiration.isoformat()), corrupt_day))
+        self.assertEqual(result.rows, one_after_another)
+        self.assertEqual([issue[0] for issue in result.issues], [near_expiry(corrupt_day)])
 
     def test_an_expiration_that_still_fails_is_left_out_and_recorded(self):
         corrupt_day = self.trading_dates[1]
@@ -985,6 +1085,8 @@ class DownloadRunTests(unittest.TestCase):
 
     def test_a_failing_service_stops_the_run_instead_of_marking_days(self):
         failing_day = self.trading_dates[1]
+        # The first day is in the file before this run, so the service check asks again for its data.
+        self.assertEqual(self.run_downloader(FakeThetaData(self.frames_by_date), end="2024-03-25")[0], 0)
         unavailable = FakeRpcError(grpc.StatusCode.UNAVAILABLE, "failed to connect to all addresses")
         service = FakeThetaData(self.frames_by_date, failures={("quotes", failing_day, "*"): unavailable,
                                                                ("quotes", self.trading_dates[0], near_expiry(self.trading_dates[0])): unavailable})
@@ -1051,8 +1153,12 @@ class DownloadRunTests(unittest.TestCase):
         service = FakeThetaData(self.frames_by_date, failures=failures)
         exit_code, events = self.run_downloader(service)
         self.assertEqual((exit_code, events[-1]), (0, {"type": "done", "daysDone": 2, "daysTotal": 5, "unavailableDays": 3, "daysWithIssues": 0}))
-        # Each failing day's service check asked again for the first day's end of day, one expiration.
-        self.assertEqual(service.calls_for("eod", self.trading_dates[0]), ["*"] + [near_expiry(self.trading_dates[0])] * 3)
+        # Each failing day's service check asked again for the first day's end of day, one expiration, or, when that day was
+        # not stored yet (days are fetched ahead), for the expirations.
+        stored_data_checks = service.calls_for("eod", self.trading_dates[0])[1:]
+        self.assertEqual(set(stored_data_checks) - {near_expiry(self.trading_dates[0])}, set())
+        expiration_checks = sum(1 for called_part, _, _ in service.calls if called_part == "expirations") - 1
+        self.assertEqual(len(stored_data_checks) + expiration_checks, 3)
 
     def test_intraday_quotes_follow_the_same_rules(self):
         corrupt_day = self.trading_dates[1]
@@ -1061,8 +1167,7 @@ class DownloadRunTests(unittest.TestCase):
         self.assertEqual((exit_code, events[-1]), (0, {"type": "done", "daysDone": 5, "daysTotal": 5, "unavailableDays": 0, "daysWithIssues": 1}))
         self.assertEqual(self.stored_days()[1], ("2024-03-26", "complete", CONTRACTS_PER_DAY, CONTRACTS_PER_DAY, CONTRACTS_PER_DAY, "complete", 12, INTRADAY_ROWS_PER_DAY // 2))
         self.assertEqual(self.read_database("SELECT part, expiry FROM day_issues"), [("intraday_quotes", far_expiry(corrupt_day))])
-        # The service check used the intraday quotes of the day before, already stored.
-        self.assertEqual(service.calls_for("intraday_quotes", self.trading_dates[0]), ["*", near_expiry(self.trading_dates[0])])
+        self.assert_service_checked_once(service, "intraday_quotes", self.trading_dates[0])
         self.assert_every_stored_day_is_whole()
 
     def test_a_day_whose_intraday_quotes_cannot_be_retrieved_keeps_its_morning_parts_and_is_asked_for_again(self):
@@ -1169,7 +1274,8 @@ class DownloadRunTests(unittest.TestCase):
             service = FakeThetaData(self.frames_by_date, failures=failures)
             exit_code, events = self.run_downloader(service)
             self.assertEqual((exit_code, events[-1]), (0, {"type": "done", "daysDone": 5, "daysTotal": 5, "unavailableDays": 0, "daysWithIssues": 1}))
-            self.assertEqual(service.calls_for("quotes", corrupt_day), [far_expiry(corrupt_day)] * (len(NO_EXPIRATION_BY_EXPIRATION_RETRY_DELAYS) + 1))
+            # Asked for once a run: ThetaData cannot read it, so it is not retried.
+            self.assertEqual(service.calls_for("quotes", corrupt_day), [far_expiry(corrupt_day)])
             # The failure counted because ThetaData still answered for quotes already stored (the latest day's).
             self.assertEqual(service.calls_for("quotes", self.trading_dates[3]), [near_expiry(self.trading_dates[3])])
             self.assertEqual(self.read_database("SELECT attempts FROM day_issues"), [(1 + later_run,)])
@@ -1273,11 +1379,12 @@ class DownloadRunTests(unittest.TestCase):
     def test_a_session_taken_by_another_login_is_logged_in_again_and_the_day_completed(self):
         service = FakeThetaData(self.frames_by_date)
 
-        def another_login_during_the_third_day(part_name, trading_date, expiration_key):
-            if trading_date == self.trading_dates[2] and part_name == "eod" and service.login_count == 1:
+        # During the first day, so later requests are still to be made (several days are fetched ahead) and find the session taken.
+        def another_login_during_the_first_day(part_name, trading_date, expiration_key):
+            if trading_date == self.trading_dates[0] and part_name == "eod" and service.login_count == 1:
                 service.another_program_logs_in()
 
-        service.on_request = another_login_during_the_third_day
+        service.on_request = another_login_during_the_first_day
         exit_code, events = self.run_downloader(service)
         self.assertEqual((exit_code, events[-1]), (0, {"type": "done", "daysDone": 5, "daysTotal": 5, "unavailableDays": 0, "daysWithIssues": 0}))
         self.assertEqual(service.login_count, 2)

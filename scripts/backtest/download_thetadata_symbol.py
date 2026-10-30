@@ -5,7 +5,8 @@
 # intraday_days.all_expiries 0) is completed by fetching its parts again and adding only the rows it lacks.
 # Resumable: what a day already has in the file is not fetched again. A day ThetaData cannot serve never stops the run:
 # what can be retrieved is kept, what cannot is recorded (day_issues, unavailable_days) and asked for again on later
-# runs. At most 2 requests in flight (the plan's limit). Progress goes to stdout as JSON lines, logs to stderr. Spec: docs/backtesting/DATA-FILES.md.
+# runs. At most 2 requests in flight (the plan's limit), with 8 days' requests queued so a slow one leaves the other slot
+# work; each request is logged with its duration. Progress goes to stdout as JSON lines, logs to stderr. Spec: docs/backtesting/DATA-FILES.md.
 #
 # Run with the backtest venv: .venv-backtest/bin/python scripts/backtest/download_thetadata_symbol.py \
 #   --symbol AAOI --start 2020-01-01 --end 2026-10-09 --data-dir /abs/path [--intraday-strike-window-pct 40]
@@ -13,6 +14,7 @@
 import argparse
 import collections
 import concurrent.futures
+import contextlib
 import dataclasses
 import datetime
 import functools
@@ -56,7 +58,12 @@ INTRADAY_WINDOW = "10:00-15:30"
 INTRADAY_LOOK_TIMES = tuple(f"{minutes // 60:02d}:{minutes % 60:02d}" for minutes in range(10 * 60, 15 * 60 + 30 + 1, 30))
 ALL_EXPIRATIONS = "*"
 MAX_REQUESTS_IN_FLIGHT = 2
-DAYS_FETCHED_AHEAD = 2
+# Requests are prepared on more threads than may be in flight, so a freed slot is taken at once: a thread mapping an
+# answer or waiting out a retry holds none.
+REQUEST_THREADS = 2 * MAX_REQUESTS_IN_FLIGHT
+# Days whose requests are queued at once: while one request is slow (an expiry day's quotes, a part asked for expiration
+# by expiration), the other slot works on later days.
+DAYS_FETCHED_AHEAD = 8
 SESSION_FINISHED_HOUR_EASTERN = 18
 # ThetaData publishes a session's data some hours after it ends and, until then, answers no data for it, as for a
 # holiday. So a weekday with no data in any part is final (a 'no_data' day) only once it is this many days old; until
@@ -86,6 +93,9 @@ TRANSIENT_GRPC_STATUS_NAMES = {"UNAVAILABLE", "DEADLINE_EXCEEDED", "RESOURCE_EXH
 REFUSED_GRPC_STATUS_NAMES = {"PERMISSION_DENIED", "UNAUTHENTICATED"}
 SESSION_LOST_GRPC_STATUS_NAME = "UNAUTHENTICATED"
 SESSION_LOST_DETAILS_MARKER = "invalid session"
+# ThetaData answers a request for stored data it cannot read back with INTERNAL 'Corrupt FIT data'. Asked again it fails
+# the same way, so it is not retried: the part goes straight to being asked for expiration by expiration.
+UNREADABLE_STORED_DATA_DETAILS_MARKER = "corrupt fit data"
 
 SCHEMA_STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -806,11 +816,57 @@ def grpc_error_details(error: grpc.RpcError) -> str:
     return details or str(error)
 
 
+@dataclasses.dataclass
+class RequestTiming:
+    """How long one request waited for a request slot, and how long it then took."""
+
+    waited_seconds: float
+    started_at: float
+    seconds: float = 0.0
+
+    def __str__(self) -> str:
+        return f"{self.seconds:.1f} s" + (f", after {self.waited_seconds:.1f} s waiting for a request slot" if self.waited_seconds >= 0.05 else "")
+
+
+class RequestStatistics:
+    """Per kind of request (the first word of its description: quotes, eod, open_interest, intraday_quotes, expirations),
+    how many were made and the seconds they took, and the seconds requests waited for a slot."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.count_by_kind = collections.Counter()
+        self.seconds_by_kind = collections.Counter()
+        self.waited_seconds = 0.0
+
+    def record(self, kind: str, timing: RequestTiming) -> None:
+        with self.lock:
+            self.count_by_kind[kind] += 1
+            self.seconds_by_kind[kind] += timing.seconds
+            self.waited_seconds += timing.waited_seconds
+
+    def snapshot(self) -> tuple[collections.Counter, collections.Counter, float]:
+        with self.lock:
+            return collections.Counter(self.count_by_kind), collections.Counter(self.seconds_by_kind), self.waited_seconds
+
+    def describe_since(self, earlier: tuple[collections.Counter, collections.Counter, float], elapsed_seconds: float) -> str:
+        """The requests made since `earlier` (a snapshot), and the share of elapsed_seconds the slots were in use."""
+        count_by_kind, seconds_by_kind, waited_seconds = self.snapshot()
+        count_by_kind.subtract(earlier[0])
+        seconds_by_kind.subtract(earlier[1])
+        kinds = [kind for kind in sorted(count_by_kind) if count_by_kind[kind] > 0]
+        total_seconds = sum(seconds_by_kind[kind] for kind in kinds)
+        busy_share = total_seconds / (MAX_REQUESTS_IN_FLIGHT * elapsed_seconds) if elapsed_seconds > 0 else 0.0
+        return (f"{sum(count_by_kind[kind] for kind in kinds)} requests ({', '.join(f'{kind} {count_by_kind[kind]}' for kind in kinds)}) took "
+                f"{total_seconds:.0f} s ({', '.join(f'{kind} {seconds_by_kind[kind]:.0f} s' for kind in kinds)}) and waited {waited_seconds - earlier[2]:.0f} s "
+                f"for a request slot; the {MAX_REQUESTS_IN_FLIGHT} slots were in use {busy_share:.0%} of the {elapsed_seconds:.0f} s")
+
+
 class ThetaDataSession:
     """The logged-in client every request uses. ThetaData allows one login per API key at a time: a later login (a
     probe, a second downloader) invalidates this one, and its requests then fail with 'Invalid session ID'. When that
     happens this waits, logs in again and the request is repeated, at most
-    len(WAITS_BEFORE_LOGIN_AFTER_SESSION_LOSS_SECONDS) times per run."""
+    len(WAITS_BEFORE_LOGIN_AFTER_SESSION_LOSS_SECONDS) times per run. A request is made only while it holds one of the
+    MAX_REQUESTS_IN_FLIGHT request slots (the plan's limit), whichever thread makes it."""
 
     def __init__(self, client_factory, stop_requested: threading.Event, waits_before_login_seconds=WAITS_BEFORE_LOGIN_AFTER_SESSION_LOSS_SECONDS):
         self.client_factory = client_factory
@@ -819,11 +875,30 @@ class ThetaDataSession:
         self.lock = threading.Lock()
         self.client = client_factory()
         self.logins_after_session_loss = 0
+        self.request_slots = threading.BoundedSemaphore(MAX_REQUESTS_IN_FLIGHT)
+        self.statistics = RequestStatistics()
 
     def current(self):
         """(client, its login number). Blocks while another request is logging in again."""
         with self.lock:
             return self.client, self.logins_after_session_loss
+
+    @contextlib.contextmanager
+    def request_slot(self, description: str):
+        """Holds a request slot while the request is made, yielding its RequestTiming; records the timing on release.
+        Raises DownloadCancelled when a stop is requested while it waits for the slot."""
+        waiting_since = time.monotonic()
+        while not self.request_slots.acquire(timeout=STOP_CHECK_INTERVAL_SECONDS):
+            if self.stop_requested.is_set():
+                raise DownloadCancelled()
+        now = time.monotonic()
+        timing = RequestTiming(waited_seconds=now - waiting_since, started_at=now)
+        try:
+            yield timing
+        finally:
+            timing.seconds = time.monotonic() - timing.started_at
+            self.request_slots.release()
+            self.statistics.record(description.split(" ", 1)[0], timing)
 
     def log_in_again_after_session_loss(self, lost_login_number: int, description: str) -> None:
         with self.lock:
@@ -842,17 +917,29 @@ class ThetaDataSession:
             self.logins_after_session_loss += 1
 
 
+def describe_answer(frame) -> str:
+    height = getattr(frame, "height", None)
+    return f"{height} rows" if height is not None else "answered"
+
+
 def fetch_frame_with_retries(session: ThetaDataSession, perform_request, description: str, retry_delays_seconds=RETRY_DELAYS_SECONDS, sleep=time.sleep):
-    """Returns the frame of perform_request(client), or None when ThetaData has no data. A session taken by another
-    login is logged in again and the request repeated. Any other permission or authentication refusal raises
-    RequestRefused at once. Transient gRPC errors, and answers the library cannot decode, are retried with backoff;
-    RequestFailed once the retries are used up or the error is not one that passes."""
+    """Returns the frame of perform_request(client), or None when ThetaData has no data; each attempt holds a request
+    slot and an answer is logged with its time. A session taken by another login is logged in again and the request
+    repeated. Any other permission or authentication refusal raises RequestRefused at once. Transient gRPC errors, and
+    answers the library cannot decode, are retried with backoff (holding no slot while waiting), except stored data
+    ThetaData cannot read; RequestFailed once the retries are used up or the error is not one that passes."""
     attempt_index = 0
     while True:
         client, login_number = session.current()
         try:
-            return perform_request(client)
+            with session.request_slot(description) as timing:
+                frame = perform_request(client)
+            logger.info("%s: %s in %s", description, describe_answer(frame), timing)
+            return frame
+        except DownloadCancelled:
+            raise
         except NoDataFoundError:
+            logger.info("%s: no data in %s", description, timing)
             return None
         except grpc.RpcError as error:
             status_name = grpc_status_name(error)
@@ -865,7 +952,7 @@ def fetch_frame_with_retries(session: ThetaDataSession, perform_request, descrip
                 raise RequestRefused(
                     f"ThetaData refused {description} ({failure}). The API key or subscription does not allow this "
                     f"request (the options VALUE plan covers 2020-01-01 onwards).") from None
-            may_pass_on_retry = status_name in TRANSIENT_GRPC_STATUS_NAMES
+            may_pass_on_retry = status_name in TRANSIENT_GRPC_STATUS_NAMES and UNREADABLE_STORED_DATA_DETAILS_MARKER not in details.lower()
         except Exception as error:
             failure = f"{type(error).__name__}: {error}"
             may_pass_on_retry = True
@@ -986,7 +1073,8 @@ def fetch_day_part(session: ThetaDataSession, symbol: str, trading_date: datetim
                    references: StoredDataReferences, retry_delays_seconds, expiration_by_expiration_retry_delays_seconds, completing: bool = False) -> DayPartResult:
     """One part of one day: one request for all expirations. If that keeps failing while the service still answers for
     stored data, each expiration in range is asked for on its own (completing a day stored with the earlier cap: only
-    those beyond it); what comes back is kept and the rest listed."""
+    those beyond it), on MAX_REQUESTS_IN_FLIGHT threads; what comes back is kept, in expiration order, and the rest
+    listed."""
     try:
         return DayPartResult(fetch_part_rows(session, symbol, trading_date, day_part, ALL_EXPIRATIONS, retry_delays_seconds))
     except RequestFailed as error:
@@ -1000,12 +1088,18 @@ def fetch_day_part(session: ThetaDataSession, symbol: str, trading_date: datetim
     # Completing, an empty range leaves nothing to add: the day already holds every expiration listed.
     if not expirations_in_range and not completing:
         result.issues.append((None, f"{failed_request}; the symbol lists no expiration within {EXPIRATION_BY_EXPIRATION_MAX_DAYS_TO_EXPIRY} days to ask for on its own"))
-    for expiration_date in expirations_in_range:
-        try:
-            result.rows.extend(fetch_part_rows(session, symbol, trading_date, day_part, expiration_date, expiration_by_expiration_retry_delays_seconds))
-        except RequestFailed as error:
-            result.issues.append((expiration_date.isoformat(), str(error)))
-            logger.warning("%s: left out", error)
+    expiration_executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_REQUESTS_IN_FLIGHT, thread_name_prefix="thetadata-expiration")
+    try:
+        futures = [expiration_executor.submit(fetch_part_rows, session, symbol, trading_date, day_part, expiration_date, expiration_by_expiration_retry_delays_seconds)
+                   for expiration_date in expirations_in_range]
+        for expiration_date, future in zip(expirations_in_range, futures):
+            try:
+                result.rows.extend(future.result())
+            except RequestFailed as error:
+                result.issues.append((expiration_date.isoformat(), str(error)))
+                logger.warning("%s: left out", error)
+    finally:
+        expiration_executor.shutdown(wait=False, cancel_futures=True)
     # Each answer is free of repeats; a contract answered for two expirations would still break the day's write.
     result.rows = deduplicate_by_key(result.rows, day_part.key_length, day_part.name, trading_date)
     logger.warning("%s %s %s: %d rows from %d of %d expirations asked for one by one", day_part.name, symbol, trading_date.isoformat(), len(result.rows),
@@ -1189,8 +1283,11 @@ def download_days(session: ThetaDataSession, connection: sqlite3.Connection, sym
                   expiration_dates: list[datetime.date], strike_window_pct: float | None, emit_event, stop_requested: threading.Event,
                   no_data_is_final_through: datetime.date, retry_delays_seconds=RETRY_DELAYS_SECONDS,
                   expiration_by_expiration_retry_delays_seconds=EXPIRATION_BY_EXPIRATION_RETRY_DELAYS_SECONDS) -> int:
-    """Fetches and stores each planned day in date order with at most MAX_REQUESTS_IN_FLIGHT requests running; returns days done."""
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_REQUESTS_IN_FLIGHT, thread_name_prefix="thetadata-request")
+    """Fetches and stores each planned day in date order, DAYS_FETCHED_AHEAD days' requests queued on REQUEST_THREADS
+    threads, at most MAX_REQUESTS_IN_FLIGHT of them in flight (the session's request slots); returns days done."""
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=REQUEST_THREADS, thread_name_prefix="thetadata-request")
+    statistics_at_start = session.statistics.snapshot()
+    started_at = time.monotonic()
     references = read_stored_data_references(connection)
     days_waiting = collections.deque(day_plans)
     days_in_flight = collections.deque()
@@ -1248,6 +1345,7 @@ def download_days(session: ThetaDataSession, connection: sqlite3.Connection, sym
         if days_processed > 1:
             logger.info("%s: %d days in %.1f s after the first (%.2f s per day)", symbol, days_processed, previous_store_time - first_store_time,
                         (previous_store_time - first_store_time) / (days_processed - 1))
+        logger.info("%s: %s", symbol, session.statistics.describe_since(statistics_at_start, time.monotonic() - started_at))
     return days_done
 
 
