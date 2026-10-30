@@ -6,7 +6,7 @@ import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { addCalendarDays } from "../lib/calendarDays.js";
 import type { MarketQuoteConsumer } from "../lib/marketQuoteLoop.js";
 import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
-import { loadOptionQuoteBandQuotes, upsertOptionQuoteBandQuotes, type OptionQuoteBandQuote, type OptionQuoteBandQuoteWrite } from "./optionQuoteBandQuotes.js";
+import { loadOptionQuoteBandQuotes, recordFinishedOptionQuoteBandCycles, upsertOptionQuoteBandQuotes, type OptionQuoteBandCycleWrite, type OptionQuoteBandQuote, type OptionQuoteBandQuoteWrite } from "./optionQuoteBandQuotes.js";
 import { optionQuoteBandDayUniverse, planOptionQuoteBand, type OptionQuoteBandPlan, type LadderClock, type OptionQuoteBandScope, type OptionQuoteBandUniverseContract } from "./optionQuoteBandPlan.js";
 import { forwardAnchorsFromBandQuotes } from "./ladderForwardAnchors.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
@@ -146,14 +146,27 @@ export function createOptionQuoteBandPlanner(dependencies: OptionQuoteBandPlanne
 /** Band quotes are written in batches of this many as they settle, and the rest at the end of the cycle. */
 const bandQuoteWriteBatchSize = 20;
 
-/** The ladder as a user of the market quote loop (server.ts wires it in first, so its band is quoted first). */
-export function createLadderQuoteConsumer(planner: OptionQuoteBandPlanner = createOptionQuoteBandPlanner(), store: (writes: OptionQuoteBandQuoteWrite[]) => Promise<void> = upsertOptionQuoteBandQuotes): MarketQuoteConsumer {
+/**
+ * The ladder as a user of the market quote loop (server.ts wires it in first, so its band is quoted first). Once every batch
+ * of a cycle is stored, the cycle is recorded as each quoted ticker's newest finished one (option_quote_band_cycles), which
+ * the looks read from and Pluto's rounds start on; a cycle with a batch that failed to store is not recorded.
+ */
+export function createLadderQuoteConsumer(
+  planner: OptionQuoteBandPlanner = createOptionQuoteBandPlanner(),
+  store: (writes: OptionQuoteBandQuoteWrite[]) => Promise<void> = upsertOptionQuoteBandQuotes,
+  recordFinished: (writes: OptionQuoteBandCycleWrite[]) => Promise<void> = recordFinishedOptionQuoteBandCycles,
+  now: () => Date = () => new Date(),
+): MarketQuoteConsumer {
   let buffer: OptionQuoteBandQuoteWrite[] = [];
-  const flush = async () => {
-    if (buffer.length === 0) return;
+  const writing = new Set<Promise<void>>();
+  let lastCycleWithFailedWrite: number | null = null;
+  const flush = (): Promise<void> => {
+    if (buffer.length === 0) return Promise.resolve();
     const batch = buffer;
     buffer = [];
-    await store(batch);
+    const write: Promise<void> = store(batch).finally(() => writing.delete(write));
+    writing.add(write);
+    return write;
   };
   return {
     name: "CC + Put Ladder",
@@ -164,8 +177,20 @@ export function createLadderQuoteConsumer(planner: OptionQuoteBandPlanner = crea
     },
     onQuote(quote, cycle) {
       buffer.push({ tickerId: quote.contract.tickerId, tradingDateIso: cycle.tradingDateIso, expiry: quote.contract.expiry, strike: quote.contract.strike, right: quote.contract.right, bid: quote.bid, ask: quote.ask, stockPrice: cycle.spotByTicker.get(quote.contract.tickerId) ?? null, errorCode: quote.errorCode, quotedAt: quote.quotedAt, cycleNumber: cycle.cycleNumber });
-      if (buffer.length >= bandQuoteWriteBatchSize) void flush().catch((error) => console.error(`option quote band write failed — ${error instanceof Error ? error.message : error}`));
+      if (buffer.length < bandQuoteWriteBatchSize) return;
+      void flush().catch((error) => {
+        lastCycleWithFailedWrite = cycle.cycleNumber;
+        console.error(`option quote band write failed — ${error instanceof Error ? error.message : error}`);
+      });
     },
-    onCycleComplete: () => flush(),
+    async onCycleComplete(quotes, cycle) {
+      // The last batch joins those still being stored; its own failure is the loop's to report, as before.
+      const lastBatch = flush();
+      const stored = await Promise.allSettled([...writing, lastBatch]);
+      await lastBatch;
+      if (stored.some((outcome) => outcome.status === "rejected") || lastCycleWithFailedWrite === cycle.cycleNumber) return;
+      const finishedAt = now();
+      await recordFinished([...new Set(quotes.map((quote) => quote.contract.tickerId))].map((tickerId) => ({ tickerId, tradingDateIso: cycle.tradingDateIso, cycleNumber: cycle.cycleNumber, startedAt: cycle.now, finishedAt })));
+    },
   };
 }

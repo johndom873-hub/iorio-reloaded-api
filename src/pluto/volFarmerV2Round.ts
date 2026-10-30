@@ -24,7 +24,7 @@ import { loadInFlightNotionals, loadInFlightNotionalsBySymbol, loadLastFilledPlu
 import { executePlutoOrder, watchPlutoOrder, type ExecuteInput } from "./executor.js";
 import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
 import { nextListedExpiryAfter, optionQuoteBandDayUniverse } from "./optionQuoteBandPlan.js";
-import { loadOptionQuoteBandQuotes, type OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
+import { loadFinishedOptionQuoteBandCycle, loadOptionQuoteBandQuotes } from "./optionQuoteBandQuotes.js";
 import { latestCycleQuotes } from "./ladderLook.js";
 import { loadOpenPositionFigures } from "./ladderLookSnapshot.js";
 import { ladderOrdersSentToday, loadLadderBookOrderCounts } from "./ladderOrders.js";
@@ -72,8 +72,8 @@ export function volFarmerV2NoCallQuotedReason(input: {
   expirations: readonly string[];
   strikesByExpiry: ReadonlyMap<string, readonly number[]>;
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
-  /** Every band quote of the ticker today, from any cycle. */
-  bandQuotes: readonly OptionQuoteBandQuote[];
+  /** Whether the band has finished a cycle on the ticker today. */
+  bandCycleFinished: boolean;
 }): string {
   const nextExpiry = nextListedExpiryAfter(input.expirations, input.todayIso);
   if (nextExpiry === null) return "no Call expiry listed after today";
@@ -81,8 +81,7 @@ export function volFarmerV2NoCallQuotedReason(input: {
   if (input.previousSessionVolumeByContract === null) return `no ${expiry} option is quoted today: no option volume was captured after the previous session's close (the capture covers the tickers enabled then), so none can be sold before the next session`;
   const universe = optionQuoteBandDayUniverse({ expirations: input.expirations, strikesByExpiry: input.strikesByExpiry, sessionIso: input.todayIso, expiryRule: { kind: "next_listed_expiry" }, previousSessionVolumeByContract: input.previousSessionVolumeByContract });
   if (!universe.some((contract) => contract.right === "C")) return `no ${expiry} Call traded enough in the previous session to sell one (the 20% volume rule needs a volume of 5 or more)`;
-  if (input.bandQuotes.length === 0) return `no ${expiry} option is quoted yet today`;
-  if (input.bandQuotes.some((quote) => quote.right === "C" && quote.expiry === nextExpiry)) return `the latest quotes have no ${expiry} Call yet`;
+  if (!input.bandCycleFinished) return `no ${expiry} option is quoted yet today`;
   return `no ${expiry} Call is near v2's Call |delta| range at this price, so none is quoted`;
 }
 
@@ -264,9 +263,10 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
   }
 
   // 3. The market and the book at this round.
-  const [prices, bandQuotes, forwardAnchors, previousSessionVolumeByContract, stepImpliedVolatility, chain, inFlight, tickerExposure] = await Promise.all([
+  const [prices, bandQuotes, bandCycle, forwardAnchors, previousSessionVolumeByContract, stepImpliedVolatility, chain, inFlight, tickerExposure] = await Promise.all([
     fetchPricesPoolFirst([{ key: "stock", legType: "stock", symbol }]),
     loadOptionQuoteBandQuotes(tickerId, clock.todayIso),
+    loadFinishedOptionQuoteBandCycle(tickerId, clock.todayIso),
     defaultOptionQuoteBandPlannerDependencies.loadForwardAnchors(tickerId, clock.todayIso),
     defaultOptionQuoteBandPlannerDependencies.loadPreviousSessionVolume(tickerId, clock.todayIso),
     loadVolFarmerV2StepImpliedVolatility(tickerId, clock.todayIso),
@@ -280,7 +280,7 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
     await saveVolFarmerV2Memory(tickerId, memory, adopted);
     return nothingDue;
   }
-  const { quotes, stale } = latestCycleQuotes(bandQuotes, now, settings.maxQuoteAgeMinutes);
+  const { quotes, stale } = latestCycleQuotes(bandQuotes, bandCycle, now, settings.maxQuoteAgeMinutes);
   if (stale) {
     note(`the band's latest quotes are older than ${settings.maxQuoteAgeMinutes} minutes, so nothing is planned`);
     await saveVolFarmerV2Memory(tickerId, memory, adopted);
@@ -309,7 +309,7 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
   const { farmer, v2 } = volFarmerV2RulesOf(settings);
   const noCallQuotedReason = quotes.some((quote) => quote.right === "C" && quote.expiry > clock.todayIso)
     ? undefined
-    : volFarmerV2NoCallQuotedReason({ todayIso: clock.todayIso, expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, previousSessionVolumeByContract, bandQuotes });
+    : volFarmerV2NoCallQuotedReason({ todayIso: clock.todayIso, expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, previousSessionVolumeByContract, bandCycleFinished: bandCycle !== null });
   const liveSessions = await loadLiveTradingSessions(now);
   const marketWith = (leapsQuotesByExpiry: ReadonlyMap<string, SymbolFileQuote[]>, missing: Set<string>): VolFarmerV2Market => ({
     symbol,

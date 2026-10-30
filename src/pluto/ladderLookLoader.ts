@@ -7,7 +7,7 @@ import { fetchOpenCycleSummaryRowsByTickerId } from "../lib/cycleBreakEvenQuerie
 import { loadLiveTradingSessions } from "../lib/liveTradingSessions.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { loadPreviousClose } from "../lib/tickerCalendarQueries.js";
-import { loadOptionQuoteBandQuotes } from "./optionQuoteBandQuotes.js";
+import { loadFinishedOptionQuoteBandCycle, loadOptionQuoteBandQuotes } from "./optionQuoteBandQuotes.js";
 import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
 import type { LadderClock } from "./optionQuoteBandPlan.js";
 import { loadLadderCycleMemory } from "./ladderCycleMemory.js";
@@ -65,7 +65,7 @@ export async function loadWorkingLadderSales(symbol: string, connection: Knex = 
 }
 
 export async function loadLadderLookInput(ticker: { tickerId: string; symbol: string; tickerWeight: number }, pass: LadderPassContext, connection: Knex = db): Promise<LadderLookInput | LadderLookUnavailable> {
-  const [prices, previousClose, memory, settings, positions, cycleRowsByTicker, workingSales, bandQuotes, forwardAnchors, previousSessionVolumeByContract, liveSessions] = await Promise.all([
+  const [prices, previousClose, memory, settings, positions, cycleRowsByTicker, workingSales, bandQuotes, bandCycle, forwardAnchors, previousSessionVolumeByContract, liveSessions] = await Promise.all([
     fetchPricesPoolFirst([{ key: "stock", legType: "stock", symbol: ticker.symbol }]),
     loadPreviousClose(ticker.tickerId, pass.clock.todayIso),
     loadLadderCycleMemory(ticker.tickerId, connection),
@@ -74,6 +74,7 @@ export async function loadLadderLookInput(ticker: { tickerId: string; symbol: st
     fetchOpenCycleSummaryRowsByTickerId([ticker.tickerId]),
     loadWorkingLadderSales(ticker.symbol, connection),
     loadOptionQuoteBandQuotes(ticker.tickerId, pass.clock.todayIso, connection),
+    loadFinishedOptionQuoteBandCycle(ticker.tickerId, pass.clock.todayIso, connection),
     defaultOptionQuoteBandPlannerDependencies.loadForwardAnchors(ticker.tickerId, pass.clock.todayIso),
     defaultOptionQuoteBandPlannerDependencies.loadPreviousSessionVolume(ticker.tickerId, pass.clock.todayIso),
     loadLiveTradingSessions(pass.now),
@@ -93,6 +94,7 @@ export async function loadLadderLookInput(ticker: { tickerId: string; symbol: st
     baseline: settings.baseline,
     book: { tickerId: ticker.tickerId, at: pass.now, stockPrice, positions, cycleRows: cycleRowsByTicker.get(ticker.tickerId)!, freeCash: pass.freeCash, accountValue: pass.accountValue, tickerWeight: ticker.tickerWeight, commissions: pass.commissions, workingSales },
     bandQuotes,
+    bandCycle,
     forwardAnchors,
     previousSessionVolumeByContract,
     maxQuoteAgeMinutes: pass.maxQuoteAgeMinutes,

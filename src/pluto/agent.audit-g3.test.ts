@@ -71,7 +71,7 @@ vi.mock("./stateStore.js", () => ({
     harness.saved.push(record);
   }),
 }));
-vi.mock("./bandQuoteWatermark.js", () => ({ findNewlyQuotedContracts: vi.fn(), loadTodaysBandQuoteStamps: vi.fn(), hasTodaysBandQuotes: vi.fn(async () => true), rememberAnalysed: vi.fn() }));
+vi.mock("./bandQuoteWatermark.js", () => ({ findNewlyFinishedBandCycles: vi.fn(), loadTodaysFinishedBandCycles: vi.fn(), hasTodaysBandQuotes: vi.fn(async () => true), rememberAnalysed: vi.fn() }));
 vi.mock("./systemChecks.js", () => ({ isInsideTradingWindow: () => true }));
 
 const { PlutoAgent } = await import("./agent.js");

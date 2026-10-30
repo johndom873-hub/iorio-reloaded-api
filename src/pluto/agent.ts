@@ -21,7 +21,7 @@ import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { assemblePlutoReadinessResults, decidePlutoReadinessRun, describePlutoReadinessOutcome, reusableProbeResults, runPlutoReadinessTests } from "./readiness.js";
 import { createPlutoReadinessProbes } from "./readinessProbes.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, recordPlutoRelease, savePlutoReadiness } from "./stateStore.js";
-import { findNewlyQuotedContracts, hasTodaysBandQuotes, loadTodaysBandQuoteStamps, rememberAnalysed } from "./bandQuoteWatermark.js";
+import { findNewlyFinishedBandCycles, hasTodaysBandQuotes, loadTodaysFinishedBandCycles, rememberAnalysed } from "./bandQuoteWatermark.js";
 import { isInsideTradingWindow } from "./systemChecks.js";
 import { easternIsoDate, easternMinutesOfDay } from "../lib/easternIsoDate.js";
 
@@ -53,8 +53,8 @@ export class PlutoAgent {
   private timers: ReturnType<typeof setInterval>[] = [];
   private unsubscribeNotifications: (() => void) | null = null;
   private stopMemoryMonitor: (() => void) | null = null;
-  /** quoted_at last analysed, per band contract. */
-  private readonly lastAnalysedQuotedAtMs = new Map<string, number>();
+  /** finished_at of the band cycle last analysed, per ticker. */
+  private readonly lastAnalysedFinishedAtMs = new Map<string, number>();
   /** Forced rounds waiting for the loop, in arrival order; null symbols = every allowed ticker. */
   private readonly forcedRounds: { trigger: PlutoTrigger; detail: Record<string, unknown>; symbols: string[] | null; retried?: boolean }[] = [];
   private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -498,10 +498,10 @@ export class PlutoAgent {
       }
       return;
     }
-    const newlyQuoted = findNewlyQuotedContracts(await loadTodaysBandQuoteStamps(), this.lastAnalysedQuotedAtMs);
-    if (newlyQuoted.symbols.length === 0) return;
-    await this.runRoundSafely({ trigger: "band_quotes_update", triggerDetail: { symbols: newlyQuoted.symbols, contracts: newlyQuoted.contractCount }, symbols: newlyQuoted.symbols, force: false });
-    rememberAnalysed(newlyQuoted.stamps, this.lastAnalysedQuotedAtMs);
+    const newlyFinished = findNewlyFinishedBandCycles(await loadTodaysFinishedBandCycles(), this.lastAnalysedFinishedAtMs);
+    if (newlyFinished.symbols.length === 0) return;
+    await this.runRoundSafely({ trigger: "band_quotes_update", triggerDetail: { symbols: newlyFinished.symbols }, symbols: newlyFinished.symbols, force: false });
+    rememberAnalysed(newlyFinished.stamps, this.lastAnalysedFinishedAtMs);
   }
 
   /**

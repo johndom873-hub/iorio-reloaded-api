@@ -85,7 +85,7 @@ vi.mock("./optionQuoteBandPlanLoader.js", () => ({
     loadPreviousSessionVolume: async () => new Map((harness.quotes as SymbolFileQuote[]).map((quote) => [contractKey(quote), 1_000])),
   },
 }));
-vi.mock("./optionQuoteBandQuotes.js", () => ({ loadOptionQuoteBandQuotes: async () => [] }));
+vi.mock("./optionQuoteBandQuotes.js", () => ({ loadOptionQuoteBandQuotes: async () => [], loadFinishedOptionQuoteBandCycle: async () => ({ cycleNumber: 1, startedAt: new Date(0), finishedAt: new Date(0) }) }));
 vi.mock("./ladderLook.js", () => ({ latestCycleQuotes: () => ({ quotes: harness.quotes, stale: false }) }));
 vi.mock("./ladderLookSnapshot.js", () => ({ loadOpenPositionFigures: async (tickerId: string) => harness.positionsByTickerId.get(tickerId) ?? harness.positions }));
 vi.mock("./ladderOrders.js", () => ({ loadLadderBookOrderCounts: async () => ({ ...harness.bookCounts }), ladderOrdersSentToday: async () => ({ count: 0 }) }));
@@ -313,24 +313,23 @@ describe("runVolFarmerV2Round", () => {
 describe("volFarmerV2NoCallQuotedReason", () => {
   // Wed 28 Oct 2026: the next listed expiry is Fri 30 Oct (2DTE).
   const base = { todayIso: "2026-10-28", expirations: ["20261106", "20261030", "20261028"], strikesByExpiry: new Map([["20261030", [95, 105]], ["20261106", [105]], ["20261028", [105]]]) };
-  const bandQuote = (expiry: string, strike: number, right: "C" | "P") => ({ expiry, strike, right, bid: 1, ask: 1.1, stockPrice: 100, errorCode: null, quotedAt: new Date(), cycleNumber: 1 });
 
   it("names the missing previous-session volume when the ticker was enabled after the capture", () => {
-    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: null, bandQuotes: [] })).toBe(
+    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: null, bandCycleFinished: false })).toBe(
       "no 30 Oct (2DTE) option is quoted today: no option volume was captured after the previous session's close (the capture covers the tickers enabled then), so none can be sold before the next session",
     );
   });
 
   it("tells the 20% volume rule, quotes not in yet, and the |delta| band apart", () => {
     const volume = new Map([["2026-10-30|105|C", 4], ["2026-10-30|95|P", 50]]);
-    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: volume, bandQuotes: [] })).toBe("no 30 Oct (2DTE) Call traded enough in the previous session to sell one (the 20% volume rule needs a volume of 5 or more)");
+    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: volume, bandCycleFinished: false })).toBe("no 30 Oct (2DTE) Call traded enough in the previous session to sell one (the 20% volume rule needs a volume of 5 or more)");
     const traded = new Map([["2026-10-30|105|C", 40]]);
-    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: traded, bandQuotes: [] })).toBe("no 30 Oct (2DTE) option is quoted yet today");
-    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: traded, bandQuotes: [bandQuote("2026-10-30", 105, "C")] })).toBe("the latest quotes have no 30 Oct (2DTE) Call yet");
-    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: traded, bandQuotes: [bandQuote("2026-10-30", 95, "P")] })).toBe("no 30 Oct (2DTE) Call is near v2's Call |delta| range at this price, so none is quoted");
+    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: traded, bandCycleFinished: false })).toBe("no 30 Oct (2DTE) option is quoted yet today");
+    // A finished cycle without a Call after today: none was near the range at this price (a Call quoted at an earlier cycle has left the band).
+    expect(volFarmerV2NoCallQuotedReason({ ...base, previousSessionVolumeByContract: traded, bandCycleFinished: true })).toBe("no 30 Oct (2DTE) Call is near v2's Call |delta| range at this price, so none is quoted");
   });
 
   it("keeps the plain note when the chain lists no expiry after today", () => {
-    expect(volFarmerV2NoCallQuotedReason({ ...base, expirations: ["20261028"], previousSessionVolumeByContract: null, bandQuotes: [] })).toBe("no Call expiry listed after today");
+    expect(volFarmerV2NoCallQuotedReason({ ...base, expirations: ["20261028"], previousSessionVolumeByContract: null, bandCycleFinished: false })).toBe("no Call expiry listed after today");
   });
 });

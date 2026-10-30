@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import type { QuoteLoopCycle, QuoteLoopOptionQuote } from "../lib/marketQuoteLoop.js";
+import type { OptionQuoteBandCycleWrite, OptionQuoteBandQuoteWrite } from "./optionQuoteBandQuotes.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import type { PlutoTickerSettings } from "./tickerSettingsStore.js";
-import { createOptionQuoteBandPlanner, type OptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
+import { createLadderQuoteConsumer, createOptionQuoteBandPlanner, type OptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
 
 const todayIso = "2026-10-20";
 const now = new Date("2026-10-20T16:00:00Z");
@@ -79,5 +81,69 @@ describe("createOptionQuoteBandPlanner", () => {
   it("without the previous session's volumes, the ticker's universe is empty: the 20% rule sells none of an unknown volume", async () => {
     const planner = createOptionQuoteBandPlanner(dependencies({ loadPreviousSessionVolume: async () => null }));
     expect((await planner.plan(todayIso, new Map([["t1", 100]]), now)).get("t1")!.plan).toMatchObject({ universeCount: 0, contracts: [] });
+  });
+});
+
+describe("createLadderQuoteConsumer", () => {
+  const cycleStart = new Date("2026-10-20T16:00:00Z");
+  const finishedAt = new Date("2026-10-20T16:00:40Z");
+  const cycle = (cycleNumber: number): QuoteLoopCycle => ({ tradingDateIso: todayIso, cycleNumber, now: cycleStart, spotByTicker: new Map([["t1", 100], ["t2", 50]]), impliedVolatilityByTicker: new Map() });
+  const quote = (tickerId: string, strike: number, right: "C" | "P" = "P"): QuoteLoopOptionQuote => ({ contract: { tickerId, symbol: tickerId === "t1" ? "LADR" : "VFV", expiry: "2026-11-20", strike, right }, bid: 1, ask: 1.1, last: null, errorCode: null, quotedAt: new Date("2026-10-20T16:00:10Z") });
+  const consumerWith = (store: (writes: OptionQuoteBandQuoteWrite[]) => Promise<void>, recordFinished: (writes: OptionQuoteBandCycleWrite[]) => Promise<void>) => createLadderQuoteConsumer(createOptionQuoteBandPlanner(dependencies()), store, recordFinished, () => finishedAt);
+
+  it("records each quoted ticker's cycle as finished once every batch of it is stored", async () => {
+    let releaseFirstBatch!: () => void;
+    const firstBatchStored = new Promise<void>((resolve) => (releaseFirstBatch = resolve));
+    const batchSizes: number[] = [];
+    const store = vi.fn(async (writes: OptionQuoteBandQuoteWrite[]) => {
+      batchSizes.push(writes.length);
+      if (batchSizes.length === 1) await firstBatchStored;
+    });
+    const recordFinished = vi.fn(async (_writes: OptionQuoteBandCycleWrite[]) => {});
+    const consumer = consumerWith(store, recordFinished);
+    // LADR's 20 Puts fill the first batch; its Call and VFV's two quotes are stored at the end of the cycle.
+    const quotes = [...Array.from({ length: 20 }, (_, index) => quote("t1", 60 + index)), quote("t1", 105, "C"), quote("t2", 45), quote("t2", 55, "C")];
+    for (const each of quotes) consumer.onQuote!(each, cycle(7));
+    const completing = consumer.onCycleComplete!(quotes, cycle(7));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(batchSizes).toEqual([20, 3]);
+    expect(recordFinished).not.toHaveBeenCalled();
+    releaseFirstBatch();
+    await completing;
+    expect(recordFinished).toHaveBeenCalledWith([
+      { tickerId: "t1", tradingDateIso: todayIso, cycleNumber: 7, startedAt: cycleStart, finishedAt },
+      { tickerId: "t2", tradingDateIso: todayIso, cycleNumber: 7, startedAt: cycleStart, finishedAt },
+    ]);
+  });
+
+  it("does not record a cycle with a batch that failed to store; the next cycle is recorded", async () => {
+    let failNextWrite = true;
+    const store = vi.fn(async (_writes: OptionQuoteBandQuoteWrite[]) => {
+      if (!failNextWrite) return;
+      failNextWrite = false;
+      throw new Error("connection lost");
+    });
+    const recordFinished = vi.fn(async (_writes: OptionQuoteBandCycleWrite[]) => {});
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consumer = consumerWith(store, recordFinished);
+    const quotes = Array.from({ length: 21 }, (_, index) => quote("t1", 60 + index));
+    for (const each of quotes) consumer.onQuote!(each, cycle(7));
+    await consumer.onCycleComplete!(quotes, cycle(7));
+    expect(recordFinished).not.toHaveBeenCalled();
+    for (const each of quotes) consumer.onQuote!(each, cycle(8));
+    await consumer.onCycleComplete!(quotes, cycle(8));
+    expect(recordFinished).toHaveBeenCalledTimes(1);
+    expect(recordFinished.mock.calls[0]![0]).toMatchObject([{ tickerId: "t1", cycleNumber: 8 }]);
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("option quote band write failed — connection lost"));
+    consoleError.mockRestore();
+  });
+
+  it("leaves a failed last batch for the loop to report, and records nothing", async () => {
+    const recordFinished = vi.fn(async (_writes: OptionQuoteBandCycleWrite[]) => {});
+    const consumer = consumerWith(async () => Promise.reject(new Error("connection lost")), recordFinished);
+    const quotes = [quote("t1", 60)];
+    consumer.onQuote!(quotes[0]!, cycle(7));
+    await expect(consumer.onCycleComplete!(quotes, cycle(7))).rejects.toThrow("connection lost");
+    expect(recordFinished).not.toHaveBeenCalled();
   });
 });

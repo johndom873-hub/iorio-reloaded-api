@@ -13,7 +13,7 @@ const harness = vi.hoisted(() => ({
   watchOk: true,
   insideWindow: true,
   connected: true,
-  quoteStamps: [] as { symbol: string; expiry: string; strike: number; right: string; quotedAtMs: number }[],
+  finishedCycles: [] as { symbol: string; finishedAtMs: number }[],
 }));
 
 vi.mock("../db/connection.js", () => {
@@ -84,7 +84,7 @@ vi.mock("./stateStore.js", () => ({
 }));
 vi.mock("./bandQuoteWatermark.js", async () => {
   const actual = await vi.importActual<typeof import("./bandQuoteWatermark.js")>("./bandQuoteWatermark.js");
-  return { ...actual, loadTodaysBandQuoteStamps: async () => harness.quoteStamps, hasTodaysBandQuotes: async () => harness.bandQuotesIn };
+  return { ...actual, loadTodaysFinishedBandCycles: async () => harness.finishedCycles, hasTodaysBandQuotes: async () => harness.bandQuotesIn };
 });
 vi.mock("./systemChecks.js", () => ({ isInsideTradingWindow: () => harness.insideWindow }));
 
@@ -111,7 +111,7 @@ beforeEach(() => {
   harness.watchOk = true;
   harness.insideWindow = true;
   harness.connected = true;
-  harness.quoteStamps = [];
+  harness.finishedCycles = [];
 });
 
 afterEach(() => {
@@ -265,20 +265,20 @@ describe("PlutoAgent forced-round retry and failure alert (audit A)", () => {
     expect(harness.telegrams.filter((message) => message.includes("completing again"))).toHaveLength(1);
   });
 
-  it("a Day Signals round that failed still remembers the quotes it was given (deliberate)", async () => {
+  it("a band round that failed still remembers the finished cycle it was given (deliberate)", async () => {
     const agent = makeAgent();
     agent.watching = true;
-    harness.quoteStamps = [{ symbol: "AAA", expiry: "2026-10-16", strike: 30, right: "C", quotedAtMs: etInstant("10:05").getTime() }];
+    harness.finishedCycles = [{ symbol: "AAA", finishedAtMs: etInstant("10:05").getTime() }];
     harness.passScript.push(new Error("boom"));
     await agent.loopIteration();
     await agent.loopIteration();
     expect(harness.passRequests).toHaveLength(1);
   });
 
-  it("Day Signals rounds are never held-positions-only, even before the opening look", async () => {
+  it("band rounds are never held-positions-only, even before the opening look", async () => {
     const agent = makeAgent();
     agent.watching = true;
-    harness.quoteStamps = [{ symbol: "AAA", expiry: "2026-10-16", strike: 30, right: "C", quotedAtMs: etInstant("10:05").getTime() }];
+    harness.finishedCycles = [{ symbol: "AAA", finishedAtMs: etInstant("10:05").getTime() }];
     await agent.loopIteration();
     expect(harness.passRequests[0]).toMatchObject({ trigger: "band_quotes_update", force: false });
     expect(harness.passRequests[0]!.heldPositionsOnly).toBeUndefined();
@@ -309,7 +309,7 @@ describe("PlutoAgent window, analysis and connection events", () => {
     expect(agent.watching).toBe(true);
     vi.setSystemTime(etInstant("15:30"));
     harness.insideWindow = false;
-    harness.quoteStamps = [{ symbol: "AAA", expiry: "2026-10-16", strike: 30, right: "C", quotedAtMs: etInstant("15:29").getTime() }];
+    harness.finishedCycles = [{ symbol: "AAA", finishedAtMs: etInstant("15:29").getTime() }];
     await agent.loopIteration();
     expect(harness.passRequests).toHaveLength(0);
     expect(agent.watching).toBe(false);

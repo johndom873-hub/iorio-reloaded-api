@@ -130,7 +130,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
         : planned === 0
           ? `no order planned (${looked} ticker(s) looked at${notes.length > 0 ? `; ${notes.join("; ")}` : ""})`
           : `none of the ${planned} planned order(s) was sent${notes.length > 0 ? ` (${notes.join("; ")})` : ""}`;
-  await finishPass({ candidateCount: planned, systemChecks: checks.checks, skippedReason });
+  await finishPass({ candidateCount: planned, systemChecks: checks.checks, skippedReason, notes });
   if (skippedReason) await recordPlutoEvent("pass_skipped", { passId, trigger: request.trigger, reason: skippedReason });
   await recordPlutoPass();
   return { passId, skippedReason, outcome: sent > 0 ? "trade" : null };

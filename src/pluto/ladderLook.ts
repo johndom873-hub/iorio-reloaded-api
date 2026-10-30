@@ -5,7 +5,7 @@ import { describePriceAdjustment } from "../ibkr/dailyBarSplitCheck.js";
 import { daysToExpiry } from "../lib/optionContractLabel.js";
 import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { splitSuggestedByPrice } from "../lib/stockSplits.js";
-import type { OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
+import type { OptionQuoteBandCycle, OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
 import type { LadderClock } from "./optionQuoteBandPlan.js";
 import { nextLadderCycleMemory, type LadderCycleMemory } from "./ladderCycleMemory.js";
 import { createLadderLookBook, type LadderLookSnapshot, type PlannedLadderSale } from "./ladderLookBook.js";
@@ -19,9 +19,9 @@ import type { LadderBaselineSettings } from "./ladderSettings.js";
 //              (a split IBKR's history does not show yet, or a fall that size: either way a person looks)
 //   2. memory  the cycle's start, starting account value and shock (ladderCycleMemory.ts)
 //   3. sales   the shared steps: calls on free shares, the entry (a Cash-Secured Put or a Covered Call, whichever ranks
-//              higher), ladder Puts; quotes are the option quote band's from the market quote loop's latest cycle on the ticker,
-//              priced at the mid (the ladder orders at the mid). A band quote older than Pluto's maxQuoteAgeMinutes is
-//              left out; when the latest cycle has none fresher, nothing is planned on the ticker.
+//              higher), ladder Puts; quotes are the option quote band's from the market quote loop's newest finished cycle
+//              on the ticker on, priced at the mid (the ladder orders at the mid). A band quote older than Pluto's
+//              maxQuoteAgeMinutes is left out; when none of those is fresher, nothing is planned on the ticker.
 
 export interface LadderLookInput {
   symbol: string;
@@ -37,6 +37,8 @@ export interface LadderLookInput {
   book: LadderLookSnapshot;
   /** The ticker's band quotes today (latest per contract). */
   bandQuotes: readonly OptionQuoteBandQuote[];
+  /** The ticker's newest finished band cycle today, the quotes read from its start on; null before its first one. */
+  bandCycle: OptionQuoteBandCycle | null;
   /** Pluto's 10:00 forwards by expiry. */
   forwardAnchors: ReadonlyMap<string, BaselineForwardAnchor>;
   /** The previous session's volume per contractKey; null when it was not captured (nothing can be sold). */
@@ -62,12 +64,13 @@ export interface LadderLookResult {
 }
 
 /**
- * The band quotes of the loop's latest cycle on the ticker, as the sale steps take quotes (an older quote may have left
- * the band), without those quoted more than maxQuoteAgeMinutes before `now`. `stale`: the latest cycle had quotes, none of them fresh.
+ * The ticker's band quotes from its newest finished cycle on, as the sale steps take quotes: that cycle whole, with any
+ * fresher quote of the cycle being stored (a quote from before it may have left the band), without those quoted more than
+ * maxQuoteAgeMinutes before `now`. `stale`: there were such quotes, none of them fresh. None before the first cycle finishes.
  */
-export function latestCycleQuotes(bandQuotes: readonly OptionQuoteBandQuote[], now: Date, maxQuoteAgeMinutes: number): { quotes: SymbolFileQuote[]; stale: boolean } {
-  const latestCycle = bandQuotes.reduce((latest, quote) => Math.max(latest, quote.cycleNumber), -1);
-  const latest = bandQuotes.filter((quote) => quote.cycleNumber === latestCycle && quote.errorCode === null);
+export function latestCycleQuotes(bandQuotes: readonly OptionQuoteBandQuote[], bandCycle: Pick<OptionQuoteBandCycle, "startedAt"> | null, now: Date, maxQuoteAgeMinutes: number): { quotes: SymbolFileQuote[]; stale: boolean } {
+  if (bandCycle === null) return { quotes: [], stale: false };
+  const latest = bandQuotes.filter((quote) => quote.quotedAt.getTime() >= bandCycle.startedAt.getTime() && quote.errorCode === null);
   const fresh = latest.filter((quote) => now.getTime() - quote.quotedAt.getTime() <= maxQuoteAgeMinutes * 60_000);
   return { quotes: fresh.map((quote) => ({ expiry: quote.expiry, strike: quote.strike, right: quote.right, bid: quote.bid, ask: quote.ask, bidSize: null, askSize: null })), stale: latest.length > 0 && fresh.length === 0 };
 }
@@ -82,7 +85,7 @@ export function runLadderLook(input: LadderLookInput): LadderLookResult {
   const cycleOpen = sharesHeld || input.book.positions.some((position) => position.status === "open" && position.legs.some((leg) => leg.exitAt === null));
   const memory = nextLadderCycleMemory(input.memory, { cycleOpen, sharesHeld, accountValue: input.book.accountValue, todayIso: input.clock.todayIso, shockPctIfStartingToday: input.shockPctIfStartingToday });
   const baseline: BacktestBaselineSettings = { ...defaultBacktestBaselineSettings, ...input.baseline };
-  const { quotes, stale } = latestCycleQuotes(input.bandQuotes, input.now, input.maxQuoteAgeMinutes);
+  const { quotes, stale } = latestCycleQuotes(input.bandQuotes, input.bandCycle, input.now, input.maxQuoteAgeMinutes);
   if (stale) return { stoppedBecause: null, memory, planned: [], notes: [`${input.symbol}: the band's latest quotes are older than ${input.maxQuoteAgeMinutes} minutes, so nothing is planned`], cannotTradeBecause: "stale_band_quotes" };
   const forwardAnchors = new Map(input.forwardAnchors);
   const yearsToTodaysClose = yearsToSessionClose(input.now, input.clock.closeMinutesEt);

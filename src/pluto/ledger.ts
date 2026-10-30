@@ -8,7 +8,7 @@ import { ensurePlutoSettingsVersion } from "./settingsVersions.js";
 // routes read.
 
 /**
- * What started an analysis round: new option quote band quotes (band_quotes_update), or, without a new quote, the day's first
+ * What started an analysis round: a finished cycle of option quote band quotes (band_quotes_update), or, without one, the day's first
  * analysis, a settings change, an order ending, a ticker's cooldown ending, a position closing. Rounds stored before
  * Signals was retired (2026-10-27) may carry day_signals_update, grade_crossing or held_leg.
  */
@@ -43,6 +43,8 @@ export interface FinishPlutoPassInput {
   systemChecks?: Record<string, PlutoSystemCheck>;
   /** Null for a round that sent an order; it also replaces an "abandoned" label the sweep may have written meanwhile. */
   skippedReason?: string | null;
+  /** What the strategies' rounds said, "SYMBOL: note" in order, whether or not they sent an order. */
+  notes?: string[];
 }
 
 export async function finishPlutoPass(passId: string, input: FinishPlutoPassInput): Promise<void> {
@@ -53,6 +55,7 @@ export async function finishPlutoPass(passId: string, input: FinishPlutoPassInpu
       ...(input.candidateCount !== undefined ? { candidate_count: input.candidateCount } : {}),
       ...(input.systemChecks !== undefined ? { system_checks: JSON.stringify(input.systemChecks) } : {}),
       ...(input.skippedReason !== undefined ? { skipped_reason: input.skippedReason } : {}),
+      ...(input.notes !== undefined ? { notes: JSON.stringify(input.notes) } : {}),
     });
 }
 

@@ -11,8 +11,9 @@ vi.mock("../db/connection.js", async () => {
 
 const { db } = await import("../db/connection.js");
 const { dropIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
-const { loadOptionQuoteBandQuotes, upsertOptionQuoteBandQuotes } = await import("./optionQuoteBandQuotes.js");
+const { loadFinishedOptionQuoteBandCycle, loadOptionQuoteBandQuotes, recordFinishedOptionQuoteBandCycles, upsertOptionQuoteBandQuotes } = await import("./optionQuoteBandQuotes.js");
 const { defaultOptionQuoteBandPlannerDependencies } = await import("./optionQuoteBandPlanLoader.js");
+const { hasTodaysBandQuotes, loadTodaysFinishedBandCycles } = await import("./bandQuoteWatermark.js");
 const testDb: Knex = db;
 
 const tickerId = randomUUID();
@@ -57,5 +58,51 @@ describe("the option quote band's tables", () => {
     ]);
     expect(await defaultOptionQuoteBandPlannerDependencies.loadPreviousSessionVolume(tickerId, "2026-10-19")).toEqual(new Map([["2026-11-20|90|P", 120]]));
     expect(await defaultOptionQuoteBandPlannerDependencies.loadPreviousSessionVolume(tickerId, todayIso)).toEqual(new Map([["2026-11-20|90|P", 300]]));
+  });
+});
+
+describe("the band's finished cycles", () => {
+  const cycleTickerId = randomUUID();
+  const at = new Date("2026-10-20T15:10:00Z");
+  const cycle = (cycleNumber: number, startedAtIso: string) => ({ tickerId: cycleTickerId, tradingDateIso: todayIso, cycleNumber, startedAt: new Date(startedAtIso), finishedAt: new Date(new Date(startedAtIso).getTime() + 40_000) });
+
+  beforeAll(async () => {
+    await testDb("tickers").insert({ id: cycleTickerId, symbol: "CYCL", company_name: "Cycle Co" });
+    await testDb("shortlist_entries").insert({ ticker_id: cycleTickerId, added_by_user_id: randomUUID(), bot_enabled: true });
+  });
+
+  it("keeps each ticker's newest finished cycle of the day: an older one never replaces it, a restart's lower number does", async () => {
+    await recordFinishedOptionQuoteBandCycles([cycle(5, "2026-10-20T15:00:00Z")]);
+    await recordFinishedOptionQuoteBandCycles([cycle(6, "2026-10-20T15:00:40Z")]);
+    expect(await loadFinishedOptionQuoteBandCycle(cycleTickerId, todayIso)).toMatchObject({ cycleNumber: 6, startedAt: new Date("2026-10-20T15:00:40Z") });
+    // A process that began its cycle earlier finishing it later (two web dynos overlap during a release).
+    await recordFinishedOptionQuoteBandCycles([cycle(4, "2026-10-20T14:59:20Z")]);
+    expect((await loadFinishedOptionQuoteBandCycle(cycleTickerId, todayIso))!.cycleNumber).toBe(6);
+    // After a restart the loop counts from 1 again, later.
+    await recordFinishedOptionQuoteBandCycles([cycle(1, "2026-10-20T15:05:00Z")]);
+    expect(await loadFinishedOptionQuoteBandCycle(cycleTickerId, todayIso)).toEqual({ cycleNumber: 1, startedAt: new Date("2026-10-20T15:05:00Z"), finishedAt: new Date("2026-10-20T15:05:40Z") });
+    expect(await loadFinishedOptionQuoteBandCycle(cycleTickerId, "2026-10-19")).toBeNull();
+  });
+
+  it("starts Pluto's rounds and the opening look: today's finished cycle, with an error-free quote of it for the data to be in", async () => {
+    expect(await loadTodaysFinishedBandCycles(at)).toEqual([{ symbol: "CYCL", finishedAtMs: new Date("2026-10-20T15:05:40Z").getTime() }]);
+    const quote = { tickerId: cycleTickerId, tradingDateIso: todayIso, expiry: "2026-11-20", strike: 50, right: "C" as const, bid: 1, ask: 1.1, stockPrice: 49, errorCode: null, quotedAt: new Date("2026-10-20T15:04:00Z"), cycleNumber: 300 };
+    // Only a quote from before the finished cycle: not in.
+    await upsertOptionQuoteBandQuotes([quote]);
+    expect(await hasTodaysBandQuotes(at)).toBe(false);
+    // The same contract re-quoted in the cycle with an error: still not in.
+    await upsertOptionQuoteBandQuotes([{ ...quote, errorCode: 200, quotedAt: new Date("2026-10-20T15:05:10Z"), cycleNumber: 1 }]);
+    expect(await hasTodaysBandQuotes(at)).toBe(false);
+    await upsertOptionQuoteBandQuotes([{ ...quote, strike: 55, quotedAt: new Date("2026-10-20T15:05:12Z"), cycleNumber: 1 }]);
+    expect(await hasTodaysBandQuotes(at)).toBe(true);
+    // The next day has neither yet.
+    expect(await loadTodaysFinishedBandCycles(new Date("2026-10-21T15:00:00Z"))).toEqual([]);
+    expect(await hasTodaysBandQuotes(new Date("2026-10-21T15:00:00Z"))).toBe(false);
+  });
+
+  it("leaves out a ticker Pluto may not trade", async () => {
+    await testDb("shortlist_entries").where({ ticker_id: cycleTickerId }).update({ bot_enabled: false });
+    expect(await loadTodaysFinishedBandCycles(at)).toEqual([]);
+    expect(await hasTodaysBandQuotes(at)).toBe(false);
   });
 });

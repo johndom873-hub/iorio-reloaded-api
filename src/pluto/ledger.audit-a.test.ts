@@ -67,3 +67,14 @@ describe("closeAbandonedPlutoPasses + finishPlutoPass (audit A)", () => {
     expect(row.skipped_reason).toBeNull();
   });
 });
+
+describe("finishPlutoPass: the rounds' notes (2026-10-30)", () => {
+  it("stores every round's notes on its pass, a pass that sent an order included; none when the pass stopped before the rounds", async () => {
+    const sent = await insertUnfinishedPass(new Date());
+    await finishPlutoPass(sent, { candidateCount: 1, skippedReason: null, notes: ["AAA: no Put is due", "BBB: no cycle opened: a lot costs $39,431, more than half the pot ($36,907)"] });
+    expect((await db("pluto_passes").where({ id: sent }).first("notes")).notes).toEqual(["AAA: no Put is due", "BBB: no cycle opened: a lot costs $39,431, more than half the pot ($36,907)"]);
+    const stoppedEarly = await insertUnfinishedPass(new Date());
+    await finishPlutoPass(stoppedEarly, { skippedReason: "no net liquidation value for the strategies' pots" });
+    expect((await db("pluto_passes").where({ id: stoppedEarly }).first("notes")).notes).toBeNull();
+  });
+});

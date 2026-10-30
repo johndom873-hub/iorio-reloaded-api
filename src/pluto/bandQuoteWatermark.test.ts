@@ -1,24 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { contractKey, findNewlyQuotedContracts, rememberAnalysed, type BandQuoteStamp } from "./bandQuoteWatermark.js";
+import { findNewlyFinishedBandCycles, rememberAnalysed, type FinishedBandCycleStamp } from "./bandQuoteWatermark.js";
 
-const stamp = (symbol: string, strike: number, quotedAtMs: number, right = "P"): BandQuoteStamp => ({ symbol, expiry: "2026-10-17", strike, right, quotedAtMs });
+const stamp = (symbol: string, finishedAtMs: number): FinishedBandCycleStamp => ({ symbol, finishedAtMs });
 
-describe("findNewlyQuotedContracts", () => {
-  it("treats every contract as new the first time", () => {
-    const result = findNewlyQuotedContracts([stamp("HOOD", 24, 1000), stamp("HOOD", 25, 1000), stamp("MU", 100, 1000)], new Map());
-    expect(result).toMatchObject({ symbols: ["HOOD", "MU"], contractCount: 3 });
+describe("findNewlyFinishedBandCycles", () => {
+  it("treats every ticker's finished cycle as new the first time", () => {
+    const result = findNewlyFinishedBandCycles([stamp("MU", 1000), stamp("HOOD", 1000)], new Map());
+    expect(result).toEqual({ symbols: ["HOOD", "MU"], stamps: [stamp("MU", 1000), stamp("HOOD", 1000)] });
   });
 
-  it("never returns a contract whose quote was already analysed, and tracks each contract's own timestamp", () => {
+  it("analyses a ticker again only once a newer cycle has finished on it", () => {
     const seen = new Map<string, number>();
-    rememberAnalysed([stamp("HOOD", 24, 1000), stamp("HOOD", 25, 1000), stamp("MU", 100, 1000)], seen);
-    const result = findNewlyQuotedContracts([stamp("HOOD", 24, 1000), stamp("HOOD", 25, 2000), stamp("MU", 100, 1000)], seen);
-    expect(result.symbols).toEqual(["HOOD"]);
-    expect(result.stamps).toEqual([stamp("HOOD", 25, 2000)]);
-    expect(findNewlyQuotedContracts([stamp("HOOD", 24, 1000), stamp("MU", 100, 1000)], seen).contractCount).toBe(0);
-  });
-
-  it("a put and a call at the same strike are separate quotes", () => {
-    expect(contractKey(stamp("HOOD", 24, 1, "P"))).not.toBe(contractKey(stamp("HOOD", 24, 1, "C")));
+    rememberAnalysed([stamp("HOOD", 1000), stamp("MU", 1000)], seen);
+    const result = findNewlyFinishedBandCycles([stamp("HOOD", 2000), stamp("MU", 1000)], seen);
+    expect(result).toEqual({ symbols: ["HOOD"], stamps: [stamp("HOOD", 2000)] });
+    expect(findNewlyFinishedBandCycles([stamp("HOOD", 1000), stamp("MU", 1000)], seen).symbols).toEqual([]);
   });
 });

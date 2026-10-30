@@ -107,6 +107,13 @@ describe("runPlutoPass", () => {
     expect(ledger.finishPlutoPass).toHaveBeenCalledWith("pass-1", expect.objectContaining({ candidateCount: 1 }));
   });
 
+  it("keeps every round's notes on the pass, the ladder's first, a pass that sent an order included", async () => {
+    harness.ladderOutcome = { looked: ["AAA"], planned: 0, outcomes: [], notes: ["AAA: no Put is due"] };
+    harness.volFarmerV2Outcome = { looked: ["BBB", "CCC"], planned: 1, sent: 1, notes: ["CCC: no cycle opened: a lot costs $39,431, more than half the pot ($36,907)"] };
+    await runPlutoPass(round([]), context);
+    expect(ledger.finishPlutoPass).toHaveBeenCalledWith("pass-1", expect.objectContaining({ skippedReason: null, notes: ["AAA: no Put is due", "CCC: no cycle opened: a lot costs $39,431, more than half the pot ($36,907)"] }));
+  });
+
   it("stops the ladder at the SPY stress level, and runs Vol Farmer v2 stressed (its LEAPS sales only)", async () => {
     harness.spyDayChangePct = -4.9;
     await runPlutoPass(round(["AAA"]), context);
