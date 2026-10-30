@@ -301,7 +301,7 @@ async function lookAtTicker(context: { input: VolFarmerV2RoundInput; ticker: Plu
     optionCommissionDollars: round.optionCommissionDollars,
     stockCommissionDollars: round.stockCommissionDollars,
   };
-  lastRound.figures = { potDollars, committedDollars: tickerExposure + inFlight.tickerNotional, freeCashDollars: snapshot.freeCash, leapsCapDollars: (potDollars * settings.volFarmerV2LeapsMaxAllocationPct) / 100 };
+  lastRound.figures = { potDollars, committedDollars: tickerExposure + inFlight.tickerNotional, freeCashDollars: snapshot.freeCash, leapsCapDollars: (potDollars * settings.volFarmerV2LeapsMaxAllocationPct) / 100, putsDollars: (potDollars * (100 - settings.volFarmerV2FirstPositionPct)) / 100 };
   const listedExpiries = chain.expirations
     .map((expiry) => `${expiry.slice(0, 4)}-${expiry.slice(4, 6)}-${expiry.slice(6, 8)}`)
     .filter((expiry) => expiry >= clock.todayIso)

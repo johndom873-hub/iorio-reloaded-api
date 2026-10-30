@@ -17,7 +17,7 @@ export async function loadVolFarmerV2Memory(tickerId: string, connection: Knex =
 
 /** Saves the memory; the cash check the backtest's note reads is left out (it only grows). `adopted`: the first save of holdings v2 adopted. */
 export async function saveVolFarmerV2Memory(tickerId: string, memory: VolFarmerV2Memory, adopted: boolean, connection: Knex = db): Promise<void> {
-  const stored: VolFarmerV2Memory = { ...memory, state: { ...memory.state, cash: { cycles: 0, firstHalfLeft: [], secondHalfLeft: [], leapsTriggers: [] }, leapsTrigger: null } };
+  const stored: VolFarmerV2Memory = { ...memory, state: { ...memory.state, cash: { cycles: 0, firstPositionCashLeft: [], putsCashLeft: [], leapsTriggers: [] }, leapsTrigger: null } };
   const row = { ticker_id: tickerId, memory: JSON.stringify(stored), updated_at: connection.fn.now(), ...(adopted ? { adopted_at: connection.fn.now() } : {}) };
   await connection("pluto_vol_farmer_v2_cycles").insert(row).onConflict("ticker_id").merge();
 }
@@ -32,6 +32,8 @@ export interface VolFarmerV2RoundFigures {
   freeCashDollars: number;
   /** The most a LEAPS purchase spends: v2's LEAPS cap, % of the pot. */
   leapsCapDollars: number;
+  /** What the Puts sell on: the pot less the First position's share (rounds before 2026-10-30 lack it: half the pot). */
+  putsDollars?: number;
 }
 
 /** A round's notes on a ticker and its figures (null: it stopped before reading the book); a ticker not adopted yet gets a row with no memory. */

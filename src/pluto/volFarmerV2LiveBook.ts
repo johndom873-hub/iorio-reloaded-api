@@ -34,6 +34,7 @@ export function volFarmerV2RulesOf(settings: PlutoSettings): { farmer: Pick<Back
   return {
     farmer: { callMinAbsDelta: settings.volFarmerV2CallMinAbsDelta, callMaxAbsDelta: settings.volFarmerV2CallMaxAbsDelta, maxSpreadPctOfMid: settings.volFarmerV2MaxSpreadPctOfMid },
     v2: {
+      firstPositionPct: settings.volFarmerV2FirstPositionPct,
       putsStartCallYieldPct: settings.volFarmerV2PutsStartCallYieldPct,
       putMaxAbsDelta: settings.volFarmerV2PutMaxAbsDelta,
       stepBelowFirstBreakEvenPct: settings.volFarmerV2StepBelowFirstBreakEvenPct,

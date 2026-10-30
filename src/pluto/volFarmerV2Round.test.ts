@@ -139,7 +139,7 @@ const v2Ticker = (symbol: string) => ({ tickerId: `t-${symbol}`, symbol, strateg
  */
 function withLeapsDue(tickerId: string): void {
   const position = (shares: number, costPerShare: number) => ({ shares, costPerShare, premiums: [], calls: [], puts: [] });
-  harness.memory.set(tickerId, { state: { potDollars: 250_000, first: position(200, 100), second: position(200, 130), leaps: null, leapsBought: false, leapsToSell: false, leapsTrigger: null, cash: { cycles: 1, firstHalfLeft: [], secondHalfLeft: [], leapsTriggers: [] } }, pending: [] });
+  harness.memory.set(tickerId, { state: { potDollars: 250_000, first: position(200, 100), second: position(200, 130), leaps: null, leapsBought: false, leapsToSell: false, leapsTrigger: null, cash: { cycles: 1, firstPositionCashLeft: [], putsCashLeft: [], leapsTriggers: [] } }, pending: [] });
   const stockLeg = (id: string) => ({ id, legType: "stock", side: "long", quantity: 200, optionType: null, strikePrice: null, expiryDate: null, multiplier: 1, entryPrice: 100, entryAt: new Date(), exitPrice: null, exitAt: null });
   harness.positionsByTickerId.set(tickerId, [{ strategyKey: "covered_call", status: "open", legs: [stockLeg(`${tickerId}-s1`), stockLeg(`${tickerId}-s2`)] }]);
   harness.chain = { expirations: ["20271217"], strikesByExpiry: new Map([["20271217", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
@@ -189,8 +189,8 @@ describe("runVolFarmerV2Round", () => {
     expect(memory.pending).toEqual([expect.objectContaining({ ref: "action:action-1", kind: "covered_call", contracts: 12, startsCycle: true })]);
     expect(memory.state.first).toMatchObject({ shares: 1_200, calls: [{ legId: "action:action-1", shares: 1_200 }] });
     expect(summary.sent).toBe(1);
-    // Pot $250,000; committed: the exposure, 30,000; free cash: the budget's $500,000 at most the account's $400,000; LEAPS cap 10% of the pot.
-    expect(harness.lastRounds.get("t-VFT")).toEqual({ notes: [expect.stringContaining("VFT Sell $105 Call")], figures: { potDollars: 250_000, committedDollars: 30_000, freeCashDollars: 400_000, leapsCapDollars: 25_000 } });
+    // Pot $250,000; committed: the exposure, 30,000; free cash: the budget's $500,000 at most the account's $400,000; LEAPS cap 10% of the pot; the Puts' half, 125,000.
+    expect(harness.lastRounds.get("t-VFT")).toEqual({ notes: [expect.stringContaining("VFT Sell $105 Call")], figures: { potDollars: 250_000, committedDollars: 30_000, freeCashDollars: 400_000, leapsCapDollars: 25_000, putsDollars: 125_000 } });
     expect(harness.lastRounds.has("t-LAD")).toBe(false);
   });
 

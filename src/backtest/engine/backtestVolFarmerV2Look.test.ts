@@ -212,6 +212,19 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(assigned.actions.some((action) => action.kind === "open_cash_secured_put")).toBe(false);
   });
 
+  it("buys the first position with the First position share of the pot and sells Puts on the rest", async () => {
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    // 70% of $100,000: 6 lots at 100 ($60,000 and commission; a seventh would pass $70,000).
+    const opened = await look(ledger, "2026-03-09", 100, "2026-03-13", { firstPositionPct: 70 });
+    expect(opened.actions[0]!.description).toContain("with 600 shares bought @ 100.00");
+    settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
+    const afterFall = await look(ledger, "2026-03-16", 80, "2026-03-20", { firstPositionPct: 70 });
+    const put = afterFall.actions.find((action) => action.kind === "open_cash_secured_put")!;
+    // The rest, 30% of the pot, secures floor(30,000 ÷ (strike × 100)) contracts.
+    expect(put.quantity).toBe(Math.floor(30_000 / (put.contract!.strike! * 100)));
+    expect(put.chosenBecause).toContain("on 30% of the pot");
+  });
+
   it("takes the Step from the previous session's IV at each Put sale, and sells no Put without it", async () => {
     // IV 30% on Friday 6 March, before the cycle opens on Monday 9 March; 90% on Friday 13 March, before the Put on Monday 16 March.
     const bars = barsWithImpliedVolatility([["2026-03-06", 0.3], ["2026-03-13", 0.9]]);

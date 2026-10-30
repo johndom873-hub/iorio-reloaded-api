@@ -344,15 +344,22 @@ export const defaultBacktestVolFarmerSettings: BacktestVolFarmerSettings = { cal
 
 /**
  * Vol Farmer v2 (decision maker "vol_farmer_v2", Marcelo 2026-10-27; research): two Covered Calls at different price
- * levels, no hedge Put. The first position buys shares with half the pot and sells Calls at or above its break-even (what
- * the shares cost less its Calls' premiums). While the best of those Calls yields under putsStartCallYieldPct a year,
- * Puts are sold with the other half, struck at least stepBelowFirstBreakEvenPct (the Step) below that break-even; their shares,
+ * levels, no hedge Put. The first position buys shares with firstPositionPct of the pot and sells Calls at or above its
+ * break-even (what the shares cost less its Calls' premiums). While the best of those Calls yields under
+ * putsStartCallYieldPct a year, Puts are sold with the rest of the pot, struck at least stepBelowFirstBreakEvenPct (the
+ * Step) below that break-even; their shares,
  * once assigned, are the second position, with a break-even of its own (the strike less its Puts' and Calls' premiums).
  * Once the price is half a Step below the second position's break-even, the free cash buys a LEAPS Call, one a holding,
  * sold when the second position is called away (Marcelo 2026-10-28). Calls and Puts on the next listed expiry, held to
  * it; the Calls' |delta| range and the spread limit are the Vol Farmer's settings (backtestVolFarmerV2Look.ts).
  */
 export interface BacktestVolFarmerV2Settings {
+  /**
+   * First position (Marcelo 2026-10-30): the share of the ticker's pot, percent, its shares are bought with: whole lots,
+   * floor(pot × this ÷ 100 ÷ a lot's cost); the Puts sell on the rest, floor(pot × (100 − this) ÷ 100 ÷ (strike × 100))
+   * contracts. 50: the halves Vol Farmer v2 began with.
+   */
+  firstPositionPct: number;
   /** Puts start under: Puts are sold while the best Call the first position can sell yields under this, percent a year (no Call: 0%). */
   putsStartCallYieldPct: number;
   /** Put |delta|: the Puts' highest |delta|. */
@@ -406,7 +413,7 @@ export type VolFarmerV2StepRule = (typeof volFarmerV2StepRules)[number];
 export const volFarmerV2LooksChoices = ["first_look", "every_look"] as const;
 export type VolFarmerV2Looks = (typeof volFarmerV2LooksChoices)[number];
 
-export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 0 };
+export const defaultBacktestVolFarmerV2Settings: BacktestVolFarmerV2Settings = { firstPositionPct: 50, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 0 };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5), read by the retired rules

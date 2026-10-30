@@ -3,7 +3,7 @@ import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
 import { effectiveAllocationPctBySymbol, tickerPotShare } from "../../lib/tickerAllocation.js";
 import { openCandidateId } from "./candidateIds.js";
 import type { BacktestBarHistory } from "./backtestBarHistory.js";
-import type { BacktestAction, BacktestBreakEvenLevel, BacktestOrderShortfall, BacktestVolFarmerV2Settings } from "../backtestTypes.js";
+import { defaultBacktestVolFarmerV2Settings, type BacktestAction, type BacktestBreakEvenLevel, type BacktestOrderShortfall, type BacktestVolFarmerV2Settings } from "../backtestTypes.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { BacktestLookContext, BacktestLookResult, BacktestLookSymbol, BacktestOptionSale } from "./backtestLookTypes.js";
 import { markOfTwoSidedQuote } from "./backtestOptionMarks.js";
@@ -348,7 +348,7 @@ const median = (values: readonly number[]) => {
  * pot left unspent once sized (whole lots, whole contracts), and every LEAPS trigger: the free cash then against one
  * contract's cost, and what was bought.
  */
-export function describeVolFarmerV2Run(ledger: SimulatedLedger, symbols: readonly string[]): string | null {
+export function describeVolFarmerV2Run(ledger: SimulatedLedger, symbols: readonly string[], firstPositionPct = defaultBacktestVolFarmerV2Settings.firstPositionPct): string | null {
   const bySymbol = stateByLedger.get(ledger);
   if (!bySymbol) return null;
   const parts = symbols.flatMap((symbol) => {
@@ -363,7 +363,7 @@ export function describeVolFarmerV2Run(ledger: SimulatedLedger, symbols: readonl
       triggers.length === 0
         ? "no LEAPS trigger"
         : `${triggers.length} LEAPS trigger(s), ${bought.length} bought (${bought.map((trigger) => `${trigger.contracts}× on ${trigger.boughtOn}`).join(", ") || "none"})${unaffordable.length === 0 ? "" : `, ${unaffordable.length} never affordable (first: free cash ${formatWholeDollars(unaffordable[0]!.freeCash)} on ${unaffordable[0]!.dateIso}, a contract ${formatWholeDollars(unaffordable[0]!.contractCost!)})`}${heldBack === undefined ? "" : `, ${heldBack.count} look(s) at which the account's free cash held it below its cap (first on ${heldBack.firstDateIso})`}`;
-    return [`${symbols.length > 1 ? `${symbol}: ` : ""}${cash.cycles} cycle(s); unspent once sized: first half ${left(cash.firstHalfLeft)}, second half ${left(cash.secondHalfLeft)}; ${leapsPart}`];
+    return [`${symbols.length > 1 ? `${symbol}: ` : ""}${cash.cycles} cycle(s); unspent once sized: ${firstPositionPct === 50 ? "first half" : "first position"} ${left(cash.firstPositionCashLeft)}, ${firstPositionPct === 50 ? "second half" : "Puts"} ${left(cash.putsCashLeft)}; ${leapsPart}`];
   });
   return parts.length === 0 ? null : `Vol Farmer v2 cash: ${parts.join(" · ")}.`;
 }

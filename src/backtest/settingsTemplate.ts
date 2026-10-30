@@ -189,8 +189,9 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
       { value: "none", label: "None" },
     ],
   },
-  { path: "volFarmerV2.putsStartCallYieldPct", label: "Puts start under", unit: "percent", editable: true, note: "% a year: Puts start while the first position's Calls yield under this. At each look where the first position needs a new Call (none open), the best Call the first position can sell (at or above its break-even, the Vol Farmer's |delta| range, the next expiry) is measured by its premium yield; under this (no Call: 0%), Puts are sold with the other half of the pot, beside the Calls" },
-  { path: "volFarmerV2.putMaxAbsDelta", label: "Put |delta|", unit: "number", editable: true, note: "the Puts' highest |delta|: the Put sold is the one with the highest premium yield of the next expiry up to this |delta|, struck far enough below the first position's break-even (next row); as many contracts as half the pot secures (strike × 100 each)" },
+  { path: "volFarmerV2.firstPositionPct", label: "First position", unit: "percent", editable: true, note: "% of the ticker's pot the first position's shares are bought with, in whole lots; the Puts sell on the rest. Pot $150,000 at 70%: shares at $50 buy 21 lots ($105,000), and Puts struck at $40 sell floor($45,000 ÷ $4,000) = 11 contracts (10 to 90)" },
+  { path: "volFarmerV2.putsStartCallYieldPct", label: "Puts start under", unit: "percent", editable: true, note: "% a year: Puts start while the first position's Calls yield under this. At each look where the first position needs a new Call (none open), the best Call the first position can sell (at or above its break-even, the Vol Farmer's |delta| range, the next expiry) is measured by its premium yield; under this (no Call: 0%), Puts are sold with the rest of the pot (after the First position), beside the Calls" },
+  { path: "volFarmerV2.putMaxAbsDelta", label: "Put |delta|", unit: "number", editable: true, note: "the Puts' highest |delta|: the Put sold is the one with the highest premium yield of the next expiry up to this |delta|, struck far enough below the first position's break-even (next row); as many contracts as the rest of the pot secures (strike × 100 each)" },
   { path: "volFarmerV2.stepBelowFirstBreakEvenPct", label: "Step", unit: "percent", editable: true, note: "% at least below the first break-even: a Put's strike ≤ the first position's break-even × (1 − this ÷ 100), so the second position opens lower than the first (0 to 90); the Step with the Fixed Step rule" },
   {
     path: "volFarmerV2.stepRule",
@@ -748,7 +749,7 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
   {
     group: "Vol Farmer v2",
     section: "vol_farmer_v2",
-    rows: [...volFarmerV2ReadsIt, "volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta", "volFarmerV2.leapsMaxAccountPct", "volFarmerV2.leapsSpreadCostChargedPct", "volFarmerV2.looks", "volFarmerV2.excessAllowancePct"].map((path) => ({
+    rows: [...volFarmerV2ReadsIt, "volFarmerV2.firstPositionPct", "volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta", "volFarmerV2.leapsMaxAccountPct", "volFarmerV2.leapsSpreadCostChargedPct", "volFarmerV2.looks", "volFarmerV2.excessAllowancePct"].map((path) => ({
       path,
       appliesWhen: volFarmerV2ReadsIt.has(path)
         ? { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer", "vol_farmer_v2"] }], explanation: "Applies only with Vol Farmer v2 (or the original Vol Farmer) as decision maker." }

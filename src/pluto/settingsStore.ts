@@ -60,6 +60,8 @@ export interface PlutoSettings {
   safetyMaxOrdersPerDay: number;
   // Vol Farmer v2 (the backtest's volFarmerV2 keys with a "volFarmerV2" prefix, and the Vol Farmer's Call keys it reads;
   // volFarmerV2Settings.ts maps them back). Set once from the lab's values of 2026-10-27; never synced with the lab.
+  /** % of the ticker's pot the first position's shares are bought with; the Puts sell on the rest (Marcelo 2026-10-30). */
+  volFarmerV2FirstPositionPct: number;
   volFarmerV2PutsStartCallYieldPct: number;
   volFarmerV2PutMaxAbsDelta: number;
   volFarmerV2StepBelowFirstBreakEvenPct: number;
@@ -112,6 +114,7 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   safetyMaxOpenPositions: { column: "safety_max_open_positions", kind: "integer", min: 1, max: 10000 },
   safetyMaxOrdersPerDay: { column: "safety_max_orders_per_day", kind: "integer", min: 1, max: 10000 },
   // Vol Farmer v2's bounds are the backtest's (validateVolFarmerV2Settings, validateVolFarmerSettings).
+  volFarmerV2FirstPositionPct: { column: "vol_farmer_v2_first_position_pct", kind: "number", min: 10, max: 90 },
   volFarmerV2PutsStartCallYieldPct: { column: "vol_farmer_v2_puts_start_call_yield_pct", kind: "number", min: 0, max: 500 },
   volFarmerV2PutMaxAbsDelta: { column: "vol_farmer_v2_put_max_abs_delta", kind: "number", min: 0.01, max: 0.99 },
   volFarmerV2StepBelowFirstBreakEvenPct: { column: "vol_farmer_v2_step_below_first_break_even_pct", kind: "number", min: 0, max: 90 },

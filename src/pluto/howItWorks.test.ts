@@ -45,7 +45,7 @@ describe("buildPlutoHowItWorks", () => {
   it("quotes Vol Farmer v2's settings and works its example with the strategy's own functions", () => {
     const { example, ...values } = buildPlutoHowItWorks(settings, figures).volFarmerV2;
     expect(values).toEqual({
-      callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, maxSpreadPctOfMid: 50, minimumBid: 0.05, maxVolumeSharePct: 20,
+      callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, maxSpreadPctOfMid: 50, minimumBid: 0.05, maxVolumeSharePct: 20, firstPositionPct: 50,
       putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepRule: "implied_move_at_put_sale", stepBelowFirstBreakEvenPct: 15,
       leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAllocationPct: 10,
     });
@@ -58,6 +58,11 @@ describe("buildPlutoHowItWorks", () => {
     expect(example.leapsEntryBelowSecondBreakEvenPct).toBeCloseTo(8.6603, 4);
     // The fixed Step rule quotes the fixed Step.
     expect(buildPlutoHowItWorks({ ...settings, volFarmerV2StepRule: "fixed" }, figures).volFarmerV2.example).toMatchObject({ stepPct: 15, putStrikeCap: 81.6, leapsEntryBelowSecondBreakEvenPct: 7.5 });
+  });
+
+  it("sizes Vol Farmer v2's first position with the First position share of the pot", () => {
+    // Pot 200,000 × 70% = 140,000: floor(140,000 ÷ 10,000.50) = 13 lots.
+    expect(buildPlutoHowItWorks({ ...settings, volFarmerV2FirstPositionPct: 70 }, figures).volFarmerV2).toMatchObject({ firstPositionPct: 70, example: { pot: 200_000, lots: 13 } });
   });
 
   it("follows the live settings: the example's pot, rungs and shock move with them", () => {

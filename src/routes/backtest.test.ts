@@ -227,7 +227,7 @@ describe("backtest routes", () => {
       ...Array(18).fill("baseline_wheel · Hedge"),
       ...Array(8).fill("steady_stake · Steady Stake"),
       ...Array(22).fill("vol_farmer · Original Vol Farmer (retired)"),
-      ...Array(13).fill("vol_farmer_v2 · Vol Farmer v2"),
+      ...Array(14).fill("vol_farmer_v2 · Vol Farmer v2"),
     ]);
     // Every row once, and every condition on a row that is there.
     const paths = template.rows.map((row) => row.path);

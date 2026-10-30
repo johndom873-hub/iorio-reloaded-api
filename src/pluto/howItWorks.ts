@@ -99,6 +99,8 @@ export interface PlutoHowItWorks {
     maxSpreadPctOfMid: number;
     minimumBid: number;
     maxVolumeSharePct: number;
+    /** % of the pot the first position's shares are bought with; the Puts sell on the rest. */
+    firstPositionPct: number;
     putsStartCallYieldPct: number;
     putMaxAbsDelta: number;
     stepRule: PlutoSettings["volFarmerV2StepRule"];
@@ -189,6 +191,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       maxSpreadPctOfMid: settings.volFarmerV2MaxSpreadPctOfMid,
       minimumBid: baselineMinimumBid,
       maxVolumeSharePct: percent(baselineMaxVolumeShare),
+      firstPositionPct: settings.volFarmerV2FirstPositionPct,
       putsStartCallYieldPct: settings.volFarmerV2PutsStartCallYieldPct,
       putMaxAbsDelta: settings.volFarmerV2PutMaxAbsDelta,
       stepRule: settings.volFarmerV2StepRule,
@@ -201,7 +204,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
         allocationPct: ladderExampleAllocationPct,
         pot,
         stockPrice: volFarmerV2ExampleStockPrice,
-        lots: Math.floor(pot / 2 / volFarmerV2LotCost + 1e-9),
+        lots: Math.floor((pot * settings.volFarmerV2FirstPositionPct) / 100 / volFarmerV2LotCost + 1e-9),
         firstBreakEven: volFarmerV2ExampleFirstBreakEven,
         impliedVolatilityPct: percent(volFarmerV2ExampleImpliedVolatility),
         stepPct: volFarmerV2Step,

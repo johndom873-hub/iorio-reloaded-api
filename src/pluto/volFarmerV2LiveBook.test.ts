@@ -69,7 +69,7 @@ describe("Vol Farmer v2's live rules", () => {
   it("are Pluto's v2 settings, at every look, the LEAPS cap a share of the ticker's pot", () => {
     const { farmer, v2 } = volFarmerV2RulesOf({ ...settings, excessAllowancePct: 20 });
     expect(farmer).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, maxSpreadPctOfMid: 50 });
-    expect(v2).toEqual({ putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 0, looks: "every_look", tickerAllocationPct: {}, excessAllowancePct: 20 });
+    expect(v2).toEqual({ firstPositionPct: 50, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 365, leapsAbsDelta: 0.7, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 0, looks: "every_look", tickerAllocationPct: {}, excessAllowancePct: 20 });
   });
 });
 

@@ -25,6 +25,7 @@ export const plutoLadderSettingsFixture = {
 
 // Vol Farmer v2's settings at their migration defaults (20261027900001, the lab's values of 2026-10-27).
 export const plutoVolFarmerV2SettingsFixture = {
+  volFarmerV2FirstPositionPct: 50,
   volFarmerV2PutsStartCallYieldPct: 5,
   volFarmerV2PutMaxAbsDelta: 0.3,
   volFarmerV2StepBelowFirstBreakEvenPct: 15,

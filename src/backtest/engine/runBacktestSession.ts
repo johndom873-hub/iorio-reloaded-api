@@ -1202,7 +1202,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     }
     const volFarmerCashNote = settings.decisionMaker === "vol_farmer" ? describeVolFarmerCash(ledger, symbols.map((entry) => entry.symbol)) : null;
     if (volFarmerCashNote !== null) sessionNotes.push(volFarmerCashNote);
-    const volFarmerV2Note = settings.decisionMaker === "vol_farmer_v2" ? describeVolFarmerV2Run(ledger, symbols.map((entry) => entry.symbol)) : null;
+    const volFarmerV2Note = settings.decisionMaker === "vol_farmer_v2" ? describeVolFarmerV2Run(ledger, symbols.map((entry) => entry.symbol), settings.volFarmerV2.firstPositionPct) : null;
     if (volFarmerV2Note !== null) sessionNotes.push(volFarmerV2Note);
     const bookRecords = buildBookRecords({ ledger, symbols, optionSales, actions, priceByLegId, lastSessionDateIso, calendar, noSaleRecords: { shortfalls, notes: noSaleNotes, noCandidates: noCandidateNotes } });
     // The book holds every share it sells (the ledger refuses anything else); the platform's cycle derivation reading it
