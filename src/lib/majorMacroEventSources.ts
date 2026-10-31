@@ -1,4 +1,5 @@
 import { requireEnvironmentVariable } from "../config/env.js";
+import { fredRequestHeaders } from "./fredApi.js";
 import { readFredJson, runWithRetries } from "./riskFreeRate.js";
 
 // Where the major US macro events come from (stored by macroEventCalendar.ts):
@@ -47,7 +48,7 @@ export async function fetchFredReleaseDates(releaseId: number, fromDateIso: stri
 
   const body = await runWithRetries(
     async () => {
-      const response = await fetch(url, { signal: AbortSignal.timeout(sourceRequestTimeoutMs) });
+      const response = await fetch(url, { headers: fredRequestHeaders, signal: AbortSignal.timeout(sourceRequestTimeoutMs) });
       if (!response.ok) throw new Error(`FRED release ${releaseId} responded ${response.status}`);
       return readFredJson<{ release_dates?: { date: string }[] }>(response);
     },

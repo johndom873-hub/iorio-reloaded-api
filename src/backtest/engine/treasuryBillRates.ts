@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { requireEnvironmentVariable } from "../../config/env.js";
 import { addCalendarDays } from "../../lib/calendarDays.js";
+import { fredRequestHeaders } from "../../lib/fredApi.js";
 
 // The 3-month Treasury bill rate for the backtest (docs/backtesting/FORMULAS.md, "Interest on idle cash"): FRED series
 // DTB3, daily, in percent. It is both the interest idle cash earns and the risk-free rate of the day's surface fit and
@@ -72,7 +73,7 @@ export async function fetchTreasuryBillSeriesFromFred(): Promise<TreasuryBillObs
   url.searchParams.set("observation_start", treasuryBillSeriesStartIso);
   url.searchParams.set("api_key", requireEnvironmentVariable("FRED_API_KEY"));
   url.searchParams.set("file_type", "json");
-  const response = await fetch(url, { signal: AbortSignal.timeout(fredRequestTimeoutMs) });
+  const response = await fetch(url, { headers: fredRequestHeaders, signal: AbortSignal.timeout(fredRequestTimeoutMs) });
   if (!response.ok) throw new Error(`FRED responded ${response.status} for ${treasuryBillSeriesId}`);
   const body = (await response.json()) as { observations?: { date: string; value: string }[] };
   const observations = parseFredObservations(body.observations ?? []);

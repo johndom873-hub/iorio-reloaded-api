@@ -93,6 +93,7 @@ describe("fetchFredReleaseDates", () => {
     expect(await fetchFredReleaseDates(10, "2026-10-07")).toEqual(["2026-10-14", "2026-11-10"]);
     const url = new URL(fetchMock.mock.calls[0]![0]);
     expect(url.origin + url.pathname).toBe("https://api.stlouisfed.org/fred/release/dates");
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ headers: { "User-Agent": "iorio-reloaded/1.0" } });
     expect(Object.fromEntries(url.searchParams)).toEqual({
       release_id: "10",
       realtime_start: "2026-10-07",

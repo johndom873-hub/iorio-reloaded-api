@@ -1,5 +1,6 @@
 import { db } from "../db/connection.js";
 import { requireEnvironmentVariable } from "../config/env.js";
+import { fredRequestHeaders } from "./fredApi.js";
 
 // Risk-free rate for the P(d2) success probability: FRED's TB3MS (3-month
 // T-bill, monthly), same series menaris-admin-api's saxo-service.js uses.
@@ -70,7 +71,7 @@ async function fetchAndStoreFromFred(attempts: number): Promise<number> {
 
   const body = await runWithRetries(
     async () => {
-      const response = await fetch(url, { signal: AbortSignal.timeout(fredRequestTimeoutMs) });
+      const response = await fetch(url, { headers: fredRequestHeaders, signal: AbortSignal.timeout(fredRequestTimeoutMs) });
       if (!response.ok) throw new Error(`FRED responded ${response.status}`);
       return readFredJson<{ observations?: { date: string; value: string }[] }>(response);
     },

@@ -2,12 +2,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import knexLibrary, { type Knex } from "knex";
 import { syntheticOptionQuotes, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile } from "../backtest/engine/testSupport/syntheticBacktestData.js";
 import type { AnalysisFileFigures } from "../backtest/analysis/analysisFigures.js";
+import { treasuryBillCachePath, treasuryBillSeriesId, type TreasuryBillCache } from "../backtest/engine/treasuryBillRates.js";
 import type { AnalysisRunView, TickerAnalysisView } from "../backtest/analysis/analysisStore.js";
 
 // The Analyse window's routes on the real backtest router against the test database: starting an analysis (Update
@@ -52,6 +53,9 @@ beforeAll(async () => {
   const days = ["2026-03-02", "2026-03-03", "2026-03-04"].map((tradingDate) => ({ tradingDate, quotes: syntheticOptionQuotes(tradingDate, 50, ["2026-03-20"], 0.5, 0.04, 1, 3), endOfDayVolume: 100, openInterest: 500 }));
   writeSyntheticSymbolFile(path.join(dataDirectory, `${symbol}.sqlite`), symbol, days);
   writeSyntheticIbkrBarsFromQuotes(path.join(dataDirectory, `${symbol}.sqlite`), days.map(({ tradingDate }) => ({ tradingDate, open: 50, high: 51, low: 49, close: 50, volume: 1_000, impliedVolatility: 0.5 })), 4);
+  // The T-bill rates the figures need, cached so the test never calls FRED.
+  const treasuryBillCache: TreasuryBillCache = { seriesId: treasuryBillSeriesId, fetchedAtIso: "2026-03-05T00:00:00.000Z", observations: ["2026-02-27", ...days.map(({ tradingDate }) => tradingDate)].map((dateIso) => ({ dateIso, ratePercent: 4 })) };
+  writeFileSync(treasuryBillCachePath(dataDirectory), JSON.stringify(treasuryBillCache));
   const [user] = await testDb("users").insert({ username: `analysis-routes-${suffix}`, display_name: "Analysis Routes Tester", password_hash: "not-a-real-hash" }).returning("id");
   userId = user.id;
   const app = express();
