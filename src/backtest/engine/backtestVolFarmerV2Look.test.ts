@@ -225,6 +225,101 @@ describe("Vol Farmer v2 at the looks", () => {
     expect(put.chosenBecause).toContain("on 30% of the pot");
   });
 
+  const markShares = (ledger: SimulatedLedger, marks: Map<string, number>, stockPrice: number) => {
+    for (const leg of ledger.legs) if (leg.legType === "stock" && leg.exitAt === null) marks.set(leg.id, stockPrice);
+  };
+  /** Vol Farmer v3's look: the open shares marked at the look's price first, as the session marks them, so the pot is the account's value then. */
+  function lookV3(ledger: SimulatedLedger, marks: Map<string, number>, todayIso: string, stockPrice: number, expiry: string, more: Partial<BacktestVolFarmerV2Settings> = {}) {
+    markShares(ledger, marks, stockPrice);
+    const settings = { decisionMaker: "vol_farmer_v3", trading: { spreadCostChargedPct: 0 }, volFarmer: defaultBacktestVolFarmerSettings, volFarmerV2: { ...scenarioVolFarmerV2Settings, ...more }, volFarmerV3: { rebalanceBandPct: 5 } } as unknown as EffectiveBacktestSettings;
+    return runVolFarmerV2Look({ calendar: weekdayCalendar, todayIso, lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf(todayIso, stockPrice, expiry), bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: marks, nextActionId } as unknown as BacktestLookContext);
+  }
+
+  it("Vol Farmer v3: tops the first position up to its target after a fall, its cost averaged into the break-even, and sells the Puts on the pot at the look", async () => {
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    const marks = new Map<string, number>();
+    // Monday 9 March at 100: 4 lots, as Vol Farmer v2 opens.
+    const opened = await lookV3(ledger, marks, "2026-03-09", 100, "2026-03-13");
+    expect(opened.actions[0]!.description).toContain("with 400 shares bought @ 100.00");
+    // Thursday 12 March at 80, the Call still open: no trade.
+    expect((await lookV3(ledger, marks, "2026-03-12", 80, "2026-03-13")).actions).toEqual([]);
+
+    // The Call expires below its strike; on Monday 16 March at 80 the pot is the account's value.
+    settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
+    markShares(ledger, marks, 80);
+    const pot = ledgerNetLiquidationValue(ledger, marks);
+    expect(pot).toBeCloseTo(ledger.cash + 400 * 80, 6);
+    // With no option open, the positions' P&L is the account's: the shares' cost, the Call's premium, the shares at 80.
+    const firstPnl = Number(/P&L by position: first (−?)\$([\d,]+)/.exec(describeVolFarmerV2Run(ledger, [symbol], 50, "Vol Farmer v3", marks)!)!.slice(1).join("").replace("−", "-").replace(/,/g, ""));
+    expect(Math.abs(firstPnl - (pot - 100_000))).toBeLessThanOrEqual(1);
+    const afterFall = await lookV3(ledger, marks, "2026-03-16", 80, "2026-03-20");
+    // $32,000 of shares against half the pot (about $46,000): under it by more than 5% of the pot, so back to floor(target
+    // ÷ a lot's cost) = 5 lots, one bought.
+    const lotCost = 80 * 100 + stockCommissionDollars(100);
+    expect(Math.floor(pot / 2 / lotCost)).toBe(5);
+    expect(afterFall.actions.map((action) => action.kind)).toEqual(["buy_shares", "open_cash_secured_put"]);
+    const topUp = afterFall.actions[0]!;
+    expect(topUp.quantity).toBe(100);
+    expect(topUp.description).toContain("4 → 5 lots");
+    expect((topUp.candidateScores as { potValue: number }).potValue).toBeCloseTo(pot, 6);
+    // Its break-even: what the 500 shares cost less the Call's premium, per share: (B-E¹ × 400 + the lot's cost) ÷ 500.
+    const breakEvenBefore = (topUp.candidateScores as { breakEvenFirst: number }).breakEvenFirst;
+    const put = afterFall.actions[1]!;
+    expect((put.candidateScores as { breakEvenFirst: number }).breakEvenFirst).toBeCloseTo((breakEvenBefore * 400 + lotCost) / 500, 6);
+    expect(afterFall.breakEvenLevels![0]!.firstBreakEven).toBeCloseTo((breakEvenBefore * 400 + lotCost) / 500, 6);
+    // The Puts sell on half the pot at the look (the lot's commission spent since), not on the cycle's $100,000.
+    expect(put.quantity).toBe(Math.floor((pot - stockCommissionDollars(100)) / 2 / (put.contract!.strike! * 100)));
+  });
+
+  it("Vol Farmer v3: sells lots back to the target once the shares outgrow it, its break-even kept, never the last lot", async () => {
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    const marks = new Map<string, number>();
+    const opened = await lookV3(ledger, marks, "2026-03-09", 100, "2026-03-13");
+    const breakEvenOpened = opened.breakEvenLevels![0]!.firstBreakEven!;
+    settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
+    // Monday 16 March at 200: $80,000 of shares against half the pot (about $70,000), over it by more than 5% of the pot:
+    // back to floor(target ÷ a lot's cost) = 3 lots.
+    markShares(ledger, marks, 200);
+    const pot = ledgerNetLiquidationValue(ledger, marks);
+    expect(Math.floor(pot / 2 / (200 * 100 + stockCommissionDollars(100)))).toBe(3);
+    const risen = await lookV3(ledger, marks, "2026-03-16", 200, "2026-03-20");
+    const trim = risen.actions.find((action) => action.kind === "close_shares")!;
+    expect(trim.quantity).toBe(100);
+    expect(trim.description).toContain(`4 → 3 lots, break-even ${breakEvenOpened.toFixed(2)} kept`);
+    expect(risen.breakEvenLevels![0]!.firstBreakEven).toBeCloseTo(breakEvenOpened, 6);
+    expect(ledger.legs.filter((leg) => leg.legType === "stock" && leg.exitAt === null).reduce((sum, leg) => sum + leg.quantity, 0)).toBe(300);
+
+    // A first position of one lot keeps it, however far the shares outgrow their target: 15% of $100,000 buys 1 lot at 100.
+    const small = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    const smallMarks = new Map<string, number>();
+    await lookV3(small, smallMarks, "2026-03-09", 100, "2026-03-13", { firstPositionPct: 15 });
+    settleExpiry(small, { legId: openOption(small, "call")[0]!.id, expiryClose: 99 });
+    const tripled = await lookV3(small, smallMarks, "2026-03-16", 300, "2026-03-20", { firstPositionPct: 15 });
+    expect(tripled.actions.filter((action) => action.kind === "close_shares")).toEqual([]);
+  });
+
+  it("Vol Farmer v3: tops up no more lots than the free cash pays for, and the run's note counts what it held short", async () => {
+    // A 300% excess allowance: the pot is four times the account and the first position's target twice it.
+    const more = { excessAllowancePct: 300 };
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
+    const marks = new Map<string, number>();
+    const opened = await lookV3(ledger, marks, "2026-03-09", 100, "2026-03-13", more);
+    expect(opened.actions[0]!.description).toContain("with 900 shares bought @ 100.00");
+    settleExpiry(ledger, { legId: openOption(ledger, "call")[0]!.id, expiryClose: 99 });
+    markShares(ledger, marks, 80);
+    const pot = 4 * ledgerNetLiquidationValue(ledger, marks);
+    const lotCost = 80 * 100 + stockCommissionDollars(100);
+    const wanted = Math.floor(pot / 2 / lotCost) - 9;
+    const affordable = Math.floor(ledgerFreeCash(ledger) / lotCost);
+    expect(affordable).toBe(1);
+    const afterFall = await lookV3(ledger, marks, "2026-03-16", 80, "2026-03-20", more);
+    const topUp = afterFall.actions.find((action) => action.kind === "buy_shares")!;
+    expect(topUp.quantity).toBe(100);
+    expect(topUp.description).toContain(`pays for 1 of the ${wanted} lots`);
+    expect(describeVolFarmerV2Run(ledger, [symbol], 50, "Vol Farmer v3")).toContain(`Vol Farmer v3 cash: 1 cycle(s)`);
+    expect(describeVolFarmerV2Run(ledger, [symbol], 50, "Vol Farmer v3")).toContain(`rebalanced: 1 top-up(s) (1 lots), 0 trim(s) (0 lots), 1 top-up(s) the free cash held short (${wanted - 1} lots)`);
+  });
+
   it("takes the Step from the previous session's IV at each Put sale, and sells no Put without it", async () => {
     // IV 30% on Friday 6 March, before the cycle opens on Monday 9 March; 90% on Friday 13 March, before the Put on Monday 16 March.
     const bars = barsWithImpliedVolatility([["2026-03-06", 0.3], ["2026-03-13", 0.9]]);

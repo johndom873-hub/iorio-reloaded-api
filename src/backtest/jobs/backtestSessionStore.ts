@@ -43,7 +43,7 @@ import { hedgePutCostYield, hedgePutCostYieldOnCalendarDays } from "../engine/ba
 import { optionCommissionDollars } from "../engine/ledger/ledgerFills.js";
 import { loadLadderRungs } from "../analysis/analysisBacktest.js";
 import { loadSessionFreeCash } from "../analysis/sessionFreeCash.js";
-import { backtestCaptureLookTimeEt, backtestEngineVersion } from "../backtestTypes.js";
+import { backtestCaptureLookTimeEt, backtestEngineVersion, runsVolFarmerV2Steps } from "../backtestTypes.js";
 import { computeCycleAccuracyBands, computeDaysWithNoOptions, computeDrawdowns, computeMonthlyReturns, computePnlSources, computeTradeAccuracyBands, cycleFiguresOf, type ClosedTradeFigures } from "../sessionAnalytics.js";
 import { excessCalmarOf, treasuryBillCagr } from "../analysis/analysisSessions.js";
 import { cachedTreasuryBillRates } from "../engine/treasuryBillRates.js";
@@ -716,13 +716,13 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
       noCandidate: stretch.noCandidate ?? null,
       freeCashShareAtStart: freeCash?.shareAtMark(stretch.firstIdleDay) ?? null,
     })),
-    noCallRuns: await loadCycleNoCallRuns({ sessionId, symbol, cycleNumber, notedBy: decisionMaker === "vol_farmer" || decisionMaker === "vol_farmer_v2" ? decisionMaker : null, timeline: row.timeline, stretches, splitFactorOf }),
+    noCallRuns: await loadCycleNoCallRuns({ sessionId, symbol, cycleNumber, notedBy: decisionMaker === "vol_farmer" ? decisionMaker : decisionMaker && runsVolFarmerV2Steps(decisionMaker) ? "vol_farmer_v2" : null, timeline: row.timeline, stretches, splitFactorOf }),
   };
 }
 
 /**
  * A cycle's No Call runs (cycleNoCallDays.ts): its days with shares and no Call from its positions' legs, the shares from
- * its own trades, and why no Call was sold from the day summaries of a Vol Farmer or Vol Farmer v2 session (`notedBy`), else
+ * its own trades, and why no Call was sold from the day summaries of a Vol Farmer or Vol Farmer v2 (or v3) session (`notedBy`), else
  * the session's records of the calls on the free shares and the cycle's stock-only stretches.
  */
 async function loadCycleNoCallRuns(input: { sessionId: string; symbol: string; cycleNumber: number; notedBy: "vol_farmer" | "vol_farmer_v2" | null; timeline: readonly BacktestCycleTimelineRow[]; stretches: BacktestCycleDetail["stockOnlyStretches"]; splitFactorOf: SplitFactorOfDay }): Promise<BacktestNoCallRun[]> {

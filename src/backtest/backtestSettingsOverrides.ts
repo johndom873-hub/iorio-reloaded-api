@@ -1,4 +1,4 @@
-import { defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, type BacktestSettings, type BacktestSettingsOverrides, type EffectiveBacktestSettings } from "./backtestTypes.js";
+import { defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, defaultBacktestVolFarmerV3Settings, type BacktestSettings, type BacktestSettingsOverrides, type EffectiveBacktestSettings } from "./backtestTypes.js";
 
 // A session's effective settings: its snapshot with the session-only overrides on top. Pure.
 
@@ -17,6 +17,7 @@ export function applyBacktestOverrides(snapshot: BacktestSettings, overrides: Ba
     steadyStake: { ...defaultBacktestSteadyStakeSettings, ...snapshot.steadyStake, ...overrides.steadyStake },
     volFarmer: { ...defaultBacktestVolFarmerSettings, ...snapshot.volFarmer, ...overrides.volFarmer },
     volFarmerV2: { ...defaultBacktestVolFarmerV2Settings, ...snapshot.volFarmerV2, ...overrides.volFarmerV2 },
+    volFarmerV3: { ...defaultBacktestVolFarmerV3Settings, ...snapshot.volFarmerV3, ...overrides.volFarmerV3 },
   };
 }
 
@@ -35,6 +36,7 @@ export function countBacktestOverrides(snapshot: BacktestSettings, overrides: Ba
     changedIn({ ...defaultBacktestBaselineSettings, ...snapshot.baseline }, overrides.baseline) +
     changedIn({ ...defaultBacktestSteadyStakeSettings, ...snapshot.steadyStake }, overrides.steadyStake) +
     changedIn({ ...defaultBacktestVolFarmerSettings, ...snapshot.volFarmer }, overrides.volFarmer) +
-    changedIn({ ...defaultBacktestVolFarmerV2Settings, ...snapshot.volFarmerV2 }, overrides.volFarmerV2)
+    changedIn({ ...defaultBacktestVolFarmerV2Settings, ...snapshot.volFarmerV2 }, overrides.volFarmerV2) +
+    changedIn({ ...defaultBacktestVolFarmerV3Settings, ...snapshot.volFarmerV3 }, overrides.volFarmerV3)
   );
 }

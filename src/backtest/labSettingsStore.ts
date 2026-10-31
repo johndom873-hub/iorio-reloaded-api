@@ -11,6 +11,7 @@ import {
   defaultBacktestSteadyStakeSettings,
   defaultBacktestVolFarmerSettings,
   defaultBacktestVolFarmerV2Settings,
+  defaultBacktestVolFarmerV3Settings,
   type BacktestLabAuditRow,
   type BacktestLabChange,
   type BacktestLabTickerOverrides,
@@ -76,6 +77,7 @@ async function completeSettings(stored: BacktestSettings, connection: Knex): Pro
     steadyStake: withCodeKeys(defaultBacktestSteadyStakeSettings, stored.steadyStake),
     volFarmer: withCodeKeys(defaultBacktestVolFarmerSettings, stored.volFarmer),
     volFarmerV2: withCodeKeys(defaultBacktestVolFarmerV2Settings, stored.volFarmerV2),
+    volFarmerV3: withCodeKeys(defaultBacktestVolFarmerV3Settings, stored.volFarmerV3),
   };
 }
 
@@ -97,7 +99,7 @@ export async function loadBacktestLabSettings(connection: Knex = db): Promise<Ba
 
 /**
  * Saves changes to the global lab values: `overrides` in the New session's shape (trading, decisionMaker, baseline,
- * steadyStake, volFarmer, volFarmerV2), checked as a session's overrides are, and `defaultPotDollars`. One audit row per
+ * steadyStake, volFarmer, volFarmerV2, volFarmerV3), checked as a session's overrides are, and `defaultPotDollars`. One audit row per
  * value that changed; an empty list when nothing did.
  */
 /** Saves the global lab values; `dryRun` validates and answers the changes without writing (the save's confirmation). */

@@ -9,11 +9,11 @@ import type { BacktestLookContext, BacktestLookResult, BacktestLookSymbol, Backt
 import { markOfTwoSidedQuote } from "./backtestOptionMarks.js";
 import { captureLookTimeEt, lookInstantMs } from "./backtestTickerInputs.js";
 import { noteBaselineForwardAnchors, roundedStrike, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
-import { buyLeapsCall, expirySettlementInstant, openCashSecuredPut, openCoveredCall, sellLeapsCall } from "./ledger/ledgerEvents.js";
+import { buyLeapsCall, buyShares, expirySettlementInstant, openCashSecuredPut, openCoveredCall, sellLeapsCall, sellShares } from "./ledger/ledgerEvents.js";
 import { optionCommissionDollars, stockCommissionDollars } from "./ledger/ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
 import { cycleSplitFactorFor, cycleStartSplitFactor, isSymbolFlat, legsOfPosition, positionsOfSymbol, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
-import { newVolFarmerV2SymbolState, runVolFarmerV2Turn, volFarmerV2BreakEven, volFarmerV2TurnOrder, type VolFarmerV2Book, type VolFarmerV2CashCut, type VolFarmerV2Market, type VolFarmerV2Position, type VolFarmerV2SymbolState } from "./volFarmerV2Steps.js";
+import { newVolFarmerV2SymbolState, runVolFarmerV2Turn, volFarmerV2BreakEven, volFarmerV2TurnOrder, type VolFarmerV2Book, type VolFarmerV2CashCut, type VolFarmerV2Market, type VolFarmerV2Position, type VolFarmerV2PositionCashFlow, type VolFarmerV2SymbolState, type VolFarmerV3SharesOrder } from "./volFarmerV2Steps.js";
 
 // Vol Farmer v2 in the backtest: the shared steps (volFarmerV2Steps.ts, where the rules are) on the simulated ledger, at
 // the 10:00 look only or at every look (volFarmerV2.looks; a later look reads its own quotes and price). Each order the
@@ -59,7 +59,10 @@ export function volFarmerV2TickerShares(sessionSymbols: readonly string[], v2: P
   return new Map([...allocations].map(([symbol, allocationPct]) => [symbol, tickerPotShare(allocationPct, v2.excessAllowancePct, 100)]));
 }
 
-/** The Vol Farmer v2 look (runBacktestSession.ts skips the looks after 10:00 when its looks are the first only). */
+/**
+ * The Vol Farmer v2 look, Vol Farmer v3's too: v2's steps with v3's rebalancing of the first position (runBacktestSession.ts
+ * skips the looks after 10:00 when its looks are the first only).
+ */
 export async function runVolFarmerV2Look(context: BacktestLookContext): Promise<BacktestLookResult> {
   const { settings, ledger, todayIso } = context;
   const lookTimeEt = context.lookTimeEt ?? captureLookTimeEt;
@@ -68,6 +71,7 @@ export async function runVolFarmerV2Look(context: BacktestLookContext): Promise<
   const optionSales: BacktestOptionSale[] = [];
   const shortfalls: BacktestOrderShortfall[] = [];
   const v2 = settings.volFarmerV2;
+  const v3 = settings.decisionMaker === "vol_farmer_v3" ? settings.volFarmerV3 : undefined;
   const shareBySymbol = volFarmerV2TickerShares([...context.sectorBySymbol.keys()], v2);
   const turnOrder = volFarmerV2TurnOrder([...context.sectorBySymbol.keys()], context.sessionDayIndex ?? 0);
   const inTurn = [...context.symbols].sort((a, b) => turnOrder.indexOf(a.profile.symbol) - turnOrder.indexOf(b.profile.symbol));
@@ -75,7 +79,7 @@ export async function runVolFarmerV2Look(context: BacktestLookContext): Promise<
     const share = shareBySymbol.get(lookSymbol.profile.symbol) ?? 0;
     const market = marketOf(context, lookSymbol, at, share);
     const book = ledgerBook({ context, lookSymbol, market, at, lookTimeEt, share, actions, optionSales, shortfalls });
-    return { lookSymbol, ...runVolFarmerV2Turn({ state: stateOf(ledger, lookSymbol.profile.symbol), market, farmer: settings.volFarmer, v2, book }) };
+    return { lookSymbol, ...runVolFarmerV2Turn({ state: stateOf(ledger, lookSymbol.profile.symbol), market, farmer: settings.volFarmer, v2, ...(v3 ? { v3 } : {}), book }) };
   });
   // The LEAPS once every ticker has had its turn, in the same order: new cycles and Puts have the free cash first.
   for (const turn of turns) turn.leaps?.();
@@ -151,6 +155,10 @@ function openOptionLegsOf(ledger: SimulatedLedger, symbol: string): LedgerLeg[] 
 /** The LEAPS purchases the free cash held back, per ledger and symbol: how many, and the first one's day (the run's cash note). */
 const leapsCashCutsByLedger = new WeakMap<SimulatedLedger, Map<string, { count: number; firstDateIso: string }>>();
 
+type PositionCashFlows = Record<"first" | "second", Record<VolFarmerV2PositionCashFlow["kind"], number>>;
+/** Each position's cash flows so far, per ledger and symbol (the run's P&L by position, Marcelo 2026-10-30). */
+const positionCashFlowsByLedger = new WeakMap<SimulatedLedger, Map<string, PositionCashFlows>>();
+
 /** The symbol's book on the simulated ledger: each order filled at once at its fill price, and recorded. */
 function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestLookSymbol; market: VolFarmerV2Market; at: Date; lookTimeEt: string; share: number; actions: BacktestAction[]; optionSales: BacktestOptionSale[]; shortfalls: BacktestOrderShortfall[] }): VolFarmerV2Book {
   const { context, lookSymbol, market, at, lookTimeEt, share, actions, optionSales, shortfalls } = input;
@@ -186,6 +194,32 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
       bestCandidate: best === null ? null : { expiry: best.expiry, strike: best.strike, dte: best.dte, premiumYield: best.premiumYield, volumeCap: best.volumeCap },
     });
   };
+  // A share trade of Vol Farmer v3's rebalancing, recorded as the Steady Stake's are; its quantity in shares as traded.
+  const shareAction = (input: { actionId: string; kind: "buy_shares" | "close_shares"; order: VolFarmerV3SharesOrder; positionIds: string[] }): BacktestAction => {
+    const sharesAsTraded = Math.round(input.order.shares * priceToCycleScale);
+    return {
+      actionId: input.actionId,
+      tradingDate: todayIso,
+      at: at.toISOString(),
+      lookTimeEt,
+      passNumber: 1,
+      symbol,
+      kind: input.kind,
+      candidateId: `${symbol}:${input.kind}:${input.positionIds[0]}`,
+      description: input.order.description,
+      automatic: false,
+      chosenBecause: input.order.chosenBecause,
+      outcome: "filled",
+      blockReason: null,
+      gateResults: [{ gate: "vol_farmer_v3", ok: true, detail: `${sharesAsTraded} shares` }],
+      contract: null,
+      candidateScores: input.order.candidateScores,
+      quantity: sharesAsTraded,
+      limitPrice: stockPrice,
+      fillPrice: stockPrice,
+      positionIds: input.positionIds,
+    };
+  };
   return {
     isFlat: () => isSymbolFlat(ledger, symbol),
     freeCash: () => ledgerFreeCash(ledger),
@@ -193,6 +227,13 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
     leapsCapBaseDollars: tickerShareOfAccount,
     // Cuts are recorded once tickers share the account's cash: a ticker on its own spends only cash it left itself.
     ...(context.sectorBySymbol.size > 1 ? { noteCashCut } : {}),
+    notePositionPnl(flow) {
+      let bySymbol = positionCashFlowsByLedger.get(ledger);
+      if (!bySymbol) positionCashFlowsByLedger.set(ledger, (bySymbol = new Map()));
+      let flows = bySymbol.get(symbol);
+      if (!flows) bySymbol.set(symbol, (flows = { first: { shares: 0, calls: 0, puts: 0 }, second: { shares: 0, calls: 0, puts: 0 } }));
+      flows[flow.position][flow.kind] += flow.dollars;
+    },
     openOptionContracts: () => openOptionLegsOf(ledger, symbol).map((leg) => ({ expiry: leg.expiryDate!, strike: leg.strikePrice! })),
     leg(legId) {
       const leg = legById(legId);
@@ -211,7 +252,9 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
         strike: call.strike * priceToCycleScale,
         contracts: sale.contracts,
         callFillPrice: call.fillPrice * priceToCycleScale,
-        stockFillPrice: sale.startsCycle ? stockPrice * priceToCycleScale : null,
+        stockFillPrice: sale.startsCycle || sale.buysShares ? stockPrice * priceToCycleScale : null,
+        // A rebuilt first position buys its own shares, leaving the second position's where they are.
+        ...(sale.buysShares ? { buyEveryShare: true } : {}),
         at,
         actionId,
         splitFactorToday: lookSymbol.splitFactorToday,
@@ -307,6 +350,22 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
       return opened.legId;
     },
 
+    // Vol Farmer v3's rebalancing: the shares go to (or come from) the symbol's uncovered ones, where a Call takes them.
+    buyShares(order) {
+      const actionId = context.nextActionId();
+      const bought = buyShares(ledger, { symbol, shares: order.shares, fillPrice: stockPrice * priceToCycleScale, at, actionId, splitFactorToday: lookSymbol.splitFactorToday, tradedSharesPerLedgerShare: priceToCycleScale });
+      context.priceByLegId.set(bought.legId, stockPrice * priceToCycleScale);
+      actions.push(shareAction({ actionId, kind: "buy_shares", order, positionIds: [bought.positionId] }));
+    },
+
+    sellShares(order) {
+      const holder = positionsOfSymbol(ledger, symbol).find((position) => position.status === "open" && position.strategyKey === "unstructured");
+      if (!holder) throw new Error(`${symbol}: no uncovered shares to sell for Vol Farmer v3's rebalancing.`);
+      const actionId = context.nextActionId();
+      sellShares(ledger, { positionId: holder.id, shares: order.shares, fillPrice: stockPrice * priceToCycleScale, at, actionId, tradedSharesPerLedgerShare: priceToCycleScale });
+      actions.push(shareAction({ actionId, kind: "close_shares", order, positionIds: [holder.id] }));
+    },
+
     sellLeaps(sale) {
       // One order for every leg of the LEAPS (its purchase and top-ups), each closed whole at the order's fill.
       const legs = sale.legIds.map((legId) => legById(legId)!);
@@ -346,9 +405,9 @@ const median = (values: readonly number[]) => {
 /**
  * The session note on Vol Farmer v2's cash (Marcelo 2026-10-27, "test that there is cash to spare"): what each half of the
  * pot left unspent once sized (whole lots, whole contracts), and every LEAPS trigger: the free cash then against one
- * contract's cost, and what was bought.
+ * contract's cost, and what was bought; Vol Farmer v3's adds its rebalancing (top-ups, trims, top-ups the cash cut).
  */
-export function describeVolFarmerV2Run(ledger: SimulatedLedger, symbols: readonly string[], firstPositionPct = defaultBacktestVolFarmerV2Settings.firstPositionPct): string | null {
+export function describeVolFarmerV2Run(ledger: SimulatedLedger, symbols: readonly string[], firstPositionPct = defaultBacktestVolFarmerV2Settings.firstPositionPct, strategyLabel = "Vol Farmer v2", priceByLegId: ReadonlyMap<string, number> = new Map()): string | null {
   const bySymbol = stateByLedger.get(ledger);
   if (!bySymbol) return null;
   const parts = symbols.flatMap((symbol) => {
@@ -363,7 +422,20 @@ export function describeVolFarmerV2Run(ledger: SimulatedLedger, symbols: readonl
       triggers.length === 0
         ? "no LEAPS trigger"
         : `${triggers.length} LEAPS trigger(s), ${bought.length} bought (${bought.map((trigger) => `${trigger.contracts}× on ${trigger.boughtOn}`).join(", ") || "none"})${unaffordable.length === 0 ? "" : `, ${unaffordable.length} never affordable (first: free cash ${formatWholeDollars(unaffordable[0]!.freeCash)} on ${unaffordable[0]!.dateIso}, a contract ${formatWholeDollars(unaffordable[0]!.contractCost!)})`}${heldBack === undefined ? "" : `, ${heldBack.count} look(s) at which the account's free cash held it below its cap (first on ${heldBack.firstDateIso})`}`;
-    return [`${symbols.length > 1 ? `${symbol}: ` : ""}${cash.cycles} cycle(s); unspent once sized: ${firstPositionPct === 50 ? "first half" : "first position"} ${left(cash.firstPositionCashLeft)}, ${firstPositionPct === 50 ? "second half" : "Puts"} ${left(cash.putsCashLeft)}; ${leapsPart}`];
+    // Each position's P&L (Marcelo 2026-10-30): its cash flows, and its shares still held at the session's last mark.
+    const flows = positionCashFlowsByLedger.get(ledger)?.get(symbol);
+    const state = bySymbol.get(symbol)!;
+    const stockLeg = positionsOfSymbol(ledger, symbol).filter((position) => position.status === "open").flatMap((position) => legsOfPosition(ledger, position.id)).find((leg) => leg.legType === "stock" && leg.exitAt === null);
+    const markPerShare = stockLeg === undefined ? 0 : (priceByLegId.get(stockLeg.id) ?? stockLeg.entryPrice);
+    const positionPart = (name: "first" | "second", position: VolFarmerV2Position | null) => {
+      const flow = flows?.[name] ?? { shares: 0, calls: 0, puts: 0 };
+      const shares = flow.shares + (position?.shares ?? 0) * markPerShare;
+      return `${name} ${formatWholeDollars(shares + flow.calls + flow.puts)} (shares ${formatWholeDollars(shares)}, Calls ${formatWholeDollars(flow.calls)}${name === "second" ? `, Puts ${formatWholeDollars(flow.puts)}` : ""})`;
+    };
+    const pnlPart = flows === undefined ? "" : `; P&L by position: ${positionPart("first", state.first)}, ${positionPart("second", state.second)}`;
+    const rebalance = cash.rebalance;
+    const rebalancePart = rebalance === undefined ? "" : `; rebalanced: ${rebalance.topUps} top-up(s) (${rebalance.lotsBought} lots), ${rebalance.trims} trim(s) (${rebalance.lotsSold} lots)${rebalance.cashCuts === 0 ? "" : `, ${rebalance.cashCuts} top-up(s) the free cash held short (${rebalance.lotsCut} lots)`}`;
+    return [`${symbols.length > 1 ? `${symbol}: ` : ""}${cash.cycles} cycle(s); unspent once sized: ${firstPositionPct === 50 ? "first half" : "first position"} ${left(cash.firstPositionCashLeft)}, ${firstPositionPct === 50 ? "second half" : "Puts"} ${left(cash.putsCashLeft)}; ${leapsPart}${rebalancePart}${pnlPart}`];
   });
-  return parts.length === 0 ? null : `Vol Farmer v2 cash: ${parts.join(" · ")}.`;
+  return parts.length === 0 ? null : `${strategyLabel} cash: ${parts.join(" · ")}.`;
 }

@@ -14,7 +14,16 @@ import {
   defaultBacktestSteadyStakeSettings,
   defaultBacktestVolFarmerSettings,
   defaultBacktestVolFarmerV2Settings,
+  defaultBacktestVolFarmerV3Settings,
+  runsVolFarmerV2Steps,
   volFarmerV2LooksChoices,
+  volFarmerV3CallStrikeFloorChoices,
+  volFarmerV3PutsSoldChoices,
+  volFarmerV3PutStrikeCapChoices,
+  volFarmerV3TrimsSellChoices,
+  volFarmerV3FirstPositionAfterCalledAwayChoices,
+  volFarmerV3OptionsExpiryChoices,
+  volFarmerV3RebalancesChoices,
   volFarmerV2StepRules,
   type BacktestBaselineSettings,
   type BacktestBookMode,
@@ -25,6 +34,7 @@ import {
   type BacktestSteadyStakeSettings,
   type BacktestVolFarmerSettings,
   type BacktestVolFarmerV2Settings,
+  type BacktestVolFarmerV3Settings,
   type BacktestSymbolResolution,
   type BacktestSymbolSettingSource,
   type BacktestSymbolSettings,
@@ -121,7 +131,7 @@ function changedEntries(base: object, changes: Record<string, unknown>): Record<
 export function validateBacktestSettingsOverrides(raw: unknown, snapshot: BacktestSettings, editablePaths: ReadonlySet<string>): { ok: true; overrides: BacktestSettingsOverrides } | { ok: false; error: string } {
   if (raw === undefined || raw === null) return { ok: true, overrides: {} };
   if (!isPlainObject(raw)) return { ok: false, error: "overrides must be an object." };
-  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "decisionMaker" && key !== "baseline" && key !== "steadyStake" && key !== "volFarmer" && key !== "volFarmerV2");
+  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "decisionMaker" && key !== "baseline" && key !== "steadyStake" && key !== "volFarmer" && key !== "volFarmerV2" && key !== "volFarmerV3");
   if (unknownSection) return { ok: false, error: `overrides.${unknownSection} is not a setting a session can change.` };
 
   const overrides: BacktestSettingsOverrides = {};
@@ -183,6 +193,18 @@ export function validateBacktestSettingsOverrides(raw: unknown, snapshot: Backte
     if (problem) return { ok: false, error: problem };
     const changed = changedEntries(snapshotVolFarmerV2, raw.volFarmerV2);
     if (Object.keys(changed).length > 0) overrides.volFarmerV2 = changed as Partial<BacktestVolFarmerV2Settings>;
+  }
+
+  // Every Vol Farmer v3 value can change for a session.
+  if (raw.volFarmerV3 !== undefined) {
+    if (!isPlainObject(raw.volFarmerV3)) return { ok: false, error: "overrides.volFarmerV3 must be an object." };
+    const snapshotVolFarmerV3 = { ...defaultBacktestVolFarmerV3Settings, ...snapshot.volFarmerV3 };
+    const unknownField = Object.keys(raw.volFarmerV3).find((field) => !(field in defaultBacktestVolFarmerV3Settings));
+    if (unknownField) return { ok: false, error: `volFarmerV3.${unknownField} is not a Vol Farmer v3 setting.` };
+    const problem = validateVolFarmerV3Settings({ ...snapshotVolFarmerV3, ...raw.volFarmerV3 });
+    if (problem) return { ok: false, error: problem };
+    const changed = changedEntries(snapshotVolFarmerV3, raw.volFarmerV3);
+    if (Object.keys(changed).length > 0) overrides.volFarmerV3 = changed as Partial<BacktestVolFarmerV3Settings>;
   }
 
   if (raw.decisionMaker !== undefined) {
@@ -316,6 +338,22 @@ export function validateVolFarmerV2Settings(values: Record<string, unknown>): st
   return null;
 }
 
+/** Vol Farmer v3's own values (BacktestVolFarmerV3Settings): null when they are valid. */
+export function validateVolFarmerV3Settings(values: Record<string, unknown>): string | null {
+  const rebalanceBandPct = values.rebalanceBandPct;
+  if (typeof rebalanceBandPct !== "number" || !Number.isFinite(rebalanceBandPct) || rebalanceBandPct < 0 || rebalanceBandPct > 50) return "volFarmerV3.rebalanceBandPct must be a number from 0 to 50.";
+  if (!(volFarmerV3RebalancesChoices as readonly unknown[]).includes(values.rebalances)) return `volFarmerV3.rebalances must be one of ${volFarmerV3RebalancesChoices.join(", ")}.`;
+  if (!(volFarmerV3FirstPositionAfterCalledAwayChoices as readonly unknown[]).includes(values.firstPositionAfterCalledAway)) return `volFarmerV3.firstPositionAfterCalledAway must be one of ${volFarmerV3FirstPositionAfterCalledAwayChoices.join(", ")}.`;
+  if (!(volFarmerV3OptionsExpiryChoices as readonly unknown[]).includes(values.optionsExpiry)) return `volFarmerV3.optionsExpiry must be one of ${volFarmerV3OptionsExpiryChoices.join(", ")}.`;
+  const optionsMaxDaysToExpiry = values.optionsMaxDaysToExpiry;
+  if (typeof optionsMaxDaysToExpiry !== "number" || !Number.isInteger(optionsMaxDaysToExpiry) || optionsMaxDaysToExpiry < 1 || optionsMaxDaysToExpiry > 45) return "volFarmerV3.optionsMaxDaysToExpiry must be a whole number from 1 to 45.";
+  if (!(volFarmerV3CallStrikeFloorChoices as readonly unknown[]).includes(values.callStrikeFloor)) return `volFarmerV3.callStrikeFloor must be one of ${volFarmerV3CallStrikeFloorChoices.join(", ")}.`;
+  if (!(volFarmerV3PutsSoldChoices as readonly unknown[]).includes(values.putsSold)) return `volFarmerV3.putsSold must be one of ${volFarmerV3PutsSoldChoices.join(", ")}.`;
+  if (!(volFarmerV3PutStrikeCapChoices as readonly unknown[]).includes(values.putStrikeCap)) return `volFarmerV3.putStrikeCap must be one of ${volFarmerV3PutStrikeCapChoices.join(", ")}.`;
+  if (!(volFarmerV3TrimsSellChoices as readonly unknown[]).includes(values.trimsSell)) return `volFarmerV3.trimsSell must be one of ${volFarmerV3TrimsSellChoices.join(", ")}.`;
+  return null;
+}
+
 /** The put ladder's values (putsWhenNoCall "reserve_ladder"): null when they are valid. */
 function validateLadderSettings(values: Record<string, unknown>): string | null {
   const isNumberIn = (value: unknown, min: number, max: number) => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
@@ -417,9 +455,9 @@ export function validateCreateBacktestSessionRequest(body: unknown, context: Bac
   if (effective.decisionMaker !== "baseline") {
     if (body.symbolSettings !== undefined && body.symbolSettings !== null) return { ok: false, error: "symbolSettings apply to the baseline only." };
     if (typeof startingValue !== "number") return { ok: false, error: "The starting account value must be a number above 0." };
-    // Vol Farmer v2's set allocations name the session's tickers.
+    // Vol Farmer v2's set allocations (v3's too) name the session's tickers.
     const stranger = Object.keys({ ...defaultBacktestVolFarmerV2Settings, ...effective.volFarmerV2 }.tickerAllocationPct).find((symbol) => !symbols.includes(symbol));
-    if (effective.decisionMaker === "vol_farmer_v2" && stranger !== undefined) return { ok: false, error: `volFarmerV2.tickerAllocationPct.${stranger}: ${stranger} is not one of the session's symbols.` };
+    if (runsVolFarmerV2Steps(effective.decisionMaker) && stranger !== undefined) return { ok: false, error: `volFarmerV2.tickerAllocationPct.${stranger}: ${stranger} is not one of the session's symbols.` };
     return { ok: true, value: { ...base, startingValue, bookMode: "shared_account", symbolSettings: null, symbolResolution: null, settingsSource: null, potsFromStartingValue: null }, warnings };
   }
 

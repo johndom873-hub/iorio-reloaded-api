@@ -3,7 +3,7 @@ import { db } from "../db/connection.js";
 import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { kellyFraction } from "../pluto/postModelGates.js";
 import { mapTradingSettingsRow } from "../lib/tradingSettingsStore.js";
-import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, type BacktestSettingApplicability, type BacktestSettingCondition, type BacktestSettingGroup, type BacktestSettingRow, type BacktestSettingSection, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
+import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, defaultBacktestVolFarmerV3Settings, type BacktestSettingApplicability, type BacktestSettingCondition, type BacktestSettingGroup, type BacktestSettingRow, type BacktestSettingSection, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
 import { earningsDateKnownCalendarDaysAhead } from "./engine/backtestTickerInputs.js";
 
 // The New session settings table (docs/backtesting/): the values a session snapshots and may change for itself only. The
@@ -14,7 +14,7 @@ export async function loadCurrentBacktestSettings(connection: Knex = db): Promis
   const [pluto, tradingRow] = await Promise.all([loadPlutoSettings(connection), connection("trading_settings").first()]);
   if (!tradingRow) throw new Error("No trading_settings row found.");
   const trading = mapTradingSettingsRow(tradingRow);
-  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "vol_farmer_v2", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings }, steadyStake: { ...defaultBacktestSteadyStakeSettings }, volFarmer: { ...defaultBacktestVolFarmerSettings }, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings } };
+  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "vol_farmer_v2", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings }, steadyStake: { ...defaultBacktestSteadyStakeSettings }, volFarmer: { ...defaultBacktestVolFarmerSettings }, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings }, volFarmerV3: { ...defaultBacktestVolFarmerV3Settings } };
 }
 
 type RowDefinition = Omit<BacktestSettingRow, "now" | "group" | "section" | "appliesWhen"> & { fixedValue?: number | string };
@@ -35,11 +35,12 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Decision maker",
     unit: "choice",
     editable: true,
-    note: "who decides the session's trades. The Steady Stake and Vol Farmer v2: only their own group's values, at the 10:00 look",
+    note: "who decides the session's trades. The Steady Stake and Vol Farmer v2: only their own group's values, at the 10:00 look; Vol Farmer v3: Vol Farmer v2's values and its own",
     choices: [
       { value: "baseline", label: "CC + Put Ladder (Covered Calls on the shares, a ladder of Puts below)" },
       { value: "steady_stake", label: "Steady Stake (a steady share stake, Calls and Puts on expiry days)" },
       { value: "vol_farmer_v2", label: "Vol Farmer v2 (two Covered Calls at different levels, a LEAPS Call; research)" },
+      { value: "vol_farmer_v3", label: "Vol Farmer v3 (Vol Farmer v2 with its first position rebalanced to its share of the pot; research)" },
     ],
   },
   { path: "volFarmer.callMinAbsDelta", label: "Calls' |delta| from", unit: "number", editable: true, note: "the Call sold is the one with the highest premium yield (annualized) inside the |delta| and days-to-expiry ranges whose strike passes the hedge rule; |delta| from each quote's own implied volatility" },
@@ -209,6 +210,85 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
   { path: "volFarmerV2.leapsMaxAccountPct", label: "LEAPS cap", unit: "percent", editable: true, note: "% of the ticker's pot at the look (its allocation of the account's value, positions marked, raised by the excess allowance; one ticker with no allowance: the account) a LEAPS purchase spends at most, never more than the free cash. 0: no cap, all the free cash (0 to 100)" },
   { path: "volFarmerV2.leapsSpreadCostChargedPct", label: "LEAPS spread cost share", unit: "percent", editable: true, note: "how much of the half-spread a LEAPS purchase or sale gives up; a held LEAPS is valued at what selling it would bring. 33: about two-thirds of the way across the spread, bid $10 and ask $13 buy at $11.995 and sell at $11.005. Calls and Puts keep the Spread cost share (0 to 100)" },
   { path: "volFarmerV2.excessAllowancePct", label: "Excess allowance", unit: "percent", editable: true, note: "the session's tickers share one account, each with its allocation of it (Tickers: an equal share unless set); each ticker's pot is its allocation raised by this, at the account's value at the look. 24 tickers on $1,900,000 with 26.3158% each size from $100,000 at the start, the pots adding up to 126.3% of the account, so a ticker draws on the cash the others leave unused; when the cash runs short the tickers take turns, moved one place each day, and LEAPS buy last. 0: the pots are the allocations (0 to 1000)" },
+  { path: "volFarmerV3.rebalanceBandPct", label: "Rebalancing band", unit: "percent", editable: true, note: "% of the ticker's pot: at a look where the first position holds shares with no Call open, just before its next Call, it is traded back to its target (the First position share of the ticker's pot at the look) once its value is off it by more than this: whole lots bought with the free cash, or sold, to floor(target ÷ a lot's cost), never below one lot. Pot $150,000, First position 50% and 5%: a target of $75,000, traded below $67,500 or above $82,500; at $40 a share, back to 18 lots ($72,000) (0 to 50)" },
+  {
+    path: "volFarmerV3.rebalances",
+    label: "Rebalances",
+    unit: "choice",
+    editable: true,
+    note: "what the target covers. Both positions as one holding: the second position's shares count too; top-ups still buy into the first position, a trim sells the position with the higher break-even first (only lots with no Call open, the first keeping one lot), and a second position sold out ends as one called away does",
+    choices: [
+      { value: "first_position", label: "The first position" },
+      { value: "both_positions", label: "Both positions as one holding" },
+    ],
+  },
+  {
+    path: "volFarmerV3.firstPositionAfterCalledAway",
+    label: "First position called away first",
+    unit: "choice",
+    editable: true,
+    note: "a first position called away while the second still holds shares (top-ups took its break-even below the second's): wait for the second to be called away before a new cycle, as Vol Farmer v2 does, or rebuild it at the next look as a cycle opens, less the second position's shares' value when both positions are rebalanced as one",
+    choices: [
+      { value: "wait", label: "Waits for the second to go" },
+      { value: "rebuild", label: "Rebuilt at the next look" },
+    ],
+  },
+  {
+    path: "volFarmerV3.optionsExpiry",
+    label: "Calls and Puts expire",
+    unit: "choice",
+    editable: true,
+    note: "the next expiry after today, as Vol Farmer v2 sells; or today's close, sold at the 10:00 look on the days an expiry falls (the Steady Stake's), so they cover no night. A day without one rebalances, and a cycle opens by buying its shares alone",
+    choices: [
+      { value: "next", label: "On the next expiry" },
+      { value: "today", label: "At today's close, on expiry days" },
+    ],
+  },
+  { path: "volFarmerV3.optionsMaxDaysToExpiry", label: "Next expiry within", unit: "days", editable: true, note: "with Calls and Puts on the next expiry: the most calendar days it may be away for the look to sell on it; further away, the look sells none and only rebalances, and a cycle opens by buying its shares alone. Monday's look with the next expiry on Friday (4 days) and 2: no option until Wednesday's look. 45: every next expiry (1 to 45)" },
+  {
+    path: "volFarmerV3.callStrikeFloor",
+    label: "Calls struck at least",
+    unit: "choice",
+    editable: true,
+    note: "at the position's break-even, as Vol Farmer v2 sells them, or anywhere above the price inside the Calls' |delta| range",
+    choices: [
+      { value: "break_even", label: "At the break-even" },
+      { value: "none", label: "Above the price" },
+    ],
+  },
+  {
+    path: "volFarmerV3.putsSold",
+    label: "Puts sold",
+    unit: "choice",
+    editable: true,
+    note: "when the first position's best Call yields under Puts start under, as Vol Farmer v2 sells them; or with every Call the first position sells, whatever it yields (the second position still holding no shares and no Put)",
+    choices: [
+      { value: "calls_yield_little", label: "When the Calls yield little" },
+      { value: "with_every_call", label: "With every Call" },
+    ],
+  },
+  {
+    path: "volFarmerV3.putStrikeCap",
+    label: "Puts struck at most",
+    unit: "choice",
+    editable: true,
+    note: "a Step below the first position's break-even, as Vol Farmer v2 sells them; or anywhere below the price inside the Puts' |delta| limit",
+    choices: [
+      { value: "first_break_even_less_step", label: "A Step below the first break-even" },
+      { value: "none", label: "Below the price" },
+    ],
+  },
+  {
+    path: "volFarmerV3.trimsSell",
+    label: "Trims sell",
+    unit: "choice",
+    editable: true,
+    note: "with both positions rebalanced as one: the position with the higher break-even first, or the second position's shares (the Puts' assigned ones) first, so it empties and the Puts can sell again; only lots with no Call open, the first keeping one lot",
+    choices: [
+      { value: "higher_break_even_first", label: "The higher break-even first" },
+      { value: "second_position_first", label: "The second position first" },
+    ],
+  },
   {
     path: "volFarmerV2.looks",
     label: "Decides",
@@ -752,8 +832,16 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
     rows: [...volFarmerV2ReadsIt, "volFarmerV2.firstPositionPct", "volFarmerV2.putsStartCallYieldPct", "volFarmerV2.putMaxAbsDelta", "volFarmerV2.stepBelowFirstBreakEvenPct", "volFarmerV2.stepRule", "volFarmerV2.leapsMinDte", "volFarmerV2.leapsAbsDelta", "volFarmerV2.leapsMaxAccountPct", "volFarmerV2.leapsSpreadCostChargedPct", "volFarmerV2.looks", "volFarmerV2.excessAllowancePct"].map((path) => ({
       path,
       appliesWhen: volFarmerV2ReadsIt.has(path)
-        ? { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer", "vol_farmer_v2"] }], explanation: "Applies only with Vol Farmer v2 (or the original Vol Farmer) as decision maker." }
-        : { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v2"] }], explanation: "Applies only with Vol Farmer v2 as decision maker." },
+        ? { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer", "vol_farmer_v2", "vol_farmer_v3"] }], explanation: "Applies only with Vol Farmer v2 or v3 (or the original Vol Farmer) as decision maker." }
+        : { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v2", "vol_farmer_v3"] }], explanation: "Applies only with Vol Farmer v2 or v3 as decision maker." },
+    })),
+  },
+  {
+    group: "Vol Farmer v3",
+    section: "vol_farmer_v3",
+    rows: ["volFarmerV3.rebalanceBandPct", "volFarmerV3.rebalances", "volFarmerV3.firstPositionAfterCalledAway", "volFarmerV3.optionsExpiry", "volFarmerV3.optionsMaxDaysToExpiry", "volFarmerV3.callStrikeFloor", "volFarmerV3.putsSold", "volFarmerV3.putStrikeCap", "volFarmerV3.trimsSell"].map((path) => ({
+      path,
+      appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v3"] }], explanation: "Applies only with Vol Farmer v3 as decision maker." },
     })),
   },
 ];
@@ -777,6 +865,7 @@ export function readBacktestSettingValue(settings: BacktestSettings, settingPath
   if (section === "steadyStake") return ({ ...defaultBacktestSteadyStakeSettings, ...settings.steadyStake } as unknown as Record<string, number | string>)[field]!;
   if (section === "volFarmer") return ({ ...defaultBacktestVolFarmerSettings, ...settings.volFarmer } as unknown as Record<string, number | string>)[field]!;
   if (section === "volFarmerV2") return ({ ...defaultBacktestVolFarmerV2Settings, ...settings.volFarmerV2 } as unknown as Record<string, number | string>)[field]!;
+  if (section === "volFarmerV3") return ({ ...defaultBacktestVolFarmerV3Settings, ...settings.volFarmerV3 } as unknown as Record<string, number | string>)[field]!;
   if (section === "pluto") return (settings.pluto as unknown as Record<string, number | string>)[field]!;
   if (section === "trading") return (settings.trading as unknown as Record<string, number | string>)[field]!;
   throw new Error(`Not a settings path: ${settingPath}`);

@@ -172,8 +172,14 @@ describe("validateBacktestSettingsOverrides", () => {
     expect(validateBacktestSettingsOverrides({ decisionMaker: "rules" }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
     expect(validateBacktestSettingsOverrides({ decisionMaker: "llm" }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
     expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer" }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "decisionMaker must be baseline, steady_stake or vol_farmer_v2." });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "decisionMaker must be baseline, steady_stake, vol_farmer_v2 or vol_farmer_v3." });
     expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer_v2" }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: {} });
+    // Vol Farmer v3: v2's values and its band, 0 to 50% of the pot.
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer_v3", volFarmerV3: { rebalanceBandPct: 10 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { decisionMaker: "vol_farmer_v3", volFarmerV3: { rebalanceBandPct: 10 } } });
+    expect(validateBacktestSettingsOverrides({ volFarmerV3: { rebalanceBandPct: 51 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV3.rebalanceBandPct must be a number from 0 to 50." });
+    expect(validateBacktestSettingsOverrides({ volFarmerV3: { stakePct: 80 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV3.stakePct is not a Vol Farmer v3 setting." });
+    expect(validateBacktestSettingsOverrides({ volFarmerV3: { rebalances: "both_positions", firstPositionAfterCalledAway: "rebuild" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmerV3: { rebalances: "both_positions", firstPositionAfterCalledAway: "rebuild" } } });
+    expect(validateBacktestSettingsOverrides({ volFarmerV3: { rebalances: "all" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV3.rebalances must be one of first_position, both_positions." });
     expect(validateBacktestSettingsOverrides({ decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } } });
     expect(validateBacktestSettingsOverrides({ baseline: { minAbsDelta: 0.7 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "baseline.minAbsDelta must not be above baseline.maxAbsDelta." });
     expect(validateBacktestSettingsOverrides({ baseline: { strangle: true } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "baseline.strangle cannot be changed for a session." });
