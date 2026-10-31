@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calendarDaysBetween, easternInstant, easternIsoDate, easternMinutesOfDay, formatDateWithWeekday, formatEasternDateTime, formatEasternTime, weekdaysAfterUntil } from "./easternIsoDate.js";
+import { calendarDaysBetween, easternInstant, easternIsoDate, easternMinutesOfDay, formatDateWithWeekday, formatEasternDateTime, formatEasternTime, formatWeekdayDayMonth, weekdaysAfterUntil } from "./easternIsoDate.js";
 
 describe("Eastern time formatting", () => {
   it("shows summer clock time (EDT, UTC-4)", () => {
@@ -26,6 +26,7 @@ describe("Eastern time formatting", () => {
 
   it("puts the weekday on a plain calendar date", () => {
     expect(formatDateWithWeekday("2026-10-05")).toBe("Mon 2026-10-05");
+    expect(formatWeekdayDayMonth("2026-11-02")).toBe("Mon 2 Nov");
   });
 });
 

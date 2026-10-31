@@ -70,11 +70,16 @@ describe("isSessionVolumeQuoteSettled", () => {
 describe("describeSessionVolumeCaptureOutcome", () => {
   const ticker = (symbol: string, error: string | null, enabled = true) => ({ symbol, enabled, universe: 10, requested: 10, unknownIv: 0, withVolume: error ? 0 : 10, withImpliedVolatility: 10, stockPrice: 100, error });
   const result = (tickers: ReturnType<typeof ticker>[]) => ({ sessionDateIso: "2026-10-14", nextSessionIso: "2026-10-15", tickers, concurrency: 40, elapsedSeconds: 60 });
-  it("fails when no enabled ticker was captured, completes with errors when some were not; the 20% rule is off for them tomorrow", () => {
+  it("fails when no enabled ticker was captured, completes with errors when some were not; the 20% rule is off for them at the next session", () => {
     expect(describeSessionVolumeCaptureOutcome(result([ticker("HOOD", null), ticker("SMCI", null)]))).toEqual({});
-    expect(describeSessionVolumeCaptureOutcome(result([ticker("HOOD", null), ticker("SMCI", "no stored option chain")]))).toEqual({ completedWithErrors: { errorCount: 1, message: "no option volume for SMCI (no stored option chain): the 20% volume rule is off for them tomorrow" } });
-    expect(describeSessionVolumeCaptureOutcome(result([ticker("SMCI", "no stored option chain")]))).toEqual({ failureMessage: "no enabled ticker's option volume was captured, so the 20% volume rule is off for them tomorrow: SMCI (no stored option chain)" });
+    expect(describeSessionVolumeCaptureOutcome(result([ticker("HOOD", null), ticker("SMCI", "no stored option chain")]))).toEqual({ completedWithErrors: { errorCount: 1, message: "no option volume for SMCI (no stored option chain): the 20% volume rule is off for them on Thu 15 Oct" } });
+    expect(describeSessionVolumeCaptureOutcome(result([ticker("SMCI", "no stored option chain")]))).toEqual({ failureMessage: "no enabled ticker's option volume was captured, so the 20% volume rule is off for them on Thu 15 Oct: SMCI (no stored option chain)" });
     expect(describeSessionVolumeCaptureOutcome(result([]))).toEqual({});
+  });
+
+  it("names the next session: after a Friday, the Monday", () => {
+    const friday = { ...result([ticker("HOOD", null), ticker("SMCI", "timeout")]), sessionDateIso: "2026-10-30", nextSessionIso: "2026-11-02" };
+    expect(describeSessionVolumeCaptureOutcome(friday).completedWithErrors?.message).toBe("no option volume for SMCI (timeout): the 20% volume rule is off for them on Mon 2 Nov");
   });
 
   it("only logs a shortlisted ticker Pluto is not enabled on", () => {

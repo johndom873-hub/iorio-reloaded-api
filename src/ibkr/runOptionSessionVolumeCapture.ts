@@ -5,7 +5,7 @@ import { openCaptureQuoteWindow, type CaptureQuoteWindow, type CapturedOptionQuo
 import { requestLivePrices } from "./fetchLivePrices.js";
 import { releaseMarketDataLines, renewMarketDataLineReservation, reserveMarketDataLines } from "./marketDataLineBudget.js";
 import { nextReqIdFor } from "./sharedReadConnection.js";
-import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { easternIsoDate, formatWeekdayDayMonth } from "../lib/easternIsoDate.js";
 import { loadOpenDaysBetween } from "../lib/marketSessionStatus.js";
 import { getRiskFreeRateForJob } from "../lib/riskFreeRate.js";
 import { addCalendarDays } from "../lib/calendarDays.js";
@@ -22,7 +22,7 @@ import { optionQuoteBandScopeOf } from "../pluto/optionQuoteBandPlanLoader.js";
 // contract's full-session volume (IBKR tick 8, read under FROZEN after the close: it holds the whole day then and resets
 // overnight, measured 2026-10-14/15) and its IBKR implied volatility, stored as the previous session's volume for the next
 // day's option quote band and both strategies' 20% rule, and as each contract's last-seen IV. Only the enabled tickers'
-// failures alert: without its volumes a ticker trades the next day with the rule lifted (optionQuoteBandPlan.ts).
+// failures alert: without its volumes a ticker trades the next session with the rule lifted (optionQuoteBandPlan.ts).
 //
 // Which contracts: the option quote band's universe for the next session under the ticker's strategy (every listed
 // strike, both rights, of the expiries it sells counted from that session: the CC + Put Ladder's days-to-expiry range,
@@ -212,15 +212,17 @@ export async function runOptionSessionVolumeCapture(dependencies: SessionVolumeC
 
 /**
  * The job's outcome, from the tickers Pluto is enabled on (a shortlisted ticker it is not enabled on is only logged): a
- * failure when none of them was captured, completed with errors when some were not.
+ * failure when none of them was captured, completed with errors when some were not. The text names the next session
+ * ("on Mon 2 Nov"): after a Friday or before a holiday it is not the next day.
  */
 export function describeSessionVolumeCaptureOutcome(result: SessionVolumeCaptureResult): { failureMessage?: string; completedWithErrors?: { errorCount: number; message: string } } {
   const enabled = result.tickers.filter((ticker) => ticker.enabled);
   const failed = enabled.filter((ticker) => ticker.error !== null);
   const listed = failed.map((ticker) => `${ticker.symbol} (${ticker.error})`).join(", ");
+  const nextSession = formatWeekdayDayMonth(result.nextSessionIso);
   if (enabled.length === 0) return {};
-  if (failed.length === enabled.length) return { failureMessage: `no enabled ticker's option volume was captured, so the 20% volume rule is off for them tomorrow: ${listed}` };
-  if (failed.length > 0) return { completedWithErrors: { errorCount: failed.length, message: `no option volume for ${listed}: the 20% volume rule is off for them tomorrow` } };
+  if (failed.length === enabled.length) return { failureMessage: `no enabled ticker's option volume was captured, so the 20% volume rule is off for them on ${nextSession}: ${listed}` };
+  if (failed.length > 0) return { completedWithErrors: { errorCount: failed.length, message: `no option volume for ${listed}: the 20% volume rule is off for them on ${nextSession}` } };
   return {};
 }
 

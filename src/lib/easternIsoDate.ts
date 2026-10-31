@@ -1,3 +1,5 @@
+import { formatDayMonth } from "./optionContractLabel.js";
+
 const easternDateFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" });
 
 /** Reading ICU is slow next to the arithmetic around it: recent answers are kept, up to this many each (then started afresh). */
@@ -98,10 +100,15 @@ export function formatEasternDateTime(at: Date, omitDateOnEasternDay?: string): 
 
 /** A calendar date with its weekday, e.g. "Mon 2026-10-05". The date is a plain calendar date, so no time zone applies. */
 const utcWeekdayFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short" });
+const weekdayOfDate = (dateIso: string): string => utcWeekdayFormatter.format(new Date(`${dateIso}T12:00:00Z`));
 
 export function formatDateWithWeekday(dateIso: string): string {
-  const weekday = utcWeekdayFormatter.format(new Date(`${dateIso}T12:00:00Z`));
-  return `${weekday} ${dateIso}`;
+  return `${weekdayOfDate(dateIso)} ${dateIso}`;
+}
+
+/** The same date as weekday, day and month (formatDayMonth), e.g. "Mon 2 Nov": a session named in an alert. */
+export function formatWeekdayDayMonth(dateIso: string): string {
+  return `${weekdayOfDate(dateIso)} ${formatDayMonth(dateIso)}`;
 }
 
 /** Weekdays after `fromIso` up to and including `toIso` (holidays not excluded), e.g. Wed 2026-10-07 → Fri 2026-10-09 = 2. */
