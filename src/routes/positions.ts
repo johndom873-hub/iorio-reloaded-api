@@ -1029,8 +1029,78 @@ function readSignalSnapshot(raw: unknown): { ok: true; value: Record<string, unk
   return { ok: true, value: raw as Record<string, unknown> };
 }
 
+/**
+ * Vol Farmer v4's share purchase (strategyKey "shares", Marcelo 2026-10-31): a stock leg alone, bought at Pluto's limit when
+ * it rebalances, or buys a first position on a day it sells no option. Pluto's only, for an action taken under v4; the worker
+ * writes its fills to the ticker's uncovered shares (ibkrGatewayOrderTracking.ts).
+ */
+async function buildPlutoSharePurchase(request: Request, response: Response): Promise<void> {
+  const { symbol, stock, option } = request.body as OpenOrderRequestBody;
+  if (!symbol || !symbol.trim()) {
+    response.status(400).json({ error: "Symbol is required." });
+    return;
+  }
+  const plutoActionId = await readPlutoActionId(request);
+  if (!plutoActionId.ok) {
+    response.status(400).json({ error: plutoActionId.error });
+    return;
+  }
+  const action = plutoActionId.value === null ? undefined : await db("pluto_actions").where({ id: plutoActionId.value }).first("execution_strategy");
+  if (action?.execution_strategy !== "vol_farmer_v4") {
+    response.status(400).json({ error: "Shares are bought on their own only by Pluto, under Vol Farmer v4." });
+    return;
+  }
+  if (option !== undefined) {
+    response.status(400).json({ error: "A share purchase has no option leg." });
+    return;
+  }
+  if (!stock || typeof stock !== "object" || !Number.isInteger(stock.quantity) || stock.quantity <= 0) {
+    response.status(400).json({ error: "stock.quantity must be a positive whole number of shares." });
+    return;
+  }
+  if (typeof stock.limitPrice !== "number" || !(roundToCents(stock.limitPrice) > 0)) {
+    response.status(400).json({ error: "stock.limitPrice must be a positive number." });
+    return;
+  }
+  const frozenRefusal = await frozenTickerRefusal(symbol.trim().toUpperCase());
+  if (frozenRefusal) {
+    response.status(409).json({ error: frozenRefusal });
+    return;
+  }
+  const ticker = await requireExistingTicker(symbol);
+  if (!ticker) {
+    response.status(400).json({ error: "Unknown symbol — add it via the Shortlist first." });
+    return;
+  }
+  const signalSnapshot = readSignalSnapshot((request.body as OpenOrderRequestBody).signalSnapshot);
+  if (!signalSnapshot.ok) {
+    response.status(400).json({ error: signalSnapshot.error });
+    return;
+  }
+  const payload: OrderRequestPayload = {
+    symbol: ticker.symbol,
+    strategyKey: "shares",
+    legs: [{ role: "stock", action: OrderAction.BUY, symbol: ticker.symbol, quantity: stock.quantity, unitPrice: roundToCents(stock.limitPrice) }],
+  };
+  const [orderRequest] = await db("order_requests")
+    .insert({
+      requested_by_user_id: request.session.userId,
+      request_type: "open_shares",
+      payload: JSON.stringify(payload),
+      pluto_action_id: plutoActionId.value,
+      signal_snapshot: signalSnapshot.value === null ? null : JSON.stringify(signalSnapshot.value),
+    })
+    .returning("*");
+  await publishNotification({ type: "order_status", orderId: orderRequest.id });
+  response.status(201).json({ ...serializeOrderRequest(orderRequest), note: null });
+}
+
 positionsRouter.post("/orders", async (request, response) => {
   const { symbol, strategyKey, stock, option, buyEveryShare } = request.body as OpenOrderRequestBody;
+  if (strategyKey === "shares") {
+    await buildPlutoSharePurchase(request, response);
+    return;
+  }
   if (buyEveryShare !== undefined && typeof buyEveryShare !== "boolean") {
     response.status(400).json({ error: "buyEveryShare must be true or false." });
     return;
@@ -1054,12 +1124,12 @@ positionsRouter.post("/orders", async (request, response) => {
     return;
   }
   const isLeaps = strategyKey === "leaps";
-  // Pluto buys LEAPS for Vol Farmer v2 only (Marcelo 2026-10-27): an action taken under any other strategy is refused.
+  // Pluto buys LEAPS for Vol Farmer v4 only (v2 until 2026-10-31): an action taken under any other strategy is refused.
   const leapsPlutoActionId = (request.body as { plutoActionId?: unknown }).plutoActionId;
   if (isLeaps && leapsPlutoActionId) {
     const action = typeof leapsPlutoActionId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(leapsPlutoActionId) ? await db("pluto_actions").where({ id: leapsPlutoActionId }).first("execution_strategy") : undefined;
-    if (action?.execution_strategy !== "vol_farmer_v2") {
-      response.status(400).json({ error: "Pluto buys LEAPS only under Vol Farmer v2." });
+    if (action?.execution_strategy !== "vol_farmer_v4") {
+      response.status(400).json({ error: "Pluto buys LEAPS only under Vol Farmer v4." });
       return;
     }
   }
@@ -1138,7 +1208,9 @@ positionsRouter.post("/orders", async (request, response) => {
     // Shares already committed by in-flight covered-call orders on this
     // symbol (2026-09-24) — two builds could otherwise both skip the stock
     // leg against the same uncovered shares and leave the second call naked.
-    const availableUncovered = buyEveryShare ? 0 : Math.max(0, (await fetchAvailableUncoveredShares(ticker.id)) - (await sharesCommittedByInFlightCoveredCalls(ticker.symbol)));
+    // Shares a working sale of uncovered shares is selling (Vol Farmer v4's trims) are not there to cover a call either.
+    const [uncoveredShares, committedByCalls, soldBySales] = buyEveryShare ? [0, 0, 0] : await Promise.all([fetchAvailableUncoveredShares(ticker.id), sharesCommittedByInFlightCoveredCalls(ticker.symbol), sharesSoldByInFlightUncoveredShareSales(ticker.symbol)]);
+    const availableUncovered = Math.max(0, uncoveredShares - committedByCalls - soldBySales);
     const shortfall = Math.max(0, requiredShares - availableUncovered);
     excessUncoveredShares = Math.max(0, availableUncovered - requiredShares);
 
@@ -1481,6 +1553,17 @@ export async function sharesCommittedByInFlightCoveredCalls(symbol: string): Pro
     .whereRaw("payload->>'strategyKey' = ?", ["covered_call"])
     .select("payload");
   return sumSharesCommittedByCoveredCallPayloads(rows.map((row) => row.payload));
+}
+
+/** Uncovered shares that in-flight sales of them are selling: the stock legs of active closes of the symbol's unstructured positions. */
+export async function sharesSoldByInFlightUncoveredShareSales(symbol: string): Promise<number> {
+  const rows: { payload: OrderRequestPayload }[] = await db("order_requests")
+    .whereIn("status", [...activeOrderRequestStatuses])
+    .where("request_type", "close_position")
+    .whereRaw("payload->>'symbol' = ?", [symbol])
+    .whereRaw("payload->>'strategyKey' = ?", ["unstructured"])
+    .select("payload");
+  return rows.reduce((sum, row) => sum + row.payload.legs.filter((leg) => leg.role === "stock" && leg.action === OrderAction.SELL).reduce((legSum, leg) => legSum + leg.quantity, 0), 0);
 }
 
 /** The CC + Put Ladder's gate context for an order its Pluto action took under the ladder; a failed read refuses the order. */

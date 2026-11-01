@@ -11,7 +11,7 @@ const ticker: PlutoTickerSettings = { symbol: "LADR", tickerId: "t1", strategy: 
 
 function dependencies(overrides: Partial<OptionQuoteBandPlannerDependencies> = {}): OptionQuoteBandPlannerDependencies {
   return {
-    loadSettings: async () => ({ ladderMinDte: 1, ladderMaxDte: 45, ladderMinAbsDelta: 0.05, ladderMaxAbsDelta: 0.3, volFarmerV2CallMinAbsDelta: 0.1, volFarmerV2CallMaxAbsDelta: 0.3 }) as PlutoSettings,
+    loadSettings: async () => ({ ladderMinDte: 1, ladderMaxDte: 45, ladderMinAbsDelta: 0.05, ladderMaxAbsDelta: 0.3, volFarmerV4CallMinAbsDelta: 0.1, volFarmerV4CallMaxAbsDelta: 0.3, volFarmerV4OptionsExpiry: "next" }) as PlutoSettings,
     loadPaused: async () => false,
     loadEnabledTickers: async () => [ticker],
     // 20 Nov (31 DTE): the $80, $90 and $100 Puts and Calls.
@@ -64,8 +64,8 @@ describe("createOptionQuoteBandPlanner", () => {
     expect(loadChain).toHaveBeenCalledTimes(2);
   });
 
-  it("a Vol Farmer v2 ticker: only the next listed expiry, built afresh when the ticker's strategy changes during the day", async () => {
-    // 23 Oct (3 DTE) is the next listed expiry; 20 Nov (31 DTE) is inside the ladder's range but not v2's.
+  it("a Vol Farmer v4 ticker selling the next expiry: only the next listed one, built afresh when the ticker's strategy changes during the day", async () => {
+    // 23 Oct (3 DTE) is the next listed expiry; 20 Nov (31 DTE) is inside the ladder's range but not v4's.
     const chain = { expirations: ["20261120", "20261023"], strikesByExpiry: new Map([["20261120", [80, 100]], ["20261023", [80, 100]]]), fetchedAt: null };
     const volume = new Map(["2026-11-20|80|P", "2026-11-20|100|C", "2026-10-23|80|P", "2026-10-23|100|C"].map((key) => [key, 100]));
     let strategy: PlutoTickerSettings["strategy"] = null;
@@ -76,6 +76,23 @@ describe("createOptionQuoteBandPlanner", () => {
     strategy = "cc_put_ladder";
     expect((await expiriesOf()).sort()).toEqual(["2026-10-23", "2026-11-20"]);
     expect(loadChain).toHaveBeenCalledTimes(2);
+  });
+
+  it("a Vol Farmer v4 ticker selling today's expiry: only the one ending at today's close, none on a day without one, built afresh when the setting changes", async () => {
+    // Tue 20 Oct lists 20 Oct (0 DTE) and 23 Oct; Wed 21 Oct lists no expiry ending that day.
+    const chain = { expirations: ["20261020", "20261023"], strikesByExpiry: new Map([["20261020", [80, 100]], ["20261023", [80, 100]]]), fetchedAt: null };
+    let optionsExpiry: PlutoSettings["volFarmerV4OptionsExpiry"] = "today";
+    const loadChain = vi.fn(async () => chain);
+    const planner = createOptionQuoteBandPlanner(
+      dependencies({ loadSettings: async () => ({ volFarmerV4CallMinAbsDelta: 0.05, volFarmerV4CallMaxAbsDelta: 0.5, volFarmerV4OptionsExpiry: optionsExpiry }) as PlutoSettings, loadEnabledTickers: async () => [{ ...ticker, strategy: "vol_farmer_v4" }], loadChain, loadPreviousSessionVolume: async () => null }),
+    );
+    const expiriesOn = async (dayIso: string) => [...new Set((await planner.plan(dayIso, new Map([["t1", 100]]), new Date(`${dayIso}T16:00:00Z`))).get("t1")!.plan.contracts.map((contract) => contract.expiry))];
+    expect(await expiriesOn(todayIso)).toEqual(["2026-10-20"]);
+    optionsExpiry = "next";
+    expect(await expiriesOn(todayIso)).toEqual(["2026-10-23"]);
+    expect(loadChain).toHaveBeenCalledTimes(2);
+    optionsExpiry = "today";
+    expect(await expiriesOn("2026-10-21")).toEqual([]);
   });
 
   it("without the previous session's volumes, the ticker's expiry is taken whole: the 20% rule is lifted on it for the day", async () => {

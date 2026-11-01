@@ -230,6 +230,15 @@ export class FileIntradayPrices {
     for (const bars of this.barsByDate.values()) bars.sort((a, b) => a.startMinutesEt - b.startMinutesEt);
   }
 
+  /** The prices of the days before `firstDayIso` × `multiplier`, in place: IBKR's bars before a spin-off back on the prices traded (findSpinOffs). */
+  scaleBefore(firstDayIso: string, multiplier: number): void {
+    for (const [dateIso, closes] of this.closesByDate) if (dateIso < firstDayIso) for (const close of closes) close[1] *= multiplier;
+    for (const [dateIso, bars] of this.barsByDate) {
+      if (dateIso >= firstDayIso) continue;
+      this.barsByDate.set(dateIso, bars.map((bar) => ({ ...bar, open: bar.open * multiplier, high: bar.high * multiplier, close: bar.close * multiplier })));
+    }
+  }
+
   /** A day's bars, ascending; none when the file has none that day. */
   barsOn(dateIso: string): readonly FileIntradayBarPrices[] {
     return this.barsByDate.get(dateIso) ?? [];

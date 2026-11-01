@@ -26,7 +26,7 @@ import { optionQuoteBandScopeOf } from "../pluto/optionQuoteBandPlanLoader.js";
 //
 // Which contracts: the option quote band's universe for the next session under the ticker's strategy (every listed
 // strike, both rights, of the expiries it sells counted from that session: the CC + Put Ladder's days-to-expiry range,
-// Vol Farmer v2's next listed expiry; optionQuoteBandPlan.ts) narrowed to the first-look re-quoting band around the
+// Vol Farmer v4's expiry ending that session or its next listed one; optionQuoteBandPlan.ts) narrowed to the first-look re-quoting band around the
 // strategy's Call |delta| range (optionRequoteBand.ts) at today's last price, from each contract's last-seen IV: the
 // Calls inside it, every Put below the price; a Call whose IV is unknown is always quoted. The first night knows no IV,
 // so it quotes the whole universe (about 21,000 contracts, ~35 min for 20 tickers); later nights quote the band (~3,200,

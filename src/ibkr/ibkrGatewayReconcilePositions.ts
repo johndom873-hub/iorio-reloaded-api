@@ -21,7 +21,7 @@ export interface ReconciliationDependencies {
   /** Writes the opening trades recordExecution buffered for a conId before its leg existed. */
   drainPendingOpeningExecutions: (conId: string, newLegId: string) => Promise<void>;
   /** Writes waiting covered-call share fills onto the stock leg of the position holding their call, once it exists. */
-  attributeWaitingCoveredCallShareBuys?: () => Promise<void>;
+  attributeWaitingShareBuys?: () => Promise<void>;
 }
 
 /** Closes a leftover-stock position whose shares are now covered by a newly sold call. */
@@ -83,15 +83,27 @@ async function logPlatformAnomaly(
 }
 
 // Stock-only leftover (no calls sold against it at all) traces back to
-// exactly one of two known causes: a covered call's short call expired
-// worthless (its own close_reason already recorded that), or a
-// cash-secured put got assigned (same). Looked up by the most recently
+// one of three known causes: a covered call's short call expired
+// worthless (its own close_reason already recorded that), a
+// cash-secured put got assigned (same), or Pluto bought the shares on their
+// own (Vol Farmer v4's share purchase, 2026-10-31). The first two are looked up by the most recently
 // closed covered_call/cash_secured_put position on this ticker, but only one
 // closed within leftoverStockCauseWindowMinutes (positions close in the same
-// pass, or the one before, that the shares appear) — if neither matches, this
-// is a genuinely unexplained appearance of stock and gets logged as a
+// pass, or the one before, that the shares appear), the third by a share purchase sent in that window that filled or
+// may have — if none matches, this is a genuinely unexplained appearance of stock and gets logged as a
 // platform anomaly rather than silently labeled.
 const leftoverStockCauseWindowMinutes = 30;
+
+/** Whether Pluto sent a share purchase (open_shares) for the symbol within the cause window that filled, or may have. */
+async function hasRecentPlutoSharePurchase(symbol: string): Promise<boolean> {
+  const order = await db("order_requests")
+    .where({ request_type: "open_shares" })
+    .whereRaw("payload->>'symbol' = ?", [symbol])
+    .whereNotIn("status", ["pending_confirmation", "cancelled", "rejected", "error"])
+    .whereRaw(`created_at >= now() - interval '${leftoverStockCauseWindowMinutes} minutes'`)
+    .first("id");
+  return order !== undefined;
+}
 
 async function determineLeftoverStockReason(symbol: string): Promise<string> {
   const ticker = await db("tickers").where({ symbol }).first();
@@ -126,6 +138,7 @@ async function determineLeftoverStockReason(symbol: string): Promise<string> {
   if (recentClosed?.strategy_key === "cash_secured_put" && recentClosed.close_reason === "assigned") {
     return "csp_assigned_stock";
   }
+  if (await hasRecentPlutoSharePurchase(symbol)) return "pluto_share_buy";
   return "unknown";
 }
 
@@ -438,7 +451,7 @@ async function runReconciliationPass(allHeld: IbkrHeldPosition[], passId: number
   // A frozen ticker (a stock split until its records are rewritten, tickerFreeze.ts) is left out of the whole pass.
   const { held, frozenTickerIds } = await setAsideFrozenTickers(allHeld, passId, deps.notifyTelegram);
   currentPassId = passId;
-  await deps.attributeWaitingCoveredCallShareBuys?.();
+  await deps.attributeWaitingShareBuys?.();
   legsHandedOffThisPass = 0;
   stockHandoffSourcesThisPass = new Map();
   marginalCallPositionIds = new Set();
@@ -1374,8 +1387,10 @@ async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPos
 
   let positionId = existingLeftoverLeg?.position_id as string | undefined;
   if (!positionId) {
+    // Shares beyond the calls' that Pluto just bought on their own are explained; any other cause is left to review.
+    const unstructuredReason = (await hasRecentPlutoSharePurchase(symbol)) ? "pluto_share_buy" : "unknown";
     const [newPosition] = await db("positions")
-      .insert({ strategy_key: "unstructured", ticker_id: ticker.id, status: "open", unstructured_reason: "unknown" })
+      .insert({ strategy_key: "unstructured", ticker_id: ticker.id, status: "open", unstructured_reason: unstructuredReason })
       .returning(["id"]);
     positionId = newPosition.id;
     await publishNotification({ type: "position_opened", positionId: positionId!, symbol });

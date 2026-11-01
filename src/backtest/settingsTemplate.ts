@@ -3,7 +3,7 @@ import { db } from "../db/connection.js";
 import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { kellyFraction } from "../pluto/postModelGates.js";
 import { mapTradingSettingsRow } from "../lib/tradingSettingsStore.js";
-import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, defaultBacktestVolFarmerV3Settings, type BacktestSettingApplicability, type BacktestSettingCondition, type BacktestSettingGroup, type BacktestSettingRow, type BacktestSettingSection, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
+import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, defaultBacktestVolFarmerV3Settings, defaultBacktestVolFarmerV4Settings, type BacktestSettingApplicability, type BacktestSettingCondition, type BacktestSettingGroup, type BacktestSettingRow, type BacktestSettingSection, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
 import { earningsDateKnownCalendarDaysAhead } from "./engine/backtestTickerInputs.js";
 
 // The New session settings table (docs/backtesting/): the values a session snapshots and may change for itself only. The
@@ -14,15 +14,15 @@ export async function loadCurrentBacktestSettings(connection: Knex = db): Promis
   const [pluto, tradingRow] = await Promise.all([loadPlutoSettings(connection), connection("trading_settings").first()]);
   if (!tradingRow) throw new Error("No trading_settings row found.");
   const trading = mapTradingSettingsRow(tradingRow);
-  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "vol_farmer_v2", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings }, steadyStake: { ...defaultBacktestSteadyStakeSettings }, volFarmer: { ...defaultBacktestVolFarmerSettings }, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings }, volFarmerV3: { ...defaultBacktestVolFarmerV3Settings } };
+  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "vol_farmer_v4", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings }, steadyStake: { ...defaultBacktestSteadyStakeSettings }, volFarmer: { ...defaultBacktestVolFarmerSettings }, volFarmerV2: { ...defaultBacktestVolFarmerV2Settings }, volFarmerV3: { ...defaultBacktestVolFarmerV3Settings }, volFarmerV4: { ...defaultBacktestVolFarmerV4Settings } };
 }
 
 type RowDefinition = Omit<BacktestSettingRow, "now" | "group" | "section" | "appliesWhen"> & { fixedValue?: number | string };
 
 const percentOfAccount = "% of the account";
 
-/** Every row's label, unit and note; backtestSettingLayout places them. "fixed." rows are model constants, shown but not editable. */
-export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
+/** Every row but Vol Farmer v4's (volFarmerV4RowDefinitions): label, unit and note. "fixed." rows are model constants, shown but not editable. */
+const rowDefinitionsBeforeVolFarmerV4: readonly RowDefinition[] = [
   { path: "fixed.earningsDateKnownCalendarDaysAhead", label: "Earnings dates known 30 days ahead", unit: "days", editable: false, note: "a report's date is seen from 30 calendar days before it: expiries spanning it are skipped only from then", fixedValue: earningsDateKnownCalendarDaysAhead },
 
   { path: "trading.spreadCostChargedPct", label: "Spread cost share", unit: "percent", editable: true, note: "how much of the half-spread a fill gives up" },
@@ -35,12 +35,13 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Decision maker",
     unit: "choice",
     editable: true,
-    note: "who decides the session's trades. The Steady Stake and Vol Farmer v2: only their own group's values, at the 10:00 look; Vol Farmer v3: Vol Farmer v2's values and its own",
+    note: "who decides the session's trades. The Steady Stake, Vol Farmer v2 and v4: only their own group's values, at the 10:00 look; Vol Farmer v3: Vol Farmer v2's values and its own",
     choices: [
       { value: "baseline", label: "CC + Put Ladder (Covered Calls on the shares, a ladder of Puts below)" },
       { value: "steady_stake", label: "Steady Stake (a steady share stake, Calls and Puts on expiry days)" },
       { value: "vol_farmer_v2", label: "Vol Farmer v2 (two Covered Calls at different levels, a LEAPS Call; research)" },
       { value: "vol_farmer_v3", label: "Vol Farmer v3 (Vol Farmer v2 with its first position rebalanced to its share of the pot; research)" },
+      { value: "vol_farmer_v4", label: "Vol Farmer v4 (Vol Farmer v3 on values of its own: 80% of the pot in shares, Calls expiring at today's close)" },
     ],
   },
   { path: "volFarmer.callMinAbsDelta", label: "Calls' |delta| from", unit: "number", editable: true, note: "the Call sold is the one with the highest premium yield (annualized) inside the |delta| and days-to-expiry ranges whose strike passes the hedge rule; |delta| from each quote's own implied volatility" },
@@ -289,6 +290,7 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
       { value: "second_position_first", label: "The second position first" },
     ],
   },
+  { path: "volFarmerV3.topUpCapPctOfPot", label: "Top-ups up to", unit: "percent", editable: true, note: "% of the ticker's pot: the most money its top-ups may take it to, counting what its held shares cost (the first position's fills, the second's assigned strikes) and the cash its open Puts hold; a top-up buys only the lots the room left pays for. A cycle's first purchase, Calls, Puts, trims and LEAPS are not capped. Pot $264,052 at 100% with $211,240 in: $52,812 of room, 3 lots at $150 ($15,000.50 each) of the 4 rebalancing wants. 0: no cap" },
   {
     path: "volFarmerV2.looks",
     label: "Decides",
@@ -684,6 +686,51 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
   { path: "baseline.hedgePutFarBelowPct", label: "Hedge: far below the new price by", unit: "percent", editable: true, note: "kept Puts struck this much below the new entry's price are sold, and at-the-money ones bought" },
 ];
 
+/** Vol Farmer v4's rows (Marcelo 2026-10-31), in its group's order: a copy of each row it takes a value from, under volFarmerV4. */
+const volFarmerV4SourcePaths: readonly string[] = [
+  "volFarmer.callMinAbsDelta",
+  "volFarmer.callMaxAbsDelta",
+  "volFarmer.maxSpreadPctOfMid",
+  "volFarmerV2.firstPositionPct",
+  "volFarmerV2.excessAllowancePct",
+  "volFarmerV3.rebalanceBandPct",
+  "volFarmerV3.rebalances",
+  "volFarmerV3.trimsSell",
+  "volFarmerV3.topUpCapPctOfPot",
+  "volFarmerV3.firstPositionAfterCalledAway",
+  "volFarmerV3.optionsExpiry",
+  "volFarmerV3.optionsMaxDaysToExpiry",
+  "volFarmerV3.callStrikeFloor",
+  "volFarmerV3.putsSold",
+  "volFarmerV2.putsStartCallYieldPct",
+  "volFarmerV2.putMaxAbsDelta",
+  "volFarmerV3.putStrikeCap",
+  "volFarmerV2.stepBelowFirstBreakEvenPct",
+  "volFarmerV2.stepRule",
+  "volFarmerV2.leapsMinDte",
+  "volFarmerV2.leapsAbsDelta",
+  "volFarmerV2.leapsMaxAccountPct",
+  "volFarmerV2.leapsSpreadCostChargedPct",
+  "volFarmerV2.looks",
+];
+
+/** The copied rows whose note names a rule v4 reads differently: the Calls' strike and expiry are its own choices. */
+const volFarmerV4Notes: Readonly<Record<string, string>> = {
+  callMinAbsDelta: "the Call sold is the one with the highest premium yield (annualized) inside this |delta| range, on the expiry Calls and Puts expire sets, struck as Calls struck at least sets; |delta| from each quote's own implied volatility",
+  putsStartCallYieldPct: "% a year: Puts start while the first position's Calls yield under this. At each look where the first position needs a new Call (none open), the best Call it can sell (the Calls' |delta| range, the expiry sold, struck as Calls struck at least sets) is measured by its premium yield; under this (no Call: 0%), Puts are sold with the rest of the pot (after the First position), beside the Calls",
+  putMaxAbsDelta: "the Puts' highest |delta|: the Put sold is the one with the highest premium yield of the expiry sold (Calls and Puts expire) up to this |delta|, struck as Puts struck at most sets; as many contracts as the rest of the pot secures (strike × 100 each)",
+};
+
+const volFarmerV4RowDefinitions: readonly RowDefinition[] = volFarmerV4SourcePaths.map((sourcePath) => {
+  const source = rowDefinitionsBeforeVolFarmerV4.find((row) => row.path === sourcePath);
+  if (source === undefined) throw new Error(`Vol Farmer v4 copies a row that does not exist: ${sourcePath}`);
+  const field = sourcePath.slice(sourcePath.indexOf(".") + 1);
+  return { ...source, path: `volFarmerV4.${field}`, note: volFarmerV4Notes[field] ?? source.note };
+});
+
+/** Every row's label, unit and note; backtestSettingLayout places them. "fixed." rows are model constants, shown but not editable. */
+export const backtestSettingRowDefinitions: readonly RowDefinition[] = [...rowDefinitionsBeforeVolFarmerV4, ...volFarmerV4RowDefinitions];
+
 const ladderOn: BacktestSettingCondition = { path: "baseline.putsWhenNoCall", oneOf: ["reserve_ladder"] };
 const hedgeOn: BacktestSettingCondition = { path: "baseline.hedgePutTenorDays", above: 0 };
 const hedgeOnEntries: BacktestSettingCondition = { path: "baseline.hedgePutCovers", oneOf: ["entries"] };
@@ -839,9 +886,17 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
   {
     group: "Vol Farmer v3",
     section: "vol_farmer_v3",
-    rows: ["volFarmerV3.rebalanceBandPct", "volFarmerV3.rebalances", "volFarmerV3.firstPositionAfterCalledAway", "volFarmerV3.optionsExpiry", "volFarmerV3.optionsMaxDaysToExpiry", "volFarmerV3.callStrikeFloor", "volFarmerV3.putsSold", "volFarmerV3.putStrikeCap", "volFarmerV3.trimsSell"].map((path) => ({
+    rows: ["volFarmerV3.rebalanceBandPct", "volFarmerV3.rebalances", "volFarmerV3.firstPositionAfterCalledAway", "volFarmerV3.optionsExpiry", "volFarmerV3.optionsMaxDaysToExpiry", "volFarmerV3.callStrikeFloor", "volFarmerV3.putsSold", "volFarmerV3.putStrikeCap", "volFarmerV3.trimsSell", "volFarmerV3.topUpCapPctOfPot"].map((path) => ({
       path,
       appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v3"] }], explanation: "Applies only with Vol Farmer v3 as decision maker." },
+    })),
+  },
+  {
+    group: "Vol Farmer v4",
+    section: "vol_farmer_v4",
+    rows: volFarmerV4RowDefinitions.map(({ path }) => ({
+      path,
+      appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v4"] }], explanation: "Applies only with Vol Farmer v4 as decision maker." },
     })),
   },
 ];
@@ -866,6 +921,7 @@ export function readBacktestSettingValue(settings: BacktestSettings, settingPath
   if (section === "volFarmer") return ({ ...defaultBacktestVolFarmerSettings, ...settings.volFarmer } as unknown as Record<string, number | string>)[field]!;
   if (section === "volFarmerV2") return ({ ...defaultBacktestVolFarmerV2Settings, ...settings.volFarmerV2 } as unknown as Record<string, number | string>)[field]!;
   if (section === "volFarmerV3") return ({ ...defaultBacktestVolFarmerV3Settings, ...settings.volFarmerV3 } as unknown as Record<string, number | string>)[field]!;
+  if (section === "volFarmerV4") return ({ ...defaultBacktestVolFarmerV4Settings, ...settings.volFarmerV4 } as unknown as Record<string, number | string>)[field]!;
   if (section === "pluto") return (settings.pluto as unknown as Record<string, number | string>)[field]!;
   if (section === "trading") return (settings.trading as unknown as Record<string, number | string>)[field]!;
   throw new Error(`Not a settings path: ${settingPath}`);

@@ -12,8 +12,9 @@ import { hasPreviousSessionVolumeForOneContract, optionRequoteBand, selectOption
 //   universe          the stored chain's contracts (both rights) of the expiries the ticker's strategy sells, with
 //                     enough previous-session volume for one contract under the 20% rule:
 //                       CC + Put Ladder   its days-to-expiry range (ladderMinDte–ladderMaxDte)
-//                       Vol Farmer v2     the next listed expiry after the session, the only one it sells (a LEAPS is
-//                                         quoted when its steps ask for one, volFarmerV2Round.ts)
+//                       Vol Farmer v4     the expiry it sells: the one ending at the session's close (0 days away), or
+//                                         the next listed after the session (its Options expiry setting); a LEAPS is
+//                                         quoted when its steps ask for one, volFarmerV4Round.ts
 //                     An expiry the after-close capture has no volume for is taken whole: the rule is lifted on it for
 //                     the day (Marcelo 2026-10-30; expiriesWithoutPreviousSessionVolume)
 //   last-seen IV      the contract's own IV at its latest quote today (the mid's IV on the expiry's forward, Pluto's
@@ -26,8 +27,16 @@ import { hasPreviousSessionVolumeForOneContract, optionRequoteBand, selectOption
 
 export type OptionQuoteBandUniverseContract = Pick<OptionRequoteContract, "expiry" | "strike" | "right">;
 
-/** The expiries a ticker's band covers: the CC + Put Ladder's days-to-expiry range, or Vol Farmer v2's next listed expiry. */
+/** The expiries a ticker's band covers: a days-to-expiry range (the CC + Put Ladder's; Vol Farmer v4's 0 to 0 for today's), or the next listed expiry (Vol Farmer v4's "next"). */
 export type OptionQuoteBandExpiryRule = { kind: "days_to_expiry_range"; minDte: number; maxDte: number } | { kind: "next_listed_expiry" };
+
+/**
+ * The expiry Vol Farmer v4 sells (its Options expiry setting): the one ending at the session's close, "today" (0 days away,
+ * none on a day without one), or the first listed after the session, "next".
+ */
+export function volFarmerV4ExpiryRule(settings: { volFarmerV4OptionsExpiry: "today" | "next" }): OptionQuoteBandExpiryRule {
+  return settings.volFarmerV4OptionsExpiry === "today" ? { kind: "days_to_expiry_range", minDte: 0, maxDte: 0 } : { kind: "next_listed_expiry" };
+}
 
 /** What a ticker's band covers under its strategy: its expiries and the Calls' |delta| range the band widens. */
 export interface OptionQuoteBandScope {

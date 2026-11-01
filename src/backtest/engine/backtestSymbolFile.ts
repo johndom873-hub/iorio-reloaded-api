@@ -76,6 +76,7 @@ const issueWithinReadWindowSql = "(expiry IS NULL OR (part IN ('quotes', 'intrad
 
 export class BacktestSymbolFile {
   private readonly daysStatement: StatementSync;
+  private readonly daysWithoutOptionPricesStatement: StatementSync;
   private readonly dayIssuesStatement: StatementSync;
   private readonly unavailableDaysStatement: StatementSync;
   private readonly intradayDaysStatement: StatementSync;
@@ -88,6 +89,7 @@ export class BacktestSymbolFile {
     const version = (database.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined)?.value;
     if (version !== symbolFileSchemaVersion) throw new Error(`The data file has schema version ${version ?? "unknown"}; the engine reads version ${symbolFileSchemaVersion}.`);
     this.daysStatement = database.prepare("SELECT trading_date AS tradingDate, status FROM days ORDER BY trading_date");
+    this.daysWithoutOptionPricesStatement = database.prepare("SELECT trading_date AS tradingDate FROM days WHERE status = 'complete' AND quote_rows = 0 AND eod_rows = 0 ORDER BY trading_date");
     this.dayIssuesStatement = database.prepare(`SELECT trading_date AS tradingDate, part, expiry, message FROM day_issues WHERE ${issueWithinReadWindowSql} ORDER BY trading_date, part, expiry`);
     this.unavailableDaysStatement = database.prepare("SELECT trading_date AS tradingDate, reason FROM unavailable_days ORDER BY trading_date");
     this.intradayDaysStatement = database.prepare("SELECT trading_date AS tradingDate FROM intraday_days WHERE status = 'complete' ORDER BY trading_date");
@@ -108,6 +110,11 @@ export class BacktestSymbolFile {
 
   loadDays(): SymbolFileDay[] {
     return this.daysStatement.all() as unknown as SymbolFileDay[];
+  }
+
+  /** Complete days with no option price at all: no 10:00 quote and no end-of-day row (GSAT's 2025-02-11, a split's first day). */
+  loadDaysWithoutOptionPrices(): Set<string> {
+    return new Set((this.daysWithoutOptionPricesStatement.all() as { tradingDate: string }[]).map((day) => day.tradingDate));
   }
 
   /** IBKR's daily bars kept in the file (backtestFileStockBars.ts), ascending; null when it has none. */

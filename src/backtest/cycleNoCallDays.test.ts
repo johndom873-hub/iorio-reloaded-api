@@ -120,6 +120,9 @@ describe("Vol Farmer v2's No Call reasons", () => {
   it("reads each position's note as its reason with its break-even, and leaves the Puts' note out", () => {
     expect(volFarmerV2NoCallReasons(`${first}; ${noPut}`)).toEqual([{ reason: "no Call at or above B-E¹", figure: { kind: "level", dollars: 14.2 }, text: first }]);
     expect(volFarmerV2NoCallReasons(`${first}; ${second}`).map((entry) => entry.reason)).toEqual(["no Call at or above B-E¹", "no Call at or above B-E²"]);
+    // With no break-even floor (v3/v4 "Above the price") the note names the price the Calls were sought above.
+    const aboveThePrice = "first position: no Call above the price 38.12 (expiry 198, quote 23, volume 4, delta 2, IV 1)";
+    expect(volFarmerV2NoCallReasons(aboveThePrice)).toEqual([{ reason: "no Call above the price", figure: { kind: "level", dollars: 38.12 }, text: aboveThePrice }]);
     expect(volFarmerV2NoCallReasons("first position: no Call sold: the volume limit allows none")).toEqual([{ reason: "the volume limit", figure: null, text: "first position: no Call sold: the volume limit allows none" }]);
     expect(volFarmerV2NoCallReasons("no option orders while the open cycle spans a split")[0]!.reason).toBe("a split inside the cycle");
     expect(volFarmerV2NoCallReasons(noPut)).toEqual([]);

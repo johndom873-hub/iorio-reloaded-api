@@ -5,7 +5,7 @@ import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 
 // Pluto's Safety Limits (the safety* settings): the caps on orders and positions, the SPY stress breaker and the ticker
 // cooldown hold every strategy Pluto runs, so the counts here take the orders of both together (Marcelo 2026-10-27:
-// Vol Farmer v2's under the same caps as the CC + Put Ladder's).
+// Vol Farmer v4's, v2's until 2026-10-31, under the same caps as the CC + Put Ladder's).
 
 export interface SafetyLimitCounts {
   workingOrders: number;
@@ -14,7 +14,7 @@ export interface SafetyLimitCounts {
 }
 
 /** Pluto's strategies, whose orders the Safety Limits count together. */
-const strategiesUnderSafetyLimits = ["cc_put_ladder", "vol_farmer_v2"];
+const strategiesUnderSafetyLimits = ["cc_put_ladder", "vol_farmer_v4"];
 
 /** Pluto's open-order rows (open_* order requests of actions taken under its strategies) still working or not yet confirmed. */
 function workingPlutoOpenOrderRows(connection: Knex) {

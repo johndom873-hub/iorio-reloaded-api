@@ -266,6 +266,11 @@ export interface VolFarmerV2Market {
   capsLeapsAtAskSize: boolean;
   /** Why no Call after today is quoted, when the caller knows more than the quotes (live: the option quote band's state). */
   noCallQuotedReason?: string;
+  /**
+   * Pluto only (Vol Farmer v4, Marcelo 2026-10-31): whether an expiry ends at today's close, from the listed chain, so a day
+   * its band quotes no Call of it yet is still a day options are sold on; the backtest tells it from its quotes.
+   */
+  expiryEndsToday?: boolean;
 }
 
 /** A Call the look sells: on held shares, or with the shares a new cycle buys. */
@@ -303,6 +308,8 @@ export interface VolFarmerV2LeapsPurchase {
 
 /** Whole lots Vol Farmer v3's rebalancing buys or sells at the look's price. */
 export interface VolFarmerV3SharesOrder {
+  /** The position the shares are bought into (always the first) or sold from. */
+  position: "first" | "second";
   /** On the cycle's scale. */
   shares: number;
   description: string;
@@ -517,7 +524,7 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
   // Vol Farmer v3 may sell options expiring at today's close, on the days one does; v2 sells the next after today.
   const sameDay = input.v3?.optionsExpiry === "today";
   const nextExpiry = sameDay
-    ? quotes.some((quote) => quote.right === "C" && quote.expiry === todayIso)
+    ? (market.expiryEndsToday ?? quotes.some((quote) => quote.right === "C" && quote.expiry === todayIso))
       ? todayIso
       : null
     : quotes.reduce<string | null>((next, quote) => (quote.right === "C" && quote.expiry > todayIso && (next === null || quote.expiry < next) ? quote.expiry : next), null);
@@ -559,6 +566,8 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
   };
   // Vol Farmer v3 may sell its Calls at any strike above the price, its break-evens no floor.
   const breakEvenFloor = input.v3?.callStrikeFloor !== "none";
+  /** Where the Calls were looked for, as a note says it: at or above the break-even, or (no floor) anywhere above the price. */
+  const callsSought = (breakEvenAsTraded: number, whose: "its" | "the first") => (breakEvenFloor ? `at or above ${whose} break-even ${breakEvenAsTraded.toFixed(2)}` : `above the price ${stockPrice.toFixed(2)}`);
   const callCandidates = (breakEvenAsTraded: number, heldExcluded: boolean) => {
     const selected = candidatesOf("C", { minAbsDelta: farmer.callMinAbsDelta, maxAbsDelta: farmer.callMaxAbsDelta, ...(breakEvenFloor ? { minimumStrike: breakEvenAsTraded } : {}), heldExcluded, kept: (candidate) => candidate.strike > stockPrice });
     return { calls: selected.candidates, rejections: selected.rejections };
@@ -653,7 +662,7 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
     const capLeft = (candidate: BaselineCandidate) => candidate.volumeCap - (volumeUsed.get(contractKeyOf(candidate)) ?? 0);
     const call = pickByVolume(calls, () => lots, capLeft);
     if (call === null) {
-      say(`${name} position: no Call at or above its break-even ${breakEven.toFixed(2)} (${describeRejections(rejections) || "none listed"})`);
+      say(`${name} position: no Call ${callsSought(breakEven, "its")} (${describeRejections(rejections) || "none listed"})`);
       continue;
     }
     const contracts = Math.min(lots, capLeft(call));
@@ -676,7 +685,7 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
     // Vol Farmer v3 may sell them with every Call, and anywhere below the price.
     const withEveryCall = input.v3?.putsSold === "with_every_call";
     const belowThePrice = input.v3?.putStrikeCap === "none";
-    const trigger = withEveryCall ? "Puts with every Call" : bestCall === null ? `no Call at or above the first break-even ${firstBreakEven.toFixed(2)}` : `the best Call at or above the first break-even ${firstBreakEven.toFixed(2)} yields ${percent(bestYield, 2)} a year, under ${v2.putsStartCallYieldPct}%`;
+    const trigger = withEveryCall ? "Puts with every Call" : bestCall === null ? `no Call ${callsSought(firstBreakEven, "the first")}` : `the best Call ${callsSought(firstBreakEven, "the first")} yields ${percent(bestYield, 2)} a year, under ${v2.putsStartCallYieldPct}%`;
     const putsTriggered = withEveryCall || bestYield * 100 < v2.putsStartCallYieldPct;
     const step = !putsTriggered ? null : belowThePrice ? { stepPct: 0, impliedVolatility: null } : volFarmerV2StepAtLook(v2, market);
     if (putsTriggered && step === null) say(`no Put: ${trigger}, but the previous session has no IV for the Step`);
@@ -757,7 +766,7 @@ function holdWithoutOptions(input: VolFarmerV2LookInput, until: string): string 
     const spent = lots * sharesPerContract * stockPrice + market.stockCommissionDollars(lots * sharesPerContract);
     const shares = lots * sharesPerContractOnCycleScale;
     const description = `${market.symbol} Buy ${lots * sharesPerContract} shares @ ${stockPrice.toFixed(2)} (${rebuild ? "the first position rebuilt" : "a new cycle's first position"}: ${v2.firstPositionPct}% of the ${formatWholeDollars(pot)} pot${secondValue > 0 ? " less the second position's shares" : ""}, with no Call until ${until})`;
-    book.buyShares({ shares, description, chosenBecause: "vol farmer v3: no option sold today, the first position's shares bought alone", candidateScores: { potValue: pot, targetValue: firstPositionDollars, stockPrice, lotsAfter: lots } });
+    book.buyShares({ position: "first", shares, description, chosenBecause: "vol farmer v3: no option sold today, the first position's shares bought alone", candidateScores: { potValue: pot, targetValue: firstPositionDollars, stockPrice, lotsAfter: lots } });
     if (!rebuild) {
       Object.assign(state, { ...newVolFarmerV2SymbolState(), cash: state.cash, potDollars: pot });
       state.cash.cycles += 1;
@@ -806,57 +815,44 @@ function rebalanceHolding(input: VolFarmerV2LookInput, v3: BacktestVolFarmerV3Se
   const candidateScores = { potValue: pot, targetValue: target, sharesValueBefore: value, stockPrice, breakEvenFirst: breakEvenAsTraded(first), ...(second === null ? {} : { breakEvenSecond: breakEvenAsTraded(second) }), lotsBefore: heldLots };
 
   if (targetLots > heldLots) {
-    const wanted = targetLots - heldLots;
+    const targetWanted = targetLots - heldLots;
+    const capPct = v3.topUpCapPctOfPot ?? 0;
+    const cap = capPct > 0 ? (pot * capPct) / 100 : null;
+    const moneyIn = cap === null ? 0 : volFarmerV3MoneyIn(state, book);
+    const capLots = cap === null ? targetWanted : Math.max(0, Math.floor((cap - moneyIn) / lotCost + 1e-9));
+    const capNote = cap === null || capLots >= targetWanted ? "" : `the cap (${capPct}% of the pot, ${formatWholeDollars(cap)}) leaves ${formatWholeDollars(Math.max(0, cap - moneyIn))} over the ${formatWholeDollars(moneyIn)} in`;
+    if (capLots < 1) return `no top-up: ${against}, but ${capNote}, which pays for none of the ${targetWanted} lots (${formatWholeDollars(lotCost)} each)`;
+    const wanted = Math.min(targetWanted, capLots);
     const freeCash = book.freeCash();
     const lots = Math.min(wanted, Math.floor(freeCash / lotCost + 1e-9));
     if (lots < wanted) {
       tally.cashCuts += 1;
       tally.lotsCut += wanted - lots;
     }
-    if (lots < 1) return `no top-up: ${against}, but the free cash (${formatWholeDollars(freeCash)}) pays for none of the ${wanted} lots (${formatWholeDollars(lotCost)} each)`;
+    if (lots < 1) return `no top-up: ${against}, but the free cash (${formatWholeDollars(freeCash)}) pays for none of the ${wanted} lots (${formatWholeDollars(lotCost)} each)${capNote === "" ? "" : `; ${capNote}, for ${wanted} of the ${targetWanted}`}`;
     const shares = lots * sharesPerContractOnCycleScale;
     const spent = lots * sharesPerContract * stockPrice + market.stockCommissionDollars(lots * sharesPerContract);
     const breakEvenBefore = breakEvenAsTraded(first);
     const firstLotsBefore = lotsOf(first.shares);
-    // Each premium keeps what it credits the shares held, now spread over them all, so later sales take their share of it.
-    for (const premium of first.premiums) {
-      premium.dollars *= premium.shares > 0 ? Math.min(1, first.shares / premium.shares) : 1;
-      premium.shares = first.shares + shares;
-    }
-    first.costPerShare = (first.shares * first.costPerShare + spent) / (first.shares + shares);
-    first.shares += shares;
-    const cashNote = lots < wanted ? `; the free cash (${formatWholeDollars(freeCash)}) pays for ${lots} of the ${wanted} lots` : "";
+    addVolFarmerV3Shares(first, shares, spent);
+    const cashNote = `${capNote === "" ? "" : `; ${capNote}, for ${wanted} of the ${targetWanted} lots`}${lots < wanted ? `; the free cash (${formatWholeDollars(freeCash)}) pays for ${lots} of the ${wanted} lots` : ""}`;
     const description = `${symbol} Buy ${lots * sharesPerContract} shares @ ${stockPrice.toFixed(2)} (${against}; first position ${firstLotsBefore} → ${firstLotsBefore + lots} lots, break-even ${breakEvenBefore.toFixed(2)} → ${breakEvenAsTraded(first).toFixed(2)}${cashNote})`;
-    book.buyShares({ shares, description, chosenBecause: `vol farmer v3: the ${holding}' value under the band around the target`, candidateScores: { ...candidateScores, lotsAfter: heldLots + lots, freeCash } });
+    book.buyShares({ position: "first", shares, description, chosenBecause: `vol farmer v3: the ${holding}' value under the band around the target`, candidateScores: { ...candidateScores, lotsAfter: heldLots + lots, freeCash, ...(cap === null ? {} : { topUpCap: cap, moneyInBefore: moneyIn }) } });
     book.notePositionPnl?.({ position: "first", kind: "shares", dollars: -spent });
     tally.topUps += 1;
     tally.lotsBought += lots;
     return description;
   }
 
-  // The lots sold take their share of what the position's shares cost (the cost per share stays) and of each premium.
   const sell = (name: "first" | "second", position: VolFarmerV2Position, lots: number): string => {
     const shares = lots * sharesPerContractOnCycleScale;
-    const sharesLeft = position.shares - shares;
     const lotsBefore = lotsOf(position.shares);
     const description = `${symbol} Sell ${lots * sharesPerContract} shares @ ${stockPrice.toFixed(2)} (${against}; ${name} position ${lotsBefore} → ${lotsBefore - lots} lots, break-even ${breakEvenAsTraded(position).toFixed(2)} kept)`;
-    book.sellShares!({ shares, description, chosenBecause: `vol farmer v3: the ${holding}' value over the band around the target, ${v3.trimsSell === "second_position_first" ? "the second position" : "the higher break-even"} sold first`, candidateScores: { ...candidateScores, lotsAfter: heldLots - lots } });
-    for (const premium of position.premiums) {
-      const credited = premium.dollars * (premium.shares > 0 ? Math.min(1, position.shares / premium.shares) : 1);
-      premium.dollars = (credited * sharesLeft) / position.shares;
-      premium.shares = sharesLeft;
-    }
+    book.sellShares!({ position: name, shares, description, chosenBecause: `vol farmer v3: the ${holding}' value over the band around the target, ${v3.trimsSell === "second_position_first" ? "the second position" : "the higher break-even"} sold first`, candidateScores: { ...candidateScores, lotsAfter: heldLots - lots } });
     book.notePositionPnl?.({ position: name, kind: "shares", dollars: lots * sharesPerContract * stockPrice - market.stockCommissionDollars(lots * sharesPerContract) });
-    position.shares = sharesLeft;
+    removeVolFarmerV3Shares(state, name, shares);
     tally.trims += 1;
     tally.lotsSold += lots;
-    // A second position sold out ends as one called away does: its LEAPS is sold at the next look.
-    if (name === "second" && sharesLeft === 0) {
-      state.second = null;
-      state.leapsBought = false;
-      state.leapsTrigger = null;
-      if (state.leaps !== null) state.leapsToSell = true;
-    }
     return description;
   };
   const secondFirst = v3.trimsSell === "second_position_first" || (second !== null && breakEvenAsTraded(second) > breakEvenAsTraded(first));
@@ -872,6 +868,60 @@ function rebalanceHolding(input: VolFarmerV2LookInput, v3: BacktestVolFarmerV3Se
     excess -= lots;
   }
   return sales.length === 0 ? null : sales.join(" · ");
+}
+
+/**
+ * The money a ticker has in, against Vol Farmer v3's top-up cap: what its held shares cost (the first position's fills
+ * with commission, the second's assigned strikes) plus the cash its open Puts hold. A trim lowers it by the shares sold
+ * times their cost per share.
+ */
+export function volFarmerV3MoneyIn(state: VolFarmerV2SymbolState, book: Pick<VolFarmerV2LookInput["book"], "leg">): number {
+  let dollars = 0;
+  for (const position of [state.first, state.second]) {
+    if (position === null) continue;
+    dollars += position.shares * position.costPerShare;
+    for (const put of position.puts) {
+      const putLeg = book.leg(put.legId);
+      if (putLeg !== undefined && !putLeg.closed) dollars += put.shares * putLeg.strike!;
+    }
+  }
+  return dollars;
+}
+
+/**
+ * Vol Farmer v3's top-up arithmetic (step 1b), shared with Pluto's settlement of a share purchase: `shares` bought for
+ * `spentDollars` (commission included) into the position, its cost per share blended. Each premium keeps what it credits
+ * the shares held, now spread over them all, so later sales take their share of it.
+ */
+export function addVolFarmerV3Shares(position: VolFarmerV2Position, shares: number, spentDollars: number): void {
+  for (const premium of position.premiums) {
+    premium.dollars *= premium.shares > 0 ? Math.min(1, position.shares / premium.shares) : 1;
+    premium.shares = position.shares + shares;
+  }
+  position.costPerShare = (position.shares * position.costPerShare + spentDollars) / (position.shares + shares);
+  position.shares += shares;
+}
+
+/**
+ * Vol Farmer v3's trim arithmetic (step 1b), shared with Pluto's settlement of a share sale: the shares sold take their
+ * share of what the position's shares cost (the cost per share stays) and of each premium. A second position sold out ends
+ * as one called away does: its LEAPS is sold at the next look.
+ */
+export function removeVolFarmerV3Shares(state: VolFarmerV2SymbolState, name: "first" | "second", shares: number): void {
+  const position = state[name]!;
+  const sharesLeft = position.shares - shares;
+  for (const premium of position.premiums) {
+    const credited = premium.dollars * (premium.shares > 0 ? Math.min(1, position.shares / premium.shares) : 1);
+    premium.dollars = (credited * sharesLeft) / position.shares;
+    premium.shares = sharesLeft;
+  }
+  position.shares = sharesLeft;
+  if (name === "second" && sharesLeft === 0) {
+    state.second = null;
+    state.leapsBought = false;
+    state.leapsTrigger = null;
+    if (state.leaps !== null) state.leapsToSell = true;
+  }
 }
 
 interface CallOrder {

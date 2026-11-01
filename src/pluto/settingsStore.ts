@@ -1,5 +1,22 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
+import {
+  volFarmerV2StepRules,
+  volFarmerV3CallStrikeFloorChoices,
+  volFarmerV3FirstPositionAfterCalledAwayChoices,
+  volFarmerV3OptionsExpiryChoices,
+  volFarmerV3PutsSoldChoices,
+  volFarmerV3PutStrikeCapChoices,
+  volFarmerV3RebalancesChoices,
+  volFarmerV3TrimsSellChoices,
+  type VolFarmerV3CallStrikeFloor,
+  type VolFarmerV3FirstPositionAfterCalledAway,
+  type VolFarmerV3OptionsExpiry,
+  type VolFarmerV3PutsSold,
+  type VolFarmerV3PutStrikeCap,
+  type VolFarmerV3Rebalances,
+  type VolFarmerV3TrimsSell,
+} from "../backtest/backtestTypes.js";
 
 // Pluto's parameters: one typed row (pluto_settings) plus an audit trail of every
 // change (pluto_settings_audit). Every reader goes through loadPlutoSettings; every
@@ -47,7 +64,7 @@ export interface PlutoSettings {
   // Safety Limits: they hold every Pluto strategy (safetyLimits.ts counts the orders of both together).
   /** At most this many of a ticker's orders work at once; the rest go at the next looks. */
   safetyMaxWorkingOrdersPerTicker: number;
-  /** While SPY is down this much on the day, the ladder sends nothing and Vol Farmer v2 opens nothing. */
+  /** While SPY is down this much on the day, the ladder sends nothing and Vol Farmer v4 opens nothing. */
   safetySpyStressBreakerPct: number;
   /** Minutes after a filled Pluto order on a ticker before either strategy may act on it again; 0 = no cooldown. */
   safetyTickerCooldownMinutes: number;
@@ -58,21 +75,33 @@ export interface PlutoSettings {
   safetyMaxOpenPositions: number;
   /** Across every Pluto ticker: Pluto's orders sent in a day, counted as the per-ticker daily cap counts them. */
   safetyMaxOrdersPerDay: number;
-  // Vol Farmer v2 (the backtest's volFarmerV2 keys with a "volFarmerV2" prefix, and the Vol Farmer's Call keys it reads;
-  // volFarmerV2Settings.ts maps them back). Set once from the lab's values of 2026-10-27; never synced with the lab.
+  // Vol Farmer v4 (the lab's volFarmerV4 keys with a "volFarmerV4" prefix; volFarmerV4RulesOf maps them back). v2's,
+  // renamed when v4 replaced it (Marcelo 2026-10-31), and v4's own choices, at the lab's best run; never synced with the lab.
   /** % of the ticker's pot the first position's shares are bought with; the Puts sell on the rest (Marcelo 2026-10-30). */
-  volFarmerV2FirstPositionPct: number;
-  volFarmerV2PutsStartCallYieldPct: number;
-  volFarmerV2PutMaxAbsDelta: number;
-  volFarmerV2StepBelowFirstBreakEvenPct: number;
-  volFarmerV2StepRule: "fixed" | "implied_move_at_put_sale";
-  volFarmerV2LeapsMinDte: number;
-  volFarmerV2LeapsAbsDelta: number;
+  volFarmerV4FirstPositionPct: number;
+  volFarmerV4PutsStartCallYieldPct: number;
+  volFarmerV4PutMaxAbsDelta: number;
+  volFarmerV4StepBelowFirstBreakEvenPct: number;
+  volFarmerV4StepRule: "fixed" | "implied_move_at_put_sale";
+  volFarmerV4LeapsMinDte: number;
+  volFarmerV4LeapsAbsDelta: number;
   /** % of the ticker's pot (its allocation raised by the excess allowance) a LEAPS purchase spends at most. */
-  volFarmerV2LeapsMaxAllocationPct: number;
-  volFarmerV2CallMinAbsDelta: number;
-  volFarmerV2CallMaxAbsDelta: number;
-  volFarmerV2MaxSpreadPctOfMid: number;
+  volFarmerV4LeapsMaxAllocationPct: number;
+  volFarmerV4CallMinAbsDelta: number;
+  volFarmerV4CallMaxAbsDelta: number;
+  volFarmerV4MaxSpreadPctOfMid: number;
+  /** % of the ticker's pot the holding may drift from its target before it is traded back (BacktestVolFarmerV3Settings). */
+  volFarmerV4RebalanceBandPct: number;
+  volFarmerV4Rebalances: VolFarmerV3Rebalances;
+  volFarmerV4FirstPositionAfterCalledAway: VolFarmerV3FirstPositionAfterCalledAway;
+  volFarmerV4OptionsExpiry: VolFarmerV3OptionsExpiry;
+  volFarmerV4OptionsMaxDaysToExpiry: number;
+  volFarmerV4CallStrikeFloor: VolFarmerV3CallStrikeFloor;
+  volFarmerV4PutsSold: VolFarmerV3PutsSold;
+  volFarmerV4PutStrikeCap: VolFarmerV3PutStrikeCap;
+  volFarmerV4TrimsSell: VolFarmerV3TrimsSell;
+  /** Top-ups take a ticker's money in (held shares' cost, open Puts' cash) to at most this % of its pot; 0: no cap. */
+  volFarmerV4TopUpCapPct: number;
   updatedAt: string;
   updatedByUserId: string | null;
 }
@@ -113,18 +142,28 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   safetyMaxOrdersPerTickerPerDay: { column: "safety_max_orders_per_ticker_per_day", kind: "integer", min: 1, max: 1000 },
   safetyMaxOpenPositions: { column: "safety_max_open_positions", kind: "integer", min: 1, max: 10000 },
   safetyMaxOrdersPerDay: { column: "safety_max_orders_per_day", kind: "integer", min: 1, max: 10000 },
-  // Vol Farmer v2's bounds are the backtest's (validateVolFarmerV2Settings, validateVolFarmerSettings).
-  volFarmerV2FirstPositionPct: { column: "vol_farmer_v2_first_position_pct", kind: "number", min: 10, max: 90 },
-  volFarmerV2PutsStartCallYieldPct: { column: "vol_farmer_v2_puts_start_call_yield_pct", kind: "number", min: 0, max: 500 },
-  volFarmerV2PutMaxAbsDelta: { column: "vol_farmer_v2_put_max_abs_delta", kind: "number", min: 0.01, max: 0.99 },
-  volFarmerV2StepBelowFirstBreakEvenPct: { column: "vol_farmer_v2_step_below_first_break_even_pct", kind: "number", min: 0, max: 90 },
-  volFarmerV2StepRule: { column: "vol_farmer_v2_step_rule", kind: "text", oneOf: ["fixed", "implied_move_at_put_sale"] },
-  volFarmerV2LeapsMinDte: { column: "vol_farmer_v2_leaps_min_dte", kind: "integer", min: 30, max: 1000 },
-  volFarmerV2LeapsAbsDelta: { column: "vol_farmer_v2_leaps_abs_delta", kind: "number", min: 0.05, max: 0.99 },
-  volFarmerV2LeapsMaxAllocationPct: { column: "vol_farmer_v2_leaps_max_allocation_pct", kind: "number", min: 0, max: 100 },
-  volFarmerV2CallMinAbsDelta: { column: "vol_farmer_v2_call_min_abs_delta", kind: "number", min: 0, max: 1 },
-  volFarmerV2CallMaxAbsDelta: { column: "vol_farmer_v2_call_max_abs_delta", kind: "number", min: 0, max: 1 },
-  volFarmerV2MaxSpreadPctOfMid: { column: "vol_farmer_v2_max_spread_pct_of_mid", kind: "number", min: 0, max: 200 },
+  // Vol Farmer v4's bounds and choices are the backtest's (validateVolFarmerV4Settings).
+  volFarmerV4FirstPositionPct: { column: "vol_farmer_v4_first_position_pct", kind: "number", min: 10, max: 90 },
+  volFarmerV4PutsStartCallYieldPct: { column: "vol_farmer_v4_puts_start_call_yield_pct", kind: "number", min: 0, max: 500 },
+  volFarmerV4PutMaxAbsDelta: { column: "vol_farmer_v4_put_max_abs_delta", kind: "number", min: 0.01, max: 0.99 },
+  volFarmerV4StepBelowFirstBreakEvenPct: { column: "vol_farmer_v4_step_below_first_break_even_pct", kind: "number", min: 0, max: 90 },
+  volFarmerV4StepRule: { column: "vol_farmer_v4_step_rule", kind: "text", oneOf: volFarmerV2StepRules },
+  volFarmerV4LeapsMinDte: { column: "vol_farmer_v4_leaps_min_dte", kind: "integer", min: 30, max: 1000 },
+  volFarmerV4LeapsAbsDelta: { column: "vol_farmer_v4_leaps_abs_delta", kind: "number", min: 0.05, max: 0.99 },
+  volFarmerV4LeapsMaxAllocationPct: { column: "vol_farmer_v4_leaps_max_allocation_pct", kind: "number", min: 0, max: 100 },
+  volFarmerV4CallMinAbsDelta: { column: "vol_farmer_v4_call_min_abs_delta", kind: "number", min: 0, max: 1 },
+  volFarmerV4CallMaxAbsDelta: { column: "vol_farmer_v4_call_max_abs_delta", kind: "number", min: 0, max: 1 },
+  volFarmerV4MaxSpreadPctOfMid: { column: "vol_farmer_v4_max_spread_pct_of_mid", kind: "number", min: 0, max: 200 },
+  volFarmerV4RebalanceBandPct: { column: "vol_farmer_v4_rebalance_band_pct", kind: "number", min: 0, max: 50 },
+  volFarmerV4Rebalances: { column: "vol_farmer_v4_rebalances", kind: "text", oneOf: volFarmerV3RebalancesChoices },
+  volFarmerV4FirstPositionAfterCalledAway: { column: "vol_farmer_v4_first_position_after_called_away", kind: "text", oneOf: volFarmerV3FirstPositionAfterCalledAwayChoices },
+  volFarmerV4OptionsExpiry: { column: "vol_farmer_v4_options_expiry", kind: "text", oneOf: volFarmerV3OptionsExpiryChoices },
+  volFarmerV4OptionsMaxDaysToExpiry: { column: "vol_farmer_v4_options_max_days_to_expiry", kind: "integer", min: 1, max: 45 },
+  volFarmerV4CallStrikeFloor: { column: "vol_farmer_v4_call_strike_floor", kind: "text", oneOf: volFarmerV3CallStrikeFloorChoices },
+  volFarmerV4PutsSold: { column: "vol_farmer_v4_puts_sold", kind: "text", oneOf: volFarmerV3PutsSoldChoices },
+  volFarmerV4PutStrikeCap: { column: "vol_farmer_v4_put_strike_cap", kind: "text", oneOf: volFarmerV3PutStrikeCapChoices },
+  volFarmerV4TrimsSell: { column: "vol_farmer_v4_trims_sell", kind: "text", oneOf: volFarmerV3TrimsSellChoices },
+  volFarmerV4TopUpCapPct: { column: "vol_farmer_v4_top_up_cap_pct", kind: "number", min: 0, max: 1000 },
 };
 
 export type PlutoSettingsField = keyof typeof plutoSettingsColumns;
@@ -174,8 +213,8 @@ export function validatePlutoSettingsInput(input: PlutoSettingsInput, current: P
   if (merged.ladderMinDte > merged.ladderMaxDte) return "ladderMinDte cannot exceed ladderMaxDte.";
   if (merged.ladderMaxSpreadPctOfMid <= 0) return "ladderMaxSpreadPctOfMid must be above 0.";
   if (merged.ladderShockMinPct > merged.ladderShockMaxPct) return "ladderShockMinPct cannot exceed ladderShockMaxPct.";
-  if (merged.volFarmerV2CallMinAbsDelta > merged.volFarmerV2CallMaxAbsDelta) return "volFarmerV2CallMinAbsDelta cannot exceed volFarmerV2CallMaxAbsDelta.";
-  if (merged.volFarmerV2MaxSpreadPctOfMid <= 0) return "volFarmerV2MaxSpreadPctOfMid must be above 0.";
+  if (merged.volFarmerV4CallMinAbsDelta > merged.volFarmerV4CallMaxAbsDelta) return "volFarmerV4CallMinAbsDelta cannot exceed volFarmerV4CallMaxAbsDelta.";
+  if (merged.volFarmerV4MaxSpreadPctOfMid <= 0) return "volFarmerV4MaxSpreadPctOfMid must be above 0.";
   return null;
 }
 

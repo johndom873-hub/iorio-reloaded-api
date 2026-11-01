@@ -100,7 +100,7 @@ function healthyDependencies(overrides: Partial<ReadinessDependencies> = {}): Re
     loadWorkerRow: async () => ({ updatedAt: new Date(now.getTime() - 20_000), connected: true, appEnvironment: "production", accountBindingStatus: "ok", accountBindingReason: null, ibkrAccountIds: ["U21518308"], detectedTradingMode: "live", configuredTradingMode: "live", gitSha: "abc1234" }),
     loadSettings: async () => ({ maxOrderPctOfPortfolio: 15, maxConcentrationPerTickerPct: 20, minCashReservePct: 5, deltaTargetMin: 0.2, deltaTargetMax: 0.4, recoveryDteMin: 1, recoveryDteMax: 14, minAnnualizedYieldPct: 50, commissionWarnSharePctOfPremium: 5 }),
     loadTradingHalt: async () => ({ enabled: false, reason: null, setByUserId: null, setByDisplayName: null, setAt: null }),
-    loadAccount: async () => ({ netLiquidationValue: 100_000, totalCashValue: 60_000, buyingPower: 200_000, excessLiquidity: 50_000 }),
+    loadAccount: async () => ({ netLiquidationValue: 100_000, totalCashValue: 60_000, settledCash: 60_000, buyingPower: 200_000, excessLiquidity: 50_000 }),
     loadPlutoCash: async () => ({ capitalBudgetPct: 50, enabledTickerCount: 2, committedOnPlutoTickers: 20_000, cashLockedInCsps: 10_000, inFlightNotional: 0 }),
     loadProbeContract: async () => probeContract,
     probeOrderPath: async (contract) => {
@@ -215,7 +215,7 @@ describe("collectReadinessChecks", () => {
       healthyDependencies({
         loadAccount: async () => {
           accountReads += 1;
-          return { netLiquidationValue: 100_000, totalCashValue: 11_000, buyingPower: 11_000, excessLiquidity: 11_000 };
+          return { netLiquidationValue: 100_000, totalCashValue: 11_000, settledCash: 11_000, buyingPower: 11_000, excessLiquidity: 11_000 };
         },
       }),
     );
@@ -388,9 +388,9 @@ describe("createDefaultReadinessDependencies", () => {
     expect(await dependencies.loadTradingHalt()).toBe(halt);
   });
 
-  it("keeps only the four account figures the check judges", async () => {
-    mocks.fetchAccountSummary.mockResolvedValue({ netLiquidationValue: 100_000, totalCashValue: 60_000, buyingPower: 200_000, excessLiquidity: 50_000, accountId: "U1", currency: "USD" });
-    expect(await createDefaultReadinessDependencies().loadAccount()).toEqual({ netLiquidationValue: 100_000, totalCashValue: 60_000, buyingPower: 200_000, excessLiquidity: 50_000 });
+  it("keeps only the five account figures the checks judge", async () => {
+    mocks.fetchAccountSummary.mockResolvedValue({ netLiquidationValue: 100_000, totalCashValue: 60_000, settledCash: 55_000, buyingPower: 200_000, excessLiquidity: 50_000, accountId: "U1", currency: "USD" });
+    expect(await createDefaultReadinessDependencies().loadAccount()).toEqual({ netLiquidationValue: 100_000, totalCashValue: 60_000, settledCash: 55_000, buyingPower: 200_000, excessLiquidity: 50_000 });
   });
 
   describe("loadProbeContract", () => {

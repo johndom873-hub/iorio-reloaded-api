@@ -12,6 +12,8 @@ describe("computeOrderNotional", () => {
     expect(computeOrderNotional({ strategyKey: "covered_call", strike: 110, quantity: 2, premium: 1 }, 100, 150)).toBe(4_950);
     expect(computeOrderNotional({ strategyKey: "leaps", strike: 300, quantity: 2, premium: 71.69 }, 343.91, 0)).toBeCloseTo(14_338, 6);
     expect(computeOrderNotional({ strategyKey: "covered_call", strike: 110, quantity: 2, premium: 1 }, 100, 300)).toBe(0);
+    // Vol Farmer v4's share purchase: what it pays, 200 shares × $100.02.
+    expect(computeOrderNotional({ strategyKey: "shares", strike: 0, quantity: 200, premium: 100.02 }, 0, 0)).toBeCloseTo(20_004, 9);
   });
 
   it("rolls: a covered-call roll adds nothing; a CSP roll adds the strike increase less the net credit × 100 × qty, never a negative", () => {
@@ -29,6 +31,13 @@ const putOpen: OrderRequestPayload = { symbol: "AAA", strategyKey: "cash_secured
 describe("computeInFlightOrderNotional", () => {
   it("reserves (strike − limit price) x 100 x contracts for a put open", () => {
     expect(computeInFlightOrderNotional("open_cash_secured_put", putOpen)).toBe(17_700);
+  });
+
+  it("counts a share purchase at shares x limit price, and a sale of uncovered shares as nothing", () => {
+    const purchase = { symbol: "AAA", strategyKey: "shares", legs: [{ role: "stock", action: "BUY", symbol: "AAA", quantity: 900, unitPrice: 100 }] } as OrderRequestPayload;
+    expect(computeInFlightOrderNotional("open_shares", purchase)).toBe(90_000);
+    const sale = { symbol: "AAA", strategyKey: "unstructured", legs: [{ role: "stock", action: "SELL", symbol: "AAA", quantity: 600, unitPrice: 100, positionLegId: "leg-s" }] } as OrderRequestPayload;
+    expect(computeInFlightOrderNotional("close_position", sale)).toBe(0);
   });
 
   it("counts a Covered Call entry's stock leg at shares x (limit price − call premium), and nothing when it is written against held shares", () => {

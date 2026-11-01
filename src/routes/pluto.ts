@@ -12,7 +12,7 @@ import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlut
 import { loadLadderScreenSettings } from "../pluto/ladderSettings.js";
 import { loadCurrentPlutoSettingsVersion } from "../pluto/settingsVersions.js";
 import { loadPlutoHowItWorks } from "../pluto/howItWorks.js";
-import { loadVolFarmerV2Screen } from "../pluto/volFarmerV2Screen.js";
+import { loadVolFarmerV4Screen } from "../pluto/volFarmerV4Screen.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetPlutoBreaker, resumePluto, setPlutoMode, setPlutoStressOverride, type PlutoMode } from "../pluto/stateStore.js";
 import { plutoEventCategories, plutoEventCategoryByType, plutoEventTypesInCategories, recordPlutoEvent, type PlutoEventCategory } from "../pluto/ledger.js";
 import { cancelPlutoOrders, countPlutoWorkingOrders, loadPlutoWorkingOrders } from "../pluto/orders.js";
@@ -352,9 +352,9 @@ plutoRouter.put("/allocations", requireAdmin, async (request: Request, response:
   }
 });
 
-/** Each Vol Farmer v2 ticker's two positions, LEAPS, working orders and last round, as v2's memory counts them (the Live tab's card). */
-plutoRouter.get("/vol-farmer-v2", async (_request: Request, response: Response) => {
-  response.json(await loadVolFarmerV2Screen());
+/** Each Vol Farmer v4 ticker's two positions, LEAPS, working orders and last round, as v4's memory counts them (the Live tab's card). */
+plutoRouter.get("/vol-farmer-v4", async (_request: Request, response: Response) => {
+  response.json(await loadVolFarmerV4Screen());
 });
 
 /** Every number the "How it works" tab quotes for both strategies (src/pluto/howItWorks.ts). */

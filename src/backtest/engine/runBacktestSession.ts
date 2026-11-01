@@ -1,12 +1,13 @@
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
-import { easternIsoDate } from "../../lib/easternIsoDate.js";
+import { easternInstant, easternIsoDate } from "../../lib/easternIsoDate.js";
+import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
 import { describeOptionContract } from "../../lib/optionContractLabel.js";
 import { contractKey } from "../../lib/optionContractKey.js";
 import { addCalendarDays } from "../../lib/calendarDays.js";
 import { isEtfSector, tickerCalendarProfile } from "../../lib/tickerCalendarRelevance.js";
 import { effectiveWindowEndEt } from "../../pluto/sessionSchedule.js";
-import { isRetiredBacktestDecisionMaker, retiredBacktestDecisionMakerMessage, runsVolFarmerV2Steps, type BacktestAction, type BacktestBookMode, type BacktestBreakEvenLevel, type BacktestCycle, type BacktestCycleGap, type BacktestFill, type BacktestLadderLevel, type BacktestOrderShortfall, type BacktestPosition, type BacktestRunStatistics, type BacktestSettings, type BacktestSettingsOverrides, type BacktestSymbolSettings, type BacktestTablesMode } from "../backtestTypes.js";
+import { isRetiredBacktestDecisionMaker, retiredBacktestDecisionMakerMessage, runsVolFarmerV2Steps, volFarmerStepSettingsOf, type BacktestAction, type BacktestBookMode, type BacktestBreakEvenLevel, type BacktestCycle, type BacktestCycleGap, type BacktestFill, type BacktestLadderLevel, type BacktestOrderShortfall, type BacktestPosition, type BacktestRunStatistics, type BacktestSettings, type BacktestSettingsOverrides, type BacktestSymbolSettings, type BacktestTablesMode } from "../backtestTypes.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
 import { calendarDaysBetween, computeBacktestMetrics, computeDailyReturns, cycleFiguresOf, type AccountDay } from "../sessionAnalytics.js";
@@ -23,11 +24,11 @@ import { describeDaysWithoutIntradayQuotes } from "../jobs/backtestSessionReques
 import { loadMarketStressPrices, marketStressSymbol } from "../marketStressBars.js";
 import { SpyBuyAndHold } from "./spyBuyAndHold.js";
 
-import { alignOpenOptionLegsToSplitFactor, creditInterest, settleExpiry, settleHedgePut, settleLeapsCall } from "./ledger/ledgerEvents.js";
+import { alignOpenOptionLegsToSplitFactor, buyBackCoveredCallKeepingShares, buyBackPut, creditInterest, creditSpinOff, sellHedgePut, sellLeapsCall, settleExpiry, settleHedgePut, settleLeapsCall } from "./ledger/ledgerEvents.js";
 import { ledgerCommittedDollars, ledgerHedgeLegsDueForSettlement, ledgerLeapsLegsDueForSettlement, ledgerLegsDueForSettlement, ledgerNetLiquidationValue, ledgerSharesValue } from "./ledger/ledgerSelectors.js";
 import { describeHedgeTotals, hedgeIsOn, summarizeHedge, type HedgePutQuoteSource } from "./backtestBaselineHedge.js";
 import { createSimulatedLedger, cycleSplitFactorFor, rememberedForRevision, requirePosition, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
-import { loadOrInferSplitSchedule, requireSplitFactors, splitFactorForNewCycle, splitFactorOn, type SplitSchedule } from "./splitFactors.js";
+import { bridgeSplitDaysWithoutOptionPrices, findSpinOffs, loadOrInferSplitSchedule, requireSplitFactors, spinOffValuePerShare, splitFactorForNewCycle, splitFactorOn, type SplitSchedule } from "./splitFactors.js";
 import { BacktestTradingCalendar, loadMarketCalendarRowsFrom } from "./backtestTradingCalendar.js";
 import { BacktestDayDataReader, type IntradayLookCheck, type PrefetchedSymbolDay } from "./backtestDayDataReader.js";
 import { loadTreasuryBillRates } from "./treasuryBillRates.js";
@@ -35,7 +36,7 @@ import { prepareModelTablesForSession } from "./walkForwardModelTables.js";
 import { runBaselineLook } from "./backtestBaselineLook.js";
 import { runSteadyStakeLook } from "./backtestSteadyStakeLook.js";
 import { describeVolFarmerCash, runVolFarmerLook, scanVolFarmerCrossing } from "./backtestVolFarmerLook.js";
-import { describeVolFarmerV2Run, runVolFarmerV2Look } from "./backtestVolFarmerV2Look.js";
+import { describeVolFarmerV2Run, lowerVolFarmerV2CostForSpinOff, runVolFarmerV2Look } from "./backtestVolFarmerV2Look.js";
 
 // The backtest engine's entry point (docs/backtesting/FORMULAS.md, FULL-FIDELITY-DESIGN.md, DATA-FILES.md). Called by the
 // job process (scripts/run-backtest-job.ts) for a backtest job. One session = one or several symbols from its start to
@@ -367,6 +368,10 @@ interface SessionSymbol {
   lastCompleteDay: string;
   /** Days inside the period the downloader could not retrieve at all. */
   unavailableDaysInPeriod: string[];
+  /** A split's or spin-off's days inside the period with no option price, skipped (bridgeSplitDaysWithoutOptionPrices, findSpinOffs). */
+  splitDaysSkippedInPeriod: string[];
+  /** Its spin-offs inside the period (findSpinOffs), each with its value per share as traded; credited once, on the first session day on or after it. */
+  spinOffs: { firstDayIso: string; valuePerShare: number; creditedOn: string | null }[];
   /** F on each of the symbol's own session days. */
   splitFactorByDay: Map<string, number>;
   /** The session days F changes on (the first day included), in date order. */
@@ -403,15 +408,16 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     session.bookMode === "pots" && session.symbolSettings ? new Map(Object.entries(session.symbolSettings).map(([symbol, ticker]) => [symbol, { baseline: { ...settings.baseline, ...ticker.baseline }, weight: ticker.weight }])) : undefined;
   // The baseline wheel's hedge (backtestBaselineHedge.ts) reads long-dated Puts from the files of the tickers it is on for; the Vol Farmer's, from every file.
   const hedgeOnFor = (symbol: string) => settings.decisionMaker === "vol_farmer" || (settings.decisionMaker === "baseline" && hedgeIsOn(tickerSetupBySymbol?.get(symbol)?.baseline ?? settings.baseline));
-  // Vol Farmer v2 (v3 too) buys its LEAPS from the 10:00 Calls of every listed expiry (backtestVolFarmerV2Look.ts).
+  // Vol Farmer v2 (v3 and v4 too) buys its LEAPS from the 10:00 Calls of every listed expiry (backtestVolFarmerV2Look.ts).
   const leapsOn = runsVolFarmerV2Steps(settings.decisionMaker);
-  // Vol Farmer v2 (v3 too) decides on the next Call expiry's quotes only: its days are read as NextCallExpiryDay (backtestSymbolFile.ts).
-  // Vol Farmer v3 selling options that expire today reads every expiry of the day, as the Steady Stake does.
-  const readsNextCallExpiryOnly = runsVolFarmerV2Steps(settings.decisionMaker) && !(settings.decisionMaker === "vol_farmer_v3" && settings.volFarmerV3.optionsExpiry === "today");
+  const volFarmerSteps = runsVolFarmerV2Steps(settings.decisionMaker) ? volFarmerStepSettingsOf(settings) : null;
+  // Vol Farmer v2 (v3 and v4 too) decides on the next Call expiry's quotes only: its days are read as NextCallExpiryDay (backtestSymbolFile.ts).
+  // Vol Farmer v3 or v4 selling options that expire today reads every expiry of the day, as the Steady Stake does.
+  const readsNextCallExpiryOnly = volFarmerSteps !== null && volFarmerSteps.v3?.optionsExpiry !== "today";
   // The Steady Stake decides at 10:00 only, the Vol Farmer too but reads every look's quotes (the IVs a crossing is
-  // priced on), the baseline and Vol Farmer v2 at every look unless their looks say the first only.
+  // priced on), the baseline and Vol Farmer v2 (v3, v4) at every look unless their looks say the first only.
   const decidesAtCaptureLookOnly =
-    settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" : runsVolFarmerV2Steps(settings.decisionMaker) ? settings.volFarmerV2.looks === "first_look" : settings.decisionMaker === "steady_stake";
+    settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" : volFarmerSteps !== null ? volFarmerSteps.v2.looks === "first_look" : settings.decisionMaker === "steady_stake";
   const severalSymbols = symbolNames.length > 1;
   const startingValue = Number(session.startingValue);
   const dataDirectory = requireBacktestDataDirectory();
@@ -453,22 +459,41 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     const symbols: SessionSymbol[] = [];
     for (const symbol of symbolNames) {
       const file = fileBySymbol.get(symbol)!;
-      const completeDays = completeDaysBySymbol.get(symbol)!;
-      const completeDaySet = new Set(completeDays);
+      const fileCompleteDays = completeDaysBySymbol.get(symbol)!;
       const profile = await loadTickerProfile(symbol, connection);
       // Every stock price comes from IBKR's bars kept in the file: the forecast, the 10:00 and look prices, the closes.
       const refreshHint = `press Update on its row in Data files (or run npm run backtest:backfill-file-stock-bars -- ${symbol})`;
       const dailyBarRows = file.loadIbkrDailyBars();
       if (!dailyBarRows) throw new Error(`The ${symbol} data file has no IBKR daily bars: ${refreshHint}.`);
-      const bars = new BacktestBarHistory(dailyBarRows);
+      const fileBars = new BacktestBarHistory(dailyBarRows);
       const intradayPrices = file.loadIbkrIntradayPrices(addCalendarDays(session.startDate, -10), session.endDate);
       if (!intradayPrices) throw new Error(`The ${symbol} data file has no IBKR 30-minute bars: ${refreshHint}.`);
-      const lastOwnDay = [...completeDays].reverse().find((dateIso) => dateIso >= session.startDate && dateIso <= session.endDate)!;
-      for (const [what, lastDate] of [["daily", bars.lastDateIso()], ["30-minute", intradayPrices.lastDate]] as const) {
+      const lastOwnDay = [...fileCompleteDays].reverse().find((dateIso) => dateIso >= session.startDate && dateIso <= session.endDate)!;
+      for (const [what, lastDate] of [["daily", fileBars.lastDateIso()], ["30-minute", intradayPrices.lastDate]] as const) {
         if (lastDate === null || lastDate < lastOwnDay) throw new Error(`The ${symbol} IBKR ${what} bars end ${lastDate ?? "nowhere"}, before the session's last day ${lastOwnDay}: ${refreshHint}.`);
       }
       // IBKR's bars are split-adjusted, the option file is as traded: F(D) puts every bar price on day D's traded scale.
-      const { schedule, cached: scheduleCached } = loadOrInferSplitSchedule(dataDirectory, symbol, file, completeDays, bars, rates);
+      const { schedule: fileSchedule, cached: scheduleCached } = loadOrInferSplitSchedule(dataDirectory, symbol, file, fileCompleteDays, fileBars, rates);
+      // A split's first day with no option price at all is skipped, as a day the file could not download is; so are a
+      // spin-off's, whose earlier bars are put back on the prices traded.
+      const daysWithoutOptionPrices = file.loadDaysWithoutOptionPrices();
+      const bridged = bridgeSplitDaysWithoutOptionPrices(fileSchedule, daysWithoutOptionPrices);
+      const { schedule, spinOffs, skippedDays: spinOffDaysWithoutOptionPrices } = findSpinOffs(bridged.schedule, daysWithoutOptionPrices);
+      const splitDaysWithoutOptionPrices = [...bridged.skippedDays, ...spinOffDaysWithoutOptionPrices].sort();
+      let bars = fileBars;
+      for (const spinOff of spinOffs) {
+        bars = bars.scaledBefore(spinOff.firstDayIso, spinOff.ratioBefore / spinOff.factorAfter);
+        intradayPrices.scaleBefore(spinOff.firstDayIso, spinOff.ratioBefore / spinOff.factorAfter);
+      }
+      const spinOffsInPeriod = spinOffs
+        .filter((spinOff) => spinOff.firstDayIso > session.startDate && spinOff.firstDayIso <= session.endDate)
+        .map((spinOff) => ({ firstDayIso: spinOff.firstDayIso, valuePerShare: spinOffValuePerShare(spinOff, fileBars.closeOn(spinOff.lastDayBeforeIso)! * spinOff.ratioBefore), creditedOn: null as string | null }));
+      for (const spinOff of spinOffsInPeriod) console.log(`backtest ${sessionId} ${symbol}: spin-off on ${spinOff.firstDayIso}, ${spinOff.valuePerShare.toFixed(2)} a share`);
+      const skippedDaySet = new Set(splitDaysWithoutOptionPrices);
+      const completeDays = fileCompleteDays.filter((dateIso) => !skippedDaySet.has(dateIso));
+      const completeDaySet = new Set(completeDays);
+      const skippedInPeriod = splitDaysWithoutOptionPrices.filter((dateIso) => dateIso >= session.startDate && dateIso <= session.endDate);
+      if (skippedInPeriod.length > 0) console.log(`backtest ${sessionId} ${symbol}: ${skippedInPeriod.length} split or spin-off day(s) with no option price skipped: ${skippedInPeriod.join(", ")}`);
       const ownSessionDays = sessionDays.filter((dateIso) => completeDaySet.has(dateIso));
       const splitFactorByDay = requireSplitFactors(symbol, schedule, ownSessionDays);
       const splitsInSession = schedule.splits.filter((split) => split.lastDayBefore >= sessionDays[0]! && split.firstDayAfter <= sessionDays.at(-1)!);
@@ -508,6 +533,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         captureByDay: new Map(),
         lastCompleteDay: completeDays.at(-1)!,
         unavailableDaysInPeriod,
+        splitDaysSkippedInPeriod: skippedInPeriod,
+        spinOffs: spinOffsInPeriod,
         splitFactorByDay,
         splitFactorChanges: [...splitFactorByDay.entries()].sort(([a], [b]) => a.localeCompare(b)).filter(([, factor], index, all) => index === 0 || factor !== all[index - 1]![1]).map(([fromDateIso, factor]) => ({ fromDateIso, factor })),
         closesBeforeTodayCount: 0,
@@ -691,6 +718,33 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         if (factor === null) throw new Error(`${entry.symbol} ${todayIso}: the price scale of the day cannot be inferred from its data file.`);
         return factor;
       };
+
+      // A spin-off, before anything else of its first day (Marcelo 2026-11-01): the symbol's open options close at their
+      // last marks (the data holds no price of the adjusted contracts), then every share held is credited the spun-off
+      // company's value and costs as much less; buy and hold is credited too.
+      for (const entry of symbols) {
+        for (const spinOff of entry.spinOffs) {
+          if (spinOff.creditedOn !== null || todayIso < spinOff.firstDayIso) continue;
+          spinOff.creditedOn = todayIso;
+          const at = easternInstant(todayIso, 9, 30);
+          const splitFactor = splitFactorToday(entry);
+          const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
+          const openOptionLegs = ledger.legs.filter((leg) => leg.legType === "option" && leg.exitAt === null && symbolOfLeg(leg) === entry);
+          for (const leg of openOptionLegs) {
+            const position = requirePosition(ledger, leg.positionId);
+            const mark = priceByLegId.get(leg.id) ?? leg.entryPrice;
+            if (position.strategyKey === "cash_secured_put") buyBackPut(ledger, { legId: leg.id, fillPrice: mark, at, actionId: null });
+            else if (position.strategyKey === "covered_call") buyBackCoveredCallKeepingShares(ledger, { positionId: position.id, callFillPrice: mark, at, actionId: null });
+            else if (position.strategyKey === "leaps") sellLeapsCall(ledger, { legId: leg.id, contracts: leg.quantity, fillPrice: mark, at, actionId: null });
+            else if (position.strategyKey === "hedge") sellHedgePut(ledger, { legId: leg.id, contracts: leg.quantity, fillPrice: mark, at, actionId: null });
+          }
+          const valuePerShareOnCycleScale = spinOff.valuePerShare * priceToCycleScale;
+          const credited = creditSpinOff(ledger, { symbol: entry.symbol, valuePerShare: valuePerShareOnCycleScale, at });
+          lowerVolFarmerV2CostForSpinOff(ledger, entry.symbol, valuePerShareOnCycleScale);
+          if (entry.baseline.bought) baselineCash += (entry.baseline.shares * spinOff.valuePerShare * entry.baseline.splitFactorAtPurchase) / splitFactor;
+          notes.push(noteFor(entry, `spin-off: ${formatWholeDollars(credited)} credited, ${spinOff.valuePerShare.toFixed(2)} a share held, each costing as much less${openOptionLegs.length > 0 ? `; ${openOptionLegs.length} open option leg(s) closed at their last marks` : ""}`));
+        }
+      }
 
       // a. Settlement at 16:00 of the expiry day, on that day's close. An expiry on a day the market was closed settles on the
       // close of the session before it, OCC's rule (the options of 2025-01-09, a national day of mourning, settled on the
@@ -939,7 +993,9 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const previousFileDay = hasFileDay ? (entry.previousFileDayOf.get(todayIso) ?? null) : null;
         const capture = hasFileDay ? captureOf(entry, todayIso) : null;
         const tenOclockPrice = capture?.stockPrice ?? null;
-        const adjustedFallbackPrice: number | null = tenOclockPrice !== null ? null : (entry.bars.previousClose(todayIso)?.close ?? entry.lastAdjustedStockPrice);
+        // A spin-off's first day with no file day is marked at its own close: the previous one still holds the spun-off value just credited.
+        const spinOffCreditedToday = !hasFileDay && entry.spinOffs.some((spinOff) => spinOff.creditedOn === todayIso);
+        const adjustedFallbackPrice: number | null = tenOclockPrice !== null ? null : ((spinOffCreditedToday ? entry.bars.closeOn(todayIso) : null) ?? entry.bars.previousClose(todayIso)?.close ?? entry.lastAdjustedStockPrice);
         const stockPrice: number | null = tenOclockPrice ?? (adjustedFallbackPrice === null ? null : adjustedFallbackPrice * splitFactor);
         const legsOfSymbol = openLegs.filter((leg) => symbolOfLeg(leg) === entry);
         if (stockPrice === null) {
@@ -965,7 +1021,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         baselineSharesValue += (entry.baseline.shares * stockPrice * entry.baseline.splitFactorAtPurchase) / splitFactor;
 
         if (!hasFileDay) {
-          notes.push(noteFor(entry, `not scored: ${entry.unavailableDaysInPeriod.includes(todayIso) ? "the day could not be downloaded" : todayIso > entry.lastCompleteDay ? `its data file ends ${entry.lastCompleteDay}` : "no data for the day"}; marked at the previous close ${stockPrice.toFixed(2)}`));
+          notes.push(noteFor(entry, `not scored: ${entry.unavailableDaysInPeriod.includes(todayIso) ? "the day could not be downloaded" : todayIso > entry.lastCompleteDay ? `its data file ends ${entry.lastCompleteDay}` : "no data for the day"}; marked at the ${spinOffCreditedToday ? "day's" : "previous"} close ${stockPrice.toFixed(2)}`));
           continue;
         }
         if (tenOclockPrice === null) {
@@ -1189,6 +1245,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         if (daysWithoutIntradayQuotes > 0) sessionNotes.push(describeDaysWithoutIntradayQuotes(entry.symbol, daysWithoutIntradayQuotes, ownSessionDays.length));
       }
     }
+    for (const entry of symbols) for (const spinOff of entry.spinOffs) sessionNotes.push(`${entry.symbol}: spin-off on ${spinOff.firstDayIso}: IBKR's earlier prices put back on those traded, and ${spinOff.valuePerShare.toFixed(2)} a share held credited in cash, each share's cost lowered by as much.`);
+    for (const entry of symbols) if (entry.splitDaysSkippedInPeriod.length > 0) sessionNotes.push(`${entry.symbol}: ${formatCount(entry.splitDaysSkippedInPeriod.length)} day(s) at a split or spin-off with no option price in the data file were skipped (no decision, no trade): ${entry.splitDaysSkippedInPeriod.join(", ")}.`);
     const spyPurchase = spyBuyAndHold?.purchase ?? null;
     sessionNotes.push(
       spyPurchase === null
@@ -1203,7 +1261,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     }
     const volFarmerCashNote = settings.decisionMaker === "vol_farmer" ? describeVolFarmerCash(ledger, symbols.map((entry) => entry.symbol)) : null;
     if (volFarmerCashNote !== null) sessionNotes.push(volFarmerCashNote);
-    const volFarmerV2Note = runsVolFarmerV2Steps(settings.decisionMaker) ? describeVolFarmerV2Run(ledger, symbols.map((entry) => entry.symbol), settings.volFarmerV2.firstPositionPct, settings.decisionMaker === "vol_farmer_v3" ? "Vol Farmer v3" : "Vol Farmer v2", priceByLegId) : null;
+    const volFarmerV2Note = volFarmerSteps !== null ? describeVolFarmerV2Run(ledger, symbols.map((entry) => entry.symbol), volFarmerSteps.v2.firstPositionPct, settings.decisionMaker === "vol_farmer_v4" ? "Vol Farmer v4" : settings.decisionMaker === "vol_farmer_v3" ? "Vol Farmer v3" : "Vol Farmer v2", priceByLegId) : null;
     if (volFarmerV2Note !== null) sessionNotes.push(volFarmerV2Note);
     const bookRecords = buildBookRecords({ ledger, symbols, optionSales, actions, priceByLegId, lastSessionDateIso, calendar, noSaleRecords: { shortfalls, notes: noSaleNotes, noCandidates: noCandidateNotes } });
     // The book holds every share it sells (the ledger refuses anything else); the platform's cycle derivation reading it

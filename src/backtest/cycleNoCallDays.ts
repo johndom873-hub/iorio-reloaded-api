@@ -152,13 +152,16 @@ export function volFarmerV2NoteOn(daySummary: string | null, symbol: string): st
 /**
  * Vol Farmer v2's notes on a position's shares with no Call sold (backtestVolFarmerV2Look.ts): each part of the symbol's
  * note ("first position: no Call at or above its break-even 14.20 (expiry 130, below cost 20)"; parts are joined by "; ")
- * as a reason ("no Call at or above B-E¹"), its break-even the figure; the split note as the Vol Farmer's. Parts about
- * other orders are left out.
+ * as a reason ("no Call at or above B-E¹"), its break-even the figure; with no break-even floor (v3/v4 "Above the price"),
+ * "no Call above the price 38.12 (…)" as "no Call above the price", the price the figure; the split note as the Vol
+ * Farmer's. Parts about other orders are left out.
  */
 export function volFarmerV2NoCallReasons(note: string): (Pick<BacktestNoCallReason, "reason" | "figure"> & { text: string })[] {
   return note.split("; ").flatMap((text): (Pick<BacktestNoCallReason, "reason" | "figure"> & { text: string })[] => {
     const belowBreakEven = /^(first|second) position: no Call at or above its break-even (-?\d+(?:\.\d+)?)/.exec(text);
     if (belowBreakEven) return [{ reason: `no Call at or above B-E${belowBreakEven[1] === "first" ? "¹" : "²"}`, figure: { kind: "level" as const, dollars: Number(belowBreakEven[2]) }, text }];
+    const aboveThePrice = /^(first|second) position: no Call above the price (-?\d+(?:\.\d+)?)/.exec(text);
+    if (aboveThePrice) return [{ reason: "no Call above the price", figure: { kind: "level" as const, dollars: Number(aboveThePrice[2]) }, text }];
     if (/^(first|second) position: no Call sold: the volume limit/.test(text)) return [{ reason: "the volume limit", figure: null, text }];
     const known = volFarmerNoCallReasons.find((entry) => entry.pattern.test(text));
     return known ? [{ reason: known.reason, figure: null, text }] : [];

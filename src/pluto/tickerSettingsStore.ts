@@ -5,13 +5,13 @@ import { updatePlutoSettings, type PlutoSettings } from "./settingsStore.js";
 
 // Pluto's per-ticker settings (Marcelo 2026-10-15): one row per ticker in pluto_ticker_settings, null meaning "the
 // default", with a field-level audit trail (pluto_ticker_settings_audit). Read by the CC + Put Ladder through
-// loadLadderSettingsForTicker (ladderSettings.ts). Each ticker runs one strategy (Marcelo 2026-10-27): Vol Farmer v2
-// unless it is set to the CC + Put Ladder.
+// loadLadderSettingsForTicker (ladderSettings.ts). Each ticker runs one strategy (Marcelo 2026-10-27): Vol Farmer v4
+// (v2 until 2026-10-31) unless it is set to the CC + Put Ladder.
 
-export const plutoStrategies = ["vol_farmer_v2", "cc_put_ladder"] as const;
+export const plutoStrategies = ["vol_farmer_v4", "cc_put_ladder"] as const;
 export type PlutoStrategy = (typeof plutoStrategies)[number];
 /** The strategy of a ticker with none set. */
-export const defaultPlutoStrategy: PlutoStrategy = "vol_farmer_v2";
+export const defaultPlutoStrategy: PlutoStrategy = "vol_farmer_v4";
 
 /** The strategy Pluto runs on the ticker: its own, else the default. */
 export function effectivePlutoStrategy(ticker: Pick<PlutoTickerSettings, "strategy">): PlutoStrategy {
@@ -165,9 +165,9 @@ export async function updatePlutoTickerSettings(symbol: string, input: PlutoTick
       audit.push({ ticker_id: current.tickerId, user_id: userId, field, old_value: before === null ? null : String(before), new_value: value === null ? null : String(value) });
     }
     if (audit.length === 0) return current;
-    // A ticker changing strategy is looked at afresh by the new one: v2 adopts its holdings, the ladder's cycle starts there.
+    // A ticker changing strategy is looked at afresh by the new one: v4 adopts its holdings, the ladder's cycle starts there.
     if (audit.some((row) => row.field === "strategy")) {
-      await trx("pluto_vol_farmer_v2_cycles").where({ ticker_id: current.tickerId }).delete();
+      await trx("pluto_vol_farmer_v4_cycles").where({ ticker_id: current.tickerId }).delete();
       await trx("pluto_ladder_cycles").where({ ticker_id: current.tickerId }).delete();
     }
     await trx("pluto_ticker_settings")

@@ -14,6 +14,7 @@ const unstructuredReasonLabels: Record<string, string> = {
   csp_assigned_stock: "left over from a put assignment",
   cc_expired_leftover_stock: "left over after a covered call expired",
   manual_stock_buy: "bought outside a strategy",
+  pluto_share_buy: "shares Pluto bought on their own",
   other: "other",
   unknown: "reason unknown",
 };

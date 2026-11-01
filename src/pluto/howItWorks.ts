@@ -10,7 +10,7 @@ import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { tickerPotFraction } from "./tickerSettingsStore.js";
 
 // The numbers Pluto's "How it works" tab quotes (approved mockup https://claude.ai/artifact/TYdARe8Sa6RuF5Lb1E1s2b; the
-// CC + Put Ladder and, since 2026-10-27, Vol Farmer v2): Pluto's live settings and the code's own constants, read from
+// CC + Put Ladder and Vol Farmer v4, v2 from 2026-10-27 to 2026-10-31): Pluto's live settings and the code's own constants, read from
 // where the strategies read them, so the tab cannot drift from what runs. The worked examples are computed by the
 // strategies' own functions on fixed example inputs. Percentages are in percent (5 = 5%), deltas as fractions, money in
 // dollars.
@@ -22,10 +22,15 @@ const ladderExampleAverageCost = 104;
 const ladderExampleBreakEven = 100;
 const ladderExampleShockPct = 70;
 
-/** Vol Farmer v2's example: the same account and allocation, the stock at $100, a first break-even of $96 after a fall, IBKR's IV at 60%. */
-const volFarmerV2ExampleStockPrice = 100;
-const volFarmerV2ExampleFirstBreakEven = 96;
-const volFarmerV2ExampleImpliedVolatility = 0.6;
+/**
+ * Vol Farmer v4's example: the same account and allocation, the stock at $100, a first break-even of $96 after a fall, IBKR's
+ * IV at 60%; the first position rebalanced after a fall to $90 and a rise to $110.
+ */
+const volFarmerV4ExampleStockPrice = 100;
+const volFarmerV4ExampleFirstBreakEven = 96;
+const volFarmerV4ExampleImpliedVolatility = 0.6;
+const volFarmerV4ExampleFallPrice = 90;
+const volFarmerV4ExampleRisePrice = 110;
 
 export interface PlutoHowItWorksLadderRung {
   rung: number;
@@ -92,7 +97,7 @@ export interface PlutoHowItWorks {
       rungs: PlutoHowItWorksLadderRung[];
     };
   };
-  volFarmerV2: {
+  volFarmerV4: {
     /** The Calls' |delta| range, spread limit and bid minimum; the volume share as the ladder's. */
     callMinAbsDelta: number;
     callMaxAbsDelta: number;
@@ -103,18 +108,44 @@ export interface PlutoHowItWorks {
     firstPositionPct: number;
     putsStartCallYieldPct: number;
     putMaxAbsDelta: number;
-    stepRule: PlutoSettings["volFarmerV2StepRule"];
+    stepRule: PlutoSettings["volFarmerV4StepRule"];
     /** The fixed rule's Step. */
     stepBelowFirstBreakEvenPct: number;
     leapsMinDte: number;
     leapsAbsDelta: number;
     leapsMaxAllocationPct: number;
+    /** v3's rules (volFarmerV2Steps.ts): the rebalancing band, % of the pot, and the choices as the settings hold them. */
+    rebalanceBandPct: number;
+    rebalances: PlutoSettings["volFarmerV4Rebalances"];
+    firstPositionAfterCalledAway: PlutoSettings["volFarmerV4FirstPositionAfterCalledAway"];
+    optionsExpiry: PlutoSettings["volFarmerV4OptionsExpiry"];
+    optionsMaxDaysToExpiry: number;
+    callStrikeFloor: PlutoSettings["volFarmerV4CallStrikeFloor"];
+    putsSold: PlutoSettings["volFarmerV4PutsSold"];
+    putStrikeCap: PlutoSettings["volFarmerV4PutStrikeCap"];
+    trimsSell: PlutoSettings["volFarmerV4TrimsSell"];
+    /** Top-ups take the money in to at most this % of the pot; 0: no cap. */
+    topUpCapPct: number;
     example: {
       accountValue: number;
       allocationPct: number;
       pot: number;
       stockPrice: number;
       lots: number;
+      /** The first position's target (First position % of the pot) and the band either side of it, in dollars. */
+      targetDollars: number;
+      bandDollars: number;
+      /** The lots' value after a fall to fallPrice, and the lots held after the top-up (the same when inside the band). */
+      fallPrice: number;
+      valueAfterFall: number;
+      lotsAfterFallTopUp: number;
+      /** The top-up cap in dollars (null: no cap), and the money in (the lots' cost) once the fall's top-up is bought. */
+      topUpCapDollars: number | null;
+      moneyInAfterFallTopUp: number;
+      /** The lots' value after a rise to risePrice, and the lots held after the trim. */
+      risePrice: number;
+      valueAfterRise: number;
+      lotsAfterRiseTrim: number;
       firstBreakEven: number;
       impliedVolatilityPct: number;
       stepPct: number;
@@ -143,8 +174,24 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
   }
 
 
-  const volFarmerV2Step = settings.volFarmerV2StepRule === "implied_move_at_put_sale" ? volFarmerV2ImpliedMoveStep(volFarmerV2ExampleImpliedVolatility).stepPct : settings.volFarmerV2StepBelowFirstBreakEvenPct;
-  const volFarmerV2LotCost = volFarmerV2ExampleStockPrice * 100 + flatStockCommissionEstimator.perShareDollars("buy") * 100;
+  const volFarmerV4Step = settings.volFarmerV4StepRule === "implied_move_at_put_sale" ? volFarmerV2ImpliedMoveStep(volFarmerV4ExampleImpliedVolatility).stepPct : settings.volFarmerV4StepBelowFirstBreakEvenPct;
+  // A lot's cost at a price, as the steps count it (the shares and their commission).
+  const lotCostAt = (price: number) => price * 100 + flatStockCommissionEstimator.perShareDollars("buy") * 100;
+  const target = (pot * settings.volFarmerV4FirstPositionPct) / 100;
+  const band = (pot * settings.volFarmerV4RebalanceBandPct) / 100;
+  const lots = Math.floor(target / lotCostAt(volFarmerV4ExampleStockPrice) + 1e-9);
+  const topUpCapDollars = settings.volFarmerV4TopUpCapPct > 0 ? (pot * settings.volFarmerV4TopUpCapPct) / 100 : null;
+  const moneyInBefore = lots * lotCostAt(volFarmerV4ExampleStockPrice);
+  // Step 1b's rebalancing (volFarmerV2Steps.ts rebalanceHolding): outside the band, back to floor(target ÷ a lot's cost), never
+  // below one lot; a top-up buys no more lots than the cap's room over the money in pays for.
+  const lotsAfterRebalanceAt = (price: number) => {
+    const value = lots * 100 * price;
+    if (Math.abs(value - target) <= band) return lots;
+    const targetLots = Math.max(1, Math.floor(target / lotCostAt(price) + 1e-9));
+    if (value >= target) return Math.min(lots, targetLots);
+    const capLots = topUpCapDollars === null ? Number.POSITIVE_INFINITY : Math.max(0, Math.floor((topUpCapDollars - moneyInBefore) / lotCostAt(price) + 1e-9));
+    return lots + Math.min(Math.max(0, targetLots - lots), capLots);
+  };
 
   return {
     shared: {
@@ -185,32 +232,52 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       maxQuoteAgeMinutes: settings.maxQuoteAgeMinutes,
       example: { accountValue: ladderExampleAccountValue, allocationPct: ladderExampleAllocationPct, pot, sharesBudget, reserve, rungCollateral, averageCost: ladderExampleAverageCost, breakEven: ladderExampleBreakEven, shockPct, floor, rungs },
     },
-    volFarmerV2: {
-      callMinAbsDelta: settings.volFarmerV2CallMinAbsDelta,
-      callMaxAbsDelta: settings.volFarmerV2CallMaxAbsDelta,
-      maxSpreadPctOfMid: settings.volFarmerV2MaxSpreadPctOfMid,
+    volFarmerV4: {
+      callMinAbsDelta: settings.volFarmerV4CallMinAbsDelta,
+      callMaxAbsDelta: settings.volFarmerV4CallMaxAbsDelta,
+      maxSpreadPctOfMid: settings.volFarmerV4MaxSpreadPctOfMid,
       minimumBid: baselineMinimumBid,
       maxVolumeSharePct: percent(baselineMaxVolumeShare),
-      firstPositionPct: settings.volFarmerV2FirstPositionPct,
-      putsStartCallYieldPct: settings.volFarmerV2PutsStartCallYieldPct,
-      putMaxAbsDelta: settings.volFarmerV2PutMaxAbsDelta,
-      stepRule: settings.volFarmerV2StepRule,
-      stepBelowFirstBreakEvenPct: settings.volFarmerV2StepBelowFirstBreakEvenPct,
-      leapsMinDte: settings.volFarmerV2LeapsMinDte,
-      leapsAbsDelta: settings.volFarmerV2LeapsAbsDelta,
-      leapsMaxAllocationPct: settings.volFarmerV2LeapsMaxAllocationPct,
+      firstPositionPct: settings.volFarmerV4FirstPositionPct,
+      putsStartCallYieldPct: settings.volFarmerV4PutsStartCallYieldPct,
+      putMaxAbsDelta: settings.volFarmerV4PutMaxAbsDelta,
+      stepRule: settings.volFarmerV4StepRule,
+      stepBelowFirstBreakEvenPct: settings.volFarmerV4StepBelowFirstBreakEvenPct,
+      leapsMinDte: settings.volFarmerV4LeapsMinDte,
+      leapsAbsDelta: settings.volFarmerV4LeapsAbsDelta,
+      leapsMaxAllocationPct: settings.volFarmerV4LeapsMaxAllocationPct,
+      rebalanceBandPct: settings.volFarmerV4RebalanceBandPct,
+      rebalances: settings.volFarmerV4Rebalances,
+      firstPositionAfterCalledAway: settings.volFarmerV4FirstPositionAfterCalledAway,
+      optionsExpiry: settings.volFarmerV4OptionsExpiry,
+      optionsMaxDaysToExpiry: settings.volFarmerV4OptionsMaxDaysToExpiry,
+      callStrikeFloor: settings.volFarmerV4CallStrikeFloor,
+      putsSold: settings.volFarmerV4PutsSold,
+      putStrikeCap: settings.volFarmerV4PutStrikeCap,
+      trimsSell: settings.volFarmerV4TrimsSell,
+      topUpCapPct: settings.volFarmerV4TopUpCapPct,
       example: {
         accountValue: ladderExampleAccountValue,
         allocationPct: ladderExampleAllocationPct,
         pot,
-        stockPrice: volFarmerV2ExampleStockPrice,
-        lots: Math.floor((pot * settings.volFarmerV2FirstPositionPct) / 100 / volFarmerV2LotCost + 1e-9),
-        firstBreakEven: volFarmerV2ExampleFirstBreakEven,
-        impliedVolatilityPct: percent(volFarmerV2ExampleImpliedVolatility),
-        stepPct: volFarmerV2Step,
-        putStrikeCap: volFarmerV2PutStrikeCap(volFarmerV2ExampleFirstBreakEven, volFarmerV2Step),
-        leapsEntryBelowSecondBreakEvenPct: volFarmerV2Step / 2,
-        leapsCap: volFarmerV2LeapsBudget(Number.POSITIVE_INFINITY, pot, settings.volFarmerV2LeapsMaxAllocationPct),
+        stockPrice: volFarmerV4ExampleStockPrice,
+        lots,
+        targetDollars: target,
+        bandDollars: band,
+        fallPrice: volFarmerV4ExampleFallPrice,
+        valueAfterFall: lots * 100 * volFarmerV4ExampleFallPrice,
+        lotsAfterFallTopUp: lotsAfterRebalanceAt(volFarmerV4ExampleFallPrice),
+        topUpCapDollars,
+        moneyInAfterFallTopUp: moneyInBefore + (lotsAfterRebalanceAt(volFarmerV4ExampleFallPrice) - lots) * lotCostAt(volFarmerV4ExampleFallPrice),
+        risePrice: volFarmerV4ExampleRisePrice,
+        valueAfterRise: lots * 100 * volFarmerV4ExampleRisePrice,
+        lotsAfterRiseTrim: lotsAfterRebalanceAt(volFarmerV4ExampleRisePrice),
+        firstBreakEven: volFarmerV4ExampleFirstBreakEven,
+        impliedVolatilityPct: percent(volFarmerV4ExampleImpliedVolatility),
+        stepPct: volFarmerV4Step,
+        putStrikeCap: volFarmerV2PutStrikeCap(volFarmerV4ExampleFirstBreakEven, volFarmerV4Step),
+        leapsEntryBelowSecondBreakEvenPct: volFarmerV4Step / 2,
+        leapsCap: volFarmerV2LeapsBudget(Number.POSITIVE_INFINITY, pot, settings.volFarmerV4LeapsMaxAllocationPct),
       },
     },
   };

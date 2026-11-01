@@ -31,7 +31,7 @@ interface OrderRequestResponse {
   updatedAt?: string | null;
 }
 
-/** A sale opening a position (the CC + Put Ladder's, ladderOrders.ts, and Vol Farmer v2's, volFarmerV2Round.ts): its contract and the shares it buys. */
+/** A sale opening a position (the CC + Put Ladder's, ladderOrders.ts, and Vol Farmer v4's, volFarmerV4Round.ts): its contract and the shares it buys. */
 export interface ExecuteLadderOpenInput {
   kind: "ladder_open";
   actionId: string;
@@ -45,7 +45,7 @@ export interface ExecuteLadderOpenInput {
   scoresSnapshot: unknown;
 }
 
-/** Vol Farmer v2's LEAPS purchase: a Call bought through the order route as a "leaps" position. */
+/** Vol Farmer v4's LEAPS purchase: a Call bought through the order route as a "leaps" position. */
 export interface ExecuteLeapsPurchaseInput {
   kind: "leaps_buy";
   actionId: string;
@@ -56,7 +56,7 @@ export interface ExecuteLeapsPurchaseInput {
   scoresSnapshot: unknown;
 }
 
-/** Vol Farmer v2's LEAPS sale: one LEAPS position's leg sold whole through the close route. */
+/** Vol Farmer v4's LEAPS sale: one LEAPS position's leg sold whole through the close route. */
 export interface ExecuteLeapsSaleInput {
   kind: "leaps_sell";
   actionId: string;
@@ -68,7 +68,31 @@ export interface ExecuteLeapsSaleInput {
   reasons: string[];
 }
 
-export type ExecuteInput = ExecuteLadderOpenInput | ExecuteLeapsPurchaseInput | ExecuteLeapsSaleInput;
+/**
+ * Vol Farmer v4's share purchase (its rebalancing, or a first position bought on a day it sells no option): shares bought
+ * on their own through the order route (strategyKey "shares"); `plan.quantity` is the shares.
+ */
+export interface ExecuteSharesPurchaseInput {
+  kind: "shares_buy";
+  actionId: string;
+  symbol: string;
+  plan: PlutoOrderPlan;
+  reasons: string[];
+  scoresSnapshot: unknown;
+}
+
+/** Vol Farmer v4's trim: uncovered shares sold from the ticker's leftover-stock position through the close route; `plan.quantity` is the shares. */
+export interface ExecuteSharesSaleInput {
+  kind: "shares_sell";
+  actionId: string;
+  symbol: string;
+  positionId: string;
+  legId: string;
+  plan: PlutoOrderPlan;
+  reasons: string[];
+}
+
+export type ExecuteInput = ExecuteLadderOpenInput | ExecuteLeapsPurchaseInput | ExecuteLeapsSaleInput | ExecuteSharesPurchaseInput | ExecuteSharesSaleInput;
 
 export interface ExecuteResult {
   outcome: PlutoActionOutcome;
@@ -101,14 +125,17 @@ function isoToIbkrExpiry(expiryIso: string): string {
   return expiryIso.replace(/-/g, "");
 }
 
-/** "SMCI Sell $46 Call · 9 Oct (2DTE) · 11× @ 0.39"; a LEAPS purchase "Buy". */
+/** "SMCI Sell $46 Call · 9 Oct (2DTE) · 11× @ 0.39"; a LEAPS purchase "Buy"; shares "AMD Buy 200 shares @ 254.10". */
 export function describeOrder(input: ExecuteInput): string {
+  if (input.kind === "shares_buy" || input.kind === "shares_sell") return `${input.symbol} ${input.kind === "shares_buy" ? "Buy" : "Sell"} ${input.plan.quantity} shares @ ${input.plan.limitPrice.toFixed(2)}`;
   return `${input.symbol} ${input.kind === "leaps_buy" ? "Buy" : "Sell"} ${describeOptionContract(input.contract)}${describeOrderSize(input.plan.quantity, input.plan.limitPrice)}`;
 }
 
-/** Builds the order through the route the screens use: a LEAPS sale through the close route, everything else through POST /positions/orders. */
+/** Builds the order through the route the screens use: a sale of a held leg through the close route, everything else through POST /positions/orders. */
 function buildOrder(api: InternalApiClient, input: ExecuteInput): Promise<OrderRequestResponse> {
   if (input.kind === "leaps_sell") return api.post<OrderRequestResponse>(`/positions/${input.positionId}/close`, { legs: [{ legId: input.legId, limitPrice: input.plan.limitPrice }], plutoActionId: input.actionId });
+  if (input.kind === "shares_sell") return api.post<OrderRequestResponse>(`/positions/${input.positionId}/close`, { legs: [{ legId: input.legId, limitPrice: input.plan.limitPrice, quantity: input.plan.quantity }], plutoActionId: input.actionId });
+  if (input.kind === "shares_buy") return api.post<OrderRequestResponse>("/positions/orders", { symbol: input.symbol, strategyKey: "shares", stock: { quantity: input.plan.quantity, limitPrice: input.plan.limitPrice }, signalSnapshot: input.scoresSnapshot, plutoActionId: input.actionId });
   const option = { quantity: input.plan.quantity, limitPrice: input.plan.limitPrice, strikePrice: input.contract.strike, expiryDate: isoToIbkrExpiry(input.contract.expiry) };
   if (input.kind === "leaps_buy") return api.post<OrderRequestResponse>("/positions/orders", { symbol: input.symbol, strategyKey: "leaps", option, signalSnapshot: input.scoresSnapshot, plutoActionId: input.actionId });
   return api.post<OrderRequestResponse>("/positions/orders", {
@@ -132,8 +159,9 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
     return await errored(input, `build failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  // A Covered Call entry's shares are priced by the route at the live price.
-  const otherReferenceLegs: PlutoReferenceLeg[] = (built.payload?.legs ?? []).filter((leg) => leg.role === "stock").map((leg) => ({ side: leg.action === "SELL" ? ("sell" as const) : ("buy" as const), price: Number(leg.unitPrice), multiplier: 1 }));
+  // A Covered Call entry's shares are priced by the route at the live price; an order of shares alone has no other leg.
+  const sharesAlone = input.kind === "shares_buy" || input.kind === "shares_sell";
+  const otherReferenceLegs: PlutoReferenceLeg[] = sharesAlone ? [] : (built.payload?.legs ?? []).filter((leg) => leg.role === "stock").map((leg) => ({ side: leg.action === "SELL" ? ("sell" as const) : ("buy" as const), price: Number(leg.unitPrice), multiplier: 1 }));
   await updatePlutoAction(input.actionId, { outcome: "order_built", orderRequestId: built.id, referenceOtherLegs: otherReferenceLegs.length > 0 ? otherReferenceLegs : null });
   await recordPlutoEvent("order_built", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description });
 
@@ -239,7 +267,7 @@ export function describeActionOrder(action: { kind: string; symbol: string; limi
   const right = contract.right ?? (contract.strategyKey === "covered_call" ? "C" : "P");
   const option = (strike: number | undefined, expiry: string | undefined, withDte: boolean) =>
     strike !== undefined && expiry ? describeOptionContract({ strike: Number(strike), right, expiry, dte: withDte ? daysToExpiry(expiry, todayIso) : null }) : `${strike !== undefined ? formatStrike(Number(strike)) : "?"} ${right === "C" ? "Call" : "Put"}`;
-  if (action.kind === "close_shares") return `${action.symbol} Sell ${quantity ?? "?"} shares${price === null ? "" : ` @ ${price.toFixed(2)}`}`;
+  if (action.kind === "close_shares" || action.kind === "buy_shares") return `${action.symbol} ${action.kind === "buy_shares" ? "Buy" : "Sell"} ${quantity ?? "?"} shares${price === null ? "" : ` @ ${price.toFixed(2)}`}`;
   // A close_position's quantity is its shares: one contract per 100.
   if (action.kind === "close_position") return `${action.symbol} Close ${option(contract.strike, contract.expiry, true)} + sell ${quantity ?? "?"} shares${quantity === null ? "" : ` · ${Math.round(quantity / 100)}×`}`;
   const size = quantity === null ? "" : describeOrderSize(quantity, price);
@@ -251,9 +279,9 @@ export function describeActionOrder(action: { kind: string; symbol: string; limi
 export function referenceForAdoptedOrder(action: { kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown; reference_other_legs?: unknown }, todayIso = easternIsoDate(new Date())): AdoptableOrder["reference"] & { description: string } {
   const num = (value: unknown) => (value === null || value === undefined || Number.isNaN(Number(value)) ? null : Number(value));
   const price = num(action.reference_bid) ?? num(action.reference_mid) ?? num(action.limit_price) ?? 0;
-  const side: "sell" | "buy" = action.kind === "close_leg" || action.kind === "buy_leaps" ? "buy" : "sell";
+  const side: "sell" | "buy" = action.kind === "close_leg" || action.kind === "buy_leaps" || action.kind === "buy_shares" ? "buy" : "sell";
   // A close_position (a whole covered call) is referenced on its shares, the call being its other leg.
-  const multiplier = action.kind === "close_shares" || action.kind === "close_position" ? 1 : 100;
+  const multiplier = action.kind === "close_shares" || action.kind === "buy_shares" || action.kind === "close_position" ? 1 : 100;
   const description = describeActionOrder(action, todayIso);
   const otherLegs = Array.isArray(action.reference_other_legs) ? (action.reference_other_legs as PlutoReferenceLeg[]) : undefined;
   return { price, side, multiplier, ...(otherLegs ? { otherLegs } : {}), description };

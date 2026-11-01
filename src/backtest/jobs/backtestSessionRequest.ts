@@ -15,6 +15,7 @@ import {
   defaultBacktestVolFarmerSettings,
   defaultBacktestVolFarmerV2Settings,
   defaultBacktestVolFarmerV3Settings,
+  defaultBacktestVolFarmerV4Settings,
   runsVolFarmerV2Steps,
   volFarmerV2LooksChoices,
   volFarmerV3CallStrikeFloorChoices,
@@ -35,6 +36,7 @@ import {
   type BacktestVolFarmerSettings,
   type BacktestVolFarmerV2Settings,
   type BacktestVolFarmerV3Settings,
+  type BacktestVolFarmerV4Settings,
   type BacktestSymbolResolution,
   type BacktestSymbolSettingSource,
   type BacktestSymbolSettings,
@@ -131,7 +133,7 @@ function changedEntries(base: object, changes: Record<string, unknown>): Record<
 export function validateBacktestSettingsOverrides(raw: unknown, snapshot: BacktestSettings, editablePaths: ReadonlySet<string>): { ok: true; overrides: BacktestSettingsOverrides } | { ok: false; error: string } {
   if (raw === undefined || raw === null) return { ok: true, overrides: {} };
   if (!isPlainObject(raw)) return { ok: false, error: "overrides must be an object." };
-  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "decisionMaker" && key !== "baseline" && key !== "steadyStake" && key !== "volFarmer" && key !== "volFarmerV2" && key !== "volFarmerV3");
+  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "decisionMaker" && key !== "baseline" && key !== "steadyStake" && key !== "volFarmer" && key !== "volFarmerV2" && key !== "volFarmerV3" && key !== "volFarmerV4");
   if (unknownSection) return { ok: false, error: `overrides.${unknownSection} is not a setting a session can change.` };
 
   const overrides: BacktestSettingsOverrides = {};
@@ -205,6 +207,18 @@ export function validateBacktestSettingsOverrides(raw: unknown, snapshot: Backte
     if (problem) return { ok: false, error: problem };
     const changed = changedEntries(snapshotVolFarmerV3, raw.volFarmerV3);
     if (Object.keys(changed).length > 0) overrides.volFarmerV3 = changed as Partial<BacktestVolFarmerV3Settings>;
+  }
+
+  // Every Vol Farmer v4 value can change for a session.
+  if (raw.volFarmerV4 !== undefined) {
+    if (!isPlainObject(raw.volFarmerV4)) return { ok: false, error: "overrides.volFarmerV4 must be an object." };
+    const snapshotVolFarmerV4 = { ...defaultBacktestVolFarmerV4Settings, ...snapshot.volFarmerV4 };
+    const unknownField = Object.keys(raw.volFarmerV4).find((field) => !(field in defaultBacktestVolFarmerV4Settings));
+    if (unknownField) return { ok: false, error: `volFarmerV4.${unknownField} is not a Vol Farmer v4 setting.` };
+    const problem = validateVolFarmerV4Settings({ ...snapshotVolFarmerV4, ...raw.volFarmerV4 });
+    if (problem) return { ok: false, error: problem };
+    const changed = changedEntries(snapshotVolFarmerV4, raw.volFarmerV4);
+    if (Object.keys(changed).length > 0) overrides.volFarmerV4 = changed as Partial<BacktestVolFarmerV4Settings>;
   }
 
   if (raw.decisionMaker !== undefined) {
@@ -315,43 +329,54 @@ export function validateVolFarmerSettings(values: Record<string, unknown>): stri
   return null;
 }
 
-/** Vol Farmer v2's values (BacktestVolFarmerV2Settings): null when they are valid. */
-export function validateVolFarmerV2Settings(values: Record<string, unknown>): string | null {
+/** Vol Farmer v2's values (BacktestVolFarmerV2Settings), under `section` (v4 has them too): null when they are valid. */
+export function validateVolFarmerV2Settings(values: Record<string, unknown>, section: "volFarmerV2" | "volFarmerV4" = "volFarmerV2"): string | null {
   const isNumberIn = (value: unknown, min: number, max: number) => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
-  if (!isNumberIn(values.firstPositionPct, 10, 90)) return "volFarmerV2.firstPositionPct must be a number from 10 to 90.";
-  if (!isNumberIn(values.putsStartCallYieldPct, 0, 500)) return "volFarmerV2.putsStartCallYieldPct must be a number from 0 to 500.";
-  if (!isNumberIn(values.putMaxAbsDelta, 0.01, 0.99)) return "volFarmerV2.putMaxAbsDelta must be a number from 0.01 to 0.99.";
-  if (!isNumberIn(values.stepBelowFirstBreakEvenPct, 0, 90)) return "volFarmerV2.stepBelowFirstBreakEvenPct must be a number from 0 to 90.";
-  if (!(volFarmerV2StepRules as readonly unknown[]).includes(values.stepRule)) return `volFarmerV2.stepRule must be one of ${volFarmerV2StepRules.join(", ")}.`;
-  if (!isNumberIn(values.leapsMinDte, 30, 1000) || !Number.isInteger(values.leapsMinDte)) return "volFarmerV2.leapsMinDte must be a whole number from 30 to 1000.";
-  if (!isNumberIn(values.leapsAbsDelta, 0.05, 0.99)) return "volFarmerV2.leapsAbsDelta must be a number from 0.05 to 0.99.";
-  if (!isNumberIn(values.leapsMaxAccountPct, 0, 100)) return "volFarmerV2.leapsMaxAccountPct must be a number from 0 to 100.";
-  if (!isNumberIn(values.leapsSpreadCostChargedPct, 0, 100)) return "volFarmerV2.leapsSpreadCostChargedPct must be a number from 0 to 100.";
-  if (!(volFarmerV2LooksChoices as readonly unknown[]).includes(values.looks)) return `volFarmerV2.looks must be one of ${volFarmerV2LooksChoices.join(", ")}.`;
-  if (!isNumberIn(values.excessAllowancePct, 0, 1000)) return "volFarmerV2.excessAllowancePct must be a number from 0 to 1000.";
+  if (!isNumberIn(values.firstPositionPct, 10, 90)) return `${section}.firstPositionPct must be a number from 10 to 90.`;
+  if (!isNumberIn(values.putsStartCallYieldPct, 0, 500)) return `${section}.putsStartCallYieldPct must be a number from 0 to 500.`;
+  if (!isNumberIn(values.putMaxAbsDelta, 0.01, 0.99)) return `${section}.putMaxAbsDelta must be a number from 0.01 to 0.99.`;
+  if (!isNumberIn(values.stepBelowFirstBreakEvenPct, 0, 90)) return `${section}.stepBelowFirstBreakEvenPct must be a number from 0 to 90.`;
+  if (!(volFarmerV2StepRules as readonly unknown[]).includes(values.stepRule)) return `${section}.stepRule must be one of ${volFarmerV2StepRules.join(", ")}.`;
+  if (!isNumberIn(values.leapsMinDte, 30, 1000) || !Number.isInteger(values.leapsMinDte)) return `${section}.leapsMinDte must be a whole number from 30 to 1000.`;
+  if (!isNumberIn(values.leapsAbsDelta, 0.05, 0.99)) return `${section}.leapsAbsDelta must be a number from 0.05 to 0.99.`;
+  if (!isNumberIn(values.leapsMaxAccountPct, 0, 100)) return `${section}.leapsMaxAccountPct must be a number from 0 to 100.`;
+  if (!isNumberIn(values.leapsSpreadCostChargedPct, 0, 100)) return `${section}.leapsSpreadCostChargedPct must be a number from 0 to 100.`;
+  if (!(volFarmerV2LooksChoices as readonly unknown[]).includes(values.looks)) return `${section}.looks must be one of ${volFarmerV2LooksChoices.join(", ")}.`;
+  if (!isNumberIn(values.excessAllowancePct, 0, 1000)) return `${section}.excessAllowancePct must be a number from 0 to 1000.`;
   const allocations = values.tickerAllocationPct;
-  if (!isPlainObject(allocations)) return "volFarmerV2.tickerAllocationPct must be an object of symbols.";
+  if (!isPlainObject(allocations)) return `${section}.tickerAllocationPct must be an object of symbols.`;
   const notAnAllocation = Object.entries(allocations).find(([, value]) => !isNumberIn(value, 0, 100) || value === 0);
-  if (notAnAllocation) return `volFarmerV2.tickerAllocationPct.${notAnAllocation[0]} must be a number above 0 and at most 100.`;
+  if (notAnAllocation) return `${section}.tickerAllocationPct.${notAnAllocation[0]} must be a number above 0 and at most 100.`;
   const setTotal = Object.values(allocations).reduce<number>((total, value) => total + (value as number), 0);
-  if (setTotal > 100 + 1e-9) return `volFarmerV2.tickerAllocationPct: the set allocations add up to ${Number(setTotal.toFixed(4))}%, at most 100%.`;
+  if (setTotal > 100 + 1e-9) return `${section}.tickerAllocationPct: the set allocations add up to ${Number(setTotal.toFixed(4))}%, at most 100%.`;
   return null;
 }
 
-/** Vol Farmer v3's own values (BacktestVolFarmerV3Settings): null when they are valid. */
-export function validateVolFarmerV3Settings(values: Record<string, unknown>): string | null {
+/** Vol Farmer v3's own values (BacktestVolFarmerV3Settings), under `section` (v4 has them too): null when they are valid. */
+export function validateVolFarmerV3Settings(values: Record<string, unknown>, section: "volFarmerV3" | "volFarmerV4" = "volFarmerV3"): string | null {
   const rebalanceBandPct = values.rebalanceBandPct;
-  if (typeof rebalanceBandPct !== "number" || !Number.isFinite(rebalanceBandPct) || rebalanceBandPct < 0 || rebalanceBandPct > 50) return "volFarmerV3.rebalanceBandPct must be a number from 0 to 50.";
-  if (!(volFarmerV3RebalancesChoices as readonly unknown[]).includes(values.rebalances)) return `volFarmerV3.rebalances must be one of ${volFarmerV3RebalancesChoices.join(", ")}.`;
-  if (!(volFarmerV3FirstPositionAfterCalledAwayChoices as readonly unknown[]).includes(values.firstPositionAfterCalledAway)) return `volFarmerV3.firstPositionAfterCalledAway must be one of ${volFarmerV3FirstPositionAfterCalledAwayChoices.join(", ")}.`;
-  if (!(volFarmerV3OptionsExpiryChoices as readonly unknown[]).includes(values.optionsExpiry)) return `volFarmerV3.optionsExpiry must be one of ${volFarmerV3OptionsExpiryChoices.join(", ")}.`;
+  if (typeof rebalanceBandPct !== "number" || !Number.isFinite(rebalanceBandPct) || rebalanceBandPct < 0 || rebalanceBandPct > 50) return `${section}.rebalanceBandPct must be a number from 0 to 50.`;
+  if (!(volFarmerV3RebalancesChoices as readonly unknown[]).includes(values.rebalances)) return `${section}.rebalances must be one of ${volFarmerV3RebalancesChoices.join(", ")}.`;
+  if (!(volFarmerV3FirstPositionAfterCalledAwayChoices as readonly unknown[]).includes(values.firstPositionAfterCalledAway)) return `${section}.firstPositionAfterCalledAway must be one of ${volFarmerV3FirstPositionAfterCalledAwayChoices.join(", ")}.`;
+  if (!(volFarmerV3OptionsExpiryChoices as readonly unknown[]).includes(values.optionsExpiry)) return `${section}.optionsExpiry must be one of ${volFarmerV3OptionsExpiryChoices.join(", ")}.`;
   const optionsMaxDaysToExpiry = values.optionsMaxDaysToExpiry;
-  if (typeof optionsMaxDaysToExpiry !== "number" || !Number.isInteger(optionsMaxDaysToExpiry) || optionsMaxDaysToExpiry < 1 || optionsMaxDaysToExpiry > 45) return "volFarmerV3.optionsMaxDaysToExpiry must be a whole number from 1 to 45.";
-  if (!(volFarmerV3CallStrikeFloorChoices as readonly unknown[]).includes(values.callStrikeFloor)) return `volFarmerV3.callStrikeFloor must be one of ${volFarmerV3CallStrikeFloorChoices.join(", ")}.`;
-  if (!(volFarmerV3PutsSoldChoices as readonly unknown[]).includes(values.putsSold)) return `volFarmerV3.putsSold must be one of ${volFarmerV3PutsSoldChoices.join(", ")}.`;
-  if (!(volFarmerV3PutStrikeCapChoices as readonly unknown[]).includes(values.putStrikeCap)) return `volFarmerV3.putStrikeCap must be one of ${volFarmerV3PutStrikeCapChoices.join(", ")}.`;
-  if (!(volFarmerV3TrimsSellChoices as readonly unknown[]).includes(values.trimsSell)) return `volFarmerV3.trimsSell must be one of ${volFarmerV3TrimsSellChoices.join(", ")}.`;
+  if (typeof optionsMaxDaysToExpiry !== "number" || !Number.isInteger(optionsMaxDaysToExpiry) || optionsMaxDaysToExpiry < 1 || optionsMaxDaysToExpiry > 45) return `${section}.optionsMaxDaysToExpiry must be a whole number from 1 to 45.`;
+  if (!(volFarmerV3CallStrikeFloorChoices as readonly unknown[]).includes(values.callStrikeFloor)) return `${section}.callStrikeFloor must be one of ${volFarmerV3CallStrikeFloorChoices.join(", ")}.`;
+  if (!(volFarmerV3PutsSoldChoices as readonly unknown[]).includes(values.putsSold)) return `${section}.putsSold must be one of ${volFarmerV3PutsSoldChoices.join(", ")}.`;
+  if (!(volFarmerV3PutStrikeCapChoices as readonly unknown[]).includes(values.putStrikeCap)) return `${section}.putStrikeCap must be one of ${volFarmerV3PutStrikeCapChoices.join(", ")}.`;
+  if (!(volFarmerV3TrimsSellChoices as readonly unknown[]).includes(values.trimsSell)) return `${section}.trimsSell must be one of ${volFarmerV3TrimsSellChoices.join(", ")}.`;
+  const topUpCapPctOfPot = values.topUpCapPctOfPot;
+  if (typeof topUpCapPctOfPot !== "number" || !Number.isFinite(topUpCapPctOfPot) || topUpCapPctOfPot < 0 || topUpCapPctOfPot > 1000) return `${section}.topUpCapPctOfPot must be a number from 0 to 1000.`;
   return null;
+}
+
+/** Vol Farmer v4's values (BacktestVolFarmerV4Settings): its Calls' range and spread limit, then v2's and v3's values. Null when they are valid. */
+export function validateVolFarmerV4Settings(values: Record<string, unknown>): string | null {
+  const isNumberIn = (value: unknown, min: number, max: number) => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+  for (const field of ["callMinAbsDelta", "callMaxAbsDelta"] as const) if (!isNumberIn(values[field], 0.01, 0.99)) return `volFarmerV4.${field} must be a number from 0.01 to 0.99.`;
+  if ((values.callMinAbsDelta as number) > (values.callMaxAbsDelta as number)) return "volFarmerV4.callMinAbsDelta must not be above volFarmerV4.callMaxAbsDelta.";
+  if (!isNumberIn(values.maxSpreadPctOfMid, 1, 200)) return "volFarmerV4.maxSpreadPctOfMid must be a number from 1 to 200.";
+  return validateVolFarmerV2Settings(values, "volFarmerV4") ?? validateVolFarmerV3Settings(values, "volFarmerV4");
 }
 
 /** The put ladder's values (putsWhenNoCall "reserve_ladder"): null when they are valid. */
@@ -455,9 +480,11 @@ export function validateCreateBacktestSessionRequest(body: unknown, context: Bac
   if (effective.decisionMaker !== "baseline") {
     if (body.symbolSettings !== undefined && body.symbolSettings !== null) return { ok: false, error: "symbolSettings apply to the baseline only." };
     if (typeof startingValue !== "number") return { ok: false, error: "The starting account value must be a number above 0." };
-    // Vol Farmer v2's set allocations (v3's too) name the session's tickers.
-    const stranger = Object.keys({ ...defaultBacktestVolFarmerV2Settings, ...effective.volFarmerV2 }.tickerAllocationPct).find((symbol) => !symbols.includes(symbol));
-    if (runsVolFarmerV2Steps(effective.decisionMaker) && stranger !== undefined) return { ok: false, error: `volFarmerV2.tickerAllocationPct.${stranger}: ${stranger} is not one of the session's symbols.` };
+    // Vol Farmer v2's set allocations (v3's too, v4's its own) name the session's tickers.
+    const allocationSection = effective.decisionMaker === "vol_farmer_v4" ? "volFarmerV4" : "volFarmerV2";
+    const allocations = allocationSection === "volFarmerV4" ? { ...defaultBacktestVolFarmerV4Settings, ...effective.volFarmerV4 }.tickerAllocationPct : { ...defaultBacktestVolFarmerV2Settings, ...effective.volFarmerV2 }.tickerAllocationPct;
+    const stranger = Object.keys(allocations).find((symbol) => !symbols.includes(symbol));
+    if (runsVolFarmerV2Steps(effective.decisionMaker) && stranger !== undefined) return { ok: false, error: `${allocationSection}.tickerAllocationPct.${stranger}: ${stranger} is not one of the session's symbols.` };
     return { ok: true, value: { ...base, startingValue, bookMode: "shared_account", symbolSettings: null, symbolResolution: null, settingsSource: null, potsFromStartingValue: null }, warnings };
   }
 

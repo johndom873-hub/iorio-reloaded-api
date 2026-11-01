@@ -26,6 +26,8 @@ export interface PlutoSystemCheckContext {
   marketState: MarketSessionState;
   netLiquidationValue: number | null;
   totalCashValue: number | null;
+  /** The cash account's settled cash: Vol Farmer v4's purchases and Puts draw on it (null: unknown, so none is made). */
+  settledCashValue: number | null;
   todayEasternIso: string;
   session: PlutoSession;
 }
@@ -121,10 +123,12 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
 
   let netLiquidationValue: number | null = null;
   let totalCashValue: number | null = null;
+  let settledCashValue: number | null = null;
   try {
     const account = await fetchPlutoAccountSummary();
     netLiquidationValue = account.netLiquidationValue;
     totalCashValue = account.totalCashValue;
+    settledCashValue = account.settledCash;
     record("account_data", netLiquidationValue !== null && netLiquidationValue > 0, netLiquidationValue !== null ? `NLV ${netLiquidationValue.toFixed(0)}` : "net liquidation value unavailable");
   } catch (error) {
     record("account_data", false, `account summary failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -150,5 +154,5 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   }
 
   const failures = Object.entries(checks).filter(([, check]) => !check.ok).map(([name, check]) => `${name}: ${check.detail}`);
-  return { ok: failures.length === 0, checks, failures, context: { state, marketState, netLiquidationValue, totalCashValue, todayEasternIso, session } };
+  return { ok: failures.length === 0, checks, failures, context: { state, marketState, netLiquidationValue, totalCashValue, settledCashValue, todayEasternIso, session } };
 }

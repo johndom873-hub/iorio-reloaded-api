@@ -837,6 +837,31 @@ function applyAlignOpenOptionLegsToSplitFactor(ledger: SimulatedLedger, symbol: 
 }
 
 /** Interest on the cash balance, in dollars as the engine computed it. */
+export interface SpinOffCreditEvent {
+  symbol: string;
+  /** The spun-off company's value per share, on the cycle's scale (spinOffValuePerShare). */
+  valuePerShare: number;
+  at: Date;
+}
+
+/**
+ * A spin-off (Marcelo 2026-11-01): every share of the symbol held is credited the spun-off company's value in cash (its
+ * shares received and sold at once), and its entry price falls by as much, so the break-even falls with the price. The
+ * share count stays. The engine closes the symbol's open options before it.
+ */
+function applySpinOffCredit(ledger: SimulatedLedger, event: SpinOffCreditEvent): number {
+  const positionIds = new Set(positionsOfSymbol(ledger, event.symbol).map((position) => position.id));
+  let credited = 0;
+  for (const leg of ledger.legs) {
+    if (leg.legType !== "stock" || leg.exitAt !== null || !positionIds.has(leg.positionId)) continue;
+    const amount = leg.quantity * event.valuePerShare;
+    recordCash(ledger, { at: event.at, kind: "spin_off", amount, symbol: event.symbol, positionId: leg.positionId, legId: leg.id });
+    leg.entryPrice -= event.valuePerShare;
+    credited += amount;
+  }
+  return credited;
+}
+
 function applyCreditInterest(ledger: SimulatedLedger, at: Date, interestDollars: number): void {
   recordCash(ledger, { at, kind: "interest", amount: interestDollars, symbol: null, positionId: null, legId: null });
 }
@@ -911,6 +936,10 @@ export function takeKeptHedgePuts(...args: Parameters<typeof applyTakeKeptHedgeP
 
 export function alignOpenOptionLegsToSplitFactor(...args: Parameters<typeof applyAlignOpenOptionLegsToSplitFactor>): ReturnType<typeof applyAlignOpenOptionLegsToSplitFactor> {
   return changingLedger(args[0], () => applyAlignOpenOptionLegsToSplitFactor(...args));
+}
+
+export function creditSpinOff(...args: Parameters<typeof applySpinOffCredit>): ReturnType<typeof applySpinOffCredit> {
+  return changingLedger(args[0], () => applySpinOffCredit(...args));
 }
 
 export function creditInterest(...args: Parameters<typeof applyCreditInterest>): ReturnType<typeof applyCreditInterest> {

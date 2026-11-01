@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { plutoSettingsColumns, validatePlutoSettingsInput, type PlutoSettings } from "./settingsStore.js";
-import { plutoLadderSettingsFixture, plutoVolFarmerV2SettingsFixture } from "./plutoSettingsFixture.js";
+import { plutoLadderSettingsFixture, plutoVolFarmerV4SettingsFixture } from "./plutoSettingsFixture.js";
 
 // The approved defaults (2026-09-28), as the store would read them back.
 const current: PlutoSettings = {
   ...plutoLadderSettingsFixture,
-  ...plutoVolFarmerV2SettingsFixture,
+  ...plutoVolFarmerV4SettingsFixture,
   capitalBudgetPct: 30,
   excessAllowancePct: 0,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2,

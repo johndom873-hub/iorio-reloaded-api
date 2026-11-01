@@ -12,9 +12,12 @@ export interface AccountSummary {
   // "excess liquidity" figure, additive to the existing tags so every
   // existing caller (dashboard.ts, riskLimits.ts) is unaffected.
   excessLiquidity: number | null;
+  // The cash account's settled cash (Marcelo 2026-10-31): IBKR refuses a purchase the settled cash does not pay for, so
+  // Vol Farmer v4 sizes its purchases on it too.
+  settledCash: number | null;
 }
 
-const requestedTags = "NetLiquidation,BuyingPower,TotalCashValue,GrossPositionValue,ExcessLiquidity";
+const requestedTags = "NetLiquidation,BuyingPower,TotalCashValue,SettledCash,GrossPositionValue,ExcessLiquidity";
 
 function requestAccountSummary(ib: IBApi, reqId: number): Promise<AccountSummary> {
   return new Promise<AccountSummary>((resolve, reject) => {
@@ -24,6 +27,7 @@ function requestAccountSummary(ib: IBApi, reqId: number): Promise<AccountSummary
       totalCashValue: null,
       grossPositionValue: null,
       excessLiquidity: null,
+      settledCash: null,
     };
 
     const timer = setTimeout(() => {
@@ -42,6 +46,7 @@ function requestAccountSummary(ib: IBApi, reqId: number): Promise<AccountSummary
       if (tag === "TotalCashValue") summary.totalCashValue = numericValue;
       if (tag === "GrossPositionValue") summary.grossPositionValue = numericValue;
       if (tag === "ExcessLiquidity") summary.excessLiquidity = numericValue;
+      if (tag === "SettledCash") summary.settledCash = numericValue;
     }
 
     function onAccountSummaryEnd(id: number) {

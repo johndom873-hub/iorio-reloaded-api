@@ -186,6 +186,8 @@ export function evaluateOrderPath(result: OrderPathProbeResult): ReadinessCheck 
 export interface AccountFigures {
   netLiquidationValue: number | null;
   totalCashValue: number | null;
+  /** The cash account's settled cash (Pluto's Vol Farmer v4 buys and sells Puts on it); null when IBKR reports none. */
+  settledCash: number | null;
   buyingPower: number | null;
   excessLiquidity: number | null;
 }
@@ -222,9 +224,11 @@ export interface PlutoCashFigures {
 }
 
 /**
- * Pluto's free cash as its rounds measure it (volFarmerV2Round.ts), the smaller of
+ * Pluto's free cash as its rounds measure it (volFarmerV4Round.ts), the smallest of
  *   budget left   = capital budget % × net liquidation value − committed on Pluto's tickers
  *   account free  = cash − the open Puts' strikes − the orders working
+ *   settled free  = settled cash − the open Puts' strikes − the orders working (the cash account, Marcelo 2026-10-31; none
+ *                   reported: 0)
  * judged against plutoLowCashWarningPctOfBudget of the budget.
  */
 export function evaluatePlutoCash(account: AccountFigures | null, pluto: PlutoCashFigures | null): ReadinessCheck {
@@ -237,8 +241,17 @@ export function evaluatePlutoCash(account: AccountFigures | null, pluto: PlutoCa
   const budget = (pluto.capitalBudgetPct / 100) * account.netLiquidationValue;
   const budgetLeft = budget - pluto.committedOnPlutoTickers;
   const accountFree = Math.max(0, account.totalCashValue - pluto.cashLockedInCsps) - pluto.inFlightNotional;
-  const freeCash = Math.max(0, Math.min(budgetLeft, accountFree));
-  const limitedBy = accountFree < budgetLeft ? `the account's free cash; the budget has ${formatWholeDollars(Math.max(0, budgetLeft))} left` : "the budget left";
+  const settledFree = account.settledCash === null ? 0 : Math.max(0, account.settledCash - pluto.cashLockedInCsps) - pluto.inFlightNotional;
+  const freeCash = Math.max(0, Math.min(budgetLeft, accountFree, settledFree));
+  const budgetLeftNote = `the budget has ${formatWholeDollars(Math.max(0, budgetLeft))} left`;
+  const limitedBy =
+    account.settledCash === null
+      ? `IBKR reporting no settled cash, so Pluto buys nothing and sells no Put; ${budgetLeftNote}`
+      : settledFree < accountFree && settledFree < budgetLeft
+        ? `the settled cash left (settled cash less the open Puts' strikes and the orders working); ${budgetLeftNote}`
+        : accountFree < budgetLeft
+          ? `the account's free cash; ${budgetLeftNote}`
+          : "the budget left";
   const detail = `free cash ${formatWholeDollars(freeCash)} is ${((freeCash / budget) * 100).toFixed(1)}% of Pluto's ${formatWholeDollars(budget)} budget (${pluto.capitalBudgetPct}% of net liquidation), limited by ${limitedBy}`;
   if ((freeCash / budget) * 100 < plutoLowCashWarningPctOfBudget) {
     return check(name, "warn", `${detail}. Below ${plutoLowCashWarningPctOfBudget}%: Pluto's new Puts and cycles will be cut or skipped`);

@@ -7,10 +7,10 @@ import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState, recordPlutoPass, tripPlutoBreaker } from "./stateStore.js";
 import { runPlutoSystemChecks } from "./systemChecks.js";
 import { runLadderRound } from "./ladderRound.js";
-import { runVolFarmerV2Round } from "./volFarmerV2Round.js";
+import { runVolFarmerV4Round } from "./volFarmerV4Round.js";
 
 // One round (design rounds 3–4, 2026-09-28; rules only since Signals was retired, 2026-10-27): system checks → each
-// ticker's strategy on its band quotes (the CC + Put Ladder's round, then Vol Farmer v2's, Marcelo 2026-10-27) → the real
+// ticker's strategy on its band quotes (the CC + Put Ladder's round, then Vol Farmer v4's, Marcelo 2026-10-27 and 2026-10-31) → the real
 // order routes. Everything is written to the ledger as it happens.
 
 export interface PassRunnerContext {
@@ -112,16 +112,16 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   };
 
   // 2. The strategies (Marcelo 2026-10-14/15 and 2026-10-27): rules only. Their orders wait for today's opening look. Under
-  // market stress the ladder sells nothing and Vol Farmer v2 opens nothing, a LEAPS sale still going.
+  // market stress the ladder sells nothing and Vol Farmer v4 opens nothing, a sale of LEAPS or shares still going.
   if (request.heldPositionsOnly) return skip("the strategies' orders wait for today's opening look", checks.checks);
   if (checks.context.netLiquidationValue === null) return skip("no net liquidation value for the strategies' pots", checks.checks);
   const roundInput = { passId, settings, api: context.api, marketWatch: context.marketWatch, trackWatch: context.trackWatch, now, todayIso: checks.context.todayEasternIso, totalCashValue: checks.context.totalCashValue, netLiquidationValue: checks.context.netLiquidationValue, cancelByMs: checks.context.session.cancelByMs, symbols: request.symbols };
   const ladder = marketStress ? null : await runLadderRound(roundInput);
-  const volFarmerV2 = await runVolFarmerV2Round({ ...roundInput, stressed: marketStress });
-  const sent = (ladder?.outcomes.filter((outcome) => outcome.outcome === "confirmed").length ?? 0) + volFarmerV2.sent;
-  const planned = (ladder?.planned ?? 0) + volFarmerV2.planned;
-  const looked = (ladder?.looked.length ?? 0) + volFarmerV2.looked.length;
-  const notes = [...(ladder?.notes ?? []), ...volFarmerV2.notes];
+  const volFarmerV4 = await runVolFarmerV4Round({ ...roundInput, settledCashValue: checks.context.settledCashValue, stressed: marketStress });
+  const sent = (ladder?.outcomes.filter((outcome) => outcome.outcome === "confirmed").length ?? 0) + volFarmerV4.sent;
+  const planned = (ladder?.planned ?? 0) + volFarmerV4.planned;
+  const looked = (ladder?.looked.length ?? 0) + volFarmerV4.looked.length;
+  const notes = [...(ladder?.notes ?? []), ...volFarmerV4.notes];
   const skippedReason =
     sent > 0
       ? null

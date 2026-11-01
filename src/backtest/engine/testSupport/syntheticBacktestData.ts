@@ -2,7 +2,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { easternInstant } from "../../../lib/easternIsoDate.js";
 import { blackScholesPriceOnForward, maximumSpreadFractionOfMid, yearsBetweenIsoDates } from "../../../lib/impliedVolatilitySurface.js";
 import type { PlutoSettings } from "../../../pluto/settingsStore.js";
-import { plutoLadderSettingsFixture, plutoVolFarmerV2SettingsFixture } from "../../../pluto/plutoSettingsFixture.js";
+import { plutoLadderSettingsFixture, plutoVolFarmerV4SettingsFixture } from "../../../pluto/plutoSettingsFixture.js";
 import type { BacktestSettings } from "../../backtestTypes.js";
 import { fileIntradayBarMinutes, writeFileStockBars, type FileIntradayBar } from "../../backtestFileStockBars.js";
 import type { StoredDailyBar } from "../backtestBarHistory.js";
@@ -73,7 +73,7 @@ export function syntheticOptionQuotes(todayIso: string, stockPrice: number, expi
 export function fixturePlutoSettings(overrides: Partial<PlutoSettings> = {}): PlutoSettings {
   return {
     ...plutoLadderSettingsFixture,
-  ...plutoVolFarmerV2SettingsFixture,
+  ...plutoVolFarmerV4SettingsFixture,
     capitalBudgetPct: 50,
     excessAllowancePct: 0,
     windowStartEt: "10:00",

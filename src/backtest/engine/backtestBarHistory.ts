@@ -83,6 +83,12 @@ export class BacktestBarHistory {
     return this.rows.at(-1)?.tradingDate ?? null;
   }
 
+  /** The prices of the days before `firstDayIso` × `multiplier`, the rest as they are: IBKR's bars before a spin-off back on the prices traded (findSpinOffs). */
+  scaledBefore(firstDayIso: string, multiplier: number): BacktestBarHistory {
+    const scale = (price: number | null) => (price === null ? null : price * multiplier);
+    return new BacktestBarHistory(this.rows.map((row) => (row.tradingDate >= firstDayIso ? row : { ...row, open: scale(row.open), high: scale(row.high), low: scale(row.low), close: scale(row.close) })));
+  }
+
   /** Every price × `factor` (volume and implied volatility unchanged): the split-adjusted bars on a day's traded scale (splitFactors.ts). */
   scaled(factor: number): BacktestBarHistory {
     if (factor === 1) return this;

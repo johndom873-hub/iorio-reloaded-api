@@ -7,16 +7,19 @@
 //   tick size      IBKR error 110: the price does not conform to the contract's minimum price variation
 //   margin         IBKR error 201 (order rejected) for margin: the account's equity with loan value or available funds
 //                  short of the margin the order needs
+//   settled cash   an IBKR refusal for settled cash (Marcelo 2026-10-31): the cash account pays only with settled cash
+//                  ("There is insufficient overall settled cash in your account"), whatever the error's code
 // A refusal at the order routes (HTTP 400/404/409, the order gates at confirm included) is blocked by the executor before
 // any of this: no order reached the worker.
 
-export type RoutineOrderProblem = "drifted_price" | "missing_quote" | "tick_size" | "margin";
+export type RoutineOrderProblem = "drifted_price" | "missing_quote" | "tick_size" | "margin" | "settled_cash";
 
 export const routineOrderProblemLabels: Record<RoutineOrderProblem, string> = {
   drifted_price: "drifted price",
   missing_quote: "missing quote",
   tick_size: "tick size",
   margin: "margin refusal",
+  settled_cash: "not enough settled cash",
 };
 
 const placementPriceCheckFailed = "The order's limit price failed the live-quote check at placement";
@@ -29,6 +32,7 @@ export function classifyRoutineOrderProblem(errorMessage: string | null | undefi
   if (errorMessage.startsWith(placementPriceCheckUnreadable)) return "missing_quote";
   if (errorMessage.startsWith(placementPriceCheckFailed)) return /No live two-sided quote/.test(errorMessage) ? "missing_quote" : "drifted_price";
   const code = ibkrErrorCode(errorMessage);
+  if (!Number.isNaN(code) && /settled cash/i.test(errorMessage)) return "settled_cash";
   if (code === 110) return "tick_size";
   if (code === 201 && /margin|equity with loan|available funds/i.test(errorMessage)) return "margin";
   return null;

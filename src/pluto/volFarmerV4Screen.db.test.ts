@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { Knex } from "knex";
 import { newVolFarmerV2SymbolState } from "../backtest/engine/volFarmerV2Steps.js";
-import type { VolFarmerV2PendingOrder } from "./volFarmerV2LiveBook.js";
+import type { VolFarmerV4PendingOrder } from "./volFarmerV4LiveBook.js";
 
 // The Pluto screen's Vol Farmer v2 card against a private copy of the test tables: an adopted ticker's two positions (a
 // Call leg of the book, a Put still working), its LEAPS held short of its count and its last round; a ticker waiting to
@@ -14,8 +14,8 @@ vi.mock("../db/connection.js", async () => {
 
 const { db } = await import("../db/connection.js");
 const { dropIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
-const { saveVolFarmerV2LastRound, saveVolFarmerV2Memory } = await import("./volFarmerV2LookLoader.js");
-const { loadVolFarmerV2Screen } = await import("./volFarmerV2Screen.js");
+const { saveVolFarmerV4LastRound, saveVolFarmerV4Memory } = await import("./volFarmerV4LookLoader.js");
+const { loadVolFarmerV4Screen } = await import("./volFarmerV4Screen.js");
 const testDb: Knex = db;
 
 const userId = randomUUID();
@@ -52,14 +52,14 @@ describe("the Vol Farmer v2 card", () => {
     state.first = { shares: 500, costPerShare: 110, premiums: [{ legId: callLeg, dollars: 1_000, shares: 500 }], calls: [{ legId: callLeg, shares: 400 }], puts: [] };
     state.second = { shares: 0, costPerShare: 0, premiums: [{ legId: "action:a7", dollars: 150, shares: 200 }], calls: [], puts: [{ legId: "action:a7", shares: 200 }] };
     state.leaps = { legIds: [leapsLeg, "action:a8"], expiry: "2027-12-17", strike: 90, intendedContracts: 5 };
-    const put: VolFarmerV2PendingOrder = { ref: "action:a7", actionId: "a7", kind: "cash_secured_put", expiry: "2026-11-06", strike: 95, contracts: 2, startsCycle: false, contractsByPosition: { first: 0, second: 0 }, plannedPremiumByPosition: { first: 0, second: 150 }, leapsBeforeSale: null };
-    await saveVolFarmerV2Memory(adoptedId, { state, pending: [put] }, true);
+    const put: VolFarmerV4PendingOrder = { ref: "action:a7", actionId: "a7", kind: "cash_secured_put", expiry: "2026-11-06", strike: 95, contracts: 2, startsCycle: false, contractsByPosition: { first: 0, second: 0 }, plannedPremiumByPosition: { first: 0, second: 150 }, leapsBeforeSale: null };
+    await saveVolFarmerV4Memory(adoptedId, { state, pending: [put] }, true);
     const figures = { potDollars: 64_007, committedDollars: 40_000, freeCashDollars: 5_000, leapsCapDollars: 6_401 };
     const at = new Date("2026-10-28T14:30:00Z");
-    await saveVolFarmerV2LastRound(adoptedId, { at, notes: ["first position: no Call at or above its break-even 108.00"], figures });
-    await saveVolFarmerV2LastRound(waitingId, { at, notes: ["holds no shares yet: its open Puts are left to expire or be assigned before v2 adopts it"], figures: null });
+    await saveVolFarmerV4LastRound(adoptedId, { at, notes: ["first position: no Call at or above its break-even 108.00"], figures });
+    await saveVolFarmerV4LastRound(waitingId, { at, notes: ["holds no shares yet: its open Puts are left to expire or be assigned before v4 adopts it"], figures: null });
 
-    const tickers = await loadVolFarmerV2Screen();
+    const tickers = await loadVolFarmerV4Screen();
     expect(tickers.map((ticker) => ticker.symbol)).toEqual(["VFA", "VFW"]);
     const [adopted, waiting] = tickers;
     expect(adopted).toMatchObject({
@@ -68,7 +68,7 @@ describe("the Vol Farmer v2 card", () => {
       second: { shares: 0, breakEvenPerShare: null, calls: [], puts: [{ strike: 95, expiry: "2026-11-06", contracts: 2, working: true }] },
       // The top-up still working holds no contract yet.
       leaps: { strike: 90, expiry: "2027-12-17", heldContracts: 3, intendedContracts: 5 },
-      workingOrders: [{ kind: "cash_secured_put", strike: 95, expiry: "2026-11-06", contracts: 2 }],
+      workingOrders: [{ kind: "cash_secured_put", strike: 95, expiry: "2026-11-06", contracts: 2, shares: null }],
       lastRoundAt: at.toISOString(),
       lastRoundNotes: ["first position: no Call at or above its break-even 108.00"],
       lastRoundFigures: figures,
@@ -77,9 +77,9 @@ describe("the Vol Farmer v2 card", () => {
     expect(waiting).toMatchObject({ waiting: true, adoptedAt: null, first: null, second: null, leaps: null, workingOrders: [], lastRoundFigures: null });
 
     // A memory saved after a last round keeps the round's notes, and a later round keeps the memory.
-    await saveVolFarmerV2Memory(adoptedId, { state, pending: [] }, false);
-    await saveVolFarmerV2LastRound(adoptedId, { at, notes: [], figures });
-    const [again] = await loadVolFarmerV2Screen();
+    await saveVolFarmerV4Memory(adoptedId, { state, pending: [] }, false);
+    await saveVolFarmerV4LastRound(adoptedId, { at, notes: [], figures });
+    const [again] = await loadVolFarmerV4Screen();
     expect(again).toMatchObject({ workingOrders: [], lastRoundNotes: [], first: { shares: 500 } });
   });
 });

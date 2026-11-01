@@ -314,7 +314,7 @@ let reconciliationPassCounter = 0;
 const reconciliationDependencies: ReconciliationDependencies = {
   notifyTelegram: notifyTelegramDeliveredWithinTimeout,
   drainPendingOpeningExecutions: (conId, newLegId) => executionRecorder.drainPendingOpeningExecutions(conId, newLegId),
-  attributeWaitingCoveredCallShareBuys: () => executionRecorder.attributeWaitingCoveredCallShareBuys(),
+  attributeWaitingShareBuys: () => executionRecorder.attributeWaitingShareBuys(),
 };
 
 async function reconcilePositionsFromIbkr(): Promise<void> {

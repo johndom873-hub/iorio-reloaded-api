@@ -759,7 +759,7 @@ describe("execution recorder", () => {
       expect(recorder.bufferedOpeningExecutionCount(stockConId)).toBe(1);
 
       await insertTrade(callLeg.id, order.id, 1);
-      await recorder.attributeWaitingCoveredCallShareBuys();
+      await recorder.attributeWaitingShareBuys();
       expect(await tradeOf(shares.execId!)).toMatchObject({ position_leg_id: newer.legId, is_closing_trade: false });
       expect(recorder.bufferedOpeningExecutionCount(stockConId)).toBe(0);
     });
@@ -865,6 +865,66 @@ describe("execution recorder", () => {
       await recorder.recordExecution(stockContractOf(stockConId), joining);
       expect(await tradeOf(joining.execId!)).toMatchObject({ position_leg_id: leftoverStockLegId, is_closing_trade: false });
       expect(await testDb("trades").whereIn("position_leg_id", [the98StockLegId, the94StockLegId])).toHaveLength(0);
+    });
+  });
+
+  describe("shares Pluto bought on their own (Vol Farmer v4's open_shares) go to the ticker's leftover-stock position", () => {
+    const stockContractOf = (conId: string): Contract => ({ conId: Number(conId), secType: "STK" }) as Contract;
+    async function tickerWithCoveredCall(stockConId: string): Promise<{ tickerId: string; coveredCallStockLegId: string }> {
+      const [ticker] = await testDb("tickers").insert({ symbol: `SB${(counter += 1)}${Date.now() % 10_000}`, company_name: "Share Buy Test Co", sector: "Technology" }).returning(["id"]);
+      createdTickerIds.push(ticker.id);
+      const [position] = await testDb("positions").insert({ strategy_key: "covered_call", ticker_id: ticker.id, status: "open" }).returning(["id"]);
+      createdPositionIds.push(position.id);
+      const [leg] = await testDb("position_legs").insert({ position_id: position.id, leg_type: "stock", side: "long", quantity: 100, multiplier: 1, entry_price: 90, entry_at: daysAgo(2), ibkr_contract_id: stockConId }).returning(["id"]);
+      return { tickerId: ticker.id, coveredCallStockLegId: leg.id };
+    }
+    async function leftoverStockLeg(tickerId: string, stockConId: string): Promise<string> {
+      const [position] = await testDb("positions").insert({ strategy_key: "unstructured", ticker_id: tickerId, status: "open" }).returning(["id"]);
+      createdPositionIds.push(position.id);
+      const [leg] = await testDb("position_legs").insert({ position_id: position.id, leg_type: "stock", side: "long", quantity: 100, multiplier: 1, entry_price: 95, entry_at: new Date(), ibkr_contract_id: stockConId }).returning(["id"]);
+      return leg.id;
+    }
+    async function plutoSharePurchase(): Promise<{ orderId: string; permId: number }> {
+      const permId = nextPermId();
+      const order = await insertOrder({ ibkr_perm_id: permId, request_type: "open_shares", payload: { symbol: "SB", strategyKey: "shares", legs: [{ role: "stock", action: "BUY", symbol: "SB", quantity: 100, unitPrice: 97 }] } });
+      return { orderId: order.id, permId };
+    }
+
+    it("join the leftover-stock leg, never the older Covered Call's leg of the same stock", async () => {
+      const stockConId = nextConId();
+      const { tickerId, coveredCallStockLegId } = await tickerWithCoveredCall(stockConId);
+      const leftoverLegId = await leftoverStockLeg(tickerId, stockConId);
+      const { orderId, permId } = await plutoSharePurchase();
+      const execution = executionOf({ permId, side: "BOT", shares: 100, price: 97 });
+      await recorder.recordExecution(stockContractOf(stockConId), execution);
+      expect(await tradeOf(execution.execId!)).toMatchObject({ position_leg_id: leftoverLegId, is_closing_trade: false, source_order_request_id: orderId });
+      expect(await testDb("trades").where({ position_leg_id: coveredCallStockLegId })).toHaveLength(0);
+    });
+
+    it("with no leftover-stock leg yet they wait, drain only onto a leftover-stock leg, or join one found at the next pass", async () => {
+      const stockConId = nextConId();
+      const { tickerId, coveredCallStockLegId } = await tickerWithCoveredCall(stockConId);
+      const { permId } = await plutoSharePurchase();
+      const drained = executionOf({ permId, side: "BOT", shares: 60, price: 97 });
+      await recorder.recordExecution(stockContractOf(stockConId), drained);
+      expect(recorder.bufferedOpeningExecutionCount(stockConId)).toBe(1);
+
+      // A Covered Call's new stock leg does not take them; the leftover-stock leg the reconciliation creates does.
+      await recorder.drainPendingOpeningExecutions(stockConId, coveredCallStockLegId);
+      expect(await tradeCount(drained.execId!)).toBe(0);
+      const leftoverLegId = await leftoverStockLeg(tickerId, stockConId);
+      await recorder.drainPendingOpeningExecutions(stockConId, leftoverLegId);
+      expect(await tradeOf(drained.execId!)).toMatchObject({ position_leg_id: leftoverLegId, is_closing_trade: false });
+
+      // One buffered after its leg was created is written by the next pass's attribution.
+      await testDb("position_legs").where({ id: leftoverLegId }).update({ exit_at: new Date(), exit_price: 95 });
+      const late = executionOf({ permId, side: "BOT", shares: 40, price: 97 });
+      await recorder.recordExecution(stockContractOf(stockConId), late);
+      expect(recorder.bufferedOpeningExecutionCount(stockConId)).toBe(1);
+      const nextLeftoverLegId = await leftoverStockLeg(tickerId, stockConId);
+      await recorder.attributeWaitingShareBuys();
+      expect(await tradeOf(late.execId!)).toMatchObject({ position_leg_id: nextLeftoverLegId, is_closing_trade: false });
+      expect(recorder.bufferedOpeningExecutionCount(stockConId)).toBe(0);
     });
   });
 

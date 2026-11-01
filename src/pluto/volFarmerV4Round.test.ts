@@ -1,0 +1,501 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { blackScholesPriceOnForward } from "../lib/impliedVolatilitySurface.js";
+import { contractKey } from "../lib/optionContractKey.js";
+import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
+import { plutoLadderSettingsFixture, plutoVolFarmerV4SettingsFixture } from "./plutoSettingsFixture.js";
+import type { VolFarmerV4Memory } from "./volFarmerV4LiveBook.js";
+
+// One Vol Farmer v4 round, everything outside its own work mocked: the tickers, the market, the book's counts, the memory
+// store and the executor. Checked, on v4 with its Calls on the next expiry and half the pot in shares (the numbers these
+// mechanics were first written on, under v2): which tickers it looks at, a flat ticker's opening order (recorded under v4,
+// sent with its shares, its leg kept as pending), adoption, an order a cap holds or SPY's stress stops undone, and an order
+// still working counted as planned until it settles; each ticker's last round saved for the screen, with its figures. The
+// tickers sharing Pluto's budget: the day's turn, a new cycle held to the free cash, and the LEAPS after every ticker's
+// other orders, on the free cash they left. On v4's own values (today's expiry, 80% in shares): the share orders, sent
+// alone and waited for, a trim's part fill, the settled cash, and a Call expiring at today's close. An order sent works
+// (and is in flight) until a test ends it.
+
+const harness = vi.hoisted(() => ({
+  enabled: [] as { tickerId: string; symbol: string; strategy: string | null; allocationPct: number | null }[],
+  memory: new Map<string, unknown>(),
+  saves: [] as { tickerId: string; adopted: boolean }[],
+  lastRounds: new Map<string, { notes: string[]; figures: unknown }>(),
+  outcomes: new Map<string, unknown>(),
+  positions: [] as unknown[],
+  positionsByTickerId: new Map<string, unknown[]>(),
+  accountFreeCash: 400_000,
+  /** IBKR's settled cash handed to the round (null: none reported), and what it leaves once the open Puts' cash is out. */
+  settledCashValue: 2_000_000 as number | null,
+  settledFreeCash: 2_000_000,
+  /** Pluto's own stock quote of every ticker. */
+  stockQuote: { bid: 99.98 as number | null, ask: 100.02 as number | null, updatedAtMs: 0 as number | null },
+  leftoverStockLeg: null as { legId: string; positionId: string; shares: number } | null,
+  chain: { expirations: [] as string[], strikesByExpiry: new Map<string, number[]>() },
+  breakEven: null as number | null,
+  stepImpliedVolatility: null as number | null,
+  quotes: [] as unknown[],
+  /** No after-close capture for the previous session: its volumes are unknown. */
+  previousSessionVolumeMissing: false,
+  bookCounts: { workingOrders: 0, ordersToday: 0, openPositions: 0 },
+  committed: 0,
+  actions: [] as Record<string, unknown>[],
+  executed: [] as Record<string, unknown>[],
+  events: [] as { type: string; detail: Record<string, unknown> }[],
+}));
+
+/** The orders sent and still working, with the notional the in-flight order requests count them at. */
+const workingOrders = () => harness.executed.filter((order) => (harness.outcomes.get(order.actionId as string) as { working: boolean } | undefined)?.working === true).map((order) => ({ symbol: order.symbol as string, notional: (order.plan as { notional: number }).notional }));
+
+vi.mock("../db/connection.js", () => ({ db: () => ({}) }));
+// Every weekday from the round's day a session: what the premium yields are annualized over.
+vi.mock("../lib/liveTradingSessions.js", async () => {
+  const { sessionsHeldAmong } = await import("../lib/tradingSessionsHeld.js");
+  return {
+    loadLiveTradingSessions: async (now: Date) => {
+      const saleSessionIso = now.toISOString().slice(0, 10);
+      const openDays = Array.from({ length: 800 }, (_, index) => new Date(now.getTime() + index * 86_400_000).toISOString().slice(0, 10)).filter((dateIso) => ![0, 6].includes(new Date(`${dateIso}T12:00:00Z`).getUTCDay()));
+      return { saleSessionIso, openDays, sessionsHeldTo: (expiryIso: string) => sessionsHeldAmong(openDays, saleSessionIso, expiryIso) };
+    },
+  };
+});
+vi.mock("../lib/commissionEstimate.js", async (original) => ({ ...(await original<object>()), loadCommissionEstimator: async () => ({ perContractDollars: () => 0.65 }), loadStockCommissionEstimator: async () => ({ perShareDollars: () => 0.005 }) }));
+// The round hands the account's cash (500,000) and the settled cash in turn.
+vi.mock("../lib/accountContext.js", () => ({ accountContextFromTotalCash: async (cash: number | null) => ({ freeCash: cash === 500_000 ? harness.accountFreeCash : harness.settledFreeCash }) }));
+vi.mock("../lib/tickerFreeze.js", () => ({ frozenSymbolSet: async () => new Set() }));
+vi.mock("../ibkr/pricePool.js", () => ({ fetchPricesPoolFirst: async () => ({ stock: 100 }) }));
+vi.mock("../ibkr/fetchOptionChain.js", () => ({ loadStoredOptionChain: async () => ({ ...harness.chain, fetchedAt: null }) }));
+vi.mock("../lib/cycleBreakEvenQueries.js", () => ({ fetchOpenCycleSummaryRowsByTickerId: async (ids: string[]) => new Map(ids.map((id) => [id, {}])) }));
+vi.mock("../lib/cycleInputRows.js", () => ({ summarizeOpenCycleFromRows: () => ({ breakEvenPerShare: harness.breakEven }) }));
+vi.mock("../lib/positionExposure.js", () => ({ computeTickerExposure: async () => 30_000 }));
+vi.mock("./book.js", () => ({
+  loadInFlightNotionals: async (symbol: string) => {
+    const working = workingOrders();
+    const total = working.reduce((sum, order) => sum + order.notional, 0);
+    return { totalNotional: total, tickerNotional: working.filter((order) => order.symbol === symbol).reduce((sum, order) => sum + order.notional, 0), managedNotional: total };
+  },
+  loadInFlightNotionalsBySymbol: async () => {
+    const working = workingOrders();
+    const tickerNotionalBySymbol = new Map<string, number>();
+    for (const order of working) tickerNotionalBySymbol.set(order.symbol, (tickerNotionalBySymbol.get(order.symbol) ?? 0) + order.notional);
+    const total = working.reduce((sum, order) => sum + order.notional, 0);
+    return { totalNotional: total, managedNotional: total, tickerNotionalBySymbol };
+  },
+  loadLastFilledPlutoActionAtBySymbol: async () => new Map(),
+}));
+vi.mock("./executor.js", () => ({
+  executePlutoOrder: vi.fn(async (_api: unknown, _settings: unknown, input: Record<string, unknown>) => {
+    harness.executed.push(input);
+    if (!harness.outcomes.has(input.actionId as string)) harness.outcomes.set(input.actionId as string, { working: true, filledContracts: 0, optionLegIds: [], optionNetDollars: 0, sharesBought: 0, sharesCostDollars: 0, sharesSold: 0 });
+    return { outcome: "confirmed", orderId: `order-${harness.executed.length}`, detail: "sent" };
+  }),
+  watchPlutoOrder: vi.fn(async () => ({})),
+}));
+vi.mock("./optionQuoteBandPlanLoader.js", () => ({
+  defaultOptionQuoteBandPlannerDependencies: {
+    loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 960, riskFreeRate: 0.04 }),
+    loadForwardAnchors: async () => new Map(),
+    loadPreviousSessionVolume: async () => (harness.previousSessionVolumeMissing ? null : new Map((harness.quotes as SymbolFileQuote[]).map((quote) => [contractKey(quote), 1_000]))),
+  },
+}));
+vi.mock("./optionQuoteBandQuotes.js", () => ({ loadOptionQuoteBandQuotes: async () => [], loadFinishedOptionQuoteBandCycle: async () => ({ cycleNumber: 1, startedAt: new Date(0), finishedAt: new Date(0) }) }));
+vi.mock("./ladderLook.js", () => ({ latestCycleQuotes: () => ({ quotes: harness.quotes, stale: false }) }));
+vi.mock("./ladderLookSnapshot.js", () => ({ loadOpenPositionFigures: async (tickerId: string) => harness.positionsByTickerId.get(tickerId) ?? harness.positions }));
+vi.mock("./safetyLimits.js", () => ({ loadSafetyLimitBookCounts: async () => ({ ...harness.bookCounts }), plutoOrdersSentToday: async () => ({ count: 0 }) }));
+vi.mock("../lib/orderLimits.js", async (original) => ({ ...(await original<object>()), loadCommittedCapitalOnSymbols: async () => harness.committed }));
+vi.mock("./ledger.js", () => ({
+  recordPlutoAction: vi.fn(async (input: Record<string, unknown>) => (harness.actions.push(input), `action-${harness.actions.length}`)),
+  recordPlutoEvent: vi.fn(async (type: string, detail: Record<string, unknown>) => void harness.events.push({ type, detail })),
+}));
+vi.mock("./tickerSettingsStore.js", async (original) => ({ ...(await original<object>()), loadEnabledPlutoTickerSettings: async () => harness.enabled }));
+vi.mock("./volFarmerV4LookLoader.js", () => ({
+  loadVolFarmerV4Memory: async (tickerId: string) => (harness.memory.has(tickerId) ? structuredClone(harness.memory.get(tickerId)) : null),
+  saveVolFarmerV4Memory: async (tickerId: string, memory: unknown, adopted: boolean) => {
+    harness.memory.set(tickerId, structuredClone(memory));
+    harness.saves.push({ tickerId, adopted });
+  },
+  saveVolFarmerV4LastRound: async (tickerId: string, lastRound: { notes: string[]; figures: unknown }) => {
+    harness.lastRounds.set(tickerId, structuredClone({ notes: lastRound.notes, figures: lastRound.figures }));
+  },
+  loadVolFarmerV4OrderOutcomes: async (actionIds: string[]) => new Map(actionIds.flatMap((id) => (harness.outcomes.has(id) ? [[id, harness.outcomes.get(id)]] : []))),
+  loadVolFarmerV4LegStatuses: async () => new Map(),
+  loadVolFarmerV4StepImpliedVolatility: async () => harness.stepImpliedVolatility,
+  loadVolFarmerV4LeftoverStockLeg: async () => harness.leftoverStockLeg,
+}));
+
+const { runVolFarmerV4Round, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
+
+/** v4 at its defaults: Calls expiring at today's close, 80% of the pot in shares, rebalanced. */
+const v4Settings = { ...plutoLadderSettingsFixture, ...plutoVolFarmerV4SettingsFixture, capitalBudgetPct: 50, excessAllowancePct: 0, maxQuoteAgeMinutes: 10, burstLines: 10, telegramVerbosity: "actions" };
+/** v4 with its Calls on the next expiry, at or above the break-even, |delta| at most 0.3, and half the pot in shares (v2's values). */
+const settings = { ...v4Settings, volFarmerV4OptionsExpiry: "next", volFarmerV4FirstPositionPct: 50, volFarmerV4CallMaxAbsDelta: 0.3, volFarmerV4CallStrikeFloor: "break_even" };
+let roundSettings: Record<string, unknown> = settings;
+
+/** Black-Scholes quotes at IV 50%, 2% either side of the mid, the stock at 100, `days` out (10: the 6 Nov 2026 expiry). */
+function quotesAt(right: "C" | "P", expiry = "2026-11-06", days = 10): SymbolFileQuote[] {
+  const years = days / 365;
+  return Array.from({ length: 101 }, (_, index) => 40 + index).map((strike) => {
+    const mid = blackScholesPriceOnForward(100 * Math.exp(0.04 * years), strike, years, 0.04, 0.5, right === "C");
+    return { expiry, strike, right, bid: Math.round(mid * 0.98 * 10_000) / 10_000, ask: Math.round(mid * 1.02 * 10_000) / 10_000, bidSize: null, askSize: null };
+  });
+}
+
+const marketWatch = {
+  burst: async (_symbol: string, contracts: { expiry: string; strike: number; right: "C" | "P" }[]) => contracts.map((contract) => (harness.quotes as SymbolFileQuote[]).find((quote) => contractKey(quote) === contractKey(contract))!),
+  snapshot: (symbol: string) => ({ symbol, last: 100, previousClose: 100, ...harness.stockQuote }),
+};
+
+function round(stressed = false, todayIso = "2026-10-27") {
+  return runVolFarmerV4Round({ passId: "p1", settings: roundSettings as never, api: {} as never, marketWatch: marketWatch as never, trackWatch: () => {}, now: new Date(`${todayIso}T15:00:00Z`), todayIso, totalCashValue: 500_000, settledCashValue: harness.settledCashValue, netLiquidationValue: 1_000_000, cancelByMs: null, symbols: [], stressed });
+}
+
+const v4Ticker = (symbol: string) => ({ tickerId: `t-${symbol}`, symbol, strategy: null, allocationPct: null });
+
+const position = (shares: number, costPerShare: number) => ({ shares, costPerShare, premiums: [], calls: [], puts: [] });
+const stockLeg = (id: string, quantity: number) => ({ id, legType: "stock", side: "long", quantity, optionType: null, strikePrice: null, expiryDate: null, multiplier: 1, entryPrice: 100, entryAt: new Date(), exitPrice: null, exitAt: null });
+/** VFT holding a first position of `shares` at $100 with no Call open, and nothing else: its shares the leftover-stock position's. */
+function holdingFirstPosition(shares: number): void {
+  harness.memory.set("t-VFT", { state: { potDollars: 250_000, first: position(shares, 100), second: null, leaps: null, leapsBought: false, leapsToSell: false, leapsTrigger: null, cash: { cycles: 1, firstPositionCashLeft: [], putsCashLeft: [], leapsTriggers: [] } }, pending: [] });
+  harness.positionsByTickerId.set("t-VFT", [{ strategyKey: "unstructured", status: "open", legs: [stockLeg("s1", shares)] }]);
+  harness.leftoverStockLeg = { legId: "s1", positionId: "p1", shares };
+}
+
+/**
+ * A ticker whose LEAPS is due: both positions hold 600 shares (inside the rebalancing band: $120,000 against half the
+ * $250,000 pot ± $12,500), the first's break-even 100 (a Call to sell), the second's 130 (no Call at or above it, and the
+ * price of 100 more than half a Step below it); its 17 Dec 2027 LEAPS expiry listed and quoted.
+ */
+function withLeapsDue(tickerId: string): void {
+  harness.memory.set(tickerId, { state: { potDollars: 250_000, first: position(600, 100), second: position(600, 130), leaps: null, leapsBought: false, leapsToSell: false, leapsTrigger: null, cash: { cycles: 1, firstPositionCashLeft: [], putsCashLeft: [], leapsTriggers: [] } }, pending: [] });
+  const stockLeg = (id: string) => ({ id, legType: "stock", side: "long", quantity: 600, optionType: null, strikePrice: null, expiryDate: null, multiplier: 1, entryPrice: 100, entryAt: new Date(), exitPrice: null, exitAt: null });
+  harness.positionsByTickerId.set(tickerId, [{ strategyKey: "covered_call", status: "open", legs: [stockLeg(`${tickerId}-s1`), stockLeg(`${tickerId}-s2`)] }]);
+  harness.chain = { expirations: ["20271217"], strikesByExpiry: new Map([["20271217", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
+  harness.quotes = [...(harness.quotes as SymbolFileQuote[]), ...quotesAt("C", "2027-12-17", 416)];
+  // The previous session's IV, 0.15 × √12 = 52%: a Step of exactly 15%.
+  harness.stepImpliedVolatility = 0.15 * Math.sqrt(12);
+}
+
+/** What a LEAPS contract costs at the mid of the quote the steps chose it at, its commission included. */
+const leapsContractCost = (action: Record<string, unknown>) => {
+  const scores = action.candidateScores as { bid: number; ask: number };
+  return ((scores.bid + scores.ask) / 2) * 100 + 0.65;
+};
+
+beforeEach(() => {
+  harness.enabled = [
+    { tickerId: "t-VFT", symbol: "VFT", strategy: null, allocationPct: null },
+    { tickerId: "t-LAD", symbol: "LAD", strategy: "cc_put_ladder", allocationPct: null },
+  ];
+  harness.memory.clear();
+  harness.saves.length = 0;
+  harness.lastRounds.clear();
+  harness.outcomes.clear();
+  harness.positions = [];
+  harness.positionsByTickerId.clear();
+  harness.accountFreeCash = 400_000;
+  harness.settledCashValue = 2_000_000;
+  harness.settledFreeCash = 2_000_000;
+  harness.stockQuote = { bid: 99.98, ask: 100.02, updatedAtMs: Date.now() };
+  harness.leftoverStockLeg = null;
+  roundSettings = settings;
+  harness.chain = { expirations: [], strikesByExpiry: new Map() };
+  harness.breakEven = null;
+  harness.stepImpliedVolatility = null;
+  harness.quotes = [...quotesAt("C"), ...quotesAt("P")];
+  harness.previousSessionVolumeMissing = false;
+  harness.bookCounts = { workingOrders: 0, ordersToday: 0, openPositions: 0 };
+  harness.committed = 0;
+  harness.actions.length = 0;
+  harness.executed.length = 0;
+  harness.events.length = 0;
+});
+
+describe("runVolFarmerV4Round", () => {
+  it("opens a cycle on a flat v4 ticker: one Covered Call with its shares, recorded under v4 and kept as pending; the ladder's ticker is not its", async () => {
+    const summary = await round();
+    expect(summary.looked).toEqual(["VFT"]);
+    expect(harness.actions).toEqual([expect.objectContaining({ kind: "open_covered_call", symbol: "VFT", executionStrategy: "vol_farmer_v4", outcome: "validated" })]);
+    // Half the ticker's allocation (50% × 50% × $1,000,000 = $250,000): floor(125,000 ÷ 10,000.50) = 12 lots.
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "ladder_open", strategyKey: "covered_call", buyEveryShare: true, plan: expect.objectContaining({ quantity: 12 }) })]);
+    const memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
+    expect(memory.pending).toEqual([expect.objectContaining({ ref: "action:action-1", kind: "covered_call", contracts: 12, startsCycle: true })]);
+    expect(memory.state.first).toMatchObject({ shares: 1_200, calls: [{ legId: "action:action-1", shares: 1_200 }] });
+    expect(summary.sent).toBe(1);
+    // Pot $250,000; committed: the exposure, 30,000; free cash: the budget's $500,000 at most the account's $400,000; LEAPS cap 10% of the pot; the Puts' half, 125,000.
+    expect(harness.lastRounds.get("t-VFT")).toEqual({ notes: [expect.stringContaining("VFT Sell $105 Call")], figures: { potDollars: 250_000, committedDollars: 30_000, freeCashDollars: 400_000, leapsCapDollars: 25_000, putsDollars: 125_000 } });
+    expect(harness.lastRounds.has("t-LAD")).toBe(false);
+  });
+
+  it("without the previous session's volume, sells the expiry it sells with the 20% rule lifted for the day, and says so", async () => {
+    harness.chain = { expirations: ["20261106"], strikesByExpiry: new Map([["20261106", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
+    harness.previousSessionVolumeMissing = true;
+    await round();
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "ladder_open", strategyKey: "covered_call", plan: expect.objectContaining({ quantity: 12 }) })]);
+    expect(harness.lastRounds.get("t-VFT")!.notes[0]).toBe("no previous-session volume for 6 Nov (10DTE): the 20% volume rule is off for it today");
+  });
+
+  it("with the previous session's volume, keeps the 20% rule and says nothing of it", async () => {
+    harness.chain = { expirations: ["20261106"], strikesByExpiry: new Map([["20261106", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
+    await round();
+    expect(harness.executed).toHaveLength(1);
+    expect(harness.lastRounds.get("t-VFT")!.notes.some((note) => note.includes("20% volume rule is off"))).toBe(false);
+  });
+
+  it("counts an order still working as planned, and opens afresh once it ended unfilled", async () => {
+    await round();
+    harness.outcomes.set("action-1", { working: true, filledContracts: 0, optionLegIds: [], optionNetDollars: 0, sharesBought: 0, sharesCostDollars: 0, sharesSold: 0 });
+    await round();
+    expect(harness.executed).toHaveLength(1);
+    harness.outcomes.set("action-1", { working: false, filledContracts: 0, optionLegIds: [], optionNetDollars: 0, sharesBought: 0, sharesCostDollars: 0, sharesSold: 0 });
+    const summary = await round();
+    expect(summary.notes).toContain("VFT: the cycle's opening order did not fill: no cycle");
+    expect(harness.executed).toHaveLength(2);
+    expect((harness.memory.get("t-VFT") as VolFarmerV4Memory).pending.map((order) => order.actionId)).toEqual(["action-2"]);
+  });
+
+  it("undoes an order a cap holds, as if never placed", async () => {
+    harness.bookCounts = { workingOrders: 0, ordersToday: 100, openPositions: 0 };
+    const summary = await round();
+    expect(harness.actions).toEqual([]);
+    expect(summary.notes.some((text) => text.includes("waits for a later round") && text.includes("of Pluto's 100 orders a day are sent"))).toBe(true);
+    const memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
+    expect(memory).toMatchObject({ pending: [], state: { first: null, potDollars: 0 } });
+  });
+
+  it("opens nothing while SPY's stress level holds", async () => {
+    const summary = await round(true);
+    expect(harness.executed).toEqual([]);
+    expect(summary.notes.some((text) => text.startsWith("VFT: market stress:"))).toBe(true);
+    expect((harness.memory.get("t-VFT") as VolFarmerV4Memory).state.first).toBeNull();
+  });
+
+  it("adopts a ticker's holdings at its first look: every share at the cycle's break-even, its Call the first position's", async () => {
+    harness.breakEven = 104.5;
+    harness.positions = [{ strategyKey: "covered_call", status: "open", legs: [
+      { id: "s1", legType: "stock", side: "long", quantity: 200, optionType: null, strikePrice: null, expiryDate: null, multiplier: 1, entryPrice: 106, entryAt: new Date(), exitPrice: null, exitAt: null },
+      { id: "c1", legType: "option", side: "short", quantity: 2, optionType: "call", strikePrice: 110, expiryDate: "2026-11-06", multiplier: 100, entryPrice: 1.5, entryAt: new Date(), exitPrice: null, exitAt: null },
+    ] }];
+    await round();
+    expect(harness.saves).toEqual([{ tickerId: "t-VFT", adopted: true }]);
+    const memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
+    expect(memory.state.first).toMatchObject({ shares: 200, costPerShare: 104.5, calls: [{ legId: "c1", shares: 200 }] });
+    expect(harness.events.filter((event) => event.type === "holdings_adopted").map((event) => event.detail)).toEqual([{ passId: expect.any(String), symbol: "VFT", strategy: "vol_farmer_v4", shares: 200, breakEvenPerShare: 104.5, callContracts: 2, putContracts: 0 }]);
+    // Its Call is open: nothing to sell, and the Puts wait until the first position needs a new Call.
+    expect(harness.executed).toEqual([]);
+  });
+
+  it("waits on a ticker that holds only Puts", async () => {
+    harness.positions = [{ strategyKey: "cash_secured_put", status: "open", legs: [{ id: "p1", legType: "option", side: "short", quantity: 2, optionType: "put", strikePrice: 90, expiryDate: "2026-10-30", multiplier: 100, entryPrice: 1, entryAt: new Date(), exitPrice: null, exitAt: null }] }];
+    const summary = await round();
+    expect(summary.notes).toEqual([expect.stringContaining("VFT: holds no shares yet")]);
+    expect(harness.memory.has("t-VFT")).toBe(false);
+    expect(harness.lastRounds.get("t-VFT")).toEqual({ notes: [expect.stringContaining("holds no shares yet")], figures: null });
+  });
+
+  it("sizes a ticker's pot from its allocation raised by the excess allowance", async () => {
+    settings.excessAllowancePct = 20;
+    try {
+      await round();
+      // 50% × (1 + 20%) × 50% × $1,000,000 = $300,000: floor(150,000 ÷ 10,000.50) = 14 lots; the LEAPS cap 10% of the pot.
+      expect(harness.executed).toEqual([expect.objectContaining({ kind: "ladder_open", plan: expect.objectContaining({ quantity: 14 }) })]);
+      expect(harness.lastRounds.get("t-VFT")!.figures).toMatchObject({ potDollars: 300_000, leapsCapDollars: 30_000 });
+    } finally {
+      settings.excessAllowancePct = 0;
+    }
+  });
+
+  it("opens a new cycle with no more lots than the free cash pays for, and says so", async () => {
+    harness.accountFreeCash = 50_000;
+    await round();
+    // Half the pot wants 12 lots of $10,000.50; the free cash pays for floor(50,000 ÷ 10,000.50) = 4.
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "ladder_open", buyEveryShare: true, plan: expect.objectContaining({ quantity: 4 }) })]);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringContaining("the free cash ($50,000) pays for 4 of the 12 lots half the pot wants")]);
+  });
+
+  it("gives the tickers their turn in the day's order: alphabetical, starting one ticker further each day", async () => {
+    harness.enabled = [v4Ticker("AAA"), v4Ticker("BBB")];
+    await round(false, "2026-10-27");
+    expect(harness.executed.map((order) => order.symbol)).toEqual(["BBB", "AAA"]);
+    harness.memory.clear();
+    harness.outcomes.clear();
+    harness.executed.length = 0;
+    await round(false, "2026-10-28");
+    expect(harness.executed.map((order) => order.symbol)).toEqual(["AAA", "BBB"]);
+  });
+
+  it("buys a LEAPS after every ticker's new cycle, Calls and Puts, though its ticker's turn came first", async () => {
+    harness.enabled = [v4Ticker("AAA"), v4Ticker("VFT")];
+    withLeapsDue("t-VFT");
+    const summary = await round();
+    // 27 Oct: VFT's turn first, its first position's Call; then AAA's new cycle; then VFT's LEAPS.
+    expect(harness.executed.map((order) => [order.symbol, order.kind, order.buyEveryShare ?? null])).toEqual([["VFT", "ladder_open", false], ["AAA", "ladder_open", true], ["VFT", "leaps_buy", null]]);
+    // The free cash left is more than the LEAPS cap, 10% of VFT's $250,000 pot: the cap decides the contracts.
+    const leaps = harness.actions.find((action) => action.kind === "buy_leaps")!;
+    expect(leaps.quantity).toBe(Math.floor(25_000 / leapsContractCost(leaps)));
+    expect(summary).toMatchObject({ looked: ["VFT", "AAA"], planned: 3, sent: 3 });
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringContaining("VFT Sell $105 Call"), expect.stringContaining("VFT Buy $")]);
+  });
+
+  it("buys the LEAPS on the free cash the round's other orders left, and says what the free cash cut", async () => {
+    harness.enabled = [v4Ticker("AAA"), v4Ticker("VFT")];
+    harness.accountFreeCash = 130_000;
+    withLeapsDue("t-VFT");
+    await round();
+    // AAA's new cycle ties up 12 lots × 100 shares × $100 = $120,000 of the account's $130,000: $10,000 is left (VFT's Call on held shares ties up nothing).
+    const leaps = harness.actions.find((action) => action.kind === "buy_leaps");
+    expect(leaps).toBeDefined();
+    expect((leaps!.candidateScores as { freeCash: number }).freeCash).toBe(10_000);
+    const contracts = Math.floor(10_000 / leapsContractCost(leaps!));
+    expect(leaps!.quantity).toBe(contracts);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toContain(`the free cash ($10,000) held the LEAPS to ${contracts} of the ${Math.floor(25_000 / leapsContractCost(leaps!))} contracts its cap allows`);
+  });
+
+  it("buys no LEAPS without the previous session's IV, and says why", async () => {
+    // VFT beside the ladder's LAD: half the budget, the $250,000 pot withLeapsDue is sized for.
+    withLeapsDue("t-VFT");
+    harness.stepImpliedVolatility = null;
+    await round();
+    expect(harness.executed.some((order) => order.kind === "leaps_buy")).toBe(false);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toContain("no LEAPS: the previous session has no IV for the Step");
+  });
+});
+
+describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
+  const filledPurchase = (shares: number, price: number) => ({ working: false, filledContracts: 0, optionLegIds: [], optionNetDollars: 0, sharesBought: shares, sharesCostDollars: shares * price + shares * 0.005, sharesSold: 0 });
+
+  it("on a day no option ends, buys a flat ticker's first position alone at the mid of Pluto's quote, waits while it works, then holds the shares at their fill", async () => {
+    roundSettings = v4Settings;
+    const summary = await round();
+    // 80% of the $250,000 pot: floor(200,000 ÷ 10,000.50) = 19 lots, bought at the mid of 99.98 / 100.02.
+    expect(harness.actions).toEqual([expect.objectContaining({ kind: "buy_shares", symbol: "VFT", quantity: 1_900, limitPrice: 100, executionStrategy: "vol_farmer_v4", outcome: "validated" })]);
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "shares_buy", symbol: "VFT", plan: expect.objectContaining({ quantity: 1_900, limitPrice: 100, notional: 190_000 }) })]);
+    expect(summary).toMatchObject({ planned: 1, sent: 1 });
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringContaining("VFT Buy 1900 shares @ 100.00 (a new cycle's first position: 80% of the $250,000 pot, with no Call until an expiry day)")]);
+    let memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
+    expect(memory.pending).toEqual([expect.objectContaining({ ref: "action:action-1", kind: "buy_shares", shares: 1_900, startsCycle: true, plannedSpentDollars: 190_009.5 })]);
+    expect(memory.state.first).toMatchObject({ shares: 1_900 });
+
+    // Still working: the ticker waits, nothing else is planned.
+    await round();
+    expect(harness.executed).toHaveLength(1);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual(["waits for its purchase of 1900 shares to end"]);
+
+    // Filled at 99.99: the shares cost what they filled at, commission included; within the band, nothing more to do.
+    harness.outcomes.set("action-1", filledPurchase(1_900, 99.99));
+    harness.positionsByTickerId.set("t-VFT", [{ strategyKey: "unstructured", status: "open", legs: [stockLeg("s1", 1_900)] }]);
+    await round();
+    memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
+    expect(memory.pending).toEqual([]);
+    expect(memory.state.first!.shares).toBe(1_900);
+    expect(memory.state.first!.costPerShare).toBeCloseTo(99.995, 10);
+    expect(harness.executed).toHaveLength(1);
+  });
+
+  it("sends a share order alone: a top-up's Call is undone, and sold once the shares are bought", async () => {
+    roundSettings = { ...v4Settings, volFarmerV4OptionsExpiry: "next" };
+    holdingFirstPosition(1_000);
+    await round();
+    // $100,000 of shares against 80% of the pot, $200,000 ± $12,500: 9 lots bought to floor(200,000 ÷ 10,000.50) = 19.
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "shares_buy", plan: expect.objectContaining({ quantity: 900 }) })]);
+    let memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
+    expect(memory.state.first).toMatchObject({ shares: 1_900, calls: [], premiums: [] });
+    expect(memory.pending.map((order) => order.kind)).toEqual(["buy_shares"]);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toContain("its option orders are planned again once the share order ends");
+
+    harness.outcomes.set("action-1", filledPurchase(900, 100));
+    harness.positionsByTickerId.set("t-VFT", [{ strategyKey: "unstructured", status: "open", legs: [stockLeg("s1", 1_900)] }]);
+    await round();
+    expect(harness.executed.map((order) => [order.kind, (order.plan as { quantity: number }).quantity, order.buyEveryShare ?? null])).toEqual([["shares_buy", 900, null], ["ladder_open", 19, false]]);
+    memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
+    expect(memory.state.first).toMatchObject({ shares: 1_900, calls: [{ legId: "action:action-2", shares: 1_900 }] });
+  });
+
+  it("holds a share order back while another order of the ticker works, and sends nothing of the look", async () => {
+    roundSettings = v4Settings;
+    holdingFirstPosition(1_000);
+    const memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
+    memory.state.second = { shares: 0, costPerShare: 0, premiums: [{ legId: "action:put-1", dollars: 100, shares: 200 }], calls: [], puts: [{ legId: "action:put-1", shares: 200 }] };
+    memory.pending = [{ ref: "action:put-1", actionId: "put-1", kind: "cash_secured_put", expiry: "2026-11-06", strike: 90, contracts: 2, startsCycle: false, contractsByPosition: { first: 0, second: 2 }, plannedPremiumByPosition: { first: 0, second: 100 }, leapsBeforeSale: null }];
+    harness.outcomes.set("put-1", { working: true, filledContracts: 0, optionLegIds: [], optionNetDollars: 0, sharesBought: 0, sharesCostDollars: 0, sharesSold: 0 });
+    await round();
+    expect(harness.executed).toEqual([]);
+    expect(harness.lastRounds.get("t-VFT")!.notes.at(-1)).toMatch(/^VFT Buy 900 shares @ 100\.00 .* waits for the ticker's 1 working order\(s\) to end$/);
+    const saved = harness.memory.get("t-VFT") as VolFarmerV4Memory;
+    expect(saved.state.first).toMatchObject({ shares: 1_000, costPerShare: 100 });
+    expect(saved.pending.map((order) => order.actionId)).toEqual(["put-1"]);
+  });
+
+  it("trims from the leftover-stock position at the mid; a part fill leaves the shares it did not sell in the position", async () => {
+    roundSettings = v4Settings;
+    holdingFirstPosition(2_500);
+    await round();
+    // $250,000 of shares against $200,000 ± $12,500: 6 lots sold, to 19.
+    expect(harness.actions).toEqual([expect.objectContaining({ kind: "close_shares", quantity: 600, limitPrice: 100 })]);
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "shares_sell", positionId: "p1", legId: "s1", plan: expect.objectContaining({ quantity: 600, limitPrice: 100 }) })]);
+    expect((harness.memory.get("t-VFT") as VolFarmerV4Memory).pending).toEqual([expect.objectContaining({ kind: "sell_shares", shares: 600, saleParts: [{ position: "first", shares: 600 }] })]);
+
+    harness.outcomes.set("action-1", { working: false, filledContracts: 0, optionLegIds: [], optionNetDollars: 0, sharesBought: 0, sharesCostDollars: 0, sharesSold: 400 });
+    harness.leftoverStockLeg = { legId: "s1", positionId: "p1", shares: 2_100 };
+    await round();
+    expect(harness.lastRounds.get("t-VFT")!.notes[0]).toBe("the sale of 600 shares, 400 filled");
+    // 2,100 shares, $210,000: inside the band, so nothing more is sold.
+    expect((harness.memory.get("t-VFT") as VolFarmerV4Memory).state.first).toMatchObject({ shares: 2_100, costPerShare: 100 });
+    expect(harness.executed).toHaveLength(1);
+  });
+
+  it("buys no more than the settled cash left pays for, and nothing when IBKR reports no settled cash", async () => {
+    roundSettings = v4Settings;
+    harness.settledFreeCash = 50_000;
+    await round();
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "shares_buy", plan: expect.objectContaining({ quantity: 400 }) })]);
+    expect(harness.lastRounds.get("t-VFT")!.figures).toMatchObject({ freeCashDollars: 50_000 });
+
+    harness.memory.clear();
+    harness.executed.length = 0;
+    harness.settledCashValue = null;
+    await round();
+    expect(harness.executed).toEqual([]);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual(["IBKR reports no settled cash, so the free cash is 0: nothing is bought and no Put sold", expect.stringContaining("no first position bought")]);
+  });
+
+  it("on an expiry day, buys a flat ticker's first position with its first Call, expiring at today's close", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-27T15:00:00Z") });
+    try {
+      roundSettings = v4Settings;
+      harness.chain = { expirations: ["20261027", "20261030"], strikesByExpiry: new Map([["20261027", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
+      // 11:00 Eastern: five hours to the close.
+      harness.quotes = [...quotesAt("C", "2026-10-27", 5 / 24), ...quotesAt("P", "2026-10-27", 5 / 24)];
+      await round();
+      expect(harness.executed).toEqual([expect.objectContaining({ kind: "ladder_open", strategyKey: "covered_call", buyEveryShare: true, contract: expect.objectContaining({ expiry: "2026-10-27", dte: 0 }), plan: expect.objectContaining({ quantity: 19 }) })]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("volFarmerV4NoCallQuotedReason", () => {
+  // Wed 28 Oct 2026: the next listed expiry is Fri 30 Oct (2DTE).
+  const base = { todayIso: "2026-10-28", expirations: ["20261106", "20261030", "20261028"], strikesByExpiry: new Map([["20261030", [95, 105]], ["20261106", [105]], ["20261028", [105]]]), optionsExpiry: "next" as const };
+
+  it("without the previous session's volume (a ticker enabled after the capture), the expiry is quoted whole: no volume reason", () => {
+    expect(volFarmerV4NoCallQuotedReason({ ...base, previousSessionVolumeByContract: null, bandCycleFinished: false })).toBe("no 30 Oct (2DTE) option is quoted yet today");
+    expect(volFarmerV4NoCallQuotedReason({ ...base, previousSessionVolumeByContract: null, bandCycleFinished: true })).toBe("no 30 Oct (2DTE) Call is near v4's Call |delta| range at this price, so none is quoted");
+  });
+
+  it("tells the 20% volume rule, quotes not in yet, and the |delta| band apart", () => {
+    const volume = new Map([["2026-10-30|105|C", 4], ["2026-10-30|95|P", 50]]);
+    expect(volFarmerV4NoCallQuotedReason({ ...base, previousSessionVolumeByContract: volume, bandCycleFinished: false })).toBe("no 30 Oct (2DTE) Call traded enough in the previous session to sell one (the 20% volume rule needs a volume of 5 or more)");
+    const traded = new Map([["2026-10-30|105|C", 40]]);
+    expect(volFarmerV4NoCallQuotedReason({ ...base, previousSessionVolumeByContract: traded, bandCycleFinished: false })).toBe("no 30 Oct (2DTE) option is quoted yet today");
+    // A finished cycle without a Call after today: none was near the range at this price (a Call quoted at an earlier cycle has left the band).
+    expect(volFarmerV4NoCallQuotedReason({ ...base, previousSessionVolumeByContract: traded, bandCycleFinished: true })).toBe("no 30 Oct (2DTE) Call is near v4's Call |delta| range at this price, so none is quoted");
+  });
+
+  it("keeps the plain note when the chain lists no expiry after today", () => {
+    expect(volFarmerV4NoCallQuotedReason({ ...base, expirations: ["20261028"], previousSessionVolumeByContract: null, bandCycleFinished: false })).toBe("no Call expiry listed after today");
+  });
+
+  it("selling today's expiry: words it, or that none ends today", () => {
+    expect(volFarmerV4NoCallQuotedReason({ ...base, optionsExpiry: "today", previousSessionVolumeByContract: null, bandCycleFinished: false })).toBe("no 28 Oct (0DTE) option is quoted yet today");
+    expect(volFarmerV4NoCallQuotedReason({ ...base, optionsExpiry: "today", todayIso: "2026-10-29", previousSessionVolumeByContract: null, bandCycleFinished: false })).toBe("no Call expiry ends today");
+  });
+});

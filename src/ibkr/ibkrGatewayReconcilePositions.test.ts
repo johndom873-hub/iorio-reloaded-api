@@ -1163,6 +1163,41 @@ describe("reconcileHeldPositions — what a leftover-stock position is blamed on
   it("shares appearing hours after the last closed put are not blamed on it", async () => {
     expect(await leftoverReasonAfterPutClosed(120)).toBe("unknown");
   });
+
+  async function sharePurchase(symbol: string, status: string, minutesAgo: number): Promise<void> {
+    const created = new Date(Date.now() - minutesAgo * 60_000);
+    const payload = { symbol, strategyKey: "shares", legs: [{ role: "stock", action: "BUY", symbol, quantity: 100, unitPrice: 50 }] };
+    await testDb("order_requests").insert({ requested_by_user_id: await plutoTestUser(), request_type: "open_shares", status, payload: JSON.stringify(payload), created_at: created, updated_at: created });
+  }
+
+  it("shares Pluto just bought on their own are blamed on its share purchase, with no anomaly, beside a Covered Call too", async () => {
+    const flat = await createTicker();
+    await sharePurchase(flat.symbol, "filled", 5);
+    await runPass([heldStock(flat.symbol, (nextConId += 1), 100, 50)]);
+    const bought = (await positionsFor(flat.id)).find((position) => position.strategy_key === "unstructured")!;
+    expect(bought.unstructured_reason).toBe("pluto_share_buy");
+    expect(await anomaliesFor(bought.id)).toHaveLength(0);
+
+    const withCall = await createTicker();
+    const stockConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(withCall.id, "covered_call");
+    await insertStockLeg(coveredCallId, stockConId, 100, 48);
+    const callConId = (nextConId += 1);
+    await insertShortOptionLeg(coveredCallId, callConId, "call", 55, isoDateDaysFromToday(7), 1.2);
+    await sharePurchase(withCall.symbol, "submitted", 5);
+    await runPass([heldStock(withCall.symbol, stockConId, 200, 49), heldShortOption(withCall.symbol, callConId, OptionType.Call, 55, isoDateDaysFromToday(7), 120)]);
+    expect((await positionsFor(withCall.id)).find((position) => position.strategy_key === "unstructured")!.unstructured_reason).toBe("pluto_share_buy");
+  });
+
+  it("a share purchase that was cancelled unfilled, or sent hours ago, explains nothing", async () => {
+    for (const [status, minutesAgo] of [["cancelled", 5], ["filled", 120]] as const) {
+      const ticker = await createTicker();
+      await sharePurchase(ticker.symbol, status, minutesAgo);
+      await runPass([heldStock(ticker.symbol, (nextConId += 1), 100, 50)]);
+      await testDb("platform_anomalies").where({ anomaly_type: "unexplained_leftover_stock" }).where("detail", "like", `${ticker.symbol}:%`).del();
+      expect((await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!.unstructured_reason, status).toBe("unknown");
+    }
+  });
 });
 
 describe("option expiry clock", () => {

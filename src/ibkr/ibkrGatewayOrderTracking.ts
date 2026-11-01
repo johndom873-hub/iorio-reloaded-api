@@ -326,6 +326,19 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
     return contract.secType === "STK" && execution.side === "BOT" && sourceOrder?.requestType === "open_covered_call";
   }
 
+  // Shares Pluto bought on their own (Vol Farmer v4's share purchase, open_shares) are the ticker's uncovered shares: they
+  // go to its leftover-stock (unstructured) position, never to a Covered Call holding the same stock.
+  function isPlutoShareBuy(contract: Contract, execution: Execution, sourceOrder: SourceOrderRequest | null): boolean {
+    return contract.secType === "STK" && execution.side === "BOT" && sourceOrder?.requestType === "open_shares";
+  }
+
+  /** The open leg of an unstructured position among these legs of one contract. */
+  async function uncoveredStockLegAmong(legs: FillLegRow[]): Promise<FillLegRow | undefined> {
+    if (legs.length === 0) return undefined;
+    const unstructured = await db("positions").whereIn("id", legs.map((leg) => leg.position_id)).where({ strategy_key: "unstructured" }).first("id");
+    return legs.find((leg) => leg.position_id === unstructured?.id);
+  }
+
   /** Order request ids whose option fills sit on the position that owns this leg. */
   async function orderRequestIdsOfPositionOptionFills(legId: string): Promise<Set<string>> {
     const rows: { id: string }[] = await db("trades as tr")
@@ -342,6 +355,7 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
    * conId alone is not enough:
    *   - a leg the order itself names (a close or a roll of a tracked leg) wins, even one the reconciliation just closed;
    *   - shares bought by a covered-call order go to the position holding that order's call, or wait for it;
+   *   - shares Pluto bought on their own go to the ticker's leftover-stock position, or wait for it;
    *   - an assignment (no app order, at a short option's strike) goes where assignmentDestination says;
    *   - anything else keeps the oldest open leg of the contract; with none open, a closing fill goes to the leg the
    *     reconciliation closed when IBKR's holding went (lateClosingFillWindowMs), and an opening fill waits for its leg.
@@ -370,6 +384,10 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
       const callOwnerPositionId = await positionHoldingOrdersCall(sourceOrder!.id);
       const ownStockLeg = openLegs.find((leg) => leg.position_id === callOwnerPositionId);
       return ownStockLeg ? { kind: "open", leg: ownStockLeg } : { kind: "wait" };
+    }
+    if (isPlutoShareBuy(contract, execution, sourceOrder)) {
+      const uncoveredLeg = await uncoveredStockLegAmong(openLegs);
+      return uncoveredLeg ? { kind: "open", leg: uncoveredLeg } : { kind: "wait" };
     }
     if (!sourceOrder && contract.secType === "STK") {
       const assignment = await assignmentDestination(conId, openLegs, recentlyClosedLegs, execution, executedAt);
@@ -570,13 +588,15 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
 
   /**
    * Called by the position reconciliation when it creates a leg: writes the opening fills that were waiting for it. Shares
-   * a covered-call order bought stay buffered unless the new leg's position holds that order's call.
+   * a covered-call order bought stay buffered unless the new leg's position holds that order's call, and shares Pluto
+   * bought on their own unless it is a leftover-stock position.
    */
   async function drainPendingOpeningExecutions(conId: string, newLegId: string): Promise<void> {
     const buffered = pendingOpeningExecutions.get(conId);
     if (!buffered) return;
     pendingOpeningExecutions.delete(conId);
     let ownOrderRequestIds: Set<string> | null = null;
+    let newLegIsUncovered: boolean | null = null;
     const stillWaiting: typeof buffered = [];
     for (const entry of buffered) {
       const sourceOrder = await loadSourceOrderRequest(entry.execution);
@@ -587,29 +607,42 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
           continue;
         }
       }
+      if (isPlutoShareBuy(entry.contract, entry.execution, sourceOrder)) {
+        newLegIsUncovered ??= (await db("position_legs as pl").join("positions as p", "p.id", "pl.position_id").where({ "pl.id": newLegId, "p.strategy_key": "unstructured" }).first("pl.id")) !== undefined;
+        if (!newLegIsUncovered) {
+          stillWaiting.push(entry);
+          continue;
+        }
+      }
       await insertOpeningTradeRow(newLegId, entry.contract, entry.execution, entry.receivedAt);
     }
     if (stillWaiting.length > 0) pendingOpeningExecutions.set(conId, stillWaiting);
   }
 
   /**
-   * Shares a covered-call order bought that are still waiting while the position holding the order's call already has its
-   * stock leg: an add-on to an existing Covered Call creates no new leg to drain onto, and its call fill may have been
-   * recorded after the shares'. Called by the position reconciliation at the start of each pass.
+   * Shares still waiting while the leg they belong to already exists, so no new leg will drain them: a covered-call order's,
+   * once the position holding the order's call has its stock leg (an add-on to an existing Covered Call creates no new leg,
+   * and its call fill may have been recorded after the shares'), and Pluto's own share purchase's, once the ticker has its
+   * leftover-stock leg. Called by the position reconciliation at the start of each pass.
    */
-  async function attributeWaitingCoveredCallShareBuys(): Promise<void> {
+  async function attributeWaitingShareBuys(): Promise<void> {
     for (const [conId, buffered] of [...pendingOpeningExecutions]) {
       const stillWaiting: typeof buffered = [];
       for (const entry of buffered) {
         const sourceOrder = await loadSourceOrderRequest(entry.execution);
         const callOwnerPositionId = isCoveredCallShareBuy(entry.contract, entry.execution, sourceOrder) ? await positionHoldingOrdersCall(sourceOrder!.id) : undefined;
-        const ownStockLeg = callOwnerPositionId === undefined ? undefined : await db("position_legs").where({ ibkr_contract_id: conId, position_id: callOwnerPositionId }).whereNull("exit_at").first("id");
+        const ownStockLeg =
+          callOwnerPositionId !== undefined
+            ? await db("position_legs").where({ ibkr_contract_id: conId, position_id: callOwnerPositionId }).whereNull("exit_at").first("id")
+            : isPlutoShareBuy(entry.contract, entry.execution, sourceOrder)
+              ? await uncoveredStockLegAmong(await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at"))
+              : undefined;
         if (!ownStockLeg) {
           stillWaiting.push(entry);
           continue;
         }
         await insertOpeningTradeRow(ownStockLeg.id, entry.contract, entry.execution, entry.receivedAt);
-        console.log(`Execution ${entry.execution.execId}: shares of a covered-call order written to stock leg ${ownStockLeg.id} of the position holding its call.`);
+        console.log(`Execution ${entry.execution.execId}: shares ${callOwnerPositionId !== undefined ? "of a covered-call order written to the stock leg of the position holding its call" : "Pluto bought on their own written to the leftover-stock leg"} ${ownStockLeg.id}.`);
       }
       if (stillWaiting.length > 0) pendingOpeningExecutions.set(conId, stillWaiting);
       else pendingOpeningExecutions.delete(conId);
@@ -620,7 +653,7 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
     recordExecution,
     recordCommission,
     drainPendingOpeningExecutions,
-    attributeWaitingCoveredCallShareBuys,
+    attributeWaitingShareBuys,
     bufferedOpeningExecutionCount: (conId: string) => pendingOpeningExecutions.get(conId)?.length ?? 0,
     pendingCommissionCount: () => pendingCommissionsByExecId.size,
   };

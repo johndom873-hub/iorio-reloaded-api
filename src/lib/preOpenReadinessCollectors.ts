@@ -239,7 +239,7 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
     loadTradingHalt: () => fetchTradingHalt(),
     loadAccount: async () => {
       const summary = await fetchAccountSummary();
-      return { netLiquidationValue: summary.netLiquidationValue, totalCashValue: summary.totalCashValue, buyingPower: summary.buyingPower, excessLiquidity: summary.excessLiquidity };
+      return { netLiquidationValue: summary.netLiquidationValue, totalCashValue: summary.totalCashValue, settledCash: summary.settledCash, buyingPower: summary.buyingPower, excessLiquidity: summary.excessLiquidity };
     },
     loadProbeContract: () => loadProbeContractFromStoredChain(),
     probeOrderPath: async (contract) => {

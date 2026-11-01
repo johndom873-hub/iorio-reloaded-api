@@ -8,6 +8,8 @@ describe("classifyRoutineOrderProblem", () => {
     expect(classifyRoutineOrderProblem("The order's limit price could not be checked against a live quote at placement (timeout).")).toBe("missing_quote");
     expect(classifyRoutineOrderProblem("IBKR error 110: The price does not conform to the minimum price variation for this contract.")).toBe("tick_size");
     expect(classifyRoutineOrderProblem("IBKR error 201: Order rejected - reason:YOUR ORDER IS NOT ACCEPTED. IN ORDER TO OBTAIN THE DESIRED POSITION YOUR EQUITY WITH LOAN VALUE [10000 USD] MUST EXCEED THE INITIAL MARGIN [12000 USD]")).toBe("margin");
+    // The cash account's refusal of a purchase the settled cash does not pay for.
+    expect(classifyRoutineOrderProblem("IBKR error 201: Order rejected - reason:Your order is not accepted. There is insufficient overall settled cash in your account.")).toBe("settled_cash");
   });
 
   it("leaves every other error to the breaker", () => {

@@ -24,7 +24,8 @@ import { fetchTradingBlockedReason } from "./tradingGate.js";
 //   every order        the limit-price check: each leg's limit against its own live mid (limitPriceCheck.ts)
 // A close is not limit-checked: it only reduces exposure. A CC + Put Ladder order (its Pluto action taken under the ladder)
 // gets the ladder's delta range on its own delta and its pot cap instead of the delta band and the first two limits, and
-// the ladder's book-wide cap on Pluto's capital budget (ladderOrderGates.ts; Marcelo 2026-10-15 and 2026-10-21).
+// the ladder's book-wide cap on Pluto's capital budget (ladderOrderGates.ts; Marcelo 2026-10-15 and 2026-10-21). A Vol Farmer
+// v4 share purchase (open_shares, no option leg) gets the limits on what it pays and no delta check.
 
 export interface OrderRequestForGates {
   id: string;
@@ -54,6 +55,20 @@ export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGa
   if (!requestType.startsWith("open_") && !isRoll) return null;
   const payload = orderRequest.payload;
   const strategyKey = payload.strategyKey;
+  // A share purchase (Vol Farmer v4's rebalancing): its shares at their limit.
+  if (strategyKey === "shares") {
+    const stockLeg = payload.legs.find((leg) => leg.role === "stock");
+    if (requestType !== "open_shares" || !stockLeg) return null;
+    return {
+      strategyKey: "shares" as const,
+      symbol: payload.symbol,
+      quantity: stockLeg.quantity,
+      strike: 0,
+      premium: stockLeg.unitPrice,
+      excludeOrderRequestId: orderRequest.id,
+      ...(ladder ? { ladder: { potFraction: ladder.potFraction, stockSharesBought: 0, book: ladder.book } } : {}),
+    };
+  }
   if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put" && strategyKey !== "leaps") return null;
   // A roll is one combo with two option legs: the close leg carries positionLegId, the open leg does not. Only the strike difference adds notional.
   const optionLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && !leg.positionLegId) : payload.legs.find((leg) => leg.role === "option");

@@ -446,7 +446,7 @@ describe("POST /positions/orders/:id/confirm", () => {
     const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates-ladder" }), model_called: false }).returning("id");
     const [ladderAction] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built", execution_strategy: "cc_put_ladder" }).returning("id");
     const [edgeAction] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built" }).returning("id");
-    const settings = await testDb("pluto_settings").where({ id: 1 }).first("capital_budget_pct", "ladder_min_abs_delta", "ladder_max_abs_delta");
+    const settings = await testDb("pluto_settings").where({ id: 1 }).first("capital_budget_pct", "excess_allowance_pct", "ladder_min_abs_delta", "ladder_max_abs_delta");
     const enabledCount = Number((await testDb("shortlist_entries").whereNull("removed_at").where({ bot_enabled: true }).count({ count: "*" }))[0]!.count);
     try {
       const ladderOrder = await insertOrder(ticker.symbol, { pluto_action_id: ladderAction.id });
@@ -456,7 +456,8 @@ describe("POST /positions/orders/:id/confirm", () => {
       // The ticker's pot: its equal share of Pluto's capital budget (no allocation set), with the ladder's delta range.
       const context = evaluateLadderDeltaMock.mock.calls[0]![1];
       expect(context).toMatchObject({ minAbsDelta: Number(settings.ladder_min_abs_delta), maxAbsDelta: Number(settings.ladder_max_abs_delta), forwardAnchor: null, riskFreeRate: 0.04 });
-      expect(context.potFraction).toBeCloseTo(((100 / enabledCount / 100) * Number(settings.capital_budget_pct)) / 100, 9);
+      // The ticker's allocation raised by the excess allowance, of Pluto's budget.
+      expect(context.potFraction).toBeCloseTo(((100 / enabledCount / 100) * (1 + Number(settings.excess_allowance_pct) / 100) * Number(settings.capital_budget_pct)) / 100, 9);
       expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toMatchObject({ ladder: { potFraction: context.potFraction, stockSharesBought: 0 } });
 
       evaluateLadderDeltaMock.mockResolvedValueOnce({ compliant: false, reason: "The contract's own delta is 0.305, above the ladder's 0.05–0.3 delta range." });

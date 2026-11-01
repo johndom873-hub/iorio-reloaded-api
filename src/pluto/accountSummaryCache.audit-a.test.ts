@@ -4,7 +4,7 @@ import { accountSummaryCacheMs, fetchPlutoAccountSummary, resetPlutoAccountSumma
 
 // Audit (area A, 2026-10-07): the 60 s account-summary cache.
 
-const summary = (netLiquidationValue: number | null): AccountSummary => ({ netLiquidationValue, buyingPower: null, totalCashValue: 700_000, grossPositionValue: null, excessLiquidity: null });
+const summary = (netLiquidationValue: number | null): AccountSummary => ({ netLiquidationValue, buyingPower: null, totalCashValue: 700_000, grossPositionValue: null, excessLiquidity: null, settledCash: null });
 
 beforeEach(() => {
   resetPlutoAccountSummaryCacheForTests();

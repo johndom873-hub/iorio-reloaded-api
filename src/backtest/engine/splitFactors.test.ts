@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeSplitRatio, inferSplitSchedule, isStandardSplitRatio, niceSplitFactors, requireSplitFactors, snapToNiceSplitFactor, splitFactorForNewCycle, splitFactorOn, UnmatchedOptionsError, UnresolvedSplitScaleError, type DailySplitRatio } from "./splitFactors.js";
+import { bridgeSplitDaysWithoutOptionPrices, describeSplitRatio, findSpinOffs, spinOffValuePerShare, inferSplitSchedule, isStandardSplitRatio, niceSplitFactors, requireSplitFactors, snapToNiceSplitFactor, splitFactorForNewCycle, splitFactorOn, UnmatchedOptionsError, UnresolvedSplitScaleError, type DailySplitRatio } from "./splitFactors.js";
 import { weekdaysBetween } from "./testSupport/syntheticBacktestData.js";
 
 /** Ratios on consecutive weekdays from 2026-01-05, with ±1.5% deterministic noise unless given exactly. */
@@ -184,5 +184,75 @@ describe("the split factor a new cycle takes", () => {
     expect(splitFactorForNewCycle(0.1, [1])).toBe(0.1);
     // None fits: the day's, whose options stop at the split.
     expect(splitFactorForNewCycle(0.7, [0.3])).toBe(0.7);
+  });
+});
+
+describe("a split's days with no option price", () => {
+  // 20 days at F 1/15, one day with no ratio, 20 at F 1: GSAT's 1-for-15 split of 2025-02-11, a day ThetaData lists no option.
+  const days = ratioDays([...repeat(1 / 15, 20), null, ...repeat(1, 20)]);
+  const emptyDay = days[20]!.dateIso;
+  const inferred = inferSplitSchedule(days);
+
+  it("leave the day unresolved in the inferred schedule, so a session touching it fails", () => {
+    expect(inferred.unresolved.map((stretch) => stretch.fromDateIso)).toEqual([emptyDay]);
+    expect(() => requireSplitFactors("GSAT", inferred, [emptyDay])).toThrow(UnresolvedSplitScaleError);
+  });
+
+  it("are skipped when the data file holds no option price on them: the day takes the scale before it", () => {
+    const { schedule, skippedDays } = bridgeSplitDaysWithoutOptionPrices(inferred, new Set([emptyDay]));
+    expect(skippedDays).toEqual([emptyDay]);
+    expect(schedule.unresolved).toEqual([]);
+    expect(splitFactorOn(schedule, emptyDay)).toBeCloseTo(1 / 15, 12);
+    expect(splitFactorOn(schedule, days[21]!.dateIso)).toBe(1);
+    expect(schedule.splits).toEqual([{ lastDayBefore: emptyDay, firstDayAfter: days[21]!.dateIso, ratio: inferred.splits[0]!.ratio }]);
+    // The schedule read from the file is left as it was.
+    expect(inferred.unresolved).toHaveLength(1);
+  });
+
+  it("stay unresolved when the file holds option prices on them, at a file's edge, or between two runs of one scale", () => {
+    expect(bridgeSplitDaysWithoutOptionPrices(inferred, new Set()).skippedDays).toEqual([]);
+    const edge = inferSplitSchedule(ratioDays([...repeat(null, 3), ...repeat(1, 20)]));
+    expect(bridgeSplitDaysWithoutOptionPrices(edge, new Set(edge.unresolved.flatMap((stretch) => stretch.ratios.map((day) => day.dateIso)))).schedule.unresolved).toEqual(edge.unresolved);
+    const sameScale = { segments: [{ fromDateIso: "2026-01-05", toDateIso: "2026-01-09", factor: 1 }, { fromDateIso: "2026-01-13", toDateIso: "2026-01-20", factor: 1 }], splits: [], unresolved: [{ fromDateIso: "2026-01-12", toDateIso: "2026-01-12", ratios: [{ dateIso: "2026-01-12", ratio: null }] }] };
+    expect(bridgeSplitDaysWithoutOptionPrices(sameScale, new Set(["2026-01-12"])).skippedDays).toEqual([]);
+  });
+});
+
+describe("spin-offs", () => {
+  // WDC before Sandisk: 30 days at a steady 1.3235 (no split factor), the ex-date with no option price, then 20 days at 1.
+  const days = ratioDays([...repeat(1.3235, 30), null, ...repeat(1, 20)]);
+  const exDate = days[30]!.dateIso;
+  const inferred = inferSplitSchedule(days);
+
+  it("are unresolved in the inferred schedule: the steady ratio is no split factor", () => {
+    expect(inferred.unresolved.map((stretch) => [stretch.fromDateIso, stretch.toDateIso])).toEqual([[days[0]!.dateIso, exDate]]);
+  });
+
+  it("are found at the first day after the steady ratio, every day taking the factor after, the empty ex-date skipped", () => {
+    const { schedule, spinOffs, skippedDays } = findSpinOffs(inferred, new Set([exDate]));
+    expect(spinOffs).toHaveLength(1);
+    expect(spinOffs[0]).toMatchObject({ firstDayIso: exDate, lastDayBeforeIso: days[29]!.dateIso, factorAfter: 1 });
+    expect(spinOffs[0]!.ratioBefore).toBeCloseTo(1.3235, 2);
+    expect(skippedDays).toEqual([exDate]);
+    expect(schedule.unresolved).toEqual([]);
+    expect(schedule.segments).toEqual([{ fromDateIso: days[0]!.dateIso, toDateIso: days.at(-1)!.dateIso, factor: 1 }]);
+    expect(schedule.splits).toEqual([]);
+  });
+
+  it("are worth the last close as traded × (1 − factor after ÷ ratio before): WDC 51.91 × 1.3235 = 68.70, 16.79 a share", () => {
+    const tradedClose = 51.9097 * 1.3235;
+    expect(tradedClose).toBeCloseTo(68.70, 2);
+    expect(spinOffValuePerShare({ ratioBefore: 1.3235, factorAfter: 1 }, tradedClose)).toBeCloseTo(16.79, 2);
+  });
+
+  it("are not found on fewer than 20 days, a drifting ratio, option prices at the change, or another factor before", () => {
+    const short = inferSplitSchedule(ratioDays([...repeat(1.3235, 15), null, ...repeat(1, 20)]));
+    expect(findSpinOffs(short, new Set([ratioDays(repeat(1, 16))[15]!.dateIso])).spinOffs).toEqual([]);
+    // Drifting from 1.2 to 1.45: some 5-day medians are more than 3% off the stretch's median.
+    const drifting = inferSplitSchedule(ratioDays([...Array.from({ length: 30 }, (_, index) => 1.2 + (0.25 * index) / 29), null, ...repeat(1, 20)], false));
+    expect(findSpinOffs(drifting, new Set([exDate])).spinOffs).toEqual([]);
+    expect(findSpinOffs(inferred, new Set()).spinOffs).toEqual([]);
+    const afterAnotherFactor = inferSplitSchedule(ratioDays([...repeat(2, 20), ...repeat(1.3235, 30), null, ...repeat(1, 20)]));
+    expect(findSpinOffs(afterAnotherFactor, new Set([ratioDays(repeat(1, 51))[50]!.dateIso])).spinOffs).toEqual([]);
   });
 });

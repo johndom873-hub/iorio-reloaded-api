@@ -16,8 +16,8 @@ const harness = vi.hoisted(() => ({
   volFarmerV2Outcome: { looked: [] as string[], planned: 0, sent: 0, notes: [] as string[] },
 }));
 
-vi.mock("./volFarmerV2Round.js", () => ({
-  runVolFarmerV2Round: async (input: Record<string, unknown>) => {
+vi.mock("./volFarmerV4Round.js", () => ({
+  runVolFarmerV4Round: async (input: Record<string, unknown>) => {
     harness.volFarmerV2Rounds.push(input);
     return harness.volFarmerV2Outcome;
   },

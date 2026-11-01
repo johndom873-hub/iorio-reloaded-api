@@ -15,19 +15,20 @@ export type BacktestTablesMode = "walk_forward" | "current";
  * Who decides a session's trades. "baseline": the naive wheel of BacktestBaselineSettings (Marcelo 2026-10-13), the CC +
  * Put Ladder. "steady_stake": the Steady Stake of BacktestSteadyStakeSettings. "vol_farmer_v2": Vol Farmer v2 of
  * BacktestVolFarmerV2Settings. "vol_farmer_v3": Vol Farmer v2 with its first position rebalanced
- * (BacktestVolFarmerV3Settings; the lab only). Retired, their past sessions readable but none created or run again:
+ * (BacktestVolFarmerV3Settings; the lab only). "vol_farmer_v4": Vol Farmer v3 on values of its own
+ * (BacktestVolFarmerV4Settings), the lab's default. Retired, their past sessions readable but none created or run again:
  * "rules" (Pluto's stand-in rules on the Signals model, BacktestPolicySettings) and "llm" (the AI model through the
  * subscription) with Signals (Marcelo 2026-10-27), and "vol_farmer", the original Vol Farmer of
  * BacktestVolFarmerSettings (Marcelo 2026-10-30; v2 still reads three of its values).
  */
-export type BacktestDecisionMaker = "rules" | "llm" | "baseline" | "steady_stake" | "vol_farmer" | "vol_farmer_v2" | "vol_farmer_v3";
+export type BacktestDecisionMaker = "rules" | "llm" | "baseline" | "steady_stake" | "vol_farmer" | "vol_farmer_v2" | "vol_farmer_v3" | "vol_farmer_v4";
 
 /** The decision makers a session can still be created and run with. */
-export const activeBacktestDecisionMakers = ["baseline", "steady_stake", "vol_farmer_v2", "vol_farmer_v3"] as const satisfies readonly BacktestDecisionMaker[];
+export const activeBacktestDecisionMakers = ["baseline", "steady_stake", "vol_farmer_v2", "vol_farmer_v3", "vol_farmer_v4"] as const satisfies readonly BacktestDecisionMaker[];
 
-/** Vol Farmer v2 and v3: both run v2's steps (volFarmerV2Steps.ts) on v2's settings, v3 rebalancing its first position too. */
+/** Vol Farmer v2, v3 and v4: all run v2's steps (volFarmerV2Steps.ts), v3 and v4 with v3's rebalancing (volFarmerStepSettingsOf). */
 export function runsVolFarmerV2Steps(decisionMaker: BacktestDecisionMaker): boolean {
-  return decisionMaker === "vol_farmer_v2" || decisionMaker === "vol_farmer_v3";
+  return decisionMaker === "vol_farmer_v2" || decisionMaker === "vol_farmer_v3" || decisionMaker === "vol_farmer_v4";
 }
 
 export const retiredBacktestDecisionMakerMessage = "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026); its past sessions stay readable.";
@@ -474,6 +475,14 @@ export interface BacktestVolFarmerV3Settings {
    * ones), so it empties and the Puts can sell again.
    */
   trimsSell: VolFarmerV3TrimsSell;
+  /**
+   * The most money a ticker's top-ups may take it to, % of its pot at the look (Marcelo 2026-11-01); 0: no cap. Money in is
+   * what its held shares cost (the first position's fills with commission, the second's assigned strikes) plus the cash its
+   * open Puts hold; a top-up buys no more lots than the room left pays for. A cycle's first purchase, Calls, Puts, trims and
+   * LEAPS are not capped. Snapshots before 2026-11-01 have none: no cap. Pot $264,052 at 100%, $211,240 in shares: a top-up
+   * may spend $52,812, floor(52,812 ÷ 15,000.50) = 3 lots at $150.
+   */
+  topUpCapPctOfPot: number;
 }
 
 export const volFarmerV3OptionsExpiryChoices = ["next", "today"] as const;
@@ -491,7 +500,27 @@ export type VolFarmerV3Rebalances = (typeof volFarmerV3RebalancesChoices)[number
 export const volFarmerV3FirstPositionAfterCalledAwayChoices = ["wait", "rebuild"] as const;
 export type VolFarmerV3FirstPositionAfterCalledAway = (typeof volFarmerV3FirstPositionAfterCalledAwayChoices)[number];
 
-export const defaultBacktestVolFarmerV3Settings: BacktestVolFarmerV3Settings = { rebalanceBandPct: 5, rebalances: "first_position", firstPositionAfterCalledAway: "wait", optionsExpiry: "next", optionsMaxDaysToExpiry: 45, callStrikeFloor: "break_even", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first" };
+export const defaultBacktestVolFarmerV3Settings: BacktestVolFarmerV3Settings = { rebalanceBandPct: 5, rebalances: "first_position", firstPositionAfterCalledAway: "wait", optionsExpiry: "next", optionsMaxDaysToExpiry: 45, callStrikeFloor: "break_even", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0 };
+
+/**
+ * Vol Farmer v4 (decision maker "vol_farmer_v4", Marcelo 2026-10-31; the lab's default): Vol Farmer v3 on values of its own,
+ * every value v3 reads (the Calls' |delta| range and spread limit, Vol Farmer v2's and v3's own), so v2's and v3's keep
+ * reading as their past sessions ran. Its defaults are the Pool 52 research's best run: Calls' |delta| 0.05 to 0.5, First
+ * position 80% with a 20% excess allowance, both positions rebalanced, Calls and Puts expiring at today's close, Calls at
+ * any strike above the price, the rest as v2's and v3's defaults.
+ */
+export type BacktestVolFarmerV4Settings = Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid"> & BacktestVolFarmerV2Settings & BacktestVolFarmerV3Settings;
+
+export const defaultBacktestVolFarmerV4Settings: BacktestVolFarmerV4Settings = { callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, firstPositionPct: 80, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 20, rebalanceBandPct: 5, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0 };
+
+/** The shared steps' values (volFarmerV2Steps.ts) for a Vol Farmer v2, v3 or v4 session: v4's own, else the Vol Farmer's Calls with v2's values (and v3's). */
+export function volFarmerStepSettingsOf(settings: Pick<EffectiveBacktestSettings, "decisionMaker" | "volFarmer" | "volFarmerV2" | "volFarmerV3" | "volFarmerV4">): { farmer: Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid">; v2: BacktestVolFarmerV2Settings; v3: BacktestVolFarmerV3Settings | undefined } {
+  if (settings.decisionMaker === "vol_farmer_v4") {
+    const { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid, rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, ...v2 } = settings.volFarmerV4;
+    return { farmer: { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid }, v2, v3: { rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot } };
+  }
+  return { farmer: settings.volFarmer, v2: settings.volFarmerV2, v3: settings.decisionMaker === "vol_farmer_v3" ? settings.volFarmerV3 : undefined };
+}
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5), read by the retired rules
@@ -583,6 +612,8 @@ export interface BacktestSettings {
   volFarmerV2?: BacktestVolFarmerV2Settings;
   /** Absent on sessions created before Vol Farmer v3 existed: the defaults apply. */
   volFarmerV3?: BacktestVolFarmerV3Settings;
+  /** Absent on sessions created before Vol Farmer v4 existed: the defaults apply. */
+  volFarmerV4?: BacktestVolFarmerV4Settings;
 }
 
 export interface BacktestSettingsOverrides {
@@ -597,6 +628,7 @@ export interface BacktestSettingsOverrides {
   volFarmer?: Partial<BacktestVolFarmerSettings>;
   volFarmerV2?: Partial<BacktestVolFarmerV2Settings>;
   volFarmerV3?: Partial<BacktestVolFarmerV3Settings>;
+  volFarmerV4?: Partial<BacktestVolFarmerV4Settings>;
 }
 
 /**
@@ -714,6 +746,7 @@ export interface EffectiveBacktestSettings extends BacktestSettings {
   volFarmer: BacktestVolFarmerSettings;
   volFarmerV2: BacktestVolFarmerV2Settings;
   volFarmerV3: BacktestVolFarmerV3Settings;
+  volFarmerV4: BacktestVolFarmerV4Settings;
 }
 
 export interface BacktestJobView {
@@ -948,12 +981,13 @@ export interface BacktestSettingChoice {
 }
 
 /** One row of the New session settings table. `path` addresses the value inside BacktestSettings, e.g. "baseline.ladderRungs" or "trading.spreadCostChargedPct". */
-export type BacktestSettingGroup = "How the session runs" | "Put ladder" | "Calls and Covered Calls" | "Contract choice" | "Entry filters" | "Exits" | "Hedge" | "Steady Stake" | "Original Vol Farmer (retired)" | "Vol Farmer v2" | "Vol Farmer v3";
+export type BacktestSettingGroup = "How the session runs" | "Put ladder" | "Calls and Covered Calls" | "Contract choice" | "Entry filters" | "Exits" | "Hedge" | "Steady Stake" | "Original Vol Farmer (retired)" | "Vol Farmer v2" | "Vol Farmer v3" | "Vol Farmer v4";
 
 /** "baseline_wheel": rows a CC + Put Ladder session reads, a few shared with the others;
  *  "steady_stake": rows only the Steady Stake reads; "vol_farmer": rows the Vol Farmer reads (a few Vol Farmer v2 too);
- *  "vol_farmer_v2": rows Vol Farmer v2 reads (v3 too); "vol_farmer_v3": rows only Vol Farmer v3 reads. */
-export type BacktestSettingSection = "baseline_wheel" | "steady_stake" | "vol_farmer" | "vol_farmer_v2" | "vol_farmer_v3";
+ *  "vol_farmer_v2": rows Vol Farmer v2 reads (v3 too); "vol_farmer_v3": rows only Vol Farmer v3 reads; "vol_farmer_v4":
+ *  rows only Vol Farmer v4 reads, all of its own. */
+export type BacktestSettingSection = "baseline_wheel" | "steady_stake" | "vol_farmer" | "vol_farmer_v2" | "vol_farmer_v3" | "vol_farmer_v4";
 
 /** A row's value against another row's: `oneOf` / `noneOf` its choice values, or a number `above`. */
 export interface BacktestSettingCondition {

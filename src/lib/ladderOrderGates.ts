@@ -22,9 +22,9 @@ import type { LadderBookInput } from "./orderLimits.js";
 // The route reads this context for an order whose Pluto action was taken under the ladder (ladderOrderGateContext.ts).
 
 export interface LadderOrderGateContext {
-  /** The ticker's pot as a share of the account: its effective allocation × Pluto's capital budget (0.25 = 25%); null: no pot cap (Vol Farmer v2's LEAPS). */
+  /** The ticker's pot as a share of the account: its effective allocation × Pluto's capital budget (0.25 = 25%); null: no pot cap (Vol Farmer v4's LEAPS). */
   potFraction: number | null;
-  /** False for an order with no |delta| range (Vol Farmer v2's LEAPS). */
+  /** False for an order with no |delta| range (Vol Farmer v4's LEAPS). */
   deltaChecked: boolean;
   /** The ladder's book: Pluto's enabled tickers and its capital budget as a share of the account. */
   book: LadderBookInput;

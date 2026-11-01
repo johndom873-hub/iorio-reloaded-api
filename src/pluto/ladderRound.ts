@@ -70,7 +70,7 @@ export async function runLadderRound(input: LadderRoundInput): Promise<LadderRou
   let committedThisRound = 0;
   for (const ticker of enabled) {
     if (input.symbols.length > 0 && !input.symbols.includes(ticker.symbol)) continue;
-    // A ticker under Vol Farmer v2 is volFarmerV2Round.ts's; it still counts in the book above.
+    // A ticker under Vol Farmer v4 is volFarmerV4Round.ts's; it still counts in the book above.
     if (effectivePlutoStrategy(ticker) !== "cc_put_ladder") continue;
     if (frozen.has(ticker.symbol)) {
       summary.notes.push(`${ticker.symbol}: frozen (a split is pending), not traded`);

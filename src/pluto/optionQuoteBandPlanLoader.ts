@@ -7,19 +7,19 @@ import { addCalendarDays } from "../lib/calendarDays.js";
 import type { MarketQuoteConsumer } from "../lib/marketQuoteLoop.js";
 import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { loadOptionQuoteBandQuotes, recordFinishedOptionQuoteBandCycles, upsertOptionQuoteBandQuotes, type OptionQuoteBandCycleWrite, type OptionQuoteBandQuote, type OptionQuoteBandQuoteWrite } from "./optionQuoteBandQuotes.js";
-import { optionQuoteBandDayUniverse, planOptionQuoteBand, type OptionQuoteBandPlan, type LadderClock, type OptionQuoteBandScope, type OptionQuoteBandUniverseContract } from "./optionQuoteBandPlan.js";
+import { optionQuoteBandDayUniverse, planOptionQuoteBand, volFarmerV4ExpiryRule, type OptionQuoteBandExpiryRule, type OptionQuoteBandPlan, type LadderClock, type OptionQuoteBandScope, type OptionQuoteBandUniverseContract } from "./optionQuoteBandPlan.js";
 import { forwardAnchorsFromBandQuotes } from "./ladderForwardAnchors.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState } from "./stateStore.js";
 import { effectivePlutoStrategy, loadEnabledPlutoTickerSettings, type PlutoStrategy, type PlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // The option quote band's inputs for the market quote loop (optionQuoteBandPlan.ts). The day's part (universe, last night's
-// IVs, the clock) is read once per trading day and ticker (again when its strategy changes); the forwards once the band has
-// quotes; the band quotes and the price per cycle.
+// IVs, the clock) is read once per trading day and ticker (again when its strategy or its expiries change); the forwards once
+// the band has quotes; the band quotes and the price per cycle.
 
 /** What a ticker's band covers under its strategy (optionQuoteBandPlan.ts): the after-close volume capture covers the same. */
 export function optionQuoteBandScopeOf(ticker: PlutoTickerSettings, settings: PlutoSettings): OptionQuoteBandScope {
-  if (effectivePlutoStrategy(ticker) === "vol_farmer_v2") return { expiryRule: { kind: "next_listed_expiry" }, callDeltaRange: { minAbsDelta: settings.volFarmerV2CallMinAbsDelta, maxAbsDelta: settings.volFarmerV2CallMaxAbsDelta } };
+  if (effectivePlutoStrategy(ticker) === "vol_farmer_v4") return { expiryRule: volFarmerV4ExpiryRule(settings), callDeltaRange: { minAbsDelta: settings.volFarmerV4CallMinAbsDelta, maxAbsDelta: settings.volFarmerV4CallMaxAbsDelta } };
   return {
     expiryRule: { kind: "days_to_expiry_range", minDte: settings.ladderMinDte, maxDte: settings.ladderMaxDte },
     callDeltaRange: { minAbsDelta: ticker.ladderMinAbsDelta ?? settings.ladderMinAbsDelta, maxAbsDelta: ticker.ladderMaxAbsDelta ?? settings.ladderMaxAbsDelta },
@@ -43,8 +43,9 @@ interface TickerDay {
   overnightImpliedVolatilityByContract: Map<string, number>;
   /** Empty until the band has quotes today (read again each cycle until then). */
   anchors: Map<string, BaselineForwardAnchor>;
-  /** The strategy the universe was built for. */
+  /** The strategy and the expiries the universe was built for. */
   strategy: PlutoStrategy;
+  expiryRule: OptionQuoteBandExpiryRule;
   callDeltaRange: OptionQuoteBandScope["callDeltaRange"];
 }
 
@@ -101,7 +102,7 @@ export function createOptionQuoteBandPlanner(dependencies: OptionQuoteBandPlanne
     const cached = day!.byTicker.get(ticker.tickerId);
     const strategy = effectivePlutoStrategy(ticker);
     const scope = optionQuoteBandScopeOf(ticker, settings);
-    if (cached && cached.strategy === strategy) {
+    if (cached && cached.strategy === strategy && JSON.stringify(cached.expiryRule) === JSON.stringify(scope.expiryRule)) {
       if (cached.anchors.size === 0) cached.anchors = await dependencies.loadForwardAnchors(ticker.tickerId, tradingDateIso);
       cached.callDeltaRange = scope.callDeltaRange;
       return cached;
@@ -114,7 +115,7 @@ export function createOptionQuoteBandPlanner(dependencies: OptionQuoteBandPlanne
     ]);
     // An expiry without the previous session's volume is quoted whole: the 20% rule is lifted on it for the day.
     const universe = optionQuoteBandDayUniverse({ expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, sessionIso: tradingDateIso, expiryRule: scope.expiryRule, previousSessionVolumeByContract: volume });
-    const entry: TickerDay = { universe, overnightImpliedVolatilityByContract: overnight, anchors, strategy, callDeltaRange: scope.callDeltaRange };
+    const entry: TickerDay = { universe, overnightImpliedVolatilityByContract: overnight, anchors, strategy, expiryRule: scope.expiryRule, callDeltaRange: scope.callDeltaRange };
     day!.byTicker.set(ticker.tickerId, entry);
     return entry;
   };

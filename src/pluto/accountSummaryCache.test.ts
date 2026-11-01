@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { accountSummaryCacheMs, fetchPlutoAccountSummary, resetPlutoAccountSummaryCacheForTests } from "./accountSummaryCache.js";
 
-const summary = (netLiquidationValue: number): AccountSummary => ({ netLiquidationValue, buyingPower: null, totalCashValue: 700_000, grossPositionValue: null, excessLiquidity: null });
+const summary = (netLiquidationValue: number): AccountSummary => ({ netLiquidationValue, buyingPower: null, totalCashValue: 700_000, grossPositionValue: null, excessLiquidity: null, settledCash: null });
 
 beforeEach(() => {
   resetPlutoAccountSummaryCacheForTests();

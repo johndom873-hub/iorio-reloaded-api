@@ -22,7 +22,7 @@ export interface PlutoActionExposureInput {
 export interface PlutoActionOrderRequest {
   requestType: string;
   payload: OrderRequestPayload;
-  /** Contracts (or shares, for a share sale) the order's trades filled so far; null before any fill. */
+  /** Contracts (or shares, for a share sale or purchase) the order's trades filled so far; null before any fill. */
   filledQuantity: number | null;
   /** A buyback: the premium per share the bought-back leg was sold for; null for other orders or a leg not found. */
   closedLegPremium: number | null;
@@ -50,7 +50,7 @@ export function computePlutoActionExposure(action: PlutoActionExposureInput, ord
 
 /**
  * The order request each action produced, keyed by action id, with how much of it has filled: option contracts
- * for an open, a roll (its new leg) or a buyback, shares for a share sale. Actions without an order are absent.
+ * for an open, a roll (its new leg) or a buyback, shares for a share sale or purchase. Actions without an order are absent.
  */
 export async function loadPlutoOrderRequestsByActionId(actionIds: string[], connection: Knex = db): Promise<Map<string, PlutoActionOrderRequest>> {
   if (actionIds.length === 0) return new Map();
@@ -69,7 +69,14 @@ export async function loadPlutoOrderRequestsByActionId(actionIds: string[], conn
   const kindByAction = new Map(rows.map((row) => [row.pluto_action_id, row.kind]));
   for (const fill of fills) {
     const kind = kindByAction.get(fill.pluto_action_id);
-    const counts = kind === "close_shares" || kind === "close_position" ? fill.leg_type === "stock" && fill.is_closing_trade : kind === "close_leg" ? fill.leg_type === "option" && fill.is_closing_trade : fill.leg_type === "option" && !fill.is_closing_trade;
+    const counts =
+      kind === "close_shares" || kind === "close_position"
+        ? fill.leg_type === "stock" && fill.is_closing_trade
+        : kind === "close_leg"
+          ? fill.leg_type === "option" && fill.is_closing_trade
+          : kind === "buy_shares"
+            ? fill.leg_type === "stock" && !fill.is_closing_trade
+            : fill.leg_type === "option" && !fill.is_closing_trade;
     if (counts) filledQuantity.set(fill.pluto_action_id, (filledQuantity.get(fill.pluto_action_id) ?? 0) + Number(fill.quantity));
   }
   // A buyback's closed leg, for the premium it was sold for.

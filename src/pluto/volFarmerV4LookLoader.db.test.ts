@@ -13,7 +13,7 @@ vi.mock("../db/connection.js", async () => {
 
 const { db } = await import("../db/connection.js");
 const { dropIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
-const { loadVolFarmerV2LegStatuses, loadVolFarmerV2Memory, loadVolFarmerV2OrderOutcomes, loadVolFarmerV2StepImpliedVolatility, saveVolFarmerV2Memory } = await import("./volFarmerV2LookLoader.js");
+const { loadVolFarmerV4LeftoverStockLeg, loadVolFarmerV4LegStatuses, loadVolFarmerV4Memory, loadVolFarmerV4OrderOutcomes, loadVolFarmerV4StepImpliedVolatility, saveVolFarmerV4Memory } = await import("./volFarmerV4LookLoader.js");
 const testDb: Knex = db;
 
 const tickerId = randomUUID();
@@ -21,7 +21,7 @@ const userId = randomUUID();
 
 async function action(): Promise<string> {
   const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: "{}", model_called: false }).returning("id");
-  const [row] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_covered_call", symbol: "VFL", outcome: "confirmed", execution_strategy: "vol_farmer_v2" }).returning("id");
+  const [row] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_covered_call", symbol: "VFL", outcome: "confirmed", execution_strategy: "vol_farmer_v4" }).returning("id");
   return row.id as string;
 }
 
@@ -51,22 +51,22 @@ afterAll(async () => {
   await dropIsolatedTestDatabase(testDb);
 });
 
-describe("Vol Farmer v2's live reads", () => {
+describe("Vol Farmer v4's live reads", () => {
   it("saves and reads back a ticker's memory, without the backtest's cash check", async () => {
-    expect(await loadVolFarmerV2Memory(tickerId)).toBeNull();
+    expect(await loadVolFarmerV4Memory(tickerId)).toBeNull();
     const state = newVolFarmerV2SymbolState();
     state.first = { shares: 300, costPerShare: 50.01, premiums: [{ legId: "action:a1", dollars: 328, shares: 300 }], calls: [{ legId: "action:a1", shares: 300 }], puts: [] };
     state.cash.cycles = 4;
-    await saveVolFarmerV2Memory(tickerId, { state, pending: [] }, true);
-    const memory = await loadVolFarmerV2Memory(tickerId);
+    await saveVolFarmerV4Memory(tickerId, { state, pending: [] }, true);
+    const memory = await loadVolFarmerV4Memory(tickerId);
     expect(memory!.state.first).toEqual(state.first);
     expect(memory!.state.cash.cycles).toBe(0);
-    expect((await testDb("pluto_vol_farmer_v2_cycles").where({ ticker_id: tickerId }).first("adopted_at")).adopted_at).not.toBeNull();
+    expect((await testDb("pluto_vol_farmer_v4_cycles").where({ ticker_id: tickerId }).first("adopted_at")).adopted_at).not.toBeNull();
 
     // A memory saved with a premium total (before 2026-10-28) reads as one premium counted in full.
     const savedWithTotal = { ...memory!, state: { ...memory!.state, first: { shares: 300, costPerShare: 50.01, premiumDollars: 328, calls: [], puts: [] } } };
-    await testDb("pluto_vol_farmer_v2_cycles").where({ ticker_id: tickerId }).update({ memory: JSON.stringify(savedWithTotal) });
-    expect((await loadVolFarmerV2Memory(tickerId))!.state.first).toEqual({ shares: 300, costPerShare: 50.01, premiums: [{ legId: "", dollars: 328, shares: 0 }], calls: [], puts: [] });
+    await testDb("pluto_vol_farmer_v4_cycles").where({ ticker_id: tickerId }).update({ memory: JSON.stringify(savedWithTotal) });
+    expect((await loadVolFarmerV4Memory(tickerId))!.state.first).toEqual({ shares: 300, costPerShare: 50.01, premiums: [{ legId: "", dollars: 328, shares: 0 }], calls: [], puts: [] });
   });
 
   it("tells a working order from a done one, and reads a done order's fills: contracts, legs, premium and shares", async () => {
@@ -82,11 +82,22 @@ describe("Vol Farmer v2's live reads", () => {
       { position_leg_id: callLeg, side: "sell", quantity: 2, price: 1.1, commission: 1.3, source_order_request_id: partialOrder, executed_at: new Date() },
     ]);
     const neverBuilt = await action();
-    const outcomes = await loadVolFarmerV2OrderOutcomes([working, partial, neverBuilt]);
+    const outcomes = await loadVolFarmerV4OrderOutcomes([working, partial, neverBuilt]);
     expect(outcomes.get(working)).toMatchObject({ working: true });
     // 2 of 3 lots: 200 shares for 10,004 + 1 commission; the Calls brought 220 less 1.30.
-    expect(outcomes.get(partial)).toEqual({ working: false, filledContracts: 2, optionLegIds: [callLeg], optionNetDollars: expect.closeTo(218.7, 6), sharesBought: 200, sharesCostDollars: expect.closeTo(10_005, 6) });
+    expect(outcomes.get(partial)).toEqual({ working: false, filledContracts: 2, optionLegIds: [callLeg], optionNetDollars: expect.closeTo(218.7, 6), sharesBought: 200, sharesCostDollars: expect.closeTo(10_005, 6), sharesSold: 0 });
     expect(outcomes.get(neverBuilt)).toMatchObject({ working: false, filledContracts: 0, optionLegIds: [] });
+  });
+
+  it("reads a trim's shares sold from the leftover-stock position, and finds that position's stock leg", async () => {
+    expect(await loadVolFarmerV4LeftoverStockLeg(tickerId)).toBeNull();
+    const [position] = await testDb("positions").insert({ ticker_id: tickerId, strategy_key: "unstructured", status: "open" }).returning("id");
+    const stockLeg = await leg(position.id, { leg_type: "stock", side: "long", quantity: 2_500, option_type: null, strike_price: null, expiry_date: null, multiplier: 1, entry_price: 100 });
+    expect(await loadVolFarmerV4LeftoverStockLeg(tickerId)).toEqual({ legId: stockLeg, positionId: position.id, shares: 2_500 });
+    const trim = await action();
+    const trimOrder = await orderFor(trim, "cancelled_partially_filled", { symbol: "VFL", strategyKey: "unstructured", legs: [{ role: "stock", action: "SELL", symbol: "VFL", quantity: 600, unitPrice: 100, positionLegId: stockLeg }] });
+    await testDb("trades").insert({ position_leg_id: stockLeg, side: "sell", quantity: 400, price: 100.01, commission: 2, is_closing_trade: true, source_order_request_id: trimOrder, executed_at: new Date() });
+    expect((await loadVolFarmerV4OrderOutcomes([trim])).get(trim)).toEqual({ working: false, filledContracts: 0, optionLegIds: [], optionNetDollars: 0, sharesBought: 0, sharesCostDollars: 0, sharesSold: 400 });
   });
 
   it("reads each leg's status: open, assigned in the money at its expiry's close, expired worthless, bought back", async () => {
@@ -98,7 +109,7 @@ describe("Vol Farmer v2's live reads", () => {
     const boughtBack = await leg(position.id, { strike_price: 50, exit_price: 7.5, exit_at: new Date("2026-10-15T15:00:00Z") });
     await testDb("trades").insert({ position_leg_id: boughtBack, side: "buy", quantity: 2, price: 7.5, commission: 1.3, is_closing_trade: true, executed_at: new Date("2026-10-15T15:00:00Z") });
     const open = await leg(position.id, { expiry_date: "2026-11-20" });
-    const statuses = await loadVolFarmerV2LegStatuses([assigned, worthless, boughtBack, open]);
+    const statuses = await loadVolFarmerV4LegStatuses([assigned, worthless, boughtBack, open]);
     expect(statuses.get(assigned)).toEqual({ closed: true, assigned: true, strike: 55, contracts: 2 });
     expect(statuses.get(worthless)).toEqual({ closed: true, assigned: false, strike: 60, contracts: 2 });
     expect(statuses.get(boughtBack)).toEqual({ closed: true, assigned: false, strike: 50, contracts: 2 });
@@ -107,8 +118,8 @@ describe("Vol Farmer v2's live reads", () => {
 
   it("takes the Step's IV from the previous session's bar only", async () => {
     // Thursday 15 October has an IV, Friday 16th's bar has none, and there is no bar for Monday 19th.
-    expect(await loadVolFarmerV2StepImpliedVolatility(tickerId, "2026-10-16")).toBe(0.42);
-    expect(await loadVolFarmerV2StepImpliedVolatility(tickerId, "2026-10-19")).toBeNull();
-    expect(await loadVolFarmerV2StepImpliedVolatility(tickerId, "2026-10-20")).toBeNull();
+    expect(await loadVolFarmerV4StepImpliedVolatility(tickerId, "2026-10-16")).toBe(0.42);
+    expect(await loadVolFarmerV4StepImpliedVolatility(tickerId, "2026-10-19")).toBeNull();
+    expect(await loadVolFarmerV4StepImpliedVolatility(tickerId, "2026-10-20")).toBeNull();
   });
 });

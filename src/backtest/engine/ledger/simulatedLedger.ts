@@ -76,7 +76,7 @@ export interface LedgerShareSource {
  * called away at the strike, `hedge_purchase` and `hedge_sale` a hedge's long Puts bought and sold, `leaps_purchase` and
  * `leaps_sale` the LEAPS Calls, `interest` on the cash balance, `deposit` the starting cash.
  */
-export type CashJournalKind = "deposit" | "interest" | "premium" | "buyback" | "commission" | "share_purchase" | "share_sale" | "assignment" | "call_away" | "hedge_purchase" | "hedge_sale" | "leaps_purchase" | "leaps_sale";
+export type CashJournalKind = "deposit" | "interest" | "premium" | "buyback" | "commission" | "share_purchase" | "share_sale" | "assignment" | "call_away" | "hedge_purchase" | "hedge_sale" | "leaps_purchase" | "leaps_sale" | "spin_off";
 
 /** One movement of cash; `amount` is signed (money in is positive). The journal always sums to `cash`. */
 export interface CashJournalEntry {

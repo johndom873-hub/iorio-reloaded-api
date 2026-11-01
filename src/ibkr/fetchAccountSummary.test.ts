@@ -36,17 +36,18 @@ afterEach(() => {
 });
 
 describe("fetchAccountSummary on the shared read connection", () => {
-  it("requests the five tags for all accounts under an allocated request id and maps them to numbers", async () => {
+  it("requests the six tags for all accounts under an allocated request id and maps them to numbers", async () => {
     const result = fetchAccountSummary();
     await vi.advanceTimersByTimeAsync(0);
-    expect(ib.reqAccountSummary).toHaveBeenCalledWith(555, "All", "NetLiquidation,BuyingPower,TotalCashValue,GrossPositionValue,ExcessLiquidity");
+    expect(ib.reqAccountSummary).toHaveBeenCalledWith(555, "All", "NetLiquidation,BuyingPower,TotalCashValue,SettledCash,GrossPositionValue,ExcessLiquidity");
     summaryValue(555, "NetLiquidation", "100000.5");
     summaryValue(555, "BuyingPower", "400000");
     summaryValue(555, "TotalCashValue", "-2500.25");
     summaryValue(555, "GrossPositionValue", "75000");
     summaryValue(555, "ExcessLiquidity", "30000.75");
+    summaryValue(555, "SettledCash", "-3100.5");
     ib.emit(EventName.accountSummaryEnd, 555);
-    expect(await result).toEqual({ netLiquidationValue: 100000.5, buyingPower: 400000, totalCashValue: -2500.25, grossPositionValue: 75000, excessLiquidity: 30000.75 });
+    expect(await result).toEqual({ netLiquidationValue: 100000.5, buyingPower: 400000, totalCashValue: -2500.25, grossPositionValue: 75000, excessLiquidity: 30000.75, settledCash: -3100.5 });
   });
 
   it("leaves a field null when IBKR never sent it, and ignores non-numeric values and unknown tags", async () => {
@@ -56,7 +57,7 @@ describe("fetchAccountSummary on the shared read connection", () => {
     summaryValue(555, "BuyingPower", "n/a");
     summaryValue(555, "AccountType", "7");
     ib.emit(EventName.accountSummaryEnd, 555);
-    expect(await result).toEqual({ netLiquidationValue: 100, buyingPower: null, totalCashValue: null, grossPositionValue: null, excessLiquidity: null });
+    expect(await result).toEqual({ netLiquidationValue: 100, buyingPower: null, totalCashValue: null, grossPositionValue: null, excessLiquidity: null, settledCash: null });
   });
 
   it("treats an empty or blank value string as no value, never as a zero net liquidation", async () => {

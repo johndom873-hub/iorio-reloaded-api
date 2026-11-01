@@ -326,6 +326,103 @@ export class UnresolvedSplitScaleError extends Error {
   }
 }
 
+/**
+ * The schedule with each unresolved stretch between two scales whose every day has no option price at all taken out
+ * (Marcelo 2026-11-01): ThetaData lists no GSAT option on 2025-02-11, the first day of its 1-for-15 split, so that day
+ * has no scale to infer and nothing to trade. Such a day takes the scale before it, which nothing reads (a stock's mark
+ * is the same on either scale, and the day has no option price), and the session skips the symbol on it as on a day
+ * the file could not download. Every other unresolved stretch stays. Pure.
+ */
+export function bridgeSplitDaysWithoutOptionPrices(schedule: SplitSchedule, daysWithoutOptionPrices: ReadonlySet<string>): { schedule: SplitSchedule; skippedDays: string[] } {
+  const skippedDays: string[] = [];
+  const segments = schedule.segments.map((segment) => ({ ...segment }));
+  const unresolved: UnresolvedSplitStretch[] = [];
+  for (const stretch of schedule.unresolved) {
+    const before = segments.findLast((segment) => segment.toDateIso < stretch.fromDateIso);
+    const after = segments.find((segment) => segment.fromDateIso > stretch.toDateIso);
+    if (before === undefined || after === undefined || before.factor === after.factor || !stretch.ratios.every((day) => daysWithoutOptionPrices.has(day.dateIso))) {
+      unresolved.push(stretch);
+      continue;
+    }
+    before.toDateIso = stretch.toDateIso;
+    skippedDays.push(...stretch.ratios.map((day) => day.dateIso));
+  }
+  if (skippedDays.length === 0) return { schedule, skippedDays };
+  const splits = schedule.splits.map((split) => {
+    const before = segments.findLast((segment) => segment.fromDateIso < split.firstDayAfter);
+    return before === undefined ? split : { ...split, lastDayBefore: before.toDateIso };
+  });
+  return { schedule: { ...schedule, segments, splits, unresolved }, skippedDays };
+}
+
+/** The fewest valid days a steady ratio holds before a spin-off (Marcelo 2026-11-01). */
+export const spinOffMinimumDays = 20;
+
+/** A spin-off found in a file: IBKR's bars before `firstDayIso` are its prices less the spun-off company's value. */
+export interface DetectedSpinOff {
+  /** The first day the stock trades without the spun-off shares (the ex-date). */
+  firstDayIso: string;
+  /** The last file day with an option price before it: the close the spin-off's value is taken from. */
+  lastDayBeforeIso: string;
+  /** The steady ratio before (options' close ÷ IBKR's adjusted close: WDC 1.3235) and the split factor after (1). */
+  ratioBefore: number;
+  factorAfter: number;
+}
+
+/**
+ * Spin-offs (Marcelo 2026-11-01): an unresolved stretch of at least 20 valid days whose ratio holds steady (every 5-day
+ * median within ±3% of the stretch's median) but is no split factor, followed by a segment, is a spin-off at the first
+ * day after its last valid ratio: IBKR lowered the stock's earlier prices by the spun-off company's value (WDC before
+ * Sandisk, 24 Feb 2025: 1.3235). Its days take the factor after it, and the session puts IBKR's bars before the spin-off
+ * back on the prices traded (× ratio before ÷ factor after); the days at the change with no option price are skipped,
+ * as bridgeSplitDaysWithoutOptionPrices skips a split's. A stretch with another factor before it stays unresolved. Pure.
+ */
+export function findSpinOffs(schedule: SplitSchedule, daysWithoutOptionPrices: ReadonlySet<string>): { schedule: SplitSchedule; spinOffs: DetectedSpinOff[]; skippedDays: string[] } {
+  const spinOffs: DetectedSpinOff[] = [];
+  const skippedDays: string[] = [];
+  let segments = schedule.segments.map((segment) => ({ ...segment }));
+  const unresolved: UnresolvedSplitStretch[] = [];
+  for (const stretch of schedule.unresolved) {
+    const before = segments.findLast((segment) => segment.toDateIso < stretch.fromDateIso);
+    const after = segments.find((segment) => segment.fromDateIso > stretch.toDateIso);
+    const valid = stretch.ratios.filter((day) => day.ratio !== null && day.ratio > 0 && Number.isFinite(day.ratio));
+    const lastValid = valid.at(-1);
+    const afterLastValid = lastValid === undefined ? [] : stretch.ratios.filter((day) => day.dateIso > lastValid.dateIso);
+    const ratioBefore = valid.length === 0 ? 0 : median(valid.map((day) => day.ratio!));
+    const steady =
+      valid.length >= spinOffMinimumDays &&
+      snapToNiceSplitFactor(ratioBefore) === null &&
+      valid.every((_, index) => {
+        const start = Math.min(Math.max(0, index - Math.floor(splitPersistenceDays / 2)), valid.length - splitPersistenceDays);
+        return Math.abs(median(valid.slice(start, start + splitPersistenceDays).map((day) => day.ratio!)) / ratioBefore - 1) <= splitSnapTolerance;
+      });
+    const firstDay = afterLastValid[0]?.dateIso ?? after?.fromDateIso;
+    if (after === undefined || (before !== undefined && before.factor !== after.factor) || !steady || firstDay === undefined || !afterLastValid.every((day) => daysWithoutOptionPrices.has(day.dateIso))) {
+      unresolved.push(stretch);
+      continue;
+    }
+    after.fromDateIso = stretch.fromDateIso;
+    skippedDays.push(...afterLastValid.map((day) => day.dateIso));
+    spinOffs.push({ firstDayIso: firstDay, lastDayBeforeIso: lastValid!.dateIso, ratioBefore, factorAfter: after.factor });
+  }
+  if (spinOffs.length === 0) return { schedule, spinOffs, skippedDays };
+  // A segment of one factor right before the stretch now runs into the one after it: one segment.
+  segments = segments.reduce<SplitFactorSegment[]>((merged, segment) => {
+    const last = merged.at(-1);
+    if (last !== undefined && last.factor === segment.factor && last.toDateIso < segment.fromDateIso && !unresolved.some((stretch) => stretch.fromDateIso > last.toDateIso && stretch.toDateIso < segment.fromDateIso)) {
+      last.toDateIso = segment.toDateIso;
+      return merged;
+    }
+    return [...merged, segment];
+  }, []);
+  return { schedule: { ...schedule, segments, unresolved }, spinOffs, skippedDays };
+}
+
+/** A spin-off's value per share as traded: the last close before it, as traded × (1 − factor after ÷ ratio before). WDC: 68.70 × (1 − 1 ÷ 1.3235) = 16.79. */
+export function spinOffValuePerShare(spinOff: Pick<DetectedSpinOff, "ratioBefore" | "factorAfter">, tradedCloseBefore: number): number {
+  return tradedCloseBefore * (1 - spinOff.factorAfter / spinOff.ratioBefore);
+}
+
 /** F for every date in `datesIso`; throws on the first date before the options match IBKR's prices, or in an unresolved stretch. */
 export function requireSplitFactors(symbol: string, schedule: SplitSchedule, datesIso: readonly string[]): Map<string, number> {
   const factors = new Map<string, number>();

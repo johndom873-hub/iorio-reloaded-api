@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { easternInstant } from "../../../lib/easternIsoDate.js";
-import { buyBackPut, closeCoveredCall, creditInterest, expirySettlementInstant, isAssignedAtExpiry, openCashSecuredPut, openCoveredCall, rollLeg, sellShares, settleExpiry } from "./ledgerEvents.js";
+import { buyBackPut, closeCoveredCall, creditInterest, creditSpinOff, expirySettlementInstant, isAssignedAtExpiry, openCashSecuredPut, openCoveredCall, rollLeg, sellShares, settleExpiry } from "./ledgerEvents.js";
 import { optionPurchaseFillPrice, optionSaleFillPrice } from "./ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerCapitalDeployed, ledgerCashLockedInCashSecuredPuts, ledgerCycles, ledgerFreeCash, ledgerFreeShares, ledgerRealizedPnl } from "./ledgerSelectors.js";
 import { createSimulatedLedger, cycleGroupingWindowMs, cycleSplitFactorFor, isSymbolFlat, legsOfPosition, requireLeg, requirePosition, type SimulatedLedger } from "./simulatedLedger.js";
@@ -592,5 +592,25 @@ describe("interest and the cash journal", () => {
       expect.objectContaining({ kind: "interest", amount: 12.5, symbol: null, positionId: null, legId: null }),
     ]);
     expectCashEqualsJournal(ledger, 100_012.5);
+  });
+});
+
+describe("a spin-off", () => {
+  it("credits every share held the spun-off value and lowers its entry price by as much, the share count kept", () => {
+    const ledger = newLedger();
+    // 900 shares: 9 contracts of 100 at $68.70 with a Call on each.
+    openCoveredCall(ledger, { symbol: "WDC", expiryDate: "2025-03-21", strike: 75, contracts: 9, callFillPrice: 1, stockFillPrice: 68.7, at: decisionAt("2025-02-18"), actionId: null, splitFactorToday: 1 });
+    const stockLegs = () => ledger.legs.filter((leg) => leg.legType === "stock" && leg.exitAt === null);
+    const entryBefore = stockLegs().map((leg) => leg.entryPrice);
+    const cashBefore = ledger.cash;
+    // 16.79 a share: 900 × 16.79 = 15,111.
+    expect(creditSpinOff(ledger, { symbol: "WDC", valuePerShare: 16.79, at: decisionAt("2025-02-24") })).toBeCloseTo(15_111, 6);
+    expect(ledger.cash - cashBefore).toBeCloseTo(15_111, 6);
+    expect(stockLegs().map((leg) => leg.entryPrice)).toEqual(entryBefore.map((price) => price - 16.79));
+    expect(stockLegs().reduce((sum, leg) => sum + leg.quantity, 0)).toBe(900);
+    expect(ledger.cashJournal.filter((entry) => entry.kind === "spin_off")).toHaveLength(stockLegs().length);
+    expectCashEqualsJournal(ledger, ledger.cash);
+    // Another symbol's shares are not credited.
+    expect(creditSpinOff(ledger, { symbol: "OTHER", valuePerShare: 5, at: decisionAt("2025-02-24") })).toBe(0);
   });
 });

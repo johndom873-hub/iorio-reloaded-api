@@ -71,7 +71,7 @@ vi.mock("./positionCloseLive.js", () => ({ streamCloseLiveHandler: vi.fn() }));
 vi.mock("./positionCycleMarks.js", () => ({ getCycleMarksHandler: vi.fn() }));
 
 const { db } = await import("../db/connection.js");
-const { positionsRouter, sharesCommittedByInFlightCoveredCalls } = await import("./positions.js");
+const { positionsRouter, sharesCommittedByInFlightCoveredCalls, sharesSoldByInFlightUncoveredShareSales } = await import("./positions.js");
 
 const testDb: Knex = db;
 
@@ -374,20 +374,61 @@ describe("POST /positions/orders: LEAPS", () => {
     expect(fetchPricesPoolFirstMock).not.toHaveBeenCalled();
   });
 
-  it("builds a LEAPS sent for Pluto under Vol Farmer v2", async () => {
+  it("builds a LEAPS sent for Pluto under Vol Farmer v4", async () => {
     const ticker = await createTicker();
     const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: "{}", model_called: false }).returning("id");
-    const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "buy_leaps", symbol: ticker.symbol, outcome: "validated", execution_strategy: "vol_farmer_v2" }).returning("id");
+    const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "buy_leaps", symbol: ticker.symbol, outcome: "validated", execution_strategy: "vol_farmer_v4" }).returning("id");
     const response = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "leaps", option: optionBody, plutoActionId: action.id });
     expect(response.status).toBe(201);
     expect((await orderRow(response.json.id)).request_type).toBe("open_leaps");
   });
 
-  it("refuses a LEAPS sent for Pluto under any strategy but Vol Farmer v2, and builds nothing", async () => {
+  it("refuses a LEAPS sent for Pluto under any strategy but Vol Farmer v4, and builds nothing", async () => {
     const ticker = await createTicker();
     const response = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "leaps", option: optionBody, plutoActionId: "00000000-0000-0000-0000-000000000001" });
     expect(response.status).toBe(400);
-    expect(response.json.error).toBe("Pluto buys LEAPS only under Vol Farmer v2.");
+    expect(response.json.error).toBe("Pluto buys LEAPS only under Vol Farmer v4.");
+    expect(await orderCount()).toBe(0);
+  });
+});
+
+describe("POST /positions/orders: Vol Farmer v4's share purchase", () => {
+  async function plutoAction(symbol: string, executionStrategy: string): Promise<string> {
+    const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: "{}", model_called: false }).returning("id");
+    const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "buy_shares", symbol, outcome: "validated", execution_strategy: executionStrategy }).returning("id");
+    return action.id;
+  }
+
+  it("builds one BUY stock leg as an open_shares order at the limit rounded to the cent", async () => {
+    const ticker = await createTicker();
+    const actionId = await plutoAction(ticker.symbol, "vol_farmer_v4");
+    const response = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "shares", stock: { quantity: 200, limitPrice: 181.234 }, plutoActionId: actionId });
+    expect(response.status).toBe(201);
+    expect(response.json.payload).toEqual({ symbol: ticker.symbol, strategyKey: "shares", legs: [{ role: "stock", action: "BUY", symbol: ticker.symbol, quantity: 200, unitPrice: 181.23 }] });
+    const row = await orderRow(response.json.id);
+    expect(row.request_type).toBe("open_shares");
+    expect(row.pluto_action_id).toBe(actionId);
+    expect(fetchPricesPoolFirstMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a share purchase that is not Pluto's under Vol Farmer v4, and builds nothing", async () => {
+    const ticker = await createTicker();
+    const stock = { quantity: 100, limitPrice: 50 };
+    const withoutAction = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "shares", stock });
+    expect(withoutAction.status).toBe(400);
+    expect(withoutAction.json.error).toBe("Shares are bought on their own only by Pluto, under Vol Farmer v4.");
+    const underLadder = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "shares", stock, plutoActionId: await plutoAction(ticker.symbol, "cc_put_ladder") });
+    expect(underLadder.json.error).toBe("Shares are bought on their own only by Pluto, under Vol Farmer v4.");
+    expect(await orderCount()).toBe(0);
+  });
+
+  it("refuses an option leg, a share count that is not a positive whole number and a price that is not positive", async () => {
+    const ticker = await createTicker();
+    const actionId = await plutoAction(ticker.symbol, "vol_farmer_v4");
+    const body = (extra: Record<string, unknown>) => ({ symbol: ticker.symbol, strategyKey: "shares", plutoActionId: actionId, ...extra });
+    expect((await call("POST", "/positions/orders", body({ stock: { quantity: 100, limitPrice: 50 }, option: { quantity: 1, limitPrice: 1, strikePrice: 55, expiryDate: "20261120" } }))).json.error).toBe("A share purchase has no option leg.");
+    for (const quantity of [0, -100, 10.5, "100"]) expect((await call("POST", "/positions/orders", body({ stock: { quantity, limitPrice: 50 } }))).json.error, String(quantity)).toBe("stock.quantity must be a positive whole number of shares.");
+    for (const limitPrice of [0, 0.004, -1, "50"]) expect((await call("POST", "/positions/orders", body({ stock: { quantity: 100, limitPrice } }))).json.error, String(limitPrice)).toBe("stock.limitPrice must be a positive number.");
     expect(await orderCount()).toBe(0);
   });
 });
@@ -651,6 +692,22 @@ describe("sharesCommittedByInFlightCoveredCalls", () => {
     await insertOrder(symbol, { request_type: "open_covered_call", status: "partially_filled" }, payload);
     await insertOrder(symbol, { request_type: "open_covered_call", status: "cancel_requested" }, payload);
     expect(await sharesCommittedByInFlightCoveredCalls(symbol)).toBe(200);
+  });
+});
+
+describe("sharesSoldByInFlightUncoveredShareSales", () => {
+  it("sums the stock legs sold by the symbol's active closes of unstructured positions, and ignores everything else", async () => {
+    const ticker = await createTicker();
+    const symbol = ticker.symbol;
+    const sale = (shares: number, strategyKey = "unstructured") => ({ symbol, strategyKey, legs: [{ role: "stock", action: "SELL", symbol, quantity: shares, unitPrice: 50, positionLegId: missingId }] });
+    await insertOrder(symbol, { request_type: "close_position", status: "pending_confirmation" }, sale(100));
+    await insertOrder(symbol, { request_type: "close_position", status: "partially_filled" }, sale(200));
+    // Ignored: a finished sale, a covered call's close, and a share purchase.
+    await insertOrder(symbol, { request_type: "close_position", status: "filled" }, sale(900));
+    await insertOrder(symbol, { request_type: "close_position" }, sale(900, "covered_call"));
+    await insertOrder(symbol, { request_type: "open_shares" }, { symbol, strategyKey: "shares", legs: [{ role: "stock", action: "BUY", symbol, quantity: 900, unitPrice: 50 }] });
+    expect(await sharesSoldByInFlightUncoveredShareSales(symbol)).toBe(300);
+    expect(await sharesSoldByInFlightUncoveredShareSales(`${symbol}X`)).toBe(0);
   });
 });
 
