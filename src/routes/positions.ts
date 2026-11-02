@@ -568,6 +568,50 @@ export interface UnrealizedPnlResult {
   // snapshot was captured, so the UI can label it "as of <date>" rather
   // than implying a live number.
   asOfDate: string | null;
+  // With asOfDate: the stock's close that session (daily_price_bars), so the screen can show the price the P&L was
+  // measured at beside the live mark. Null without asOfDate or without that day's bar.
+  underlyingCloseAsOf?: number | null;
+}
+
+interface PnlSnapshotFallback {
+  unrealizedPnl: string;
+  premiumPnl: string | null;
+  stockPnl: string | null;
+  snapshotDate: string;
+  underlyingClose: number | null;
+}
+
+/** Each position's latest P&L snapshot, with its stock's close on that snapshot's session. */
+async function loadPnlSnapshotFallbacks(positionIds: string[]): Promise<Map<string, PnlSnapshotFallback>> {
+  const fallbackByPositionId = new Map<string, PnlSnapshotFallback>();
+  if (positionIds.length === 0) return fallbackByPositionId;
+  const latestSnapshotRows = await db.raw(
+    `
+    SELECT DISTINCT ON (s.position_id)
+      s.position_id AS "positionId",
+      s.unrealized_pnl AS "unrealizedPnl",
+      s.premium_pnl AS "premiumPnl",
+      s.stock_pnl AS "stockPnl",
+      to_char(s.snapshot_date, 'YYYY-MM-DD') AS "snapshotDate",
+      b.close_price AS "underlyingClose"
+    FROM position_pnl_snapshots s
+    JOIN positions p ON p.id = s.position_id
+    LEFT JOIN daily_price_bars b ON b.ticker_id = p.ticker_id AND b.trading_date = s.snapshot_date
+    WHERE s.position_id = ANY(?)
+    ORDER BY s.position_id, s.snapshot_date DESC
+    `,
+    [positionIds],
+  );
+  for (const row of latestSnapshotRows.rows) {
+    fallbackByPositionId.set(row.positionId, {
+      unrealizedPnl: row.unrealizedPnl,
+      premiumPnl: row.premiumPnl,
+      stockPnl: row.stockPnl,
+      snapshotDate: row.snapshotDate,
+      underlyingClose: row.underlyingClose === null ? null : Number(row.underlyingClose),
+    });
+  }
+  return fallbackByPositionId;
 }
 
 // One stock quote request per distinct symbol among the positions' legs, plus
@@ -658,34 +702,7 @@ positionsRouter.get("/pnl", async (request, response) => {
   const underlyingPriceByPositionId = computeUnderlyingStockPriceByPosition(positionIds, symbolByPositionId, pricesByLegId);
 
   const positionIdsMissingLive = positionIds.filter((id) => unrealizedByPositionId[id] === null);
-  const fallbackByPositionId = new Map<
-    string,
-    { unrealizedPnl: string; premiumPnl: string | null; stockPnl: string | null; snapshotDate: string }
-  >();
-  if (positionIdsMissingLive.length > 0) {
-    const latestSnapshotRows = await db.raw(
-      `
-      SELECT DISTINCT ON (position_id)
-        position_id AS "positionId",
-        unrealized_pnl AS "unrealizedPnl",
-        premium_pnl AS "premiumPnl",
-        stock_pnl AS "stockPnl",
-        to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate"
-      FROM position_pnl_snapshots
-      WHERE position_id = ANY(?)
-      ORDER BY position_id, snapshot_date DESC
-      `,
-      [positionIdsMissingLive],
-    );
-    for (const row of latestSnapshotRows.rows) {
-      fallbackByPositionId.set(row.positionId, {
-        unrealizedPnl: row.unrealizedPnl,
-        premiumPnl: row.premiumPnl,
-        stockPnl: row.stockPnl,
-        snapshotDate: row.snapshotDate,
-      });
-    }
-  }
+  const fallbackByPositionId = await loadPnlSnapshotFallbacks(positionIdsMissingLive);
 
   const result: Record<string, UnrealizedPnlResult> = {};
   for (const positionId of positionIds) {
@@ -714,6 +731,7 @@ positionsRouter.get("/pnl", async (request, response) => {
           stockMarketValue: null,
           underlyingPrice: underlyingPriceByPositionId[positionId] ?? null,
           asOfDate: fallback.snapshotDate,
+          underlyingCloseAsOf: fallback.underlyingClose,
         }
       : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: underlyingPriceByPositionId[positionId] ?? null, asOfDate: null };
   }
@@ -837,31 +855,7 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
         // Same position_pnl_snapshots fallback as GET /pnl, applied only to
         // this first event.
         const positionIdsMissingLive = positionIds.filter((id) => unrealizedByPositionId[id] === null);
-        const fallbackByPositionId = new Map<string, { unrealizedPnl: string; premiumPnl: string | null; stockPnl: string | null; snapshotDate: string }>();
-        if (positionIdsMissingLive.length > 0) {
-          const latestSnapshotRows = await db.raw(
-            `
-            SELECT DISTINCT ON (position_id)
-              position_id AS "positionId",
-              unrealized_pnl AS "unrealizedPnl",
-              premium_pnl AS "premiumPnl",
-              stock_pnl AS "stockPnl",
-              to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate"
-            FROM position_pnl_snapshots
-            WHERE position_id = ANY(?)
-            ORDER BY position_id, snapshot_date DESC
-            `,
-            [positionIdsMissingLive],
-          );
-          for (const row of latestSnapshotRows.rows) {
-            fallbackByPositionId.set(row.positionId, {
-              unrealizedPnl: row.unrealizedPnl,
-              premiumPnl: row.premiumPnl,
-              stockPnl: row.stockPnl,
-              snapshotDate: row.snapshotDate,
-            });
-          }
-        }
+        const fallbackByPositionId = await loadPnlSnapshotFallbacks(positionIdsMissingLive);
 
         for (const positionId of positionIds) {
           const unrealizedPnl = unrealizedByPositionId[positionId] ?? null;
@@ -885,6 +879,7 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
                 stockMarketValue: null,
                 underlyingPrice: null,
                 asOfDate: fallback.snapshotDate,
+                underlyingCloseAsOf: fallback.underlyingClose,
               }
             : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: null, asOfDate: null };
         }

@@ -810,7 +810,21 @@ describe("GET /positions/pnl", () => {
     // The stock leg is priced, the call is not: the stock's gain alone would pass for the whole position's.
     fetchPricesPoolFirstMock.mockResolvedValue({ [legIds[0]!]: 55, [legIds[1]!]: null });
     const response = await call("GET", `/positions/pnl?positionIds=${positionId}`);
-    expect(response.json[positionId]).toEqual({ unrealizedPnl: 222.5, unrealizedPremiumPnl: 22.5, unrealizedStockPnl: 200, stockMarketValue: null, underlyingPrice: null, asOfDate: "2026-09-02" });
+    expect(response.json[positionId]).toEqual({ unrealizedPnl: 222.5, unrealizedPremiumPnl: 22.5, unrealizedStockPnl: 200, stockMarketValue: null, underlyingPrice: null, asOfDate: "2026-09-02", underlyingCloseAsOf: null });
+  });
+
+  it("gives the stock's close on the snapshot's session beside the fallback, so the screen shows the price the P&L was measured at", async () => {
+    const { positionId, legIds } = await createPosition("covered_call", [longStock(100), shortCall(1)]);
+    const { ticker_id: tickerId } = await testDb("positions").where({ id: positionId }).first("ticker_id");
+    await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: "2026-09-02", close_price: 155.51 });
+    await testDb("position_pnl_snapshots").insert({ position_id: positionId, snapshot_date: "2026-09-02", unrealized_pnl: -4911.7, premium_pnl: 1113.29, stock_pnl: -6024.99 });
+    fetchPricesPoolFirstMock.mockResolvedValue({ [legIds[0]!]: 157.5, [legIds[1]!]: null });
+    try {
+      const response = await call("GET", `/positions/pnl?positionIds=${positionId}`);
+      expect(response.json[positionId]).toMatchObject({ unrealizedPnl: -4911.7, asOfDate: "2026-09-02", underlyingCloseAsOf: 155.51 });
+    } finally {
+      await testDb("daily_price_bars").where({ ticker_id: tickerId }).del();
+    }
   });
 
   it("keeps the split null when the snapshot predates it, and answers all-null with no snapshot at all", async () => {
@@ -818,7 +832,7 @@ describe("GET /positions/pnl", () => {
     const withNothing = await createPosition("cash_secured_put", [shortPut(1)]);
     await testDb("position_pnl_snapshots").insert({ position_id: withOldSnapshot.positionId, snapshot_date: "2026-08-01", unrealized_pnl: -40, premium_pnl: null, stock_pnl: null });
     const response = await call("GET", `/positions/pnl?positionIds=${withOldSnapshot.positionId},${withNothing.positionId}`);
-    expect(response.json[withOldSnapshot.positionId]).toEqual({ unrealizedPnl: -40, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: null, asOfDate: "2026-08-01" });
+    expect(response.json[withOldSnapshot.positionId]).toEqual({ unrealizedPnl: -40, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: null, asOfDate: "2026-08-01", underlyingCloseAsOf: null });
     expect(response.json[withNothing.positionId]).toEqual({ unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: null, asOfDate: null });
   });
 
@@ -891,7 +905,7 @@ describe("GET /positions/pnl/stream", () => {
       await waitForAbort(signal);
     });
     const { events } = await readServerSentEvents(`/positions/pnl/stream?positionIds=${positionId}`, 3);
-    expect(events[0]).toEqual({ [positionId]: { unrealizedPnl: 222.5, unrealizedPremiumPnl: 22.5, unrealizedStockPnl: 200, stockMarketValue: null, underlyingPrice: null, asOfDate: "2026-09-02" } });
+    expect(events[0]).toEqual({ [positionId]: { unrealizedPnl: 222.5, unrealizedPremiumPnl: 22.5, unrealizedStockPnl: 200, stockMarketValue: null, underlyingPrice: null, asOfDate: "2026-09-02", underlyingCloseAsOf: null } });
     expect(events[1]).toEqual({ [positionId]: { unrealizedPnl: 400, unrealizedPremiumPnl: -100, unrealizedStockPnl: 500, stockMarketValue: 5500, underlyingPrice: 55, asOfDate: null } });
     // The third frame has no call price: the position keeps its last complete P&L instead of dropping to null, while the stock price still ticks.
     expect(events[2]).toEqual({ [positionId]: { ...events[1][positionId], underlyingPrice: 56 } });
@@ -905,7 +919,7 @@ describe("GET /positions/pnl/stream", () => {
       await waitForAbort(signal);
     });
     const { events } = await readServerSentEvents(`/positions/pnl/stream?positionIds=${positionId}`, 1);
-    expect(events[0]).toEqual({ [positionId]: { unrealizedPnl: -40, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: null, asOfDate: "2026-08-01" } });
+    expect(events[0]).toEqual({ [positionId]: { unrealizedPnl: -40, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: null, asOfDate: "2026-08-01", underlyingCloseAsOf: null } });
   });
 
   it("keeps ticking a cash-secured put's stock price while its option has no price, and never regresses it to null", async () => {
