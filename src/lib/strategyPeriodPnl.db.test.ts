@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import knexLibrary, { type Knex } from "knex";
 
 // Against the test database: the P&L Over Time chart's daily series. The database is shared with other test files, so
-// each test measures what its own positions add to the series, on days 20 and 19 back where nothing else writes.
+// each test measures what its own positions add to the series, on days 20 to 18 back where nothing else writes.
 vi.mock("../db/connection.js", async () => {
   const { config } = await import("dotenv");
   config();
@@ -36,7 +36,9 @@ async function seriesFor(strategyKey: string, dates: string[]): Promise<number[]
 
 afterAll(async () => {
   const positionIds = (await testDb("positions").whereIn("ticker_id", createdTickerIds).select("id")).map((row) => row.id);
+  await testDb("position_share_sources").whereIn("position_id", positionIds).del();
   await testDb("position_pnl_snapshots").whereIn("position_id", positionIds).del();
+  await testDb("daily_price_bars").whereIn("ticker_id", createdTickerIds).del();
   await testDb("trades").whereIn("position_leg_id", testDb("position_legs").whereIn("position_id", positionIds).select("id")).del();
   await testDb("position_legs").whereIn("position_id", positionIds).del();
   await testDb("positions").whereIn("id", positionIds).del();
@@ -84,5 +86,57 @@ describe("computeStrategyDailyPnlSeries", () => {
     // Day 1: 100 shares from $50 to $53 = +$300. Day 2: total P&L $200 + $240 = $440, so +$140 on the day.
     expect(after[0]! - before[0]!).toBeCloseTo(300, 6);
     expect(after[1]! - before[1]!).toBeCloseTo(140, 6);
+  });
+
+  it("INTC 30 Oct: a Covered Call handing 500 shares over at their $95.84 cost after a $65.76 close books the fall itself; the receiver counts from $65.76 (handed value −$3,008 per 100)", async () => {
+    const [dayOne, dayTwo, dayThree] = [await isoDateDaysAgo(20), await isoDateDaysAgo(19), await isoDateDaysAgo(18)];
+    const coveredCallBefore = await seriesFor("covered_call", [dayOne, dayTwo]);
+    const leftoverBefore = await seriesFor("unstructured", [dayThree]);
+    const tickerId = await createTicker();
+    await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: dayTwo, close_price: 65.76 });
+    // Handed over late on day 2 in New York (03:11 UTC on day 3), after the 22:30 UTC snapshot.
+    const handedAt = `${dayThree}T03:11:00Z`;
+    const [coveredCall] = await testDb("positions").insert({ strategy_key: "covered_call", ticker_id: tickerId, status: "closed" }).returning(["id"]);
+    await testDb("position_legs").insert([
+      { position_id: coveredCall.id, leg_type: "stock", side: "long", quantity: 100, multiplier: 1, entry_price: 95.84, entry_at: `${dayOne}T14:00:00Z`, exit_price: 95.84, exit_at: handedAt, ibkr_contract_id: "1" },
+      { position_id: coveredCall.id, leg_type: "option", side: "short", option_type: "call", strike_price: 98, expiry_date: dayTwo, quantity: 1, multiplier: 100, entry_price: 0.8, entry_at: `${dayOne}T14:00:00Z`, exit_price: 0, exit_at: handedAt, ibkr_contract_id: "2" },
+    ]);
+    await testDb("position_pnl_snapshots").insert({ position_id: coveredCall.id, snapshot_date: dayOne, unrealized_pnl: -500, captured_at: `${dayOne}T22:30:00Z` });
+    const [leftover] = await testDb("positions").insert({ strategy_key: "unstructured", ticker_id: tickerId, status: "open" }).returning(["id"]);
+    await testDb("position_legs").insert({ position_id: leftover.id, leg_type: "stock", side: "long", quantity: 100, multiplier: 1, entry_price: 95.84, entry_at: handedAt, ibkr_contract_id: "1" });
+    await testDb("position_share_sources").insert({ position_id: leftover.id, source_position_id: coveredCall.id, shares_received: 100, created_at: handedAt });
+    // Day 3 closes at $70: (70 − 95.84) × 100.
+    await testDb("position_pnl_snapshots").insert({ position_id: leftover.id, snapshot_date: dayThree, unrealized_pnl: -2584, captured_at: `${dayThree}T22:30:00Z` });
+
+    const coveredCallAfter = await seriesFor("covered_call", [dayOne, dayTwo]);
+    const leftoverAfter = await seriesFor("unstructured", [dayThree]);
+    expect(coveredCallAfter[0]! - coveredCallBefore[0]!).toBeCloseTo(-500, 6);
+    // Day 2: $80 premium + (65.76 − 95.84) × 100 = −$2,928 in all, less the −$500 already counted.
+    expect(coveredCallAfter[1]! - coveredCallBefore[1]!).toBeCloseTo(-2428, 6);
+    // Day 3: only the move from $65.76 to $70: (70 − 65.76) × 100.
+    expect(leftoverAfter[0]! - leftoverBefore[0]!).toBeCloseTo(424, 6);
+  });
+
+  it("an assigned Put at $100 with the stock at $90 shows the $1,000 assignment loss on its own day, beside its $150 premium; the leftover counts from $90", async () => {
+    const [dayOne, dayTwo, dayThree] = [await isoDateDaysAgo(20), await isoDateDaysAgo(19), await isoDateDaysAgo(18)];
+    const putBefore = await seriesFor("cash_secured_put", [dayOne, dayTwo]);
+    const leftoverBefore = await seriesFor("unstructured", [dayThree]);
+    const tickerId = await createTicker();
+    await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: dayTwo, close_price: 90 });
+    const assignedAt = `${dayTwo}T21:30:00Z`;
+    const [put] = await testDb("positions").insert({ strategy_key: "cash_secured_put", ticker_id: tickerId, status: "closed", close_reason: "assigned" }).returning(["id"]);
+    await testDb("position_legs").insert({ position_id: put.id, leg_type: "option", side: "short", option_type: "put", strike_price: 100, expiry_date: dayTwo, quantity: 1, multiplier: 100, entry_price: 1.5, entry_at: `${dayOne}T14:00:00Z`, exit_price: 0, exit_at: assignedAt, ibkr_contract_id: "3" });
+    await testDb("position_pnl_snapshots").insert({ position_id: put.id, snapshot_date: dayOne, unrealized_pnl: 50, captured_at: `${dayOne}T22:30:00Z` });
+    const [leftover] = await testDb("positions").insert({ strategy_key: "unstructured", ticker_id: tickerId, status: "open" }).returning(["id"]);
+    await testDb("position_legs").insert({ position_id: leftover.id, leg_type: "stock", side: "long", quantity: 100, multiplier: 1, entry_price: 100, entry_at: assignedAt, ibkr_contract_id: "4" });
+    await testDb("position_share_sources").insert({ position_id: leftover.id, source_position_id: put.id, shares_received: 100, created_at: assignedAt });
+    await testDb("position_pnl_snapshots").insert({ position_id: leftover.id, snapshot_date: dayThree, unrealized_pnl: -800, captured_at: `${dayThree}T22:30:00Z` });
+
+    const putAfter = await seriesFor("cash_secured_put", [dayOne, dayTwo]);
+    const leftoverAfter = await seriesFor("unstructured", [dayThree]);
+    // Day 2: $150 premium + (90 − 100) × 100 = −$850 in all, less the +$50 already counted.
+    expect(putAfter[1]! - putBefore[1]!).toBeCloseTo(-900, 6);
+    // Day 3: the stock from $90 to $92: (92 − 90) × 100.
+    expect(leftoverAfter[0]! - leftoverBefore[0]!).toBeCloseTo(200, 6);
   });
 });

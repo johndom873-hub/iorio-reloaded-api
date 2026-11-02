@@ -13,6 +13,14 @@ import { legRealizedPnlSql } from "./legRealizedPnlSql.js";
 // the opening day counts (from entry to that close), and a partial close's realized P&L is not netted against the whole
 // position's unrealized. Closes are dated in New York time, like the snapshots (lastCompletedSessionDate). A day/strategy
 // cell with no activity and no open position that day is legitimately 0, not missing.
+//
+// Shares handed from one position to another (position_share_sources; Marcelo 2026-11-02) move at their market value, not
+// at cost: the position handing them over is credited with value = (close of the hand-over's New York day − the cost they
+// are handed at) × shares received, and the receiving position counts from −value. The cost is the source's handed-over
+// stock legs' exit price (the carried cost) or, for an assigned cash-secured put, its strike. Each value is added to the
+// source's total and taken from the receiver's from the moment of the hand-over (snapshots captured after it, and their
+// closes), so the account total is unchanged and a day's price move shows on the position that held the shares that day.
+// Without a close or a share count for the link the value is 0, as before this rule.
 export interface StrategyDailyPnl {
   snapshotDate: string;
   strategyKey: string;
@@ -40,14 +48,40 @@ export async function computeStrategyDailyPnlSeries(days: number): Promise<Strat
       WHERE p.status = 'closed'
       GROUP BY lr.position_id
     ),
+    hand_overs AS (
+      SELECT pss.position_id AS receiver_id, pss.source_position_id AS source_id, pss.created_at AS handed_at,
+        COALESCE((mark.close_price - handed_cost.cost_per_share) * pss.shares_received, 0) AS handed_value
+      FROM position_share_sources pss
+      JOIN positions source ON source.id = pss.source_position_id
+      LEFT JOIN LATERAL (
+        SELECT b.close_price FROM daily_price_bars b
+        WHERE b.ticker_id = source.ticker_id AND b.close_price IS NOT NULL AND b.trading_date <= (pss.created_at AT TIME ZONE 'America/New_York')::date
+        ORDER BY b.trading_date DESC LIMIT 1
+      ) mark ON true
+      LEFT JOIN LATERAL (
+        SELECT CASE
+          WHEN source.strategy_key = 'cash_secured_put' THEN
+            (SELECT MAX(put_leg.strike_price) FROM position_legs put_leg WHERE put_leg.position_id = source.id AND put_leg.leg_type = 'option' AND put_leg.option_type = 'put' AND put_leg.side = 'short')
+          ELSE
+            (SELECT SUM(stock_leg.quantity * stock_leg.exit_price) / NULLIF(SUM(stock_leg.quantity), 0) FROM position_legs stock_leg
+             WHERE stock_leg.position_id = source.id AND stock_leg.leg_type = 'stock' AND stock_leg.exit_price IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM trades tr WHERE tr.position_leg_id = stock_leg.id AND tr.is_closing_trade))
+        END AS cost_per_share
+      ) handed_cost ON true
+    ),
     points AS (
       SELECT s.position_id, s.snapshot_date AS d,
-        s.unrealized_pnl + COALESCE((SELECT SUM(lr.realized) FROM leg_realized lr WHERE lr.position_id = s.position_id AND lr.exit_date <= s.snapshot_date), 0) AS total_pnl
+        s.unrealized_pnl + COALESCE((SELECT SUM(lr.realized) FROM leg_realized lr WHERE lr.position_id = s.position_id AND lr.exit_date <= s.snapshot_date), 0)
+          + COALESCE((SELECT SUM(h.handed_value) FROM hand_overs h WHERE h.source_id = s.position_id AND h.handed_at < s.captured_at), 0)
+          - COALESCE((SELECT SUM(h.handed_value) FROM hand_overs h WHERE h.receiver_id = s.position_id AND h.handed_at < s.captured_at), 0) AS total_pnl
       FROM position_pnl_snapshots s
       LEFT JOIN closed_positions cp ON cp.position_id = s.position_id
       WHERE cp.close_date IS NULL OR s.snapshot_date < cp.close_date
       UNION ALL
-      SELECT position_id, close_date, lifetime_realized FROM closed_positions
+      SELECT cp.position_id, cp.close_date, cp.lifetime_realized
+          + COALESCE((SELECT SUM(h.handed_value) FROM hand_overs h WHERE h.source_id = cp.position_id), 0)
+          - COALESCE((SELECT SUM(h.handed_value) FROM hand_overs h WHERE h.receiver_id = cp.position_id), 0)
+      FROM closed_positions cp
     ),
     position_daily AS (
       SELECT position_id, d, total_pnl - COALESCE(LAG(total_pnl) OVER (PARTITION BY position_id ORDER BY d), 0) AS daily_pnl
