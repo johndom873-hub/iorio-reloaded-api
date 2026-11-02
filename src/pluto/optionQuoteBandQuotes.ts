@@ -1,8 +1,8 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 
-// The CC + Put Ladder's live band quotes (option_quote_band_quotes): written by the Day Signals loop, read by the ladder's
-// look and by the band's next selection (each contract's last-seen implied volatility). Each ticker's newest finished cycle
+// Pluto's live band quotes (option_quote_band_quotes): written by the market quote loop, read by Vol Farmer v4's round
+// and by the band's next selection (each contract's last-seen implied volatility). Each ticker's newest finished cycle
 // (option_quote_band_cycles) says from when on the looks read them.
 
 export interface OptionQuoteBandQuoteWrite {

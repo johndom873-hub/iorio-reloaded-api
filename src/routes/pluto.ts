@@ -8,8 +8,8 @@ import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
 import { isAdminRequest } from "../lib/sessionUser.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
-import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, loadPlutoTickerSettingsAudit, PlutoTickerNotFoundError, PlutoTickerSettingsValidationError, updatePlutoAllocations, updatePlutoTickerSettings, type PlutoTickerSettingsField, type PlutoTickerSettingsInput } from "../pluto/tickerSettingsStore.js";
-import { loadLadderScreenSettings } from "../pluto/ladderSettings.js";
+import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, loadPlutoTickerSettingsAudit, PlutoTickerNotFoundError, PlutoTickerSettingsValidationError, updatePlutoAllocations, updatePlutoTickerSettings, type PlutoTickerSettingsField, type PlutoTickerSettingsInput } from "../pluto/tickerSettingsStore.js";
+import { loadPlutoTickerAllocations } from "../pluto/tickerAllocations.js";
 import { loadCurrentPlutoSettingsVersion } from "../pluto/settingsVersions.js";
 import { loadPlutoHowItWorks } from "../pluto/howItWorks.js";
 import { loadVolFarmerV4Screen } from "../pluto/volFarmerV4Screen.js";
@@ -261,11 +261,11 @@ plutoRouter.get("/settings/audit", async (request: Request, response: Response) 
   response.json(await loadPlutoSettingsAudit(Math.min(500, Number(request.query.limit) || 100)));
 });
 
-/** Every enabled ticker's settings, with the allocation each one gets after the equal split and the strategy it runs. */
+/** Every enabled ticker's settings, with the allocation each one gets after the equal split. */
 plutoRouter.get("/ticker-settings", async (_request: Request, response: Response) => {
   const enabledTickers = await loadEnabledPlutoTickerSettings();
   const effective = effectiveAllocationPctBySymbol(enabledTickers);
-  response.json(enabledTickers.map((ticker) => ({ ...ticker, effectiveAllocationPct: effective.get(ticker.symbol) ?? null, effectiveStrategy: effectivePlutoStrategy(ticker) })));
+  response.json(enabledTickers.map((ticker) => ({ ...ticker, effectiveAllocationPct: effective.get(ticker.symbol) ?? null })));
 });
 
 plutoRouter.get("/ticker-settings/audit", async (request: Request, response: Response) => {
@@ -282,7 +282,7 @@ plutoRouter.get("/ticker-settings/:symbol", async (request: Request, response: R
   response.json(settings);
 });
 
-/** Body: any of strategy, allocationPct, ladderSharesPct, ladderShockOverridePct, ladderRungs, ladderMinAbsDelta, ladderMaxAbsDelta; null puts a field back to the default. */
+/** Body: allocationPct; null puts it back to an equal share. */
 plutoRouter.put("/ticker-settings/:symbol", requireAdmin, async (request: Request, response: Response) => {
   const input = request.body;
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -293,7 +293,7 @@ plutoRouter.put("/ticker-settings/:symbol", requireAdmin, async (request: Reques
   const before = await loadPlutoTickerSettings(symbol);
   try {
     const settings = await updatePlutoTickerSettings(symbol, input as PlutoTickerSettingsInput, currentUserId(request));
-    const changed = (Object.keys(input) as (PlutoTickerSettingsField | "strategy")[]).filter((field) => before?.[field] !== settings[field]);
+    const changed = (Object.keys(input) as PlutoTickerSettingsField[]).filter((field) => before?.[field] !== settings[field]);
     if (changed.length > 0) {
       const who = await currentUserDisplayName(request);
       await recordPlutoEvent("settings_changed", { by: who, symbol: settings.symbol, fields: changed.map((field) => ({ field, from: before?.[field] ?? null, to: settings[field] })) });
@@ -357,21 +357,15 @@ plutoRouter.get("/vol-farmer-v4", async (_request: Request, response: Response) 
   response.json(await loadVolFarmerV4Screen());
 });
 
-/** Every number the "How it works" tab quotes for both strategies (src/pluto/howItWorks.ts). */
+/** Every number the "How it works" tab quotes (src/pluto/howItWorks.ts). */
 plutoRouter.get("/how-it-works", async (_request: Request, response: Response) => {
   response.json(await loadPlutoHowItWorks());
 });
 
-/** Every shortlisted ticker's CC + Put Ladder settings, as the ticker window shows them (the Tickers tab's columns). */
-plutoRouter.get("/ladder-settings", async (_request: Request, response: Response) => {
+/** Every shortlisted ticker's allocation, pot and Pluto's budget in dollars (the Tickers tab's columns). */
+plutoRouter.get("/ticker-allocations", async (_request: Request, response: Response) => {
   const rows: { symbol: string }[] = await db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").whereNull("se.removed_at").orderBy("t.symbol").select("t.symbol");
-  response.json(await loadLadderScreenSettings(rows.map((row) => row.symbol)));
-});
-
-/** The CC + Put Ladder's settings for one ticker (backtest names and units), with the fit checks' price, the budget in dollars and the recommended shock's source. */
-plutoRouter.get("/ladder-settings/:symbol", async (request: Request, response: Response) => {
-  const [settings] = await loadLadderScreenSettings([String(request.params.symbol).toUpperCase()]);
-  response.json(settings);
+  response.json(await loadPlutoTickerAllocations(rows.map((row) => row.symbol)));
 });
 
 /** The settings version a pass would record now: its number (in the order versions were first stored) and when the settings last changed. */

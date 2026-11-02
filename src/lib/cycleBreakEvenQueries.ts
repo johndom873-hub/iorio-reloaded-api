@@ -74,7 +74,7 @@ export async function fetchOpenCycleSummaryByTickerId(tickerIds: string[]): Prom
   return result;
 }
 
-/** The rows fetchOpenCycleSummaryByTickerId summarizes, per ticker: for a caller that adds rows of its own first (the live ladder's look book). */
+/** The rows fetchOpenCycleSummaryByTickerId summarizes, per ticker: for a caller that adds rows of its own first. */
 export async function fetchOpenCycleSummaryRowsByTickerId(tickerIds: string[]): Promise<Map<string, OpenCycleSummaryRows>> {
   const result = new Map<string, OpenCycleSummaryRows>();
   const uniqueTickerIds = [...new Set(tickerIds)];

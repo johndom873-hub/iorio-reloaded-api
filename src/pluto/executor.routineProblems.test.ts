@@ -60,7 +60,7 @@ describe("executePlutoOrder: a refusal at confirm", () => {
       if (path.endsWith("/confirm")) throw new InternalApiError(409, reason);
       return {};
     });
-    const result = await executePlutoOrder({ post } as never, settings, { kind: "ladder_open", actionId: "a9", symbol: "LADR", strategyKey: "cash_secured_put", contract: { expiry: "2026-11-20", strike: 45, right: "P", dte: 31 }, plan: { quantity: 1, limitPrice: 0.8, notional: 4_420, fullSizeQuantity: 1 }, buyEveryShare: false, reasons: ["CC + Put Ladder."], scoresSnapshot: {} });
+    const result = await executePlutoOrder({ post } as never, settings, { kind: "strategy_open", actionId: "a9", symbol: "LADR", strategyKey: "cash_secured_put", contract: { expiry: "2026-11-20", strike: 45, right: "P", dte: 31 }, plan: { quantity: 1, limitPrice: 0.8, notional: 4_420, fullSizeQuantity: 1 }, buyEveryShare: false, reasons: ["CC + Put Ladder."], scoresSnapshot: {} });
     expect(result).toEqual({ outcome: "blocked", orderId: "o9", detail: `confirm refused: ${reason}` });
     expect(post).toHaveBeenCalledWith("/positions/orders/o9/cancel", {});
     expect(tripPlutoBreaker).not.toHaveBeenCalled();

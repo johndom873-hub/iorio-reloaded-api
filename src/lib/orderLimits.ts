@@ -33,8 +33,8 @@ import { formatWholeDollars } from "./formatWholeDollars.js";
 // A LEAPS buy (Marcelo 2026-10-27) adds the premium it pays, premium × 100 × quantity: its maximum loss, and the cash it takes.
 // A share purchase (Vol Farmer v4's rebalancing, Marcelo 2026-10-31) adds what it pays, shares × limit price.
 //
-// A CC + Put Ladder order also gets the ladder's book-wide cap: every ladder ticker's exposure and working orders together, after
-// the order, at most Pluto's capital budget (ladderBookCapitalVerdict, Marcelo 2026-10-21).
+// A Pluto strategy order also gets the book-wide cap: every Pluto ticker's exposure and working orders together, after
+// the order, at most Pluto's capital budget (strategyBookCapitalVerdict, Marcelo 2026-10-21).
 //
 // A trader's order also gets the traders' capital cap (capitalOutsidePluto.ts, Marcelo 2026-10-17) when the caller passes
 // loadTraderCapital.
@@ -68,19 +68,19 @@ export interface OrderLimitsInput {
   /** The order being evaluated, left out of the in-flight totals (it is not in flight against itself). */
   excludeOrderRequestId?: string;
   /**
-   * A CC + Put Ladder order (Marcelo 2026-10-15): the pot cap replaces the max order size and max concentration limits (the
-   * cash reserve stays), and a covered call's shares are those its stock leg buys (the ladder can buy every share even
+   * A Pluto strategy order (Marcelo 2026-10-15): the pot cap replaces the max order size and max concentration limits (the
+   * cash reserve stays), and a covered call's shares are those its stock leg buys (the strategy can buy every share even
    * with uncovered ones held), not the shortfall against the uncovered shares.
    */
-  ladder?: { potFraction: number | null; stockSharesBought: number; book: LadderBookInput };
+  strategy?: { potFraction: number | null; stockSharesBought: number; book: StrategyBookInput };
   /** A built covered-call open with a stock leg: the shares that leg buys, counted in place of the shortfall against uncovered shares held. */
   stockSharesBought?: number;
   /** A trader's order: loads the capital cap's figures (capitalOutsidePluto.ts's loadTraderCapitalFigures). */
   loadTraderCapital?: () => Promise<TraderCapitalFigures>;
 }
 
-/** The CC + Put Ladder's book (Marcelo 2026-10-21): every ticker the ladder trades, under Pluto's capital budget together. */
-export interface LadderBookInput {
+/** Pluto's book (Marcelo 2026-10-21): every ticker Pluto trades, under Pluto's capital budget together. */
+export interface StrategyBookInput {
   /** Pluto's enabled tickers. */
   symbols: readonly string[];
   /** Pluto's capital budget as a share of the account (0.5 = 50%). */
@@ -103,10 +103,10 @@ export interface OrderLimitsDetails {
   cashReserveAfterPct: number;
   inFlightNotional: number;
   limits: { maxOrderPctOfPortfolio: number; maxConcentrationPerTickerPct: number; minCashReservePct: number };
-  /** A ladder order's pot in dollars (allocation × capital budget × net liquidation value); absent for every other order. */
-  ladderPotDollars?: number;
-  /** A ladder order: the book's committed capital after it, and Pluto's capital budget in dollars. */
-  ladderBook?: LadderBookCapitalVerdict;
+  /** A strategy order's pot in dollars (allocation × capital budget × net liquidation value); absent for every other order. */
+  strategyPotDollars?: number;
+  /** A strategy order: the book's committed capital after it, and Pluto's capital budget in dollars. */
+  strategyBook?: StrategyBookCapitalVerdict;
   /** A trader's order: what traders may use outside Pluto, what is in use before this order, and Pluto's budget %. */
   traderCapital?: { availableDollars: number; inUseDollars: number; plutoCapitalBudgetPct: number };
 }
@@ -217,7 +217,7 @@ async function loadInFlightNotionals(symbol: string, excludeOrderRequestId: stri
 }
 
 /**
- * The capital the given tickers commit (the CC + Put Ladder's book): each ticker's exposure as the pot check counts it
+ * The capital the given tickers commit (Pluto's book): each ticker's exposure as the pot check counts it
  * (computeTickerExposure) plus the notional of the orders still in flight on them, `excludeOrderRequestId` left out.
  */
 export async function loadCommittedCapitalOnSymbols(symbols: readonly string[], excludeOrderRequestId?: string): Promise<number> {
@@ -227,7 +227,7 @@ export async function loadCommittedCapitalOnSymbols(symbols: readonly string[], 
   return exposures.reduce((sum, exposure) => sum + exposure, 0) + inFlightNotional;
 }
 
-export interface LadderBookCapitalVerdict {
+export interface StrategyBookCapitalVerdict {
   committedBeforeDollars: number;
   committedAfterDollars: number;
   /** Pluto's capital budget in dollars: budgetFraction × net liquidation value. */
@@ -236,24 +236,24 @@ export interface LadderBookCapitalVerdict {
 }
 
 /**
- * Pure A1 (Marcelo 2026-10-21): a ladder opening order goes only if, after it, what the ladder's tickers commit together is at
+ * Pure A1 (Marcelo 2026-10-21): a strategy opening order goes only if, after it, what Pluto's tickers commit together is at
  * most Pluto's capital budget (budget % × net liquidation value). The round's own check and the order gate's at confirm.
  */
-export function ladderBookCapitalVerdict(input: { committedBeforeDollars: number; orderNotional: number; budgetFraction: number; netLiquidationValue: number }): LadderBookCapitalVerdict {
+export function strategyBookCapitalVerdict(input: { committedBeforeDollars: number; orderNotional: number; budgetFraction: number; netLiquidationValue: number }): StrategyBookCapitalVerdict {
   const capDollars = input.budgetFraction * input.netLiquidationValue;
   const committedAfterDollars = input.committedBeforeDollars + input.orderNotional;
   // An order that adds nothing (a Call on shares already held) passes even when the book is already over: it only covers shares.
   return { committedBeforeDollars: input.committedBeforeDollars, committedAfterDollars, capDollars, fits: input.orderNotional <= 0 || committedAfterDollars <= capDollars };
 }
 
-/** The refusal's wording, for the order gate and the ladder's notes. */
-export function describeLadderBookCapitalRefusal(verdict: LadderBookCapitalVerdict, budgetFraction: number): string {
+/** The refusal's wording, for the order gate and the round's notes. */
+export function describeStrategyBookCapitalRefusal(verdict: StrategyBookCapitalVerdict, budgetFraction: number): string {
   return `Pluto's tickers would commit ${formatWholeDollars(verdict.committedAfterDollars)} together, above Pluto's capital budget of ${formatWholeDollars(verdict.capDollars)} (${formatPct(budgetFraction)} of portfolio value); ${formatWholeDollars(verdict.committedBeforeDollars)} is already committed, counting orders still working.`;
 }
 
 async function computeOrderNotionalForInput(input: OrderLimitsInput, spotPrice: number): Promise<number> {
   const needsShares = input.strategyKey === "covered_call" && input.rollFromStrike === undefined;
-  if (needsShares && input.ladder) return input.ladder.stockSharesBought * Math.max(0, spotPrice - input.premium);
+  if (needsShares && input.strategy) return input.strategy.stockSharesBought * Math.max(0, spotPrice - input.premium);
   if (needsShares && input.stockSharesBought !== undefined) return input.stockSharesBought * Math.max(0, spotPrice - input.premium);
   return computeOrderNotional(input, spotPrice, needsShares ? await fetchAvailableUncoveredShares(input.tickerId) : 0);
 }
@@ -266,9 +266,9 @@ export async function evaluateOrderLimits(input: OrderLimitsInput): Promise<Orde
   let spotPrice: number | null;
   let inFlight: InFlightTotals;
   let traderCapital: TraderCapitalFigures | undefined;
-  let ladderBookCommitted: number | undefined;
+  let strategyBookCommitted: number | undefined;
   try {
-    [account, cashLockedInCsps, existingTickerExposure, settings, spotPrice, inFlight, traderCapital, ladderBookCommitted] = await Promise.all([
+    [account, cashLockedInCsps, existingTickerExposure, settings, spotPrice, inFlight, traderCapital, strategyBookCommitted] = await Promise.all([
       fetchAccountSummary(),
       computeCashLockedInCsps(),
       computeTickerExposure(input.symbol),
@@ -276,7 +276,7 @@ export async function evaluateOrderLimits(input: OrderLimitsInput): Promise<Orde
       resolveSpotPrice(input),
       loadInFlightNotionals(input.symbol, input.excludeOrderRequestId),
       input.loadTraderCapital ? input.loadTraderCapital() : Promise.resolve(undefined),
-      input.ladder ? loadCommittedCapitalOnSymbols(input.ladder.book.symbols, input.excludeOrderRequestId) : Promise.resolve(undefined),
+      input.strategy ? loadCommittedCapitalOnSymbols(input.strategy.book.symbols, input.excludeOrderRequestId) : Promise.resolve(undefined),
     ]);
   } catch (error) {
     return { blocked: true, reasons: [`Could not verify position limits: ${error instanceof Error ? error.message : String(error)}`] };
@@ -292,8 +292,8 @@ export async function evaluateOrderLimits(input: OrderLimitsInput): Promise<Orde
   }
 
   const orderNotional = await computeOrderNotionalForInput(input, spotPrice);
-  const ladderBook = input.ladder && ladderBookCommitted !== undefined ? { committedBeforeDollars: ladderBookCommitted, budgetFraction: input.ladder.book.budgetFraction } : undefined;
-  return evaluateOrderLimitFigures({ symbol: input.symbol, orderNotional, totalPortfolioValue, totalCashValue: account.totalCashValue, cashLockedInCsps, existingTickerExposure, inFlight, settings, ladderPotFraction: input.ladder?.potFraction, ladderBook, traderCapital });
+  const strategyBook = input.strategy && strategyBookCommitted !== undefined ? { committedBeforeDollars: strategyBookCommitted, budgetFraction: input.strategy.book.budgetFraction } : undefined;
+  return evaluateOrderLimitFigures({ symbol: input.symbol, orderNotional, totalPortfolioValue, totalCashValue: account.totalCashValue, cashLockedInCsps, existingTickerExposure, inFlight, settings, strategyPotFraction: input.strategy?.potFraction, strategyBook, traderCapital });
 }
 
 export interface OrderLimitFigures {
@@ -307,12 +307,12 @@ export interface OrderLimitFigures {
   inFlight: InFlightTotals;
   settings: Pick<TradingSettings, "maxOrderPctOfPortfolio" | "maxConcentrationPerTickerPct" | "minCashReservePct">;
   /**
-   * A Pluto strategy's order (the CC + Put Ladder's, Vol Farmer v4's): its pot as a share of the account, the pot cap in
+   * A Pluto strategy's order (Vol Farmer v4's): its pot as a share of the account, the pot cap in
    * place of the max order size and concentration limits; null for an order with no pot cap (a v4 LEAPS), which gets the book's alone.
    */
-  ladderPotFraction?: number | null;
-  /** A CC + Put Ladder order: what the ladder's tickers commit before it (counting orders still working) and Pluto's capital budget as a share of the account. */
-  ladderBook?: { committedBeforeDollars: number; budgetFraction: number };
+  strategyPotFraction?: number | null;
+  /** A Pluto strategy order: what Pluto's tickers commit before it (counting orders still working) and Pluto's capital budget as a share of the account. */
+  strategyBook?: { committedBeforeDollars: number; budgetFraction: number };
   /** A trader's order: the traders' capital cap applies on top of the other limits. */
   traderCapital?: TraderCapitalFigures;
 }
@@ -332,13 +332,13 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
   const orderSharePct = orderNotional / totalPortfolioValue;
   const tickerExposureAfter = existingTickerExposure + inFlight.tickerNotional + orderNotional;
   const concentrationAfterPct = tickerExposureAfter / totalPortfolioValue;
-  const ladderPotDollars = figures.ladderPotFraction === undefined || figures.ladderPotFraction === null ? undefined : figures.ladderPotFraction * totalPortfolioValue;
-  const ladderBook = figures.ladderBook && ladderBookCapitalVerdict({ ...figures.ladderBook, orderNotional, netLiquidationValue: totalPortfolioValue });
-  if (figures.ladderPotFraction !== undefined) {
-    if (ladderPotDollars !== undefined && tickerExposureAfter > ladderPotDollars) {
-      reasons.push(`${figures.symbol} would be ${formatWholeDollars(tickerExposureAfter)}, above its Pluto pot of ${formatWholeDollars(ladderPotDollars)} (${formatPct(figures.ladderPotFraction!)} of portfolio value)${workingOrdersNote}.`);
+  const strategyPotDollars = figures.strategyPotFraction === undefined || figures.strategyPotFraction === null ? undefined : figures.strategyPotFraction * totalPortfolioValue;
+  const strategyBook = figures.strategyBook && strategyBookCapitalVerdict({ ...figures.strategyBook, orderNotional, netLiquidationValue: totalPortfolioValue });
+  if (figures.strategyPotFraction !== undefined) {
+    if (strategyPotDollars !== undefined && tickerExposureAfter > strategyPotDollars) {
+      reasons.push(`${figures.symbol} would be ${formatWholeDollars(tickerExposureAfter)}, above its Pluto pot of ${formatWholeDollars(strategyPotDollars)} (${formatPct(figures.strategyPotFraction!)} of portfolio value)${workingOrdersNote}.`);
     }
-    if (ladderBook && !ladderBook.fits) reasons.push(describeLadderBookCapitalRefusal(ladderBook, figures.ladderBook!.budgetFraction));
+    if (strategyBook && !strategyBook.fits) reasons.push(describeStrategyBookCapitalRefusal(strategyBook, figures.strategyBook!.budgetFraction));
   } else {
     if (orderNotional > limitInDollars(settings.maxOrderPctOfPortfolio)) {
       reasons.push(`This order is ${formatPct(orderSharePct)} of portfolio value, above the ${settings.maxOrderPctOfPortfolio}% max order size.`);
@@ -377,8 +377,8 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
       cashReserveAfterPct,
       inFlightNotional: inFlight.totalNotional,
       limits: { maxOrderPctOfPortfolio: settings.maxOrderPctOfPortfolio, maxConcentrationPerTickerPct: settings.maxConcentrationPerTickerPct, minCashReservePct: settings.minCashReservePct },
-      ...(ladderPotDollars === undefined ? {} : { ladderPotDollars }),
-      ...(ladderBook ? { ladderBook } : {}),
+      ...(strategyPotDollars === undefined ? {} : { strategyPotDollars }),
+      ...(strategyBook ? { strategyBook } : {}),
       ...(traderCapitalDetails === undefined ? {} : { traderCapital: traderCapitalDetails }),
     },
   };

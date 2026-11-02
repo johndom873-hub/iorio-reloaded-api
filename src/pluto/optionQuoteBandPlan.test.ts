@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import type { OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
-import { bandQuoteOwnImpliedVolatility, expiriesWithoutPreviousSessionVolume, lastSeenImpliedVolatilities, nextListedExpiryAfter, optionQuoteBandDayUniverse, planOptionQuoteBand, type LadderClock } from "./optionQuoteBandPlan.js";
+import { bandQuoteOwnImpliedVolatility, expiriesWithoutPreviousSessionVolume, lastSeenImpliedVolatilities, nextListedExpiryAfter, optionQuoteBandDayUniverse, planOptionQuoteBand, type OptionQuoteBandClock } from "./optionQuoteBandPlan.js";
 
-const clock: LadderClock = { todayIso: "2026-10-20", closeMinutesEt: 16 * 60, riskFreeRate: 0.04 };
+const clock: OptionQuoteBandClock = { todayIso: "2026-10-20", closeMinutesEt: 16 * 60, riskFreeRate: 0.04 };
 const expiry = "2026-11-20";
 const years = yearsBetweenIsoDates(clock.todayIso, expiry);
 // Pluto's 10:00 fit: the 20 Nov forward 100.10 with the stock at 100.

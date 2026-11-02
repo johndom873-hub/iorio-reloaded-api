@@ -4,7 +4,7 @@ import { sharesPerContract } from "../backtest/engine/backtestBook.js";
 import { volFarmerV2BreakEven, type VolFarmerV2Position } from "../backtest/engine/volFarmerV2Steps.js";
 import { volFarmerV4MemoryFromStored, type VolFarmerV4Memory, type VolFarmerV4OrderKind } from "./volFarmerV4LiveBook.js";
 import type { VolFarmerV4RoundFigures } from "./volFarmerV4LookLoader.js";
-import { effectivePlutoStrategy, loadEnabledPlutoTickerSettings } from "./tickerSettingsStore.js";
+import { loadEnabledPlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // The Pluto screen's Vol Farmer v4 card: each enabled ticker running v4, its two positions and LEAPS as v4's memory
 // counts them (pluto_vol_farmer_v4_cycles), the orders still working and what its last round said.
@@ -53,7 +53,7 @@ interface CycleRow {
 }
 
 export async function loadVolFarmerV4Screen(connection: Knex = db): Promise<VolFarmerV4ScreenTicker[]> {
-  const tickers = (await loadEnabledPlutoTickerSettings(connection)).filter((ticker) => effectivePlutoStrategy(ticker) === "vol_farmer_v4");
+  const tickers = (await loadEnabledPlutoTickerSettings(connection));
   if (tickers.length === 0) return [];
   const rows: CycleRow[] = await connection("pluto_vol_farmer_v4_cycles").whereIn("ticker_id", tickers.map((ticker) => ticker.tickerId)).select("ticker_id", "memory", "adopted_at", "last_round_at", "last_round_notes", "last_round_figures");
   const rowByTickerId = new Map(rows.map((row) => [row.ticker_id, row]));

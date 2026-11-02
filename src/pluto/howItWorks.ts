@@ -1,29 +1,19 @@
 import { baselineMaxVolumeShare, baselineMinimumBid } from "../backtest/engine/baselineSaleSteps.js";
-import { ladderBudget, ladderRungCollateral, ladderStrikeCap } from "../backtest/engine/backtestBaselineLadder.js";
 import { volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap } from "../backtest/engine/volFarmerV2Steps.js";
 import { flatStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { tradingSessionsPerYear } from "../lib/tradingSessionsHeld.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
-import { ladderFixedBaselineChoices } from "./ladderSettings.js";
 import { closeMarginMinutes } from "./sessionSchedule.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { tickerPotFraction } from "./tickerSettingsStore.js";
 
-// The numbers Pluto's "How it works" tab quotes (approved mockup https://claude.ai/artifact/TYdARe8Sa6RuF5Lb1E1s2b; the
-// CC + Put Ladder and Vol Farmer v4, v2 from 2026-10-27 to 2026-10-31): Pluto's live settings and the code's own constants, read from
-// where the strategies read them, so the tab cannot drift from what runs. The worked examples are computed by the
-// strategies' own functions on fixed example inputs. Percentages are in percent (5 = 5%), deltas as fractions, money in
-// dollars.
-
-/** The ladder example's fixed inputs: a $2M account, a 20% allocation, shares bought at $104 with a $100 break-even. */
-const ladderExampleAccountValue = 2_000_000;
-const ladderExampleAllocationPct = 20;
-const ladderExampleAverageCost = 104;
-const ladderExampleBreakEven = 100;
-const ladderExampleShockPct = 70;
+// The numbers Pluto's "How it works" tab quotes (approved mockup https://claude.ai/artifact/TYdARe8Sa6RuF5Lb1E1s2b; Vol
+// Farmer v4, the CC + Put Ladder's part retired 2026-11-02): Pluto's live settings and the code's own constants, read from
+// where the strategy reads them, so the tab cannot drift from what runs. The worked example is computed by the strategy's
+// own functions on fixed example inputs. Percentages are in percent (5 = 5%), deltas as fractions, money in dollars.
 
 /**
- * Vol Farmer v4's example: the same account and allocation, the stock at $100, a first break-even of $96 after a fall, IBKR's
+ * Vol Farmer v4's example: a $2M account, a 20% allocation, the stock at $100, a first break-even of $96 after a fall, IBKR's
  * IV at 60%; the first position rebalanced after a fall to $90 and a rise to $110.
  */
 const volFarmerV4ExampleStockPrice = 100;
@@ -31,12 +21,8 @@ const volFarmerV4ExampleFirstBreakEven = 96;
 const volFarmerV4ExampleImpliedVolatility = 0.6;
 const volFarmerV4ExampleFallPrice = 90;
 const volFarmerV4ExampleRisePrice = 110;
-
-export interface PlutoHowItWorksLadderRung {
-  rung: number;
-  /** The highest strike the rung's Put may have, with every earlier rung an open Put on its full share of the reserve. */
-  strikeCap: number;
-}
+const volFarmerV4ExampleAccountValue = 2_000_000;
+const volFarmerV4ExampleAllocationPct = 20;
 
 export interface PlutoHowItWorks {
   shared: {
@@ -51,7 +37,7 @@ export interface PlutoHowItWorks {
     /** A premium yield a year is the sale's return × this ÷ the trading sessions it is held (tradingSessionsHeld.ts). */
     premiumYieldSessionsPerYear: number;
   };
-  /** The Safety Limits: they hold every Pluto strategy, both strategies' orders counted together (safetyLimits.ts). */
+  /** The Safety Limits: they hold Vol Farmer v4's orders (safetyLimits.ts). */
   safetyLimits: {
     maxWorkingOrdersPerTicker: number;
     maxOrdersPerTickerPerDay: number;
@@ -62,43 +48,8 @@ export interface PlutoHowItWorks {
     spyStressBreakerPct: number;
     tickerCooldownMinutes: number;
   };
-  ladder: {
-    /** The Calls' |delta| range; the ladder's Puts have none (the rung's cap bounds them). */
-    minAbsDelta: number;
-    maxAbsDelta: number;
-    minDte: number;
-    maxDte: number;
-    maxSpreadPctOfMid: number;
-    minimumBid: number;
-    maxVolumeSharePct: number;
-    rungs: number;
-    sharesPct: number;
-    shockMinPct: number;
-    shockMaxPct: number;
-    shockNoHistoryPct: number;
-    shockLookbackYears: number;
-    /** A ladder Put is sold instead of the best Call when its premium yield beats the Call's by more than this. */
-    putOverCallYieldMarginPct: number;
-    /** The entry (a Cash-Secured Put or a Covered Call, whichever ranks higher) needs a premium yield above this, % a year. */
-    minEntryYieldPct: number;
-    /** A band quote older than this is left out of the look. */
-    maxQuoteAgeMinutes: number;
-    example: {
-      accountValue: number;
-      allocationPct: number;
-      pot: number;
-      sharesBudget: number;
-      reserve: number;
-      rungCollateral: number;
-      averageCost: number;
-      breakEven: number;
-      shockPct: number;
-      floor: number;
-      rungs: PlutoHowItWorksLadderRung[];
-    };
-  };
   volFarmerV4: {
-    /** The Calls' |delta| range, spread limit and bid minimum; the volume share as the ladder's. */
+    /** The Calls' |delta| range, spread limit and bid minimum, and the share of the previous session's volume an order may take. */
     callMinAbsDelta: number;
     callMaxAbsDelta: number;
     maxSpreadPctOfMid: number;
@@ -161,19 +112,7 @@ const percent = (fraction: number) => Math.round(fraction * 1_000_000) / 10_000;
 
 /** Pure: the tab's numbers from Pluto's settings, the platform's unfilled-order sweep and the code's constants. */
 export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfilledOrderCancelMinutes: number }): PlutoHowItWorks {
-  const pot = ladderExampleAccountValue * tickerPotFraction(ladderExampleAllocationPct, settings);
-  const { sharesBudget, reserve } = ladderBudget(pot, settings.ladderSharesPct);
-  const rungCollateral = ladderRungCollateral(reserve, 0, settings.ladderRungs);
-  const shockPct = Math.min(settings.ladderShockMaxPct, Math.max(settings.ladderShockMinPct, ladderExampleShockPct));
-  const floor = ladderExampleAverageCost * (1 - shockPct / 100);
-  const rungs: PlutoHowItWorksLadderRung[] = [];
-  for (let rung = 1; rung <= settings.ladderRungs; rung += 1) {
-    const committed = (rung - 1) * rungCollateral;
-    const strikeCap = ladderStrikeCap({ breakEven: ladderExampleBreakEven, floor, committed, rungCollateral: ladderRungCollateral(reserve, committed, settings.ladderRungs), reserve });
-    if (strikeCap !== null) rungs.push({ rung, strikeCap });
-  }
-
-
+  const pot = volFarmerV4ExampleAccountValue * tickerPotFraction(volFarmerV4ExampleAllocationPct, settings);
   const volFarmerV4Step = settings.volFarmerV4StepRule === "implied_move_at_put_sale" ? volFarmerV2ImpliedMoveStep(volFarmerV4ExampleImpliedVolatility).stepPct : settings.volFarmerV4StepBelowFirstBreakEvenPct;
   // A lot's cost at a price, as the steps count it (the shares and their commission).
   const lotCostAt = (price: number) => price * 100 + flatStockCommissionEstimator.perShareDollars("buy") * 100;
@@ -213,25 +152,6 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       spyStressBreakerPct: settings.safetySpyStressBreakerPct,
       tickerCooldownMinutes: settings.safetyTickerCooldownMinutes,
     },
-    ladder: {
-      minAbsDelta: settings.ladderMinAbsDelta,
-      maxAbsDelta: settings.ladderMaxAbsDelta,
-      minDte: settings.ladderMinDte,
-      maxDte: settings.ladderMaxDte,
-      maxSpreadPctOfMid: settings.ladderMaxSpreadPctOfMid,
-      minimumBid: baselineMinimumBid,
-      maxVolumeSharePct: percent(baselineMaxVolumeShare),
-      rungs: settings.ladderRungs,
-      sharesPct: settings.ladderSharesPct,
-      shockMinPct: settings.ladderShockMinPct,
-      shockMaxPct: settings.ladderShockMaxPct,
-      shockNoHistoryPct: settings.ladderShockNoHistoryPct,
-      shockLookbackYears: settings.ladderShockLookbackYears,
-      putOverCallYieldMarginPct: ladderFixedBaselineChoices.ladderPutYieldMarginPct,
-      minEntryYieldPct: ladderFixedBaselineChoices.minCallYieldPct,
-      maxQuoteAgeMinutes: settings.maxQuoteAgeMinutes,
-      example: { accountValue: ladderExampleAccountValue, allocationPct: ladderExampleAllocationPct, pot, sharesBudget, reserve, rungCollateral, averageCost: ladderExampleAverageCost, breakEven: ladderExampleBreakEven, shockPct, floor, rungs },
-    },
     volFarmerV4: {
       callMinAbsDelta: settings.volFarmerV4CallMinAbsDelta,
       callMaxAbsDelta: settings.volFarmerV4CallMaxAbsDelta,
@@ -257,8 +177,8 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       trimsSell: settings.volFarmerV4TrimsSell,
       topUpCapPct: settings.volFarmerV4TopUpCapPct,
       example: {
-        accountValue: ladderExampleAccountValue,
-        allocationPct: ladderExampleAllocationPct,
+        accountValue: volFarmerV4ExampleAccountValue,
+        allocationPct: volFarmerV4ExampleAllocationPct,
         pot,
         stockPrice: volFarmerV4ExampleStockPrice,
         lots,

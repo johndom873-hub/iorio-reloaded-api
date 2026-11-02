@@ -4,8 +4,8 @@ import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import knexLibrary, { type Knex } from "knex";
 
-// Pluto's per-ticker settings and the ladder's settings reader against the real test database, through the routes:
-// stored, read back, audited, and the 100% allocation rule.
+// Pluto's per-ticker settings (the allocation) and the Tickers tab's allocations and pots against the real test database,
+// through the routes: stored, read back, audited, and the 100% allocation rule.
 vi.mock("../db/connection.js", async () => {
   const { config } = await import("dotenv");
   config();
@@ -77,38 +77,37 @@ describe("ticker settings routes", () => {
   it("reads a ticker with nothing set as all defaults, and 404s an unknown symbol", async () => {
     const read = await call("GET", `/ticker-settings/${enabledSymbol.toLowerCase()}`);
     expect(read.status).toBe(200);
-    expect(read.json).toMatchObject({ symbol: enabledSymbol, allocationPct: null, ladderSharesPct: null, ladderShockOverridePct: null, updatedAt: null });
+    expect(read.json).toEqual({ symbol: enabledSymbol, tickerId: tickerIds[0], allocationPct: null, updatedAt: null, updatedByUserId: null });
     expect((await call("GET", "/ticker-settings/NOSUCHTICKERX")).status).toBe(404);
     expect((await call("PUT", "/ticker-settings/NOSUCHTICKERX", { allocationPct: 10 })).status).toBe(404);
   });
 
-  it("stores, reads back and audits each changed field; null puts one back to the default", async () => {
-    const saved = await call("PUT", `/ticker-settings/${enabledSymbol}`, { allocationPct: 12.5, ladderSharesPct: 30, ladderShockOverridePct: 70 });
+  it("stores, reads back and audits the allocation; null puts it back to an equal share", async () => {
+    const saved = await call("PUT", `/ticker-settings/${enabledSymbol}`, { allocationPct: 20 });
     expect(saved.status).toBe(200);
-    expect(saved.json).toMatchObject({ allocationPct: 12.5, ladderSharesPct: 30, ladderShockOverridePct: 70, updatedByUserId: userId });
-    const stored = await testDb("pluto_ticker_settings").where({ ticker_id: tickerIds[0] }).first();
-    expect([Number(stored.allocation_pct), Number(stored.ladder_shares_pct), Number(stored.ladder_shock_override_pct)]).toEqual([12.5, 30, 70]);
-
-    const cleared = await call("PUT", `/ticker-settings/${enabledSymbol}`, { ladderShockOverridePct: null, ladderSharesPct: 30 });
-    expect(cleared.json).toMatchObject({ allocationPct: 12.5, ladderSharesPct: 30, ladderShockOverridePct: null });
+    expect(saved.json).toMatchObject({ allocationPct: 20, updatedByUserId: userId });
+    expect(Number((await testDb("pluto_ticker_settings").where({ ticker_id: tickerIds[0] }).first()).allocation_pct)).toBe(20);
+    expect((await call("PUT", `/ticker-settings/${enabledSymbol}`, { allocationPct: null })).json).toMatchObject({ allocationPct: null });
+    expect((await call("PUT", `/ticker-settings/${enabledSymbol}`, { allocationPct: 12.5 })).json).toMatchObject({ allocationPct: 12.5 });
 
     const audit = await call("GET", `/ticker-settings/audit?symbol=${enabledSymbol}`);
     const rows = audit.json as unknown as { field: string; oldValue: string | null; newValue: string | null; userDisplayName: string }[];
     expect(rows.map((row) => [row.field, row.oldValue, row.newValue])).toEqual([
-      ["ladderShockOverridePct", "70", null],
-      ["ladderShockOverridePct", null, "70"],
-      ["ladderSharesPct", null, "30"],
       ["allocationPct", null, "12.5"],
+      ["allocationPct", "20", null],
+      ["allocationPct", null, "20"],
     ]);
     expect(rows[0]?.userDisplayName).toBe("Ticker Settings Tester");
     const event = await testDb("pluto_events").where({ type: "settings_changed" }).whereRaw("payload->>'symbol' = ?", [enabledSymbol]).orderBy("id", "desc").first();
-    expect(event.payload.fields).toEqual([{ field: "ladderShockOverridePct", from: 70, to: null }]);
+    expect(event.payload.fields).toEqual([{ field: "allocationPct", from: null, to: 12.5 }]);
   });
 
   it("refuses bad values and a total of set allocations above 100%, counting tickers that are not enabled", async () => {
     expect((await call("PUT", `/ticker-settings/${enabledSymbol}`, { allocationPct: 0 })).status).toBe(400);
-    expect((await call("PUT", `/ticker-settings/${enabledSymbol}`, { ladderSharesPct: 100 })).status).toBe(400);
     expect((await call("PUT", `/ticker-settings/${enabledSymbol}`, { maxAbsDelta: 0.2 })).status).toBe(400);
+    // The CC + Put Ladder's per-ticker values and strategy choice retired with it (2026-11-02).
+    expect((await call("PUT", `/ticker-settings/${enabledSymbol}`, { ladderSharesPct: 30 })).status).toBe(400);
+    expect((await call("PUT", `/ticker-settings/${enabledSymbol}`, { strategy: "cc_put_ladder" })).status).toBe(400);
 
     const othersRow = await testDb("pluto_ticker_settings").whereNotIn("ticker_id", tickerIds).sum({ total: "allocation_pct" }).first();
     const othersTotal = Number(othersRow?.total ?? 0);
@@ -127,53 +126,24 @@ describe("ticker settings routes", () => {
   });
 });
 
-describe("rungs and delta range per ticker", () => {
-  it("stores them, refuses a fractional rung count and a range whose lower limit passes the upper one (the strategy's side counts)", async () => {
-    expect((await call("PUT", `/ticker-settings/${otherSymbol}`, { ladderRungs: 2.5 })).status).toBe(400);
-    expect((await call("PUT", `/ticker-settings/${otherSymbol}`, { ladderRungs: 21 })).status).toBe(400);
-    const settingsRow = await testDb("pluto_settings").where({ id: 1 }).first("ladder_max_abs_delta");
-    const aboveStrategyTop = Number(settingsRow.ladder_max_abs_delta) + 0.05;
-    const refused = await call("PUT", `/ticker-settings/${otherSymbol}`, { ladderMinAbsDelta: aboveStrategyTop });
-    expect(refused.status).toBe(400);
-    expect(refused.json.error).toMatch(/lower limit cannot exceed the upper one/);
-    expect((await call("PUT", `/ticker-settings/${otherSymbol}`, { ladderMinAbsDelta: aboveStrategyTop, ladderMaxAbsDelta: aboveStrategyTop + 0.1 })).status).toBe(200);
-    const saved = await call("PUT", `/ticker-settings/${otherSymbol}`, { ladderRungs: 4, ladderMinAbsDelta: 0.08, ladderMaxAbsDelta: 0.25 });
-    expect(saved.json).toMatchObject({ ladderRungs: 4, ladderMinAbsDelta: 0.08, ladderMaxAbsDelta: 0.25 });
-  });
-
-  it("the reader gives the effective values, the strategy's values and the overrides apart", async () => {
-    const read = await call("GET", `/ladder-settings/${otherSymbol}`);
-    const settingsRow = await testDb("pluto_settings").where({ id: 1 }).first("ladder_rungs", "ladder_min_abs_delta", "ladder_max_abs_delta");
-    expect(read.json.baseline).toMatchObject({ ladderRungs: 4, minAbsDelta: 0.08, maxAbsDelta: 0.25 });
-    expect(read.json.strategyBaseline).toMatchObject({ ladderRungs: settingsRow.ladder_rungs, minAbsDelta: Number(settingsRow.ladder_min_abs_delta), maxAbsDelta: Number(settingsRow.ladder_max_abs_delta) });
-    expect(read.json.tickerOverrides).toEqual({ ladderSharesPct: null, ladderRungs: 4, minAbsDelta: 0.08, maxAbsDelta: 0.25 });
-    await call("PUT", `/ticker-settings/${otherSymbol}`, { ladderRungs: null, ladderMinAbsDelta: null, ladderMaxAbsDelta: null });
-    expect((await call("GET", `/ladder-settings/${otherSymbol}`)).json.tickerOverrides).toEqual({ ladderSharesPct: null, ladderRungs: null, minAbsDelta: null, maxAbsDelta: null });
-  });
-});
-
-describe("ladder settings reader", () => {
-  it("gives the ladder's values in backtest form with the ticker's overrides, and the pot from last night's account value", async () => {
-    const read = await call("GET", `/ladder-settings/${enabledSymbol}`);
-    expect(read.status).toBe(200);
-    const settingsRow = await testDb("pluto_settings").where({ id: 1 }).first();
-    expect(read.json).toMatchObject({ symbol: enabledSymbol, source: "live", enabled: true, allocationPct: 12.5, overrideShockPct: null });
-    expect(read.json.baseline).toMatchObject({ entry: "higher_yield", minCallYieldPct: 20, minCallYieldAppliesTo: "new_covered_calls", putsWhenNoCall: "reserve_ladder", ladderSharesPct: 30, maxAbsDelta: Number(settingsRow.ladder_max_abs_delta), ladderRungs: settingsRow.ladder_rungs });
-    expect(await testDb("pluto_settings_versions").where({ id: read.json.settingsVersionId as string }).first("id")).toBeDefined();
-
+describe("the Tickers tab's allocations and pots", () => {
+  it("gives each shortlisted ticker its allocation, its pot from last night's account value while enabled, and Pluto's budget", async () => {
+    const list = await call("GET", "/ticker-allocations");
+    expect(list.status).toBe(200);
+    const rows = list.json as unknown as { symbol: string; enabled: boolean; allocationPct: number | null; potDollars: number | null; capitalBudgetDollars: number | null }[];
+    const settingsRow = await testDb("pluto_settings").where({ id: 1 }).first("capital_budget_pct", "excess_allowance_pct");
     const snapshot = await testDb("account_pnl_snapshots").whereNotNull("net_liquidation_value").orderBy("snapshot_date", "desc").first("net_liquidation_value");
     const effective = effectiveAllocationPctBySymbol(await loadEnabledPlutoTickerSettings()).get(enabledSymbol)!;
-    const expectedPot = snapshot ? (Number(snapshot.net_liquidation_value) * (Number(settingsRow.capital_budget_pct) / 100) * effective) / 100 : null;
-    expect(read.json.potDollars).toBeCloseTo(expectedPot as number, 6);
-  });
-
-  it("gives a ticker not enabled in Pluto no pot, and an unknown symbol the strategy values only", async () => {
-    expect((await call("GET", `/ladder-settings/${otherSymbol}`)).json).toMatchObject({ enabled: false, potDollars: null, allocationPct: null });
-    const unknown = await call("GET", "/ladder-settings/nosuchtickery");
-    expect(unknown.json).toMatchObject({ symbol: "NOSUCHTICKERY", enabled: false, potDollars: null, allocationPct: null, overrideShockPct: null, recommendedShockPct: null });
-    // The test tickers have no daily bars: under 250 closes, the new-listing shock.
-    expect((await call("GET", `/ladder-settings/${otherSymbol}`)).json.recommendedShockPct).toBe(90);
-    expect((unknown.json.baseline as { ladderSharesPct: number }).ladderSharesPct).toBeGreaterThan(0);
+    const accountValue = snapshot ? Number(snapshot.net_liquidation_value) : null;
+    // The pot: the account value × the allocation × (1 + the excess allowance) × Pluto's budget.
+    const expectedPot = accountValue === null ? null : (accountValue * effective * (100 + Number(settingsRow.excess_allowance_pct)) * Number(settingsRow.capital_budget_pct)) / 1_000_000;
+    const enabled = rows.find((row) => row.symbol === enabledSymbol)!;
+    expect(enabled).toMatchObject({ enabled: true, allocationPct: 12.5, capitalBudgetDollars: accountValue === null ? null : (accountValue * Number(settingsRow.capital_budget_pct)) / 100 });
+    if (expectedPot === null) expect(enabled.potDollars).toBeNull();
+    else expect(enabled.potDollars).toBeCloseTo(expectedPot, 6);
+    expect(rows.find((row) => row.symbol === otherSymbol)).toMatchObject({ enabled: false, allocationPct: null, potDollars: null });
+    // The CC + Put Ladder's settings reads retired with it (2026-11-02).
+    expect((await fetch(`${baseUrl}/pluto/ladder-settings`)).status).toBe(404);
   });
 });
 
@@ -190,36 +160,12 @@ describe("Pluto's switch", () => {
   });
 });
 
-describe("ladder settings screen reads", () => {
-  it("lists the shortlisted tickers' ladder settings with the fit checks' price, the budget and the shock's source", async () => {
-    await testDb("daily_price_bars").insert({ ticker_id: tickerIds[0], trading_date: "2026-10-14", close_price: 106.01 });
-    const list = await call("GET", "/ladder-settings");
-    expect(list.status).toBe(200);
-    const rows = list.json as unknown as { symbol: string; lastClose: { price: number; date: string } | null; recommendedShockSource: { closesUsed: number } | null; capitalBudgetDollars: number | null }[];
-    const enabled = rows.find((row) => row.symbol === enabledSymbol)!;
-    expect(enabled.lastClose).toEqual({ price: 106.01, date: "2026-10-14" });
-    expect(enabled.recommendedShockSource).toMatchObject({ closesUsed: 1 });
-    expect(rows.find((row) => row.symbol === otherSymbol)?.lastClose).toBeNull();
-    const one = await call("GET", `/ladder-settings/${enabledSymbol.toLowerCase()}`);
-    expect(one.json).toMatchObject({ symbol: enabledSymbol, lastClose: { price: 106.01 } });
-    await testDb("daily_price_bars").where({ ticker_id: tickerIds[0] }).del();
-  });
-
+describe("the settings version", () => {
   it("numbers the current settings version and says since when", async () => {
     const version = await call("GET", "/settings/version");
     expect(version.status).toBe(200);
     expect(version.json.number).toBeGreaterThanOrEqual(1);
     expect(typeof version.json.versionId).toBe("string");
-  });
-
-  it("refuses a strategy |delta| change that would leave a ticker's own range empty, naming it", async () => {
-    const before = (await call("GET", "/settings")).json as { ladderMinAbsDelta: number; ladderMaxAbsDelta: number };
-    await call("PUT", `/ticker-settings/${enabledSymbol}`, { ladderMaxAbsDelta: 0.25 });
-    const refused = await call("PUT", "/settings", { ladderMinAbsDelta: 0.3 });
-    expect(refused.status).toBe(400);
-    expect(refused.json.error).toContain(`${enabledSymbol}'s |delta| range would be 0.30–0.25 (it sets its own upper limit)`);
-    expect((await call("GET", "/settings")).json.ladderMinAbsDelta).toBe(before.ladderMinAbsDelta);
-    await call("PUT", `/ticker-settings/${enabledSymbol}`, { ladderMaxAbsDelta: null });
   });
 });
 
@@ -248,7 +194,8 @@ describe("the Tickers tab's allocations save", () => {
       // The pot: last night's account value × 20% × (1 + 26.3158%) × Pluto's budget.
       const snapshot = await testDb("account_pnl_snapshots").whereNotNull("net_liquidation_value").orderBy("snapshot_date", "desc").first("net_liquidation_value");
       const budgetPct = Number((await testDb("pluto_settings").where({ id: 1 }).first("capital_budget_pct")).capital_budget_pct);
-      if (snapshot) expect((await call("GET", `/ladder-settings/${enabledSymbol}`)).json.potDollars).toBeCloseTo((Number(snapshot.net_liquidation_value) * 20 * 126.3158 * budgetPct) / 1_000_000, 6);
+      const pots = (await call("GET", "/ticker-allocations")).json as unknown as { symbol: string; potDollars: number | null }[];
+      if (snapshot) expect(pots.find((row) => row.symbol === enabledSymbol)!.potDollars).toBeCloseTo((Number(snapshot.net_liquidation_value) * 20 * 126.3158 * budgetPct) / 1_000_000, 6);
     } finally {
       await testDb("pluto_ticker_settings").where({ ticker_id: tickerIds[0] }).update({ allocation_pct: enabledBefore });
       await testDb("pluto_ticker_settings").where({ ticker_id: tickerIds[1] }).update({ allocation_pct: otherBefore });

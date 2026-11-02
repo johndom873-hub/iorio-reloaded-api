@@ -9,7 +9,7 @@ import type { JobResult } from "../lib/runJob.js";
 // contract-definition data, not gated on the market being open, so it runs
 // pre-market — see scripts/run-option-chain-structure-job.ts. Everything that
 // lists contracts reads what this job wrote (fetchOptionChain.ts's
-// loadStoredOptionChain): the CC + Put Ladder, the market quote loop's
+// loadStoredOptionChain): Pluto's option band, the market quote loop's
 // Volatility Calls, the session-volume capture, the Recovery Path and the
 // Ticker modal's chain. Its tickers: optionDataUniverse.ts.
 

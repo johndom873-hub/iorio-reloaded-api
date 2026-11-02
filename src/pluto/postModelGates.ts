@@ -1,7 +1,7 @@
 import { optionMidLimitPrice } from "../lib/optionLimitPrice.js";
 
 // What is left of Pluto's post-model order checks (design round 3, item 21, approved 2026-09-28) now that no model
-// chooses (Marcelo 2026-10-27): the order plan the ladder's executor sends, the mid limit price and the ticker cooldown,
+// chooses (Marcelo 2026-10-27): the order plan Pluto's executor sends, the mid limit price and the ticker cooldown,
 // and the Kelly fraction the retired rules backtests stored with their settings. Pure.
 
 export interface PlutoOrderPlan {

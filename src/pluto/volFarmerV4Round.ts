@@ -15,10 +15,10 @@ import { loadLiveTradingSessions } from "../lib/liveTradingSessions.js";
 import { summarizeOpenCycleFromRows } from "../lib/cycleInputRows.js";
 import { blackScholesDelta, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import type { InternalApiClient } from "../lib/internalApiClient.js";
-import { ladderDeltaVerdict, type LadderDeltaContext } from "../lib/ladderOrderGates.js";
+import { strategyDeltaVerdict, type StrategyDeltaContext } from "../lib/strategyOrderGates.js";
 import { daysToExpiry, describeExpiry } from "../lib/optionContractLabel.js";
 import { optionMidLimitPrice } from "../lib/optionLimitPrice.js";
-import { ladderBookCapitalVerdict, loadCommittedCapitalOnSymbols } from "../lib/orderLimits.js";
+import { strategyBookCapitalVerdict, loadCommittedCapitalOnSymbols } from "../lib/orderLimits.js";
 import { computeTickerExposure } from "../lib/positionExposure.js";
 import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { frozenSymbolSet } from "../lib/tickerFreeze.js";
@@ -27,14 +27,14 @@ import { executePlutoOrder, watchPlutoOrder, type ExecuteInput } from "./executo
 import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
 import { expiriesWithoutPreviousSessionVolume, nextListedExpiryAfter, optionQuoteBandDayUniverse, volFarmerV4ExpiryRule } from "./optionQuoteBandPlan.js";
 import { loadFinishedOptionQuoteBandCycle, loadOptionQuoteBandQuotes } from "./optionQuoteBandQuotes.js";
-import { latestCycleQuotes } from "./ladderLook.js";
-import { loadOpenPositionFigures } from "./ladderLookSnapshot.js";
+import { latestCycleQuotes } from "./latestBandQuotes.js";
+import { loadOpenPositionFigures } from "./openPositionFigures.js";
 import { loadSafetyLimitBookCounts, plutoOrdersSentToday } from "./safetyLimits.js";
 import { recordPlutoAction, recordPlutoEvent, type PlutoActionKind, type PlutoGateResult } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { tickerCooldownStatus } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
-import { effectiveAllocationPctBySymbol, effectivePlutoStrategy, loadEnabledPlutoTickerSettings, tickerPotFraction, type PlutoTickerSettings } from "./tickerSettingsStore.js";
+import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, tickerPotFraction, type PlutoTickerSettings } from "./tickerSettingsStore.js";
 import {
   adoptVolFarmerV4Holdings,
   createVolFarmerV4LiveBook,
@@ -49,10 +49,10 @@ import {
 } from "./volFarmerV4LiveBook.js";
 import { loadVolFarmerV4LeftoverStockLeg, loadVolFarmerV4LegStatuses, loadVolFarmerV4Memory, loadVolFarmerV4OrderOutcomes, loadVolFarmerV4StepImpliedVolatility, saveVolFarmerV4LastRound, saveVolFarmerV4Memory, type VolFarmerV4RoundFigures } from "./volFarmerV4LookLoader.js";
 
-// One Pluto round under Vol Farmer v4 (Marcelo 2026-10-31; Vol Farmer v2's from 2026-10-27): every enabled ticker running
-// v4 gets a look at every round (its rules at every look, as the lab's "every look"), on its live book
+// One Pluto round under Vol Farmer v4 (Marcelo 2026-10-31; Vol Farmer v2's from 2026-10-27): every enabled ticker gets a
+// look at every round (its rules at every look, as the lab's "every look"), on its live book
 // (volFarmerV4LiveBook.ts) and the market quote loop's band quotes, and the orders the shared steps place go out within the
-// Safety Limits' caps, counted with the CC + Put Ladder's orders (safetyLimits.ts; Marcelo 2026-10-27, answer d): the
+// Safety Limits' caps (safetyLimits.ts; Marcelo 2026-10-27, answer d): the
 // ticker's working orders, orders a day and open positions, the book's open positions and orders a day, and Pluto's
 // capital budget. Each option order is re-quoted live, held to v4's spread limit and |delta| ranges (a LEAPS to its spread
 // limit only), priced at the mid on the option's tick and sent through Pluto's executor; one that fails a check, or a cap
@@ -155,7 +155,7 @@ export async function runVolFarmerV4Round(input: VolFarmerV4RoundInput): Promise
     loadLastFilledPlutoActionAtBySymbol(),
   ]);
   const summary: VolFarmerV4RoundSummary = { looked: [], planned: 0, sent: 0, notes: [] };
-  const v4Tickers = enabled.filter((ticker) => effectivePlutoStrategy(ticker) === "vol_farmer_v4" && (input.symbols.length === 0 || input.symbols.includes(ticker.symbol)));
+  const v4Tickers = enabled.filter((ticker) => input.symbols.length === 0 || input.symbols.includes(ticker.symbol));
   if (v4Tickers.length === 0) return summary;
   // The tickers share Pluto's budget (Marcelo 2026-10-28): they take their turn in the day's order, so the one that finds
   // the free cash short is a different one each day.
@@ -546,7 +546,7 @@ async function sendOrder(context: {
   const opening = item.kind !== "sell_leaps";
   const description = `${item.side === "buy" ? "Buy" : "Sell"} ${item.contracts}× ${item.contract.strike} ${item.contract.right === "C" ? "Call" : "Put"} ${item.contract.expiry}`;
 
-  // The caps the ladder's orders count under; a LEAPS sale only reduces what is held.
+  // The caps Pluto's opening orders count under; a LEAPS sale only reduces what is held.
   if (opening) {
     const held = capHolding(settings, tickerCounts, round);
     if (held !== null) return { actionId: null, sent: false, detail: `${description} waits for a later round: ${held}` };
@@ -561,14 +561,14 @@ async function sendOrder(context: {
   const isLeaps = item.contract.strategyKey === "leaps";
   const isPut = item.contract.right === "P";
   // The Calls are held to v4's Calls' range, the Puts to |delta| at most its Put |delta|; a LEAPS has no range.
-  const deltaContext: LadderDeltaContext = { minAbsDelta: isPut ? 0 : farmer.callMinAbsDelta, maxAbsDelta: isPut ? v2.putMaxAbsDelta : farmer.callMaxAbsDelta, forwardAnchor: context.forwardAnchors.get(item.contract.expiry) ?? null, riskFreeRate: clock.riskFreeRate, todayIso: clock.todayIso, closeMinutesEt: clock.closeMinutesEt };
-  const verdict = twoSided && !isLeaps ? ladderDeltaVerdict({ ...twoSided, stockPrice, strike: item.contract.strike, expiryIso: item.contract.expiry, isCall: !isPut, putHeldToRange: isPut, now, context: deltaContext }) : null;
+  const deltaContext: StrategyDeltaContext = { minAbsDelta: isPut ? 0 : farmer.callMinAbsDelta, maxAbsDelta: isPut ? v2.putMaxAbsDelta : farmer.callMaxAbsDelta, forwardAnchor: context.forwardAnchors.get(item.contract.expiry) ?? null, riskFreeRate: clock.riskFreeRate, todayIso: clock.todayIso, closeMinutesEt: clock.closeMinutesEt };
+  const verdict = twoSided && !isLeaps ? strategyDeltaVerdict({ ...twoSided, stockPrice, strike: item.contract.strike, expiryIso: item.contract.expiry, isCall: !isPut, putHeldToRange: isPut, now, context: deltaContext }) : null;
   // A sale is held to the steps' bid minimum and spread limit; a LEAPS purchase or sale to a two-sided quote within the spread limit.
   const ruleFailure = twoSided === null ? null : quoteRejection === "noUsableQuote" && item.side === "sell" && !isLeaps ? `the live bid ${twoSided.bid.toFixed(2)} is under the $0.05 minimum` : quoteRejection === "spreadTooWide" ? `the live spread is ${(((twoSided.ask - twoSided.bid) / ((twoSided.bid + twoSided.ask) / 2)) * 100).toFixed(1)}% of the mid, above v4's ${farmer.maxSpreadPctOfMid}%` : null;
   // A Call that opens a cycle, or rebuilds the first position, buys its shares with it.
   const buysShares = item.order.kind === "covered_call" && (item.order.sale.startsCycle || item.order.sale.buysShares === true);
   const notional = limitPrice === null ? 0 : item.contract.strategyKey === "cash_secured_put" ? Math.max(0, item.contract.strike - limitPrice) * 100 * item.contracts : item.contract.strategyKey === "leaps" ? (opening ? limitPrice * 100 * item.contracts : 0) : buysShares ? item.contracts * 100 * Math.max(0, stockPrice - limitPrice) : 0;
-  const capital = opening && limitPrice !== null ? ladderBookCapitalVerdict({ committedBeforeDollars: round.bookCommitted, orderNotional: notional, budgetFraction: settings.capitalBudgetPct / 100, netLiquidationValue: input.netLiquidationValue }) : null;
+  const capital = opening && limitPrice !== null ? strategyBookCapitalVerdict({ committedBeforeDollars: round.bookCommitted, orderNotional: notional, budgetFraction: settings.capitalBudgetPct / 100, netLiquidationValue: input.netLiquidationValue }) : null;
   const gateResults: PlutoGateResult[] = [
     { gate: "vol_farmer_v4", ok: true, detail: item.chosenBecause },
     { gate: "live_quote", ok: twoSided !== null, detail: twoSided ? `bid ${twoSided.bid.toFixed(2)}, ask ${twoSided.ask.toFixed(2)}` : "no live two-sided quote" },
@@ -610,7 +610,7 @@ async function sendOrder(context: {
       ? { kind: "leaps_buy", actionId, symbol: ticker.symbol, contract: { expiry: contract.expiry, strike: contract.strike, right: "C", dte }, plan, reasons, scoresSnapshot }
       : item.kind === "sell_leaps"
         ? { kind: "leaps_sell", actionId, symbol: ticker.symbol, positionId: item.leg!.positionId, legId: item.leg!.legId, contract: { expiry: contract.expiry, strike: contract.strike, right: "C", dte }, plan, reasons }
-        : { kind: "ladder_open", actionId, symbol: ticker.symbol, strategyKey: item.contract.strategyKey as "covered_call" | "cash_secured_put", contract: { ...contract, dte }, plan, buyEveryShare: buysShares, reasons, scoresSnapshot };
+        : { kind: "strategy_open", actionId, symbol: ticker.symbol, strategyKey: item.contract.strategyKey as "covered_call" | "cash_secured_put", contract: { ...contract, dte }, plan, buyEveryShare: buysShares, reasons, scoresSnapshot };
   const result = await executePlutoOrder(input.api, settings, executeInput);
   if (result.orderId !== null) {
     round.bookCounts.ordersToday += 1;
@@ -632,7 +632,7 @@ async function sendOrder(context: {
 }
 
 /** The book's capital check as a gate result. */
-function bookCapitalGate(capital: ReturnType<typeof ladderBookCapitalVerdict>): PlutoGateResult {
+function bookCapitalGate(capital: ReturnType<typeof strategyBookCapitalVerdict>): PlutoGateResult {
   return { gate: "book_capital", ok: capital.fits, detail: capital.fits ? `Pluto's tickers commit ${capital.committedAfterDollars.toFixed(0)} of ${capital.capDollars.toFixed(0)} after it` : `Pluto's tickers would commit ${capital.committedAfterDollars.toFixed(0)}, above Pluto's capital budget of ${capital.capDollars.toFixed(0)}` };
 }
 
@@ -661,7 +661,7 @@ async function sendShareOrder(context: { input: VolFarmerV4RoundInput; ticker: P
   const twoSided = fresh && quote.bid !== null && quote.ask !== null && quote.bid > 0 && quote.ask >= quote.bid ? { bid: quote.bid, ask: quote.ask } : null;
   const limitPrice = twoSided ? optionMidLimitPrice(twoSided.bid, twoSided.ask, buying ? "buy" : "sell") : null;
   const notional = buying && limitPrice !== null ? limitPrice * shares : 0;
-  const capital = buying && limitPrice !== null ? ladderBookCapitalVerdict({ committedBeforeDollars: round.bookCommitted, orderNotional: notional, budgetFraction: settings.capitalBudgetPct / 100, netLiquidationValue: input.netLiquidationValue }) : null;
+  const capital = buying && limitPrice !== null ? strategyBookCapitalVerdict({ committedBeforeDollars: round.bookCommitted, orderNotional: notional, budgetFraction: settings.capitalBudgetPct / 100, netLiquidationValue: input.netLiquidationValue }) : null;
   const chosenBecause = buying ? order.order.chosenBecause : order.kind === "sell_shares" ? order.orders[0]!.chosenBecause : "";
   const scores = buying ? order.order.candidateScores : order.kind === "sell_shares" ? order.orders[0]!.candidateScores : {};
   const gateResults: PlutoGateResult[] = [

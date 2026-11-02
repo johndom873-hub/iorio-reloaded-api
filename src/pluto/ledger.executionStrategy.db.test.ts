@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Knex } from "knex";
 
-// Each Pluto action records the strategy it ran under (the order gates judge a CC + Put Ladder order by it): the ladder,
-// Pluto's only strategy since 2026-10-27, whatever an old settings version says. On a private copy of the test tables.
+// Each Pluto action records the strategy it ran under (the order gates judge a Vol Farmer v4 order by it): v4, Pluto's
+// only strategy since 2026-11-02, whatever an old settings version says. On a private copy of the test tables.
 vi.mock("../db/connection.js", async () => {
   const { createIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
   return { db: await createIsolatedTestDatabase() };
@@ -25,10 +25,10 @@ const action = (passId: string) => recordPlutoAction({ passId, kind: "open_cash_
 const strategyOf = async (actionId: string) => (await testDb("pluto_actions").where({ id: actionId }).first("execution_strategy")).execution_strategy;
 
 describe("recordPlutoAction's execution strategy", () => {
-  it("is the ladder, for a pass with or without recorded settings", async () => {
+  it("is Vol Farmer v4, for a pass with or without recorded settings", async () => {
     const oldSettingsPass = await startPlutoPass("manual", {}, { executionStrategy: "edge_margin", capitalBudgetPct: 50 });
     const bare = await startPlutoPass("manual");
-    expect(await strategyOf(await action(oldSettingsPass))).toBe("cc_put_ladder");
-    expect(await strategyOf(await action(bare))).toBe("cc_put_ladder");
+    expect(await strategyOf(await action(oldSettingsPass))).toBe("vol_farmer_v4");
+    expect(await strategyOf(await action(bare))).toBe("vol_farmer_v4");
   });
 });

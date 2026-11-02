@@ -7,18 +7,16 @@ import type { OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
 import { hasPreviousSessionVolumeForOneContract, optionRequoteBand, selectOptionRequoteContracts, type OptionRequoteBand, type OptionRequoteContract } from "./optionRequoteBand.js";
 
 // Which of a ticker's contracts the market quote loop quotes at a cycle (Marcelo 2026-10-15: the re-quoting band; the
-// option quote band since it serves both strategies, 2026-10-28). Pure; optionQuoteBandPlanLoader.ts reads its inputs.
+// option quote band since it served both strategies, 2026-10-28; Vol Farmer v4's alone since 2026-11-02). Pure; optionQuoteBandPlanLoader.ts reads its inputs.
 //
-//   universe          the stored chain's contracts (both rights) of the expiries the ticker's strategy sells, with
-//                     enough previous-session volume for one contract under the 20% rule:
-//                       CC + Put Ladder   its days-to-expiry range (ladderMinDte–ladderMaxDte)
-//                       Vol Farmer v4     the expiry it sells: the one ending at the session's close (0 days away), or
-//                                         the next listed after the session (its Options expiry setting); a LEAPS is
-//                                         quoted when its steps ask for one, volFarmerV4Round.ts
+//   universe          the stored chain's contracts (both rights) of the expiry Vol Farmer v4 sells, with enough
+//                     previous-session volume for one contract under the 20% rule: the one ending at the session's
+//                     close (0 days away), or the next listed after the session (its Options expiry setting); a LEAPS
+//                     is quoted when its steps ask for one, volFarmerV4Round.ts
 //                     An expiry the after-close capture has no volume for is taken whole: the rule is lifted on it for
 //                     the day (Marcelo 2026-10-30; expiriesWithoutPreviousSessionVolume)
 //   last-seen IV      the contract's own IV at its latest quote today (the mid's IV on the expiry's forward, Pluto's
-//                     10:00 parity forward moved with the stock: forwardAtSpot); else last night's IBKR IV plus the
+//                     forward from the band's own quotes moved with the stock: forwardAtSpot); else last night's IBKR IV plus the
 //                     expiry's median shift today (own IV today − IBKR IV last night, over the expiry's contracts that
 //                     have both); else unknown, and quoted
 //   band              Calls: predicted |delta| at the live price inside the strategy's Call range widened (first look of
@@ -27,7 +25,7 @@ import { hasPreviousSessionVolumeForOneContract, optionRequoteBand, selectOption
 
 export type OptionQuoteBandUniverseContract = Pick<OptionRequoteContract, "expiry" | "strike" | "right">;
 
-/** The expiries a ticker's band covers: a days-to-expiry range (the CC + Put Ladder's; Vol Farmer v4's 0 to 0 for today's), or the next listed expiry (Vol Farmer v4's "next"). */
+/** The expiries a ticker's band covers: a days-to-expiry range (Vol Farmer v4's 0 to 0 for today's), or the next listed expiry (its "next"). */
 export type OptionQuoteBandExpiryRule = { kind: "days_to_expiry_range"; minDte: number; maxDte: number } | { kind: "next_listed_expiry" };
 
 /**
@@ -87,7 +85,7 @@ export function optionQuoteBandDayUniverse(input: Parameters<typeof optionQuoteB
   return contracts.filter((contract) => lifted.has(contract.expiry) || hasPreviousSessionVolumeForOneContract(input.previousSessionVolumeByContract?.get(contractKey(contract)) ?? null));
 }
 
-export interface LadderClock {
+export interface OptionQuoteBandClock {
   todayIso: string;
   /** Today's close, minutes after midnight Eastern. */
   closeMinutesEt: number;
@@ -96,12 +94,12 @@ export interface LadderClock {
 }
 
 /** The engine's T: calendar days ÷ 365, or for a same-day expiry the hours from `at` to today's close ÷ 8,760. */
-function yearsToExpiryAt(expiry: string, at: Date, clock: LadderClock): number {
+function yearsToExpiryAt(expiry: string, at: Date, clock: OptionQuoteBandClock): number {
   return daysToExpiry(expiry, clock.todayIso) <= 0 ? yearsToSessionClose(at, clock.closeMinutesEt) : yearsBetweenIsoDates(clock.todayIso, expiry);
 }
 
 /** A stored quote's own IV (its mid on the forward at the quote's stock price); null without a two-sided quote or a price. */
-export function bandQuoteOwnImpliedVolatility(quote: OptionQuoteBandQuote, anchors: ReadonlyMap<string, BaselineForwardAnchor>, clock: LadderClock): number | null {
+export function bandQuoteOwnImpliedVolatility(quote: OptionQuoteBandQuote, anchors: ReadonlyMap<string, BaselineForwardAnchor>, clock: OptionQuoteBandClock): number | null {
   if (quote.bid === null || quote.ask === null || !(quote.bid > 0) || !(quote.ask > quote.bid) || quote.stockPrice === null || !(quote.stockPrice > 0)) return null;
   const years = yearsToExpiryAt(quote.expiry, quote.quotedAt, clock);
   if (!(years > 0)) return null;
@@ -116,7 +114,7 @@ const median = (values: number[]): number => {
 };
 
 /** Each universe contract's last-seen IV (see the header); null when unknown. */
-export function lastSeenImpliedVolatilities(input: { universe: readonly OptionQuoteBandUniverseContract[]; todaysQuotes: readonly OptionQuoteBandQuote[]; overnightImpliedVolatilityByContract: ReadonlyMap<string, number>; anchors: ReadonlyMap<string, BaselineForwardAnchor>; clock: LadderClock }): Map<string, number | null> {
+export function lastSeenImpliedVolatilities(input: { universe: readonly OptionQuoteBandUniverseContract[]; todaysQuotes: readonly OptionQuoteBandQuote[]; overnightImpliedVolatilityByContract: ReadonlyMap<string, number>; anchors: ReadonlyMap<string, BaselineForwardAnchor>; clock: OptionQuoteBandClock }): Map<string, number | null> {
   const ownToday = new Map<string, number>();
   for (const quote of input.todaysQuotes) {
     const impliedVolatility = bandQuoteOwnImpliedVolatility(quote, input.anchors, input.clock);
@@ -158,7 +156,7 @@ export function planOptionQuoteBand(input: {
   todaysQuotes: readonly OptionQuoteBandQuote[];
   overnightImpliedVolatilityByContract: ReadonlyMap<string, number>;
   anchors: ReadonlyMap<string, BaselineForwardAnchor>;
-  clock: LadderClock;
+  clock: OptionQuoteBandClock;
   now: Date;
   stockPrice: number;
   /** The strategy's Call |delta| range, before the band's margins. */

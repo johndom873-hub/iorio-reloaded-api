@@ -5,7 +5,7 @@ import { contractKey } from "../lib/optionContractKey.js";
 import type { PositionFigures } from "../lib/positionSelectors.js";
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
 import { addVolFarmerV3Shares, newVolFarmerV2SymbolState, removeVolFarmerV3Shares, runVolFarmerV2Steps, volFarmerV2BreakEven, type VolFarmerV2Market, type VolFarmerV2Position, type VolFarmerV3SharesOrder } from "../backtest/engine/volFarmerV2Steps.js";
-import { plutoLadderSettingsFixture, plutoVolFarmerV4SettingsFixture } from "./plutoSettingsFixture.js";
+import { plutoSafetyLimitsSettingsFixture, plutoVolFarmerV4SettingsFixture } from "./plutoSettingsFixture.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import {
   adoptVolFarmerV4Holdings,
@@ -20,7 +20,7 @@ import {
   type VolFarmerV4PendingOrder,
 } from "./volFarmerV4LiveBook.js";
 
-const settings = { ...plutoLadderSettingsFixture, ...plutoVolFarmerV4SettingsFixture } as unknown as PlutoSettings;
+const settings = { ...plutoSafetyLimitsSettingsFixture, ...plutoVolFarmerV4SettingsFixture } as unknown as PlutoSettings;
 /** Half the pot in shares: the numbers the book's tests were first written on. */
 const halfInShares = { ...settings, volFarmerV4FirstPositionPct: 50 };
 const optionCommissionDollars = (contracts: number) => 0.65 * contracts;

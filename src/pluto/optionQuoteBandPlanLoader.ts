@@ -7,23 +7,19 @@ import { addCalendarDays } from "../lib/calendarDays.js";
 import type { MarketQuoteConsumer } from "../lib/marketQuoteLoop.js";
 import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { loadOptionQuoteBandQuotes, recordFinishedOptionQuoteBandCycles, upsertOptionQuoteBandQuotes, type OptionQuoteBandCycleWrite, type OptionQuoteBandQuote, type OptionQuoteBandQuoteWrite } from "./optionQuoteBandQuotes.js";
-import { optionQuoteBandDayUniverse, planOptionQuoteBand, volFarmerV4ExpiryRule, type OptionQuoteBandExpiryRule, type OptionQuoteBandPlan, type LadderClock, type OptionQuoteBandScope, type OptionQuoteBandUniverseContract } from "./optionQuoteBandPlan.js";
-import { forwardAnchorsFromBandQuotes } from "./ladderForwardAnchors.js";
+import { optionQuoteBandDayUniverse, planOptionQuoteBand, volFarmerV4ExpiryRule, type OptionQuoteBandExpiryRule, type OptionQuoteBandPlan, type OptionQuoteBandClock, type OptionQuoteBandScope, type OptionQuoteBandUniverseContract } from "./optionQuoteBandPlan.js";
+import { forwardAnchorsFromBandQuotes } from "./optionQuoteBandForwardAnchors.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState } from "./stateStore.js";
-import { effectivePlutoStrategy, loadEnabledPlutoTickerSettings, type PlutoStrategy, type PlutoTickerSettings } from "./tickerSettingsStore.js";
+import { loadEnabledPlutoTickerSettings, type PlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // The option quote band's inputs for the market quote loop (optionQuoteBandPlan.ts). The day's part (universe, last night's
-// IVs, the clock) is read once per trading day and ticker (again when its strategy or its expiries change); the forwards once
-// the band has quotes; the band quotes and the price per cycle.
+// IVs, the clock) is read once per trading day and ticker (again when its expiries change); the forwards once the band has
+// quotes; the band quotes and the price per cycle.
 
-/** What a ticker's band covers under its strategy (optionQuoteBandPlan.ts): the after-close volume capture covers the same. */
-export function optionQuoteBandScopeOf(ticker: PlutoTickerSettings, settings: PlutoSettings): OptionQuoteBandScope {
-  if (effectivePlutoStrategy(ticker) === "vol_farmer_v4") return { expiryRule: volFarmerV4ExpiryRule(settings), callDeltaRange: { minAbsDelta: settings.volFarmerV4CallMinAbsDelta, maxAbsDelta: settings.volFarmerV4CallMaxAbsDelta } };
-  return {
-    expiryRule: { kind: "days_to_expiry_range", minDte: settings.ladderMinDte, maxDte: settings.ladderMaxDte },
-    callDeltaRange: { minAbsDelta: ticker.ladderMinAbsDelta ?? settings.ladderMinAbsDelta, maxAbsDelta: ticker.ladderMaxAbsDelta ?? settings.ladderMaxAbsDelta },
-  };
+/** What every ticker's band covers under Vol Farmer v4 (optionQuoteBandPlan.ts): the after-close volume capture covers the same. */
+export function optionQuoteBandScopeOf(settings: PlutoSettings): OptionQuoteBandScope {
+  return { expiryRule: volFarmerV4ExpiryRule(settings), callDeltaRange: { minAbsDelta: settings.volFarmerV4CallMinAbsDelta, maxAbsDelta: settings.volFarmerV4CallMaxAbsDelta } };
 }
 
 export interface OptionQuoteBandTicker {
@@ -32,7 +28,7 @@ export interface OptionQuoteBandTicker {
 }
 
 export interface OptionQuoteBandPlanner {
-  /** The tickers whose band the loop quotes today: Pluto's enabled tickers, under either strategy, while Pluto is not paused. */
+  /** The tickers whose band the loop quotes today: Pluto's enabled tickers, while Pluto is not paused. */
   tickers(tradingDateIso: string): Promise<OptionQuoteBandTicker[]>;
   /** Each ticker's contracts for this cycle, at its live price; a ticker without a price is left out. */
   plan(tradingDateIso: string, spotByTicker: ReadonlyMap<string, number | null>, now: Date): Promise<Map<string, OptionQuoteBandTicker & { plan: OptionQuoteBandPlan }>>;
@@ -43,8 +39,7 @@ interface TickerDay {
   overnightImpliedVolatilityByContract: Map<string, number>;
   /** Empty until the band has quotes today (read again each cycle until then). */
   anchors: Map<string, BaselineForwardAnchor>;
-  /** The strategy and the expiries the universe was built for. */
-  strategy: PlutoStrategy;
+  /** The expiries the universe was built for. */
   expiryRule: OptionQuoteBandExpiryRule;
   callDeltaRange: OptionQuoteBandScope["callDeltaRange"];
 }
@@ -59,7 +54,7 @@ export interface OptionQuoteBandPlannerDependencies {
   loadOvernightImpliedVolatility(tickerId: string, tradingDateIso: string): Promise<Map<string, number>>;
   /** Today's forwards by expiry from the band's own quotes (forward and the stock price at the quote); empty before the band has quotes. */
   loadForwardAnchors(tickerId: string, tradingDateIso: string): Promise<Map<string, BaselineForwardAnchor>>;
-  loadClock(tradingDateIso: string): Promise<LadderClock>;
+  loadClock(tradingDateIso: string): Promise<OptionQuoteBandClock>;
   loadBandQuotes(tickerId: string, tradingDateIso: string): Promise<OptionQuoteBandQuote[]>;
 }
 
@@ -90,9 +85,9 @@ export const defaultOptionQuoteBandPlannerDependencies: OptionQuoteBandPlannerDe
 };
 
 export function createOptionQuoteBandPlanner(dependencies: OptionQuoteBandPlannerDependencies = defaultOptionQuoteBandPlannerDependencies): OptionQuoteBandPlanner {
-  let day: { tradingDateIso: string; clock: LadderClock; byTicker: Map<string, TickerDay> } | null = null;
+  let day: { tradingDateIso: string; clock: OptionQuoteBandClock; byTicker: Map<string, TickerDay> } | null = null;
 
-  const ladderTickers = async (): Promise<{ settings: PlutoSettings; tickers: PlutoTickerSettings[] }> => {
+  const enabledTickers = async (): Promise<{ settings: PlutoSettings; tickers: PlutoTickerSettings[] }> => {
     const settings = await dependencies.loadSettings();
     const active = !(await dependencies.loadPaused());
     return { settings, tickers: active ? await dependencies.loadEnabledTickers() : [] };
@@ -100,9 +95,8 @@ export function createOptionQuoteBandPlanner(dependencies: OptionQuoteBandPlanne
 
   const tickerDay = async (ticker: PlutoTickerSettings, settings: PlutoSettings, tradingDateIso: string): Promise<TickerDay> => {
     const cached = day!.byTicker.get(ticker.tickerId);
-    const strategy = effectivePlutoStrategy(ticker);
-    const scope = optionQuoteBandScopeOf(ticker, settings);
-    if (cached && cached.strategy === strategy && JSON.stringify(cached.expiryRule) === JSON.stringify(scope.expiryRule)) {
+    const scope = optionQuoteBandScopeOf(settings);
+    if (cached && JSON.stringify(cached.expiryRule) === JSON.stringify(scope.expiryRule)) {
       if (cached.anchors.size === 0) cached.anchors = await dependencies.loadForwardAnchors(ticker.tickerId, tradingDateIso);
       cached.callDeltaRange = scope.callDeltaRange;
       return cached;
@@ -115,18 +109,18 @@ export function createOptionQuoteBandPlanner(dependencies: OptionQuoteBandPlanne
     ]);
     // An expiry without the previous session's volume is quoted whole: the 20% rule is lifted on it for the day.
     const universe = optionQuoteBandDayUniverse({ expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, sessionIso: tradingDateIso, expiryRule: scope.expiryRule, previousSessionVolumeByContract: volume });
-    const entry: TickerDay = { universe, overnightImpliedVolatilityByContract: overnight, anchors, strategy, expiryRule: scope.expiryRule, callDeltaRange: scope.callDeltaRange };
+    const entry: TickerDay = { universe, overnightImpliedVolatilityByContract: overnight, anchors, expiryRule: scope.expiryRule, callDeltaRange: scope.callDeltaRange };
     day!.byTicker.set(ticker.tickerId, entry);
     return entry;
   };
 
   return {
     async tickers() {
-      const { tickers } = await ladderTickers();
+      const { tickers } = await enabledTickers();
       return tickers.map((ticker) => ({ tickerId: ticker.tickerId, symbol: ticker.symbol }));
     },
     async plan(tradingDateIso, spotByTicker, now) {
-      const { settings, tickers } = await ladderTickers();
+      const { settings, tickers } = await enabledTickers();
       const plans = new Map<string, OptionQuoteBandTicker & { plan: OptionQuoteBandPlan }>();
       if (tickers.length === 0) return plans;
       if (day?.tradingDateIso !== tradingDateIso) day = { tradingDateIso, clock: await dependencies.loadClock(tradingDateIso), byTicker: new Map() };
@@ -148,11 +142,11 @@ export function createOptionQuoteBandPlanner(dependencies: OptionQuoteBandPlanne
 const bandQuoteWriteBatchSize = 20;
 
 /**
- * The ladder as a user of the market quote loop (server.ts wires it in first, so its band is quoted first). Once every batch
+ * Pluto's option band as a user of the market quote loop (server.ts wires it in first, so its band is quoted first). Once every batch
  * of a cycle is stored, the cycle is recorded as each quoted ticker's newest finished one (option_quote_band_cycles), which
  * the looks read from and Pluto's rounds start on; a cycle with a batch that failed to store is not recorded.
  */
-export function createLadderQuoteConsumer(
+export function createOptionQuoteBandConsumer(
   planner: OptionQuoteBandPlanner = createOptionQuoteBandPlanner(),
   store: (writes: OptionQuoteBandQuoteWrite[]) => Promise<void> = upsertOptionQuoteBandQuotes,
   recordFinished: (writes: OptionQuoteBandCycleWrite[]) => Promise<void> = recordFinishedOptionQuoteBandCycles,
@@ -170,7 +164,7 @@ export function createLadderQuoteConsumer(
     return write;
   };
   return {
-    name: "CC + Put Ladder",
+    name: "Pluto's option band",
     tickers: (tradingDateIso) => planner.tickers(tradingDateIso),
     async contracts(cycle) {
       const plans = await planner.plan(cycle.tradingDateIso, cycle.spotByTicker, cycle.now);

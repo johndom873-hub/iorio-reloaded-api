@@ -6,7 +6,7 @@ import type { VolFarmerV4PendingOrder } from "./volFarmerV4LiveBook.js";
 
 // The Pluto screen's Vol Farmer v2 card against a private copy of the test tables: an adopted ticker's two positions (a
 // Call leg of the book, a Put still working), its LEAPS held short of its count and its last round; a ticker waiting to
-// be adopted (a last round, no memory); a ticker on the ladder left out.
+// be adopted (a last round, no memory); a ticker not enabled in Pluto left out.
 vi.mock("../db/connection.js", async () => {
   const { createIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
   return { db: await createIsolatedTestDatabase() };
@@ -21,17 +21,16 @@ const testDb: Knex = db;
 const userId = randomUUID();
 const adoptedId = randomUUID();
 const waitingId = randomUUID();
-const ladderId = randomUUID();
+const disabledId = randomUUID();
 
 beforeAll(async () => {
   await testDb("users").insert({ id: userId, username: "vf2-screen", display_name: "VF2 Screen", password_hash: "x" });
   await testDb("tickers").insert([
     { id: adoptedId, symbol: "VFA", company_name: "Adopted Co" },
     { id: waitingId, symbol: "VFW", company_name: "Waiting Co" },
-    { id: ladderId, symbol: "VFL", company_name: "Ladder Co" },
+    { id: disabledId, symbol: "VFD", company_name: "Disabled Co" },
   ]);
-  await testDb("shortlist_entries").insert([adoptedId, waitingId, ladderId].map((ticker_id) => ({ ticker_id, added_by_user_id: userId, bot_enabled: true })));
-  await testDb("pluto_ticker_settings").insert({ ticker_id: ladderId, strategy: "cc_put_ladder" });
+  await testDb("shortlist_entries").insert([adoptedId, waitingId, disabledId].map((ticker_id) => ({ ticker_id, added_by_user_id: userId, bot_enabled: ticker_id !== disabledId })));
 });
 
 afterAll(async () => {

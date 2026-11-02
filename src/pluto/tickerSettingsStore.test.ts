@@ -29,7 +29,8 @@ describe("effectiveAllocationPctBySymbol", () => {
 
 describe("validatePlutoTickerSettingsInput", () => {
   it("accepts values in range and null (back to the default)", () => {
-    expect(validatePlutoTickerSettingsInput({ allocationPct: 100, ladderSharesPct: 30, ladderShockOverridePct: null })).toBeNull();
+    expect(validatePlutoTickerSettingsInput({ allocationPct: 100 })).toBeNull();
+    expect(validatePlutoTickerSettingsInput({ allocationPct: null })).toBeNull();
   });
 
   it("refuses an unknown field, a non-number and values out of range", () => {
@@ -37,7 +38,9 @@ describe("validatePlutoTickerSettingsInput", () => {
     expect(validatePlutoTickerSettingsInput({ allocationPct: "20" })).toMatch(/must be a number/);
     expect(validatePlutoTickerSettingsInput({ allocationPct: 0 })).toMatch(/above 0/);
     expect(validatePlutoTickerSettingsInput({ allocationPct: 100.5 })).toMatch(/at most 100/);
-    expect(validatePlutoTickerSettingsInput({ ladderSharesPct: 100 })).toMatch(/at most 99/);
-    expect(validatePlutoTickerSettingsInput({ ladderShockOverridePct: Number.NaN })).toMatch(/must be a number/);
+    expect(validatePlutoTickerSettingsInput({ allocationPct: Number.NaN })).toMatch(/must be a number/);
+    // The CC + Put Ladder's per-ticker values and strategy choice retired with it (2026-11-02).
+    expect(validatePlutoTickerSettingsInput({ ladderSharesPct: 30 })).toMatch(/not a ticker setting/);
+    expect(validatePlutoTickerSettingsInput({ strategy: "cc_put_ladder" })).toMatch(/not a ticker setting/);
   });
 });

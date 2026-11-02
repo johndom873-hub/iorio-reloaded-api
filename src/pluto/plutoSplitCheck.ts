@@ -3,38 +3,38 @@ import { topUpDailyBars } from "../ibkr/priceBarCache.js";
 import { loadPendingStockSplits, type StockSplit } from "../lib/stockSplits.js";
 import { loadEnabledPlutoTickerSettings } from "./tickerSettingsStore.js";
 
-// The CC + Put Ladder's split check before the open (Marcelo 2026-10-15), run by the 09:00 UTC structure job: each ladder
-// ticker's recent daily bars are fetched from IBKR and stored through the split check (dailyBarSplitCheck.ts), which
+// Pluto's split check before the open (Marcelo 2026-10-15, for the CC + Put Ladder; Vol Farmer v4's since 2026-11-02),
+// run by the 09:00 UTC structure job: each Pluto ticker's recent daily bars are fetched from IBKR and stored through the split check (dailyBarSplitCheck.ts), which
 // records a split in stock_splits and replaces the price history when IBKR's prices show one. The nightly bar job does
-// the same for every ticker; this one makes sure a split effective today is seen before the ladder's first look. A split
+// the same for every ticker; this one makes sure a split effective today is seen before Pluto's first look. A split
 // IBKR's history does not show yet is caught at each look by the price guard (splitSuggestedByPrice).
 
-export const ladderSplitCheckJobName = "ladder_split_check";
+export const plutoSplitCheckJobName = "pluto_split_check";
 
-export interface LadderSplitCheckResult {
+export interface PlutoSplitCheckResult {
   checkedSymbols: string[];
   failed: { symbol: string; message: string }[];
-  /** Splits still pending on the ladder's tickers after the check (records not yet rewritten to the new basis). */
+  /** Splits still pending on Pluto's tickers after the check (records not yet rewritten to the new basis). */
   pendingSplits: (StockSplit & { symbol: string })[];
 }
 
-export interface LadderSplitCheckDependencies {
-  loadLadderTickers(): Promise<{ tickerId: string; symbol: string }[]>;
+export interface PlutoSplitCheckDependencies {
+  loadPlutoTickers(): Promise<{ tickerId: string; symbol: string }[]>;
   connect(): Promise<IbkrConnection>;
   topUp(connection: IbkrConnection, tickerId: string, symbol: string, reqId: number): Promise<unknown>;
   loadPendingSplits(tickerIds: string[]): Promise<StockSplit[]>;
 }
 
-export const defaultLadderSplitCheckDependencies: LadderSplitCheckDependencies = {
-  loadLadderTickers: async () => (await loadEnabledPlutoTickerSettings()).map((ticker) => ({ tickerId: ticker.tickerId, symbol: ticker.symbol })),
+export const defaultPlutoSplitCheckDependencies: PlutoSplitCheckDependencies = {
+  loadPlutoTickers: async () => (await loadEnabledPlutoTickerSettings()).map((ticker) => ({ tickerId: ticker.tickerId, symbol: ticker.symbol })),
   connect: connectToIbkrGateway,
   topUp: topUpDailyBars,
   loadPendingSplits: (tickerIds) => loadPendingStockSplits(tickerIds),
 };
 
-export async function runLadderSplitCheck(dependencies: LadderSplitCheckDependencies = defaultLadderSplitCheckDependencies): Promise<LadderSplitCheckResult> {
-  const tickers = await dependencies.loadLadderTickers();
-  const result: LadderSplitCheckResult = { checkedSymbols: [], failed: [], pendingSplits: [] };
+export async function runPlutoSplitCheck(dependencies: PlutoSplitCheckDependencies = defaultPlutoSplitCheckDependencies): Promise<PlutoSplitCheckResult> {
+  const tickers = await dependencies.loadPlutoTickers();
+  const result: PlutoSplitCheckResult = { checkedSymbols: [], failed: [], pendingSplits: [] };
   if (tickers.length === 0) return result;
   const connection = await dependencies.connect();
   try {
@@ -55,9 +55,9 @@ export async function runLadderSplitCheck(dependencies: LadderSplitCheckDependen
 }
 
 /** For runJob: every ticker failing is a failure, some failing completes with errors; a pending split is said in the details. */
-export function describeLadderSplitCheckOutcome(result: LadderSplitCheckResult): { failureMessage?: string; completedWithErrors?: { errorCount: number; message: string } } {
+export function describePlutoSplitCheckOutcome(result: PlutoSplitCheckResult): { failureMessage?: string; completedWithErrors?: { errorCount: number; message: string } } {
   const failedText = result.failed.map((entry) => `${entry.symbol}: ${entry.message}`).join("; ");
-  if (result.failed.length > 0 && result.checkedSymbols.length === 0) return { failureMessage: `no ladder ticker's daily bars could be checked for a split (${failedText})` };
+  if (result.failed.length > 0 && result.checkedSymbols.length === 0) return { failureMessage: `no Pluto ticker's daily bars could be checked for a split (${failedText})` };
   if (result.failed.length > 0) return { completedWithErrors: { errorCount: result.failed.length, message: `split check failed for ${failedText}` } };
   return {};
 }

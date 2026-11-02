@@ -3,7 +3,7 @@ import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import type { DeltaComplianceResult } from "../ibkr/streamOrderLegQuote.js";
 import { evaluateCloseGateForPosition, type CloseGateVerdict } from "./closeGate.js";
 import { evaluateDeltaBandForOrderRequest } from "./deltaBandGate.js";
-import { evaluateLadderDeltaForOrderRequest, type LadderOrderGateContext } from "./ladderOrderGates.js";
+import { evaluateStrategyDeltaForOrderRequest, type StrategyOrderGateContext } from "./strategyOrderGates.js";
 import { evaluateLimitPriceCheckForOrderRequest } from "./limitPriceCheckGate.js";
 import type { PriceCheckResult } from "./limitPriceCheck.js";
 import { loadTraderCapitalFigures } from "./capitalOutsidePluto.js";
@@ -22,9 +22,9 @@ import { fetchTradingBlockedReason } from "./tradingGate.js";
 //   open_* only        the delta band, from a live delta (fails closed when no live delta can be read)
 //   close_position     the close gate (session open, live two-sided quotes on every leg, consistent wheel cycle)
 //   every order        the limit-price check: each leg's limit against its own live mid (limitPriceCheck.ts)
-// A close is not limit-checked: it only reduces exposure. A CC + Put Ladder order (its Pluto action taken under the ladder)
-// gets the ladder's delta range on its own delta and its pot cap instead of the delta band and the first two limits, and
-// the ladder's book-wide cap on Pluto's capital budget (ladderOrderGates.ts; Marcelo 2026-10-15 and 2026-10-21). A Vol Farmer
+// A close is not limit-checked: it only reduces exposure. A Pluto strategy order (its Pluto action taken under Vol Farmer
+// v4) gets the strategy's delta range on its own delta and its pot cap instead of the delta band and the first two limits,
+// and the book-wide cap on Pluto's capital budget (strategyOrderGates.ts; Marcelo 2026-10-15 and 2026-10-21). A Vol Farmer
 // v4 share purchase (open_shares, no option leg) gets the limits on what it pays and no delta check.
 
 export interface OrderRequestForGates {
@@ -49,7 +49,7 @@ export interface OrderGateResult {
 }
 
 /** The limit-check input of an opening or rolling order, or null when the order is not limit-checked (closes, no option leg, no strategy). */
-export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGates, "id" | "request_type" | "payload">, ladder: Pick<LadderOrderGateContext, "potFraction" | "book"> | null = null) {
+export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGates, "id" | "request_type" | "payload">, strategy: Pick<StrategyOrderGateContext, "potFraction" | "book"> | null = null) {
   const requestType = orderRequest.request_type;
   const isRoll = requestType === "roll_leg";
   if (!requestType.startsWith("open_") && !isRoll) return null;
@@ -66,7 +66,7 @@ export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGa
       strike: 0,
       premium: stockLeg.unitPrice,
       excludeOrderRequestId: orderRequest.id,
-      ...(ladder ? { ladder: { potFraction: ladder.potFraction, stockSharesBought: 0, book: ladder.book } } : {}),
+      ...(strategy ? { strategy: { potFraction: strategy.potFraction, stockSharesBought: 0, book: strategy.book } } : {}),
     };
   }
   if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put" && strategyKey !== "leaps") return null;
@@ -85,7 +85,7 @@ export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGa
     rollFromPremium: closeLeg?.unitPrice,
     excludeOrderRequestId: orderRequest.id,
     ...(stockLegShares !== undefined && !isRoll ? { stockSharesBought: stockLegShares } : {}),
-    ...(ladder ? { ladder: { potFraction: ladder.potFraction, stockSharesBought: stockLegShares ?? 0, book: ladder.book } } : {}),
+    ...(strategy ? { strategy: { potFraction: strategy.potFraction, stockSharesBought: stockLegShares ?? 0, book: strategy.book } } : {}),
   };
 }
 
@@ -98,10 +98,10 @@ export interface OrderGateOptions {
 export async function evaluateOrderLimitsForOrderRequest(
   orderRequest: Pick<OrderRequestForGates, "id" | "request_type" | "payload">,
   live: { spotPrice?: number } = {},
-  ladder: LadderOrderGateContext | null = null,
+  strategy: StrategyOrderGateContext | null = null,
   options: OrderGateOptions = {},
 ): Promise<OrderLimitsResult | null> {
-  const input = limitsInputFromOrderRequest(orderRequest, ladder);
+  const input = limitsInputFromOrderRequest(orderRequest, strategy);
   if (!input) return null;
   const ticker = await db("tickers").where({ symbol: input.symbol.trim().toUpperCase() }).first("id", "symbol");
   if (!ticker) return { blocked: true, reasons: [`Could not verify position limits: ${input.symbol} is not a known ticker.`] };
@@ -137,13 +137,13 @@ export function combineOrderGateVerdicts(parts: {
   return { blocks, warnings: parts.warnings };
 }
 
-/** `ladder`: the CC + Put Ladder's context for an order its Pluto action took under the ladder (null for every other order). */
-export async function evaluateOrderGates(orderRequest: OrderRequestForGates, ladder: LadderOrderGateContext | null = null, options: OrderGateOptions = {}): Promise<OrderGateResult> {
+/** `strategy`: Vol Farmer v4's context for an order its Pluto action took under it (null for every other order). */
+export async function evaluateOrderGates(orderRequest: OrderRequestForGates, strategy: StrategyOrderGateContext | null = null, options: OrderGateOptions = {}): Promise<OrderGateResult> {
   const closeGateWanted = orderRequest.request_type === "close_position" && Boolean(orderRequest.related_position_id);
   const [tradingBlockedReason, limits, deltaBand, closeGate, priceCheck] = await Promise.all([
     fetchTradingBlockedReason(),
-    evaluateOrderLimitsForOrderRequest(orderRequest, {}, ladder, options),
-    ladder ? evaluateLadderDeltaForOrderRequest(orderRequest, ladder) : evaluateDeltaBandForOrderRequest(orderRequest),
+    evaluateOrderLimitsForOrderRequest(orderRequest, {}, strategy, options),
+    strategy ? evaluateStrategyDeltaForOrderRequest(orderRequest, strategy) : evaluateDeltaBandForOrderRequest(orderRequest),
     closeGateWanted ? evaluateCloseGateForPosition(orderRequest.related_position_id!) : Promise.resolve(null),
     evaluateLimitPriceCheckForOrderRequest(orderRequest),
   ]);

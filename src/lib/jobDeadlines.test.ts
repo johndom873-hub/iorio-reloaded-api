@@ -92,8 +92,8 @@ describe("evaluatePendingJobs", () => {
   const pending = (now: string, runs: JobRunSummary[], isOpenDay = true) => evaluatePendingJobs({ now: utc(now), runs, isOpenDay: () => isOpenDay, easternDateIsoOf: easternIsoDate });
 
   it("lists the 9:00 UTC jobs between their slot and their deadline when they have not started, and nothing once they have", () => {
-    expect(pending("2026-10-01T09:05:00Z", [])).toEqual(["option_chain_structure_refresh", "session_close_read", "ladder_split_check"]);
-    expect(pending("2026-10-01T09:05:00Z", [run("option_chain_structure_refresh", "2026-10-01T09:00:04Z"), run("session_close_read", "2026-10-01T09:00:02Z"), run("ladder_split_check", "2026-10-01T09:03:00Z")])).toEqual([]);
+    expect(pending("2026-10-01T09:05:00Z", [])).toEqual(["option_chain_structure_refresh", "session_close_read", "pluto_split_check"]);
+    expect(pending("2026-10-01T09:05:00Z", [run("option_chain_structure_refresh", "2026-10-01T09:00:04Z"), run("session_close_read", "2026-10-01T09:00:02Z"), run("pluto_split_check", "2026-10-01T09:03:00Z")])).toEqual([]);
   });
 
   it("lists nothing before the slot has begun, on closed days, or for evening jobs at 10:45 ET", () => {

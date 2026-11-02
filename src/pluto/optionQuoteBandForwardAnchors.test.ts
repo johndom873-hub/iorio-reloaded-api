@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
-import { forwardAnchorsFromBandQuotes } from "./ladderForwardAnchors.js";
+import { forwardAnchorsFromBandQuotes } from "./optionQuoteBandForwardAnchors.js";
 
 const clock = { todayIso: "2026-10-27", yearsToTodaysClose: 0.0005, riskFreeRate: 0.04 };
 const at = (minute: number) => new Date(`2026-10-27T15:${String(minute).padStart(2, "0")}:00Z`);

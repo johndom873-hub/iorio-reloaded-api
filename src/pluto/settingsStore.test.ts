@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { plutoSettingsColumns, validatePlutoSettingsInput, type PlutoSettings } from "./settingsStore.js";
-import { plutoLadderSettingsFixture, plutoVolFarmerV4SettingsFixture } from "./plutoSettingsFixture.js";
+import { plutoSafetyLimitsSettingsFixture, plutoVolFarmerV4SettingsFixture } from "./plutoSettingsFixture.js";
 
 // The approved defaults (2026-09-28), as the store would read them back.
 const current: PlutoSettings = {
-  ...plutoLadderSettingsFixture,
+  ...plutoSafetyLimitsSettingsFixture,
   ...plutoVolFarmerV4SettingsFixture,
   capitalBudgetPct: 30,
   excessAllowancePct: 0,
@@ -37,16 +37,7 @@ describe("validatePlutoSettingsInput", () => {
     expect(validatePlutoSettingsInput({ windowStartEt: "15:30" }, current)).toMatch(/before windowEndEt/);
     expect(validatePlutoSettingsInput({ windowStartEt: "15:30", windowEndEt: "15:45" }, current)).toBeNull();
   });
-  it("checks the ladder's values with the backtest's bounds", () => {
-    expect(validatePlutoSettingsInput({ ladderMinAbsDelta: 0 }, current)).toMatch(/above 0/);
-    expect(validatePlutoSettingsInput({ ladderMinAbsDelta: 0.35 }, current)).toMatch(/cannot exceed ladderMaxAbsDelta/);
-    expect(validatePlutoSettingsInput({ ladderMinDte: 0 }, current)).toBeNull();
-    expect(validatePlutoSettingsInput({ ladderMaxDte: 46 }, current)).toMatch(/cannot be above 45/);
-    expect(validatePlutoSettingsInput({ ladderMinDte: 10, ladderMaxDte: 5 }, current)).toMatch(/ladderMinDte cannot exceed/);
-    expect(validatePlutoSettingsInput({ ladderMaxSpreadPctOfMid: 0 }, current)).toMatch(/above 0/);
-    expect(validatePlutoSettingsInput({ ladderRungs: 2.5 }, current)).toMatch(/whole number/);
-    expect(validatePlutoSettingsInput({ ladderSharesPct: 100 }, current)).toMatch(/cannot be above 99/);
-    expect(validatePlutoSettingsInput({ ladderShockMinPct: 85 }, current)).toMatch(/ladderShockMinPct cannot exceed/);
+  it("checks each value's bounds", () => {
     expect(validatePlutoSettingsInput({ safetyMaxWorkingOrdersPerTicker: 0 }, current)).toMatch(/cannot be below 1/);
   });
 

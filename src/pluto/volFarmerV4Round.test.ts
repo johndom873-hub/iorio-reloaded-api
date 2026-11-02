@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { blackScholesPriceOnForward } from "../lib/impliedVolatilitySurface.js";
 import { contractKey } from "../lib/optionContractKey.js";
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
-import { plutoLadderSettingsFixture, plutoVolFarmerV4SettingsFixture } from "./plutoSettingsFixture.js";
+import { plutoSafetyLimitsSettingsFixture, plutoVolFarmerV4SettingsFixture } from "./plutoSettingsFixture.js";
 import type { VolFarmerV4Memory } from "./volFarmerV4LiveBook.js";
 
 // One Vol Farmer v4 round, everything outside its own work mocked: the tickers, the market, the book's counts, the memory
@@ -16,7 +16,7 @@ import type { VolFarmerV4Memory } from "./volFarmerV4LiveBook.js";
 // (and is in flight) until a test ends it.
 
 const harness = vi.hoisted(() => ({
-  enabled: [] as { tickerId: string; symbol: string; strategy: string | null; allocationPct: number | null }[],
+  enabled: [] as { tickerId: string; symbol: string; allocationPct: number | null }[],
   memory: new Map<string, unknown>(),
   saves: [] as { tickerId: string; adopted: boolean }[],
   lastRounds: new Map<string, { notes: string[]; figures: unknown }>(),
@@ -98,8 +98,8 @@ vi.mock("./optionQuoteBandPlanLoader.js", () => ({
   },
 }));
 vi.mock("./optionQuoteBandQuotes.js", () => ({ loadOptionQuoteBandQuotes: async () => [], loadFinishedOptionQuoteBandCycle: async () => ({ cycleNumber: 1, startedAt: new Date(0), finishedAt: new Date(0) }) }));
-vi.mock("./ladderLook.js", () => ({ latestCycleQuotes: () => ({ quotes: harness.quotes, stale: false }) }));
-vi.mock("./ladderLookSnapshot.js", () => ({ loadOpenPositionFigures: async (tickerId: string) => harness.positionsByTickerId.get(tickerId) ?? harness.positions }));
+vi.mock("./latestBandQuotes.js", () => ({ latestCycleQuotes: () => ({ quotes: harness.quotes, stale: false }) }));
+vi.mock("./openPositionFigures.js", () => ({ loadOpenPositionFigures: async (tickerId: string) => harness.positionsByTickerId.get(tickerId) ?? harness.positions }));
 vi.mock("./safetyLimits.js", () => ({ loadSafetyLimitBookCounts: async () => ({ ...harness.bookCounts }), plutoOrdersSentToday: async () => ({ count: 0 }) }));
 vi.mock("../lib/orderLimits.js", async (original) => ({ ...(await original<object>()), loadCommittedCapitalOnSymbols: async () => harness.committed }));
 vi.mock("./ledger.js", () => ({
@@ -125,7 +125,7 @@ vi.mock("./volFarmerV4LookLoader.js", () => ({
 const { runVolFarmerV4Round, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
 
 /** v4 at its defaults: Calls expiring at today's close, 80% of the pot in shares, rebalanced. */
-const v4Settings = { ...plutoLadderSettingsFixture, ...plutoVolFarmerV4SettingsFixture, capitalBudgetPct: 50, excessAllowancePct: 0, maxQuoteAgeMinutes: 10, burstLines: 10, telegramVerbosity: "actions" };
+const v4Settings = { ...plutoSafetyLimitsSettingsFixture, ...plutoVolFarmerV4SettingsFixture, capitalBudgetPct: 50, excessAllowancePct: 0, maxQuoteAgeMinutes: 10, burstLines: 10, telegramVerbosity: "actions" };
 /** v4 with its Calls on the next expiry, at or above the break-even, |delta| at most 0.3, and half the pot in shares (v2's values). */
 const settings = { ...v4Settings, volFarmerV4OptionsExpiry: "next", volFarmerV4FirstPositionPct: 50, volFarmerV4CallMaxAbsDelta: 0.3, volFarmerV4CallStrikeFloor: "break_even" };
 let roundSettings: Record<string, unknown> = settings;
@@ -148,7 +148,7 @@ function round(stressed = false, todayIso = "2026-10-27") {
   return runVolFarmerV4Round({ passId: "p1", settings: roundSettings as never, api: {} as never, marketWatch: marketWatch as never, trackWatch: () => {}, now: new Date(`${todayIso}T15:00:00Z`), todayIso, totalCashValue: 500_000, settledCashValue: harness.settledCashValue, netLiquidationValue: 1_000_000, cancelByMs: null, symbols: [], stressed });
 }
 
-const v4Ticker = (symbol: string) => ({ tickerId: `t-${symbol}`, symbol, strategy: null, allocationPct: null });
+const v4Ticker = (symbol: string) => ({ tickerId: `t-${symbol}`, symbol, allocationPct: null });
 
 const position = (shares: number, costPerShare: number) => ({ shares, costPerShare, premiums: [], calls: [], puts: [] });
 const stockLeg = (id: string, quantity: number) => ({ id, legType: "stock", side: "long", quantity, optionType: null, strikePrice: null, expiryDate: null, multiplier: 1, entryPrice: 100, entryAt: new Date(), exitPrice: null, exitAt: null });
@@ -181,10 +181,8 @@ const leapsContractCost = (action: Record<string, unknown>) => {
 };
 
 beforeEach(() => {
-  harness.enabled = [
-    { tickerId: "t-VFT", symbol: "VFT", strategy: null, allocationPct: null },
-    { tickerId: "t-LAD", symbol: "LAD", strategy: "cc_put_ladder", allocationPct: null },
-  ];
+  // VFT's allocation is half of Pluto's budget: the $250,000 pot the figures below are sized for.
+  harness.enabled = [{ tickerId: "t-VFT", symbol: "VFT", allocationPct: 50 }];
   harness.memory.clear();
   harness.saves.length = 0;
   harness.lastRounds.clear();
@@ -210,26 +208,25 @@ beforeEach(() => {
 });
 
 describe("runVolFarmerV4Round", () => {
-  it("opens a cycle on a flat v4 ticker: one Covered Call with its shares, recorded under v4 and kept as pending; the ladder's ticker is not its", async () => {
+  it("opens a cycle on a flat ticker: one Covered Call with its shares, recorded under v4 and kept as pending", async () => {
     const summary = await round();
     expect(summary.looked).toEqual(["VFT"]);
     expect(harness.actions).toEqual([expect.objectContaining({ kind: "open_covered_call", symbol: "VFT", executionStrategy: "vol_farmer_v4", outcome: "validated" })]);
     // Half the ticker's allocation (50% × 50% × $1,000,000 = $250,000): floor(125,000 ÷ 10,000.50) = 12 lots.
-    expect(harness.executed).toEqual([expect.objectContaining({ kind: "ladder_open", strategyKey: "covered_call", buyEveryShare: true, plan: expect.objectContaining({ quantity: 12 }) })]);
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", strategyKey: "covered_call", buyEveryShare: true, plan: expect.objectContaining({ quantity: 12 }) })]);
     const memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
     expect(memory.pending).toEqual([expect.objectContaining({ ref: "action:action-1", kind: "covered_call", contracts: 12, startsCycle: true })]);
     expect(memory.state.first).toMatchObject({ shares: 1_200, calls: [{ legId: "action:action-1", shares: 1_200 }] });
     expect(summary.sent).toBe(1);
     // Pot $250,000; committed: the exposure, 30,000; free cash: the budget's $500,000 at most the account's $400,000; LEAPS cap 10% of the pot; the Puts' half, 125,000.
     expect(harness.lastRounds.get("t-VFT")).toEqual({ notes: [expect.stringContaining("VFT Sell $105 Call")], figures: { potDollars: 250_000, committedDollars: 30_000, freeCashDollars: 400_000, leapsCapDollars: 25_000, putsDollars: 125_000 } });
-    expect(harness.lastRounds.has("t-LAD")).toBe(false);
   });
 
   it("without the previous session's volume, sells the expiry it sells with the 20% rule lifted for the day, and says so", async () => {
     harness.chain = { expirations: ["20261106"], strikesByExpiry: new Map([["20261106", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
     harness.previousSessionVolumeMissing = true;
     await round();
-    expect(harness.executed).toEqual([expect.objectContaining({ kind: "ladder_open", strategyKey: "covered_call", plan: expect.objectContaining({ quantity: 12 }) })]);
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", strategyKey: "covered_call", plan: expect.objectContaining({ quantity: 12 }) })]);
     expect(harness.lastRounds.get("t-VFT")!.notes[0]).toBe("no previous-session volume for 6 Nov (10DTE): the 20% volume rule is off for it today");
   });
 
@@ -296,7 +293,7 @@ describe("runVolFarmerV4Round", () => {
     try {
       await round();
       // 50% × (1 + 20%) × 50% × $1,000,000 = $300,000: floor(150,000 ÷ 10,000.50) = 14 lots; the LEAPS cap 10% of the pot.
-      expect(harness.executed).toEqual([expect.objectContaining({ kind: "ladder_open", plan: expect.objectContaining({ quantity: 14 }) })]);
+      expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", plan: expect.objectContaining({ quantity: 14 }) })]);
       expect(harness.lastRounds.get("t-VFT")!.figures).toMatchObject({ potDollars: 300_000, leapsCapDollars: 30_000 });
     } finally {
       settings.excessAllowancePct = 0;
@@ -307,7 +304,7 @@ describe("runVolFarmerV4Round", () => {
     harness.accountFreeCash = 50_000;
     await round();
     // Half the pot wants 12 lots of $10,000.50; the free cash pays for floor(50,000 ÷ 10,000.50) = 4.
-    expect(harness.executed).toEqual([expect.objectContaining({ kind: "ladder_open", buyEveryShare: true, plan: expect.objectContaining({ quantity: 4 }) })]);
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", buyEveryShare: true, plan: expect.objectContaining({ quantity: 4 }) })]);
     expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringContaining("the free cash ($50,000) pays for 4 of the 12 lots half the pot wants")]);
   });
 
@@ -327,7 +324,7 @@ describe("runVolFarmerV4Round", () => {
     withLeapsDue("t-VFT");
     const summary = await round();
     // 27 Oct: VFT's turn first, its first position's Call; then AAA's new cycle; then VFT's LEAPS.
-    expect(harness.executed.map((order) => [order.symbol, order.kind, order.buyEveryShare ?? null])).toEqual([["VFT", "ladder_open", false], ["AAA", "ladder_open", true], ["VFT", "leaps_buy", null]]);
+    expect(harness.executed.map((order) => [order.symbol, order.kind, order.buyEveryShare ?? null])).toEqual([["VFT", "strategy_open", false], ["AAA", "strategy_open", true], ["VFT", "leaps_buy", null]]);
     // The free cash left is more than the LEAPS cap, 10% of VFT's $250,000 pot: the cap decides the contracts.
     const leaps = harness.actions.find((action) => action.kind === "buy_leaps")!;
     expect(leaps.quantity).toBe(Math.floor(25_000 / leapsContractCost(leaps)));
@@ -350,7 +347,7 @@ describe("runVolFarmerV4Round", () => {
   });
 
   it("buys no LEAPS without the previous session's IV, and says why", async () => {
-    // VFT beside the ladder's LAD: half the budget, the $250,000 pot withLeapsDue is sized for.
+    // VFT's half of the budget: the $250,000 pot withLeapsDue is sized for.
     withLeapsDue("t-VFT");
     harness.stepImpliedVolatility = null;
     await round();
@@ -404,7 +401,7 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
     harness.outcomes.set("action-1", filledPurchase(900, 100));
     harness.positionsByTickerId.set("t-VFT", [{ strategyKey: "unstructured", status: "open", legs: [stockLeg("s1", 1_900)] }]);
     await round();
-    expect(harness.executed.map((order) => [order.kind, (order.plan as { quantity: number }).quantity, order.buyEveryShare ?? null])).toEqual([["shares_buy", 900, null], ["ladder_open", 19, false]]);
+    expect(harness.executed.map((order) => [order.kind, (order.plan as { quantity: number }).quantity, order.buyEveryShare ?? null])).toEqual([["shares_buy", 900, null], ["strategy_open", 19, false]]);
     memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
     expect(memory.state.first).toMatchObject({ shares: 1_900, calls: [{ legId: "action:action-2", shares: 1_900 }] });
   });
@@ -465,7 +462,7 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
       // 11:00 Eastern: five hours to the close.
       harness.quotes = [...quotesAt("C", "2026-10-27", 5 / 24), ...quotesAt("P", "2026-10-27", 5 / 24)];
       await round();
-      expect(harness.executed).toEqual([expect.objectContaining({ kind: "ladder_open", strategyKey: "covered_call", buyEveryShare: true, contract: expect.objectContaining({ expiry: "2026-10-27", dte: 0 }), plan: expect.objectContaining({ quantity: 19 }) })]);
+      expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", strategyKey: "covered_call", buyEveryShare: true, contract: expect.objectContaining({ expiry: "2026-10-27", dte: 0 }), plan: expect.objectContaining({ quantity: 19 }) })]);
     } finally {
       vi.useRealTimers();
     }

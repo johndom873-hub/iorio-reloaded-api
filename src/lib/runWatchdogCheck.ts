@@ -15,9 +15,9 @@ const DAILY_JOB_NAMES = [
   // Runs 11:00 PM UTC every day (weekends too), so it has always run by this check.
   "expiry_settlement_audit",
   "option_chain_structure_refresh",
-  // 9:00 AM UTC on market days, after the structure refresh: the ladder's tickers checked for a split.
-  "ladder_split_check",
-  // 9:30 PM UTC on market days: the ladder's previous-session option volume.
+  // 9:00 AM UTC on market days, after the structure refresh: Pluto's tickers checked for a split.
+  "pluto_split_check",
+  // 9:30 PM UTC on market days: the previous-session option volume of Pluto's band.
   "option_session_volume_capture",
   // Scheduled for 7:00 PM UTC every day (weekends too).
   "market_calendar_sync",

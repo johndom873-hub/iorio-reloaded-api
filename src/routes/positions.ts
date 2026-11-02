@@ -38,8 +38,8 @@ import { fetchOrderLegFillsByOrderId } from "../lib/orderFills.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
 import { getCycleMarksHandler } from "./positionCycleMarks.js";
 import { agentLeaseRefusal, plutoAgentHolderHeader } from "../pluto/agentLease.js";
-import { loadLadderOrderGateContext } from "../pluto/ladderOrderGateContext.js";
-import type { LadderOrderGateContext } from "../lib/ladderOrderGates.js";
+import { loadStrategyOrderGateContext } from "../pluto/strategyOrderGateContext.js";
+import type { StrategyOrderGateContext } from "../lib/strategyOrderGates.js";
 import { computeUnderlyingStockPriceByPosition, computeUnrealizedPnlByPosition, normalizeExpiryDate, roundToCents, sumSharesCommittedByCoveredCallPayloads, underlyingStockPriceKey, validateCoveredCallCoverage } from "../lib/positionOrderRules.js";
 
 export const positionsRouter = Router();
@@ -962,8 +962,8 @@ interface OpenOrderRequestBody {
   /** Signals modal only: the scores at the moment the order was built (stored as-is in order_requests.signal_snapshot). */
   signalSnapshot?: unknown;
   /**
-   * Pluto's CC + Put Ladder only (Marcelo 2026-10-15): a Covered Call entry buys every share its calls cover, even with
-   * uncovered shares held (the ladder keeps those for its Puts and calls on held shares), priced as the auto-fill does.
+   * Pluto's orders only (Marcelo 2026-10-15): a Covered Call entry buys every share its calls cover, even with uncovered
+   * shares held (Vol Farmer v4 keeps those for its own Calls), priced as the auto-fill does.
    */
   buyEveryShare?: unknown;
 }
@@ -1016,7 +1016,7 @@ async function traderPlutoTickerRefusal(request: Request, symbol: string): Promi
   return `Pluto trades ${symbol}, so only an admin can open or roll on it.`;
 }
 
-/** Manual trades are locked on the tickers the CC + Put Ladder trades (Marcelo 2026-10-15): the tickers enabled in Pluto, which runs the ladder only since 2026-10-27. */
+/** Manual trades are locked on the tickers Pluto may trade (Marcelo 2026-10-15, kept for Vol Farmer v4 2026-11-02): the tickers enabled in Pluto. */
 async function manualOrdersLockedOn(symbol: string): Promise<boolean> {
   return plutoMayTradeSymbol(symbol);
 }
@@ -1565,12 +1565,12 @@ export async function sharesSoldByInFlightUncoveredShareSales(symbol: string): P
   return rows.reduce((sum, row) => sum + row.payload.legs.filter((leg) => leg.role === "stock" && leg.action === OrderAction.SELL).reduce((legSum, leg) => legSum + leg.quantity, 0), 0);
 }
 
-/** The CC + Put Ladder's gate context for an order its Pluto action took under the ladder; a failed read refuses the order. */
-async function readLadderGateContext(orderRequest: { pluto_action_id?: string | null; payload: OrderRequestPayload }): Promise<{ ladder: LadderOrderGateContext | null; error: string | null }> {
+/** Vol Farmer v4's gate context for an order its Pluto action took under it; a failed read refuses the order. */
+async function readStrategyGateContext(orderRequest: { pluto_action_id?: string | null; payload: OrderRequestPayload }): Promise<{ strategy: StrategyOrderGateContext | null; error: string | null }> {
   try {
-    return { ladder: await loadLadderOrderGateContext(orderRequest), error: null };
+    return { strategy: await loadStrategyOrderGateContext(orderRequest), error: null };
   } catch (error) {
-    return { ladder: null, error: `The CC + Put Ladder order rules could not be read (${error instanceof Error ? error.message : String(error)}).` };
+    return { strategy: null, error: `Vol Farmer v4's order rules could not be read (${error instanceof Error ? error.message : String(error)}).` };
   }
 }
 
@@ -1640,7 +1640,7 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     }
   }
   if (!orderRequest.pluto_action_id && (await manualOrdersLockedOn(orderRequest.payload.symbol))) {
-    response.status(409).json({ error: `${orderRequest.payload.symbol} is traded by Pluto's CC + Put Ladder strategy, so orders by hand are locked. Switch the ticker off in Pluto to trade it by hand.` });
+    response.status(409).json({ error: `${orderRequest.payload.symbol} is traded by Pluto, so orders by hand are locked. Switch the ticker off in Pluto to trade it by hand.` });
     return;
   }
 
@@ -1649,10 +1649,10 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   // gate for closes. The order stays pending_confirmation when any of them blocks.
   // Judged and committed under one lock (orderConfirmationLock.ts): two orders confirmed at the same instant take turns, so the second
   // sees the first as in flight and cannot slip under a limit only one of them fits under.
-  // A CC + Put Ladder order is judged by the ladder's delta range and pot instead of the delta band and two of the limits.
-  const { ladder, error: ladderError } = await readLadderGateContext(orderRequest);
-  if (ladderError) {
-    response.status(409).json({ error: ladderError });
+  // A Vol Farmer v4 order is judged by its delta range and pot instead of the delta band and two of the limits.
+  const { strategy, error: strategyError } = await readStrategyGateContext(orderRequest);
+  if (strategyError) {
+    response.status(409).json({ error: strategyError });
     return;
   }
   let blockedReasons: string[] = [];
@@ -1668,7 +1668,7 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
           return;
         }
       }
-      const gateEvaluation = await evaluateOrderGates(orderRequest, ladder, { forTrader });
+      const gateEvaluation = await evaluateOrderGates(orderRequest, strategy, { forTrader });
       if (gateEvaluation.blocks.length > 0) {
         blockedReasons = gateEvaluation.blocks;
         return;

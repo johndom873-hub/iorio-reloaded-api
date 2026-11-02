@@ -86,8 +86,8 @@ export interface RecordPlutoActionInput {
   blockReason: string | null;
   referenceBid: number | null;
   referenceMid: number | null;
-  /** The strategy the action was taken under; the CC + Put Ladder when absent. */
-  executionStrategy?: "cc_put_ladder" | "vol_farmer_v4";
+  /** The strategy the action was taken under; Vol Farmer v4 when absent (earlier actions may carry the CC + Put Ladder's). */
+  executionStrategy?: "vol_farmer_v4";
 }
 
 export async function recordPlutoAction(input: RecordPlutoActionInput): Promise<string> {
@@ -109,7 +109,7 @@ export async function recordPlutoAction(input: RecordPlutoActionInput): Promise<
       reference_bid: input.referenceBid,
       reference_mid: input.referenceMid,
       // The order gates judge an action by the strategy it ran under; earlier actions may carry Edge Margin's.
-      execution_strategy: input.executionStrategy ?? "cc_put_ladder",
+      execution_strategy: input.executionStrategy ?? "vol_farmer_v4",
     })
     .returning("id");
   return row.id as string;

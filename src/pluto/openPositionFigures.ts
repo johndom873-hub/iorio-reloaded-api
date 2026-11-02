@@ -2,7 +2,7 @@ import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import type { PositionFigures, PositionLegFigures } from "../lib/positionSelectors.js";
 
-// What the CC + Put Ladder's look book (ladderLookBook.ts) reads from the database for one ticker.
+// A ticker's open positions as the position selectors take them, for Vol Farmer v4's round.
 
 type LegRow = {
   positionId: string;

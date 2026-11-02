@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeInFlightOrderNotional, computeOrderNotional, evaluateOrderLimitFigures, ladderBookCapitalVerdict } from "./orderLimits.js";
+import { computeInFlightOrderNotional, computeOrderNotional, evaluateOrderLimitFigures, strategyBookCapitalVerdict } from "./orderLimits.js";
 import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 
 // Formula 3g's OrderNotional, plus the Roll Signals rule (2026-09-24): a roll re-uses the
@@ -71,37 +71,37 @@ describe("computeInFlightOrderNotional", () => {
   });
 });
 
-describe("evaluateOrderLimitFigures for a CC + Put Ladder order", () => {
+describe("evaluateOrderLimitFigures for a Pluto strategy order", () => {
   // A $200,000 account, $60,000 cash, nothing locked; the platform's limits at 20% per position, 10% per ticker, 5% cash reserve.
   const figures = { symbol: "LADR", totalPortfolioValue: 200_000, totalCashValue: 60_000, cashLockedInCsps: 0, inFlight: { totalNotional: 0, tickerNotional: 0 }, settings: { maxOrderPctOfPortfolio: 20, maxConcentrationPerTickerPct: 10, minCashReservePct: 5 } };
 
   it("an order the platform's 10% per ticker would refuse passes inside a 25% pot", () => {
     // LADR already $30,000; the order adds $15,000 → $45,000: 22.5% of the account, under the $50,000 pot.
     expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 30_000, orderNotional: 15_000 }).reasons).toEqual([expect.stringMatching(/22.5% of portfolio value, above the 10% max concentration/)]);
-    const ladder = evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 30_000, orderNotional: 15_000, ladderPotFraction: 0.25 });
-    expect(ladder).toMatchObject({ blocked: false, reasons: [], details: { ladderPotDollars: 50_000 } });
+    const strategy = evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 30_000, orderNotional: 15_000, strategyPotFraction: 0.25 });
+    expect(strategy).toMatchObject({ blocked: false, reasons: [], details: { strategyPotDollars: 50_000 } });
   });
 
   it("refuses an order that takes the ticker past its pot, counting orders still working", () => {
-    const over = evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 30_000, inFlight: { totalNotional: 8_000, tickerNotional: 8_000 }, orderNotional: 15_000, ladderPotFraction: 0.25 });
+    const over = evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 30_000, inFlight: { totalNotional: 8_000, tickerNotional: 8_000 }, orderNotional: 15_000, strategyPotFraction: 0.25 });
     expect(over.blocked).toBe(true);
     expect(over.reasons).toEqual(["LADR would be $53,000, above its Pluto pot of $50,000 (25.0% of portfolio value) (counting $8,000 of orders still working)."]);
   });
 
-  it("refuses an order that takes the ladder's book past Pluto's capital budget (A1), with its reason at confirm", () => {
+  it("refuses an order that takes Pluto's book past Pluto's capital budget (A1), with its reason at confirm", () => {
     // Budget 50% of $200,000 = $100,000; the book commits $96,000. A $45 Put ×1 at 0.80 adds $4,420 → $100,420: refused.
     const book = { committedBeforeDollars: 96_000, budgetFraction: 0.5 };
-    const over = evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 4_420, ladderPotFraction: 0.25, ladderBook: book });
+    const over = evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 4_420, strategyPotFraction: 0.25, strategyBook: book });
     expect(over.reasons).toEqual(["Pluto's tickers would commit $100,420 together, above Pluto's capital budget of $100,000 (50.0% of portfolio value); $96,000 is already committed, counting orders still working."]);
-    expect(over.details!.ladderBook).toEqual({ committedBeforeDollars: 96_000, committedAfterDollars: 100_420, capDollars: 100_000, fits: false });
-    expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 4_000, ladderPotFraction: 0.25, ladderBook: book })).toMatchObject({ blocked: false, details: { ladderBook: { committedAfterDollars: 100_000, fits: true } } });
+    expect(over.details!.strategyBook).toEqual({ committedBeforeDollars: 96_000, committedAfterDollars: 100_420, capDollars: 100_000, fits: false });
+    expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 4_000, strategyPotFraction: 0.25, strategyBook: book })).toMatchObject({ blocked: false, details: { strategyBook: { committedAfterDollars: 100_000, fits: true } } });
     // A Call on shares already held commits nothing: it passes an already full book.
-    expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 0, ladderPotFraction: 0.25, ladderBook: { committedBeforeDollars: 120_000, budgetFraction: 0.5 } }).blocked).toBe(false);
+    expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 0, strategyPotFraction: 0.25, strategyBook: { committedBeforeDollars: 120_000, budgetFraction: 0.5 } }).blocked).toBe(false);
   });
 
   it("keeps the cash reserve", () => {
     // $60,000 cash − $52,000 order = $8,000 = 4% of the account, under the 5% reserve.
-    expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 52_000, ladderPotFraction: 0.3 }).reasons).toEqual([expect.stringMatching(/4.0% of portfolio value as cash, below the 5% min cash reserve/)]);
+    expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 52_000, strategyPotFraction: 0.3 }).reasons).toEqual([expect.stringMatching(/4.0% of portfolio value as cash, below the 5% min cash reserve/)]);
   });
 });
 
@@ -143,10 +143,10 @@ describe("evaluateOrderLimitFigures: the traders' capital cap", () => {
   });
 });
 
-describe("ladderBookCapitalVerdict", () => {
+describe("strategyBookCapitalVerdict", () => {
   it("lets an order go only while the book's committed capital after it stays within the budget (the brief's example)", () => {
     // NLV $1,000,000 × 50% = $500,000 cap; $480,000 committed: a $4,500 order fits, a $22,500 one does not.
-    expect(ladderBookCapitalVerdict({ committedBeforeDollars: 480_000, orderNotional: 4_500, budgetFraction: 0.5, netLiquidationValue: 1_000_000 })).toEqual({ committedBeforeDollars: 480_000, committedAfterDollars: 484_500, capDollars: 500_000, fits: true });
-    expect(ladderBookCapitalVerdict({ committedBeforeDollars: 480_000, orderNotional: 22_500, budgetFraction: 0.5, netLiquidationValue: 1_000_000 }).fits).toBe(false);
+    expect(strategyBookCapitalVerdict({ committedBeforeDollars: 480_000, orderNotional: 4_500, budgetFraction: 0.5, netLiquidationValue: 1_000_000 })).toEqual({ committedBeforeDollars: 480_000, committedAfterDollars: 484_500, capDollars: 500_000, fits: true });
+    expect(strategyBookCapitalVerdict({ committedBeforeDollars: 480_000, orderNotional: 22_500, budgetFraction: 0.5, netLiquidationValue: 1_000_000 }).fits).toBe(false);
   });
 });

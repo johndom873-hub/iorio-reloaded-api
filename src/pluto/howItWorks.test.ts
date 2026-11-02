@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildPlutoHowItWorks } from "./howItWorks.js";
-import { plutoLadderSettingsFixture, plutoVolFarmerV4SettingsFixture } from "./plutoSettingsFixture.js";
+import { plutoSafetyLimitsSettingsFixture, plutoVolFarmerV4SettingsFixture } from "./plutoSettingsFixture.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 // The "How it works" tab quotes these numbers to its readers. This test pins every one at today's defaults: when a
@@ -9,7 +9,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 
 /** Pluto's settings at their migration defaults. */
 const settings: PlutoSettings = {
-  ...plutoLadderSettingsFixture,
+  ...plutoSafetyLimitsSettingsFixture,
   ...plutoVolFarmerV4SettingsFixture,
   capitalBudgetPct: 50, excessAllowancePct: 20,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2,
@@ -22,25 +22,10 @@ const figures = { unfilledOrderCancelMinutes: 15 };
 
 describe("buildPlutoHowItWorks", () => {
   it("quotes every number the tab shows, at today's defaults and constants", () => {
-    const { ladder, volFarmerV4: _volFarmerV4, ...rest } = buildPlutoHowItWorks(settings, figures);
+    const { volFarmerV4: _volFarmerV4, ...rest } = buildPlutoHowItWorks(settings, figures);
     expect(rest).toEqual({ shared: { windowStartEt: "10:45", windowEndEt: "15:30", windowEndMinutesBeforeCloseAtLeast: 30, capitalBudgetPct: 50, excessAllowancePct: 20, dailyLossBreakerPct: 2, unfilledOrderCancelMinutes: 15, premiumYieldSessionsPerYear: 252 },
       safetyLimits: { maxWorkingOrdersPerTicker: 10, maxOrdersPerTickerPerDay: 30, maxOpenPositionsPerTicker: 30, maxOpenPositions: 120, maxOrdersPerDay: 100, spyStressBreakerPct: 5, tickerCooldownMinutes: 0 },
     });
-    const { example: ladderExample, ...ladderValues } = ladder;
-    expect(ladderValues).toEqual({
-      minAbsDelta: 0.05, maxAbsDelta: 0.3, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 50, minimumBid: 0.05, maxVolumeSharePct: 20,
-      rungs: 5, sharesPct: 50, shockMinPct: 60, shockMaxPct: 80, shockNoHistoryPct: 90, shockLookbackYears: 10, putOverCallYieldMarginPct: 0, minEntryYieldPct: 20, maxQuoteAgeMinutes: 10,
-    });
-    // Pot 2,000,000 × 20% × (1 + 20%) × 50% = 240,000.
-    expect(ladderExample).toMatchObject({ accountValue: 2_000_000, allocationPct: 20, pot: 240_000, sharesBudget: 120_000, reserve: 120_000, rungCollateral: 24_000, averageCost: 104, breakEven: 100, shockPct: 70 });
-  });
-
-  it("works the ladder example with the strategy's own strike cap: the last rung sits on the floor", () => {
-    const { example } = buildPlutoHowItWorks(settings, figures).ladder;
-    // Floor 104 × (1 − 70%) = 31.20; rung n: 100 − (100 − 31.20) × n × 24,000 ÷ 120,000.
-    expect(example.floor).toBeCloseTo(31.2, 10);
-    expect(example.rungs.map((entry) => entry.rung)).toEqual([1, 2, 3, 4, 5]);
-    expect(example.rungs.map((entry) => Math.round(entry.strikeCap * 100) / 100)).toEqual([86.24, 72.48, 58.72, 44.96, 31.2]);
   });
 
   it("quotes Vol Farmer v4's settings and works its example with the strategy's own functions", () => {
@@ -82,19 +67,10 @@ describe("buildPlutoHowItWorks", () => {
     expect(buildPlutoHowItWorks({ ...settings, volFarmerV4TopUpCapPct: 100 }, figures).volFarmerV4.example).toMatchObject({ topUpCapDollars: 240_000, lotsAfterFallTopUp: 21, moneyInAfterFallTopUp: 208_010.5 });
   });
 
-  it("follows the live settings: the example's pot, rungs and shock move with them", () => {
-    const { example } = buildPlutoHowItWorks({ ...settings, capitalBudgetPct: 40, ladderRungs: 4, ladderSharesPct: 30, ladderShockMinPct: 75 }, figures).ladder;
-    // Pot 2,000,000 × 20% × (1 + 20%) × 40% = 192,000: 57,600 in shares, 134,400 reserve in 4 rungs of 33,600; shock 70% lifted to 75%.
-    expect(example).toMatchObject({ pot: 192_000, sharesBudget: 57_600, reserve: 134_400, rungCollateral: 33_600, shockPct: 75 });
-    expect(example.rungs).toHaveLength(4);
-    expect(example.rungs[3]!.strikeCap).toBeCloseTo(example.floor, 10);
-  });
-
-  it("raises both examples' pots by the excess allowance", () => {
+  it("raises the example's pot by the excess allowance", () => {
     const values = buildPlutoHowItWorks({ ...settings, excessAllowancePct: 0 }, figures);
     // Without it, the pot is the allocation alone, 2,000,000 × 20% × 50% = 200,000: floor(160,000 ÷ 10,000.50) = 15 lots; the LEAPS cap 10% of 200,000.
     expect(values.shared.excessAllowancePct).toBe(0);
-    expect(values.ladder.example).toMatchObject({ pot: 200_000, sharesBudget: 100_000, reserve: 100_000 });
     expect(values.volFarmerV4.example).toMatchObject({ pot: 200_000, lots: 15, leapsCap: 20_000 });
   });
 });

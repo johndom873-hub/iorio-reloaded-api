@@ -361,7 +361,7 @@ export function evaluateDataChecks(invariants: InvariantResult[], dataSessionIso
 // --- Today's chain structure: the stored expiries and strike grids everything that lists contracts reads ---
 
 /**
- * The 09:00 UTC structure job stores each ticker's expiries and strike grids: the CC + Put Ladder's band, the Volatility
+ * The 09:00 UTC structure job stores each ticker's expiries and strike grids: Pluto's option band, the Volatility
  * screen's Calls and the Recovery Path list their contracts from it. A ticker without today's structure uses its last one.
  */
 export function evaluateTodaysChainStructure(input: { todayIso: string; universeSymbols: string[]; symbolsWithTodaysStructure: string[] }): ReadinessCheck {

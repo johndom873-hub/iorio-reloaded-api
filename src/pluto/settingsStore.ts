@@ -48,25 +48,12 @@ export interface PlutoSettings {
   // Operational
   crashLoopRestartsPerHour: number;
   telegramVerbosity: PlutoTelegramVerbosity;
-  // CC + Put Ladder (the backtest's baseline keys with a "ladder" prefix; loadLadderSettingsForTicker maps them back)
-  ladderMinAbsDelta: number;
-  ladderMaxAbsDelta: number;
-  ladderMinDte: number;
-  ladderMaxDte: number;
-  ladderMaxSpreadPctOfMid: number;
-  ladderRungs: number;
-  /** The default share level; a ticker may override it (pluto_ticker_settings). */
-  ladderSharesPct: number;
-  ladderShockMinPct: number;
-  ladderShockMaxPct: number;
-  ladderShockNoHistoryPct: number;
-  ladderShockLookbackYears: number;
-  // Safety Limits: they hold every Pluto strategy (safetyLimits.ts counts the orders of both together).
+  // Safety Limits: they hold Vol Farmer v4's orders (safetyLimits.ts).
   /** At most this many of a ticker's orders work at once; the rest go at the next looks. */
   safetyMaxWorkingOrdersPerTicker: number;
-  /** While SPY is down this much on the day, the ladder sends nothing and Vol Farmer v4 opens nothing. */
+  /** While SPY is down this much on the day, Vol Farmer v4 opens nothing. */
   safetySpyStressBreakerPct: number;
-  /** Minutes after a filled Pluto order on a ticker before either strategy may act on it again; 0 = no cooldown. */
+  /** Minutes after a filled Pluto order on a ticker before Pluto may act on it again; 0 = no cooldown. */
   safetyTickerCooldownMinutes: number;
   safetyMaxOpenPositionsPerTicker: number;
   /** Every Pluto order sent on a ticker in a day counts, re-prices included. */
@@ -123,18 +110,6 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   maxEnabledTickers: { column: "max_enabled_tickers", kind: "integer", min: 0 },
   crashLoopRestartsPerHour: { column: "crash_loop_restarts_per_hour", kind: "integer", min: 1 },
   telegramVerbosity: { column: "telegram_verbosity", kind: "text", oneOf: ["actions", "off"] },
-  // The ladder's bounds are the backtest's (validateBaselineSettings), so every live value can be backtested.
-  ladderMinAbsDelta: { column: "ladder_min_abs_delta", kind: "number", min: 0, max: 1 },
-  ladderMaxAbsDelta: { column: "ladder_max_abs_delta", kind: "number", min: 0, max: 1 },
-  ladderMinDte: { column: "ladder_min_dte", kind: "integer", min: 0, max: 45 },
-  ladderMaxDte: { column: "ladder_max_dte", kind: "integer", min: 0, max: 45 },
-  ladderMaxSpreadPctOfMid: { column: "ladder_max_spread_pct_of_mid", kind: "number", min: 0, max: 200 },
-  ladderRungs: { column: "ladder_rungs", kind: "integer", min: 1, max: 20 },
-  ladderSharesPct: { column: "ladder_shares_pct", kind: "number", min: 1, max: 99 },
-  ladderShockMinPct: { column: "ladder_shock_min_pct", kind: "number", min: 1, max: 99 },
-  ladderShockMaxPct: { column: "ladder_shock_max_pct", kind: "number", min: 1, max: 99 },
-  ladderShockNoHistoryPct: { column: "ladder_shock_no_history_pct", kind: "number", min: 1, max: 99 },
-  ladderShockLookbackYears: { column: "ladder_shock_lookback_years", kind: "integer", min: 1, max: 30 },
   safetyMaxWorkingOrdersPerTicker: { column: "safety_max_working_orders_per_ticker", kind: "integer", min: 1, max: 100 },
   safetySpyStressBreakerPct: { column: "safety_spy_stress_breaker_pct", kind: "number", min: 0, max: 100 },
   safetyTickerCooldownMinutes: { column: "safety_ticker_cooldown_minutes", kind: "integer", min: 0 },
@@ -208,11 +183,6 @@ export function validatePlutoSettingsInput(input: PlutoSettingsInput, current: P
   }
   const merged = { ...current, ...input };
   if (merged.windowStartEt >= merged.windowEndEt) return "windowStartEt must be before windowEndEt.";
-  if (merged.ladderMinAbsDelta <= 0) return "ladderMinAbsDelta must be above 0.";
-  if (merged.ladderMinAbsDelta > merged.ladderMaxAbsDelta) return "ladderMinAbsDelta cannot exceed ladderMaxAbsDelta.";
-  if (merged.ladderMinDte > merged.ladderMaxDte) return "ladderMinDte cannot exceed ladderMaxDte.";
-  if (merged.ladderMaxSpreadPctOfMid <= 0) return "ladderMaxSpreadPctOfMid must be above 0.";
-  if (merged.ladderShockMinPct > merged.ladderShockMaxPct) return "ladderShockMinPct cannot exceed ladderShockMaxPct.";
   if (merged.volFarmerV4CallMinAbsDelta > merged.volFarmerV4CallMaxAbsDelta) return "volFarmerV4CallMinAbsDelta cannot exceed volFarmerV4CallMaxAbsDelta.";
   if (merged.volFarmerV4MaxSpreadPctOfMid <= 0) return "volFarmerV4MaxSpreadPctOfMid must be above 0.";
   return null;
@@ -224,10 +194,6 @@ export async function updatePlutoSettings(input: PlutoSettingsInput, userId: str
     const current = await loadPlutoSettings(trx);
     const problem = validatePlutoSettingsInput(input, current);
     if (problem) throw new PlutoSettingsValidationError(problem);
-    if (input.ladderMinAbsDelta !== undefined || input.ladderMaxAbsDelta !== undefined) {
-      const broken = await tickersWithBrokenDeltaRange({ ...current, ...input } as PlutoSettings, trx);
-      if (broken.length > 0) throw new PlutoSettingsValidationError(`${broken.map((entry) => `${entry.symbol}'s |delta| range would be ${entry.from.toFixed(2)}–${entry.to.toFixed(2)} (it sets its own ${entry.ownLimits}).`).join(" ")} Change ${broken.length === 1 ? "that ticker's override" : "those tickers' overrides"} in the ticker window first.`);
-    }
     const update: Record<string, unknown> = {};
     const audit: { user_id: string; field: string; old_value: string; new_value: string }[] = [];
     for (const [field, value] of Object.entries(input)) {
@@ -246,26 +212,6 @@ export async function updatePlutoSettings(input: PlutoSettingsInput, userId: str
 }
 
 export class PlutoSettingsValidationError extends Error {}
-
-/**
- * Tickers whose effective |delta| range the strategy's would leave empty (lower limit above upper): each limit is the
- * ticker's override where it has one, else the strategy's. A strategy save that does this is refused (Marcelo 2026-10-15).
- */
-export async function tickersWithBrokenDeltaRange(settings: Pick<PlutoSettings, "ladderMinAbsDelta" | "ladderMaxAbsDelta">, connection: Knex = db): Promise<{ symbol: string; from: number; to: number; ownLimits: string }[]> {
-  const rows: { symbol: string; ladder_min_abs_delta: string | null; ladder_max_abs_delta: string | null }[] = await connection("pluto_ticker_settings as s")
-    .join("tickers as t", "t.id", "s.ticker_id")
-    .where((inner) => inner.whereNotNull("s.ladder_min_abs_delta").orWhereNotNull("s.ladder_max_abs_delta"))
-    .orderBy("t.symbol")
-    .select("t.symbol", "s.ladder_min_abs_delta", "s.ladder_max_abs_delta");
-  return rows.flatMap((row) => {
-    const ownMin = row.ladder_min_abs_delta === null ? null : Number(row.ladder_min_abs_delta);
-    const ownMax = row.ladder_max_abs_delta === null ? null : Number(row.ladder_max_abs_delta);
-    const from = ownMin ?? settings.ladderMinAbsDelta;
-    const to = ownMax ?? settings.ladderMaxAbsDelta;
-    if (from <= to) return [];
-    return [{ symbol: row.symbol, from, to, ownLimits: ownMin !== null && ownMax !== null ? "lower and upper limits" : ownMin !== null ? "lower limit" : "upper limit" }];
-  });
-}
 
 export interface PlutoSettingsAuditRow {
   id: number;

@@ -17,7 +17,7 @@ const { dropIsolatedTestDatabase } = await import("./testSupport/isolatedTestSch
 const { fetchAvailableUncoveredShares, positionSelect } = await import("./positionQueries.js");
 const { computeCashLockedInCsps } = await import("./positionExposure.js");
 const { availableUncoveredShares, cashLockedInCashSecuredPuts, positionCapitalAtRisk, positionCapitalDeployed, positionRealizedPnl } = await import("./positionSelectors.js");
-const { loadOpenPositionFigures } = await import("../pluto/ladderLookSnapshot.js");
+const { loadOpenPositionFigures } = await import("../pluto/openPositionFigures.js");
 const testDb: Knex = db;
 
 const firstTickerId: string = randomUUID();

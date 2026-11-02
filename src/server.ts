@@ -9,7 +9,7 @@ import { startNotificationBroadcaster } from "./lib/notificationBroadcaster.js";
 import { startMarketQuoteLoop } from "./lib/marketQuoteLoop.js";
 import { createAssignmentRiskConsumer } from "./lib/assignmentRiskConsumer.js";
 import { createVolatilityConsumer } from "./lib/volatilityConsumer.js";
-import { createLadderQuoteConsumer } from "./pluto/optionQuoteBandPlanLoader.js";
+import { createOptionQuoteBandConsumer } from "./pluto/optionQuoteBandPlanLoader.js";
 import { startOpsMonitor } from "./lib/opsMonitor.js";
 import { startOrderTelegramNotices } from "./lib/orderTelegramNotices.js";
 import { announceWebDynoStart } from "./lib/webDynoStartNotice.js";
@@ -81,8 +81,8 @@ app.listen(port, () => {
   startOpsMonitor();
   startOrderTelegramNotices();
   startProcessMemoryMonitor({ processName: "web", label: "The API web dyno", counts: () => ({ poolContracts: marketDataPoolSnapshot().contractCount, liveListeners: sharedLiveConnection.listenerCount(), readListeners: sharedReadConnection.listenerCount() }) });
-  // The ladder first: its band is quoted first in every cycle.
-  if (marketQuoteLoopFlag === "true") startMarketQuoteLoop([createLadderQuoteConsumer(), createAssignmentRiskConsumer(), createVolatilityConsumer()]);
+  // Pluto's band first: it is quoted first in every cycle.
+  if (marketQuoteLoopFlag === "true") startMarketQuoteLoop([createOptionQuoteBandConsumer(), createAssignmentRiskConsumer(), createVolatilityConsumer()]);
   else console.log("Market quote loop disabled (MARKET_QUOTE_LOOP_ENABLED=false).");
   // Backtests queued before a restart start again, as many as BACKTEST_MAX_PARALLEL_SESSIONS allows (local only).
   if (readBacktestDataDirectory()) {

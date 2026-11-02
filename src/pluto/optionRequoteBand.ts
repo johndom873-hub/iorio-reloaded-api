@@ -6,8 +6,7 @@ import { baselineMaxVolumeShare } from "../backtest/engine/baselineSaleSteps.js"
 // Which of a ticker's contracts to quote at a look (Marcelo 2026-10-15, design: the "follow the delta band" rule):
 // the Calls whose delta at the look's price, from each contract's last-seen implied volatility, is inside the strategy's
 // Call |delta| range widened by a margin, plus every Call whose IV is still unknown; and every Put below the look's price,
-// at any delta (Marcelo 2026-10-16: the |delta| range is the Calls'; a ladder Put's strike is at most the rung's cap,
-// below the price, so the look sees every Put the backtest would). The universe is fixed each morning: the strategy's
+// at any delta (Marcelo 2026-10-16: the |delta| range is the Calls'), so the look sees every Put the backtest would. The universe is fixed each morning: the strategy's
 // expiries (optionQuoteBandPlan.ts) and a previous-session volume the 20% rule can sell at least one contract of.
 //
 //   band, later looks: max(0, bottom − 0.02) … top + 0.10      (0.05–0.30 → 0.03–0.40)

@@ -4,7 +4,7 @@ import { freezeTicker } from "./tickerFreeze.js";
 
 // Stock splits detected in IBKR's daily history (stock_splits; dailyBarSplitCheck.ts records them), and the guard that
 // catches one IBKR's history does not show yet (Marcelo 2026-10-15). A pending split (records not yet rewritten to the
-// new basis) stops the CC + Put Ladder on the ticker.
+// new basis) freezes the ticker, so Pluto and everyone else stop trading it.
 
 export interface StockSplit {
   tickerId: string;
@@ -57,7 +57,7 @@ export const splitLikeMoveTolerance = 0.05;
 /**
  * The split the live price suggests when no split is recorded: the price moved from the previous close by about a known
  * split's factor (2-for-1: the price about halves). Null otherwise. A real move of that size (a 50% fall) matches too,
- * which is the point: either way the ladder stops trading the ticker until a person looks.
+ * which is the point: either way trading on the ticker should stop until a person looks.
  *
  * Example: previous close $100, price now $50.40 → 0.504, within 5% of ½ → a 2-for-1 split (ratio 2).
  */

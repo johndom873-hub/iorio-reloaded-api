@@ -11,7 +11,7 @@ vi.mock("../db/connection.js", async () => {
 
 const { db } = await import("../db/connection.js");
 const { dropIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
-const { loadOpenPositionFigures } = await import("./ladderLookSnapshot.js");
+const { loadOpenPositionFigures } = await import("./openPositionFigures.js");
 const testDb: Knex = db;
 
 const tickerId = randomUUID();

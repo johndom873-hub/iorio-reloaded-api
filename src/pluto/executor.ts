@@ -31,9 +31,9 @@ interface OrderRequestResponse {
   updatedAt?: string | null;
 }
 
-/** A sale opening a position (the CC + Put Ladder's, ladderOrders.ts, and Vol Farmer v4's, volFarmerV4Round.ts): its contract and the shares it buys. */
-export interface ExecuteLadderOpenInput {
-  kind: "ladder_open";
+/** A sale opening a position (Vol Farmer v4's, volFarmerV4Round.ts): its contract and the shares it buys. */
+export interface ExecuteStrategyOpenInput {
+  kind: "strategy_open";
   actionId: string;
   symbol: string;
   strategyKey: "cash_secured_put" | "covered_call";
@@ -92,7 +92,7 @@ export interface ExecuteSharesSaleInput {
   reasons: string[];
 }
 
-export type ExecuteInput = ExecuteLadderOpenInput | ExecuteLeapsPurchaseInput | ExecuteLeapsSaleInput | ExecuteSharesPurchaseInput | ExecuteSharesSaleInput;
+export type ExecuteInput = ExecuteStrategyOpenInput | ExecuteLeapsPurchaseInput | ExecuteLeapsSaleInput | ExecuteSharesPurchaseInput | ExecuteSharesSaleInput;
 
 export interface ExecuteResult {
   outcome: PlutoActionOutcome;

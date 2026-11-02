@@ -18,16 +18,15 @@ import { optionQuoteBandExpiryContracts, type OptionQuoteBandExpiryRule } from "
 import { optionQuoteBandScopeOf } from "../pluto/optionQuoteBandPlanLoader.js";
 
 // The after-close option volume capture (Marcelo 2026-10-15): for every shortlisted ticker, whether Pluto is enabled on it
-// or not (Marcelo 2026-10-30: one enabled the next day then trades with its volumes), under the strategy set for it, each
+// or not (Marcelo 2026-10-30: one enabled the next day then trades with its volumes), under Vol Farmer v4's scope, each
 // contract's full-session volume (IBKR tick 8, read under FROZEN after the close: it holds the whole day then and resets
 // overnight, measured 2026-10-14/15) and its IBKR implied volatility, stored as the previous session's volume for the next
-// day's option quote band and both strategies' 20% rule, and as each contract's last-seen IV. Only the enabled tickers'
+// day's option quote band and Vol Farmer v4's 20% rule, and as each contract's last-seen IV. Only the enabled tickers'
 // failures alert: without its volumes a ticker trades the next session with the rule lifted (optionQuoteBandPlan.ts).
 //
-// Which contracts: the option quote band's universe for the next session under the ticker's strategy (every listed
-// strike, both rights, of the expiries it sells counted from that session: the CC + Put Ladder's days-to-expiry range,
-// Vol Farmer v4's expiry ending that session or its next listed one; optionQuoteBandPlan.ts) narrowed to the first-look re-quoting band around the
-// strategy's Call |delta| range (optionRequoteBand.ts) at today's last price, from each contract's last-seen IV: the
+// Which contracts: the option quote band's universe for the next session (every listed strike, both rights, of the
+// expiries Vol Farmer v4 sells counted from that session: the expiry ending that session or its next listed one;
+// optionQuoteBandPlan.ts) narrowed to the first-look re-quoting band around its Call |delta| range (optionRequoteBand.ts) at today's last price, from each contract's last-seen IV: the
 // Calls inside it, every Put below the price; a Call whose IV is unknown is always quoted. The first night knows no IV,
 // so it quotes the whole universe (about 21,000 contracts, ~35 min for 20 tickers); later nights quote the band (~3,200,
 // ~5 min), and learn the IVs of what they quote.
@@ -170,7 +169,7 @@ export async function runOptionSessionVolumeCapture(dependencies: SessionVolumeC
           const chain = await loadStoredOptionChain(ticker.tickerId);
           if (!chain || chain.expirations.length === 0) throw new Error("no stored option chain");
           const lastSeen = await loadLastSeenImpliedVolatilityByContract(ticker.tickerId, nextSessionIso);
-          const scope = optionQuoteBandScopeOf(ticker, settings);
+          const scope = optionQuoteBandScopeOf(settings);
           const band = optionRequoteBand(scope.callDeltaRange, true);
           const plan = planSessionVolumeContracts({ expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, nextSessionIso, expiryRule: scope.expiryRule, band, stockPrice, riskFreeRate, lastSeenImpliedVolatilityByContract: lastSeen });
           Object.assign(result, { universe: plan.universeCount, requested: plan.contracts.length, unknownIv: plan.unknownIvCount });

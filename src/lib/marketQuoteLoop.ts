@@ -15,14 +15,14 @@ import { sleepUnlessAborted } from "./sleepUnlessAborted.js";
 // gated by MARKET_QUOTE_LOOP_ENABLED, that quotes only what something is using right now. Each user ("consumer") says
 // which tickers and contracts it needs this cycle; the loop quotes their union once and hands every quote back:
 //
-//   - Pluto's CC + Put Ladder: its band, only while the ladder is the active strategy and Pluto is not paused;
+//   - Pluto's option band (Vol Farmer v4's): its enabled tickers' band, only while Pluto is not paused;
 //   - the assignment-risk alert: every held short leg, all session;
 //   - the Volatility screen and Pulse's Top premiums: each ticker's stock (with IBKR's 30-day IV) and a few Calls per
 //     expiry, only while one of them is open.
 //
 // With nothing to quote it holds no lines. Running, it holds `marketQuoteLoopLines` priority lines (live screens shed
 // to it, never the reverse) and runs cycles back to back on sharedLiveConnection: a stock pass over every needed
-// ticker, then one rolling window over every needed option contract, consumers in priority order (the ladder first).
+// ticker, then one rolling window over every needed option contract, consumers in priority order (Pluto's band first).
 // Throughput is bound by the connection's message rate (about 10 contracts a second), not by the line count.
 
 export const marketQuoteLoopLineHolder = "marketQuoteLoop";

@@ -7,8 +7,8 @@ import type { CapturedOptionQuote, CaptureQuoteWindow, OptionContractRequest } f
 
 // The after-close volume capture end to end on a private copy of the test tables, with IBKR replaced by a fake window: what
 // it quotes the first night (no IV known: the whole universe), what it stores, how the next day reads it, and that the
-// second night quotes only the band from the IVs the first one stored, for a CC + Put Ladder ticker; and that a Vol Farmer
-// v2 ticker is captured on its next listed expiry only.
+// second night quotes only the band from the IVs the first one stored; and which expiry Vol Farmer v4's Options expiry
+// setting captures.
 vi.mock("../db/connection.js", async () => {
   const { createIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
   return { db: await createIsolatedTestDatabase() };
@@ -25,12 +25,11 @@ const tickerId = randomUUID();
 const userId = randomUUID();
 
 beforeAll(async () => {
-  await testDb("pluto_settings").insert({ id: 1 });
+  // The first tests sell the next listed expiry with Calls up to |delta| 0.30 (the band 0.02–0.45 on a first look).
+  await testDb("pluto_settings").insert({ id: 1, vol_farmer_v4_options_expiry: "next", vol_farmer_v4_call_max_abs_delta: 0.3 });
   await testDb("users").insert({ id: userId, username: "volume-capture", display_name: "Volume Capture", password_hash: "x" });
   await testDb("tickers").insert({ id: tickerId, symbol: "VOL", company_name: "Volume Co" });
   await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: userId, bot_enabled: true });
-  // VOL runs the CC + Put Ladder, so its universe is the ladder's days-to-expiry range (a ticker with no strategy set runs Vol Farmer v2).
-  await testDb("pluto_ticker_settings").insert({ ticker_id: tickerId, strategy: "cc_put_ladder" });
   await testDb("market_calendar").insert(["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-19", "2026-10-20"].map((calendar_date) => ({ calendar_date, is_open: true })));
   await testDb("option_chain_params").insert({ ticker_id: tickerId, expirations: ["20261016", "20261120"], fetched_at: new Date("2026-10-14T09:00:00Z") });
   await testDb("option_chain_expiry_strikes").insert([
@@ -71,32 +70,32 @@ function fakeDependencies(nowIso: string, quoted: OptionContractRequest[][]) {
 describe("the after-close option volume capture", () => {
   it("the first night quotes the whole universe for the next session and stores every requested contract", async () => {
     const quoted: OptionContractRequest[][] = [];
-    const { dependencies, released } = fakeDependencies("2026-10-14T21:30:00Z", quoted);
+    const { dependencies, released } = fakeDependencies("2026-10-15T21:30:00Z", quoted);
     const result = await runOptionSessionVolumeCapture(dependencies);
-    expect(result).toMatchObject({ sessionDateIso: "2026-10-14", nextSessionIso: "2026-10-15", concurrency: 40 });
-    // 16 Oct is 1 DTE and 20 Nov 36 DTE on 15 Oct: 5 strikes × 2 rights each. Requested: the 10 Calls and the 4 Puts below
-    // the $100 price (the ladder's Puts are under the rung's cap); the fake gives no volume to the $130 Call.
-    expect(result.tickers).toEqual([expect.objectContaining({ symbol: "VOL", universe: 20, requested: 14, unknownIv: 20, withVolume: 13, withImpliedVolatility: 14, stockPrice: 100, error: null })]);
+    expect(result).toMatchObject({ sessionDateIso: "2026-10-15", nextSessionIso: "2026-10-16", concurrency: 40 });
+    // The next listed expiry after 16 Oct is 20 Nov: 5 strikes × 2 rights. Requested: the 5 Calls and the 2 Puts below the
+    // $100 price, each with a volume.
+    expect(result.tickers).toEqual([expect.objectContaining({ symbol: "VOL", universe: 10, requested: 7, unknownIv: 10, withVolume: 7, withImpliedVolatility: 7, stockPrice: 100, error: null })]);
     expect(released).toHaveBeenCalled();
 
-    const volumes = (await loadSessionVolumeByContract(tickerId, "2026-10-14"))!;
-    expect(volumes.get("2026-10-16|95|P")).toBe(95);
-    expect(volumes.has("2026-10-16|130|C")).toBe(false);
-    expect(await loadSessionVolumeByContract(tickerId, "2026-10-13")).toBeNull();
-    expect((await loadLastSeenImpliedVolatilityByContract(tickerId, "2026-10-15")).get("2026-11-20|85|P")).toBe(0.5);
+    const volumes = (await loadSessionVolumeByContract(tickerId, "2026-10-15"))!;
+    expect(volumes.get("2026-11-20|85|P")).toBe(85);
+    expect(volumes.has("2026-11-20|100|P")).toBe(false);
+    expect(await loadSessionVolumeByContract(tickerId, "2026-10-14")).toBeNull();
+    expect((await loadLastSeenImpliedVolatilityByContract(tickerId, "2026-10-16")).get("2026-11-20|85|P")).toBe(0.5);
   });
 
   it("the next night quotes only the band, from the IVs the first night stored", async () => {
     const quoted: OptionContractRequest[][] = [];
-    const { dependencies } = fakeDependencies("2026-10-15T21:30:00Z", quoted);
+    const { dependencies } = fakeDependencies("2026-10-16T21:30:00Z", quoted);
     const result = await runOptionSessionVolumeCapture(dependencies);
-    // For 16 Oct, 16 Oct itself is 0 DTE: only 20 Nov (35 DTE) is left, 10 contracts, all with an IV now but the $100, $115
-    // and $140 Puts, never quoted (not below the price).
+    // For 19 Oct the next listed expiry is still 20 Nov (32 DTE), 10 contracts, all with an IV now but the $100, $115 and
+    // $140 Puts, never quoted (not below the price).
     const [ticker] = result.tickers;
     expect(ticker).toMatchObject({ universe: 10, unknownIv: 3, error: null });
     expect(ticker!.requested).toBeGreaterThan(0);
     expect(ticker!.requested).toBeLessThan(10);
-    // At 35 DTE and 50% IV, at the money (|delta| ~0.5) is outside 0.02–0.45: never quoted.
+    // At 32 DTE and 50% IV, at the money (|delta| ~0.5) is outside 0.02–0.45: never quoted.
     expect(quoted.flat().some((contract) => contract.strike === 100)).toBe(false);
   });
 
@@ -114,7 +113,6 @@ describe("the after-close option volume capture", () => {
     const farmerTickerId = randomUUID();
     await testDb("tickers").insert({ id: farmerTickerId, symbol: "FARM", company_name: "Farmer Co" });
     await testDb("shortlist_entries").insert({ ticker_id: farmerTickerId, added_by_user_id: userId, bot_enabled: true });
-    await testDb("pluto_ticker_settings").insert({ ticker_id: farmerTickerId, strategy: "vol_farmer_v4" });
     await testDb("option_chain_params").insert({ ticker_id: farmerTickerId, expirations: ["20261023", "20261120"], fetched_at: new Date("2026-10-19T09:00:00Z") });
     await testDb("option_chain_expiry_strikes").insert([
       { ticker_id: farmerTickerId, expiry: "20261023", strikes: [90, 95, 100, 105, 110], fetched_at: new Date("2026-10-19T09:00:00Z") },
@@ -149,7 +147,7 @@ describe("the after-close option volume capture", () => {
     expect([...new Set([...(await loadSessionVolumeByContract(sameDayTickerId, "2026-10-19"))!.keys()].map((key) => key.split("|")[0]))]).toEqual(["2026-10-20"]);
   });
 
-  it("captures a shortlisted ticker Pluto is not enabled on, under the strategy set for it, so it trades with its volumes once enabled", async () => {
+  it("captures a shortlisted ticker Pluto is not enabled on, so it trades with its volumes once enabled", async () => {
     const idleTickerId = randomUUID();
     await testDb("tickers").insert({ id: idleTickerId, symbol: "IDLE", company_name: "Idle Co" });
     await testDb("shortlist_entries").insert({ ticker_id: idleTickerId, added_by_user_id: userId, bot_enabled: false });
@@ -157,7 +155,7 @@ describe("the after-close option volume capture", () => {
     await testDb("option_chain_expiry_strikes").insert({ ticker_id: idleTickerId, expiry: "20261020", strikes: [95, 100, 105], fetched_at: new Date("2026-10-19T09:00:00Z") });
     const { dependencies } = fakeDependencies("2026-10-19T21:30:00Z", []);
     const result = await runOptionSessionVolumeCapture(dependencies);
-    // No strategy set: Vol Farmer v4, the default, on the expiry ending at the next session's close (20 Oct); no price, so every contract.
+    // Vol Farmer v4 selling today's expiry: the one ending at the next session's close (20 Oct); no price, so every contract.
     expect(result.tickers.find((ticker) => ticker.symbol === "IDLE")).toMatchObject({ enabled: false, universe: 6, requested: 6, error: null });
     expect(result.tickers.find((ticker) => ticker.symbol === "VOL")).toMatchObject({ enabled: true });
     expect((await loadSessionVolumeByContract(idleTickerId, "2026-10-19"))!.size).toBe(6);

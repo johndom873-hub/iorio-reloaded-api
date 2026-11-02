@@ -3,7 +3,7 @@ import { parityImpliedForward, yearsBetweenIsoDates } from "../lib/impliedVolati
 import type { OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
 
 /**
- * Each expiry's forward from the ladder's own band quotes (Marcelo 2026-10-27, replacing the 10:00 surface fit's): put-call
+ * Each expiry's forward from the band's own quotes (Marcelo 2026-10-27, replacing the 10:00 surface fit's): put-call
  * parity on the expiry's quotes, else the stock price grown at the risk-free rate; anchored at the stock price of the
  * expiry's latest quote. The same rule the backtest applies to its looks (noteBaselineForwardAnchors in baselineSaleSteps.ts).
  */

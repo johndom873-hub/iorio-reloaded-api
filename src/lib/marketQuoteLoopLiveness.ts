@@ -26,7 +26,7 @@ export function evaluateMarketQuoteLoopLiveness(input: MarketQuoteLoopLivenessIn
   if (!input.marketOpen || !input.loopEnabled) return null;
   if (input.heartbeatUpdatedAt === null) return "The market quote loop has never reported a heartbeat although the market is open (is the web dyno running?).";
   const ageMs = input.now.getTime() - input.heartbeatUpdatedAt.getTime();
-  if (ageMs > marketQuoteLoopHeartbeatStaleAfterMs) return `The market quote loop's heartbeat is over ${marketQuoteLoopHeartbeatStaleAfterMs / 60_000} min old: the loop is not running, so the CC + Put Ladder, the assignment-risk alert and the Volatility screen get no live quotes.`;
+  if (ageMs > marketQuoteLoopHeartbeatStaleAfterMs) return `The market quote loop's heartbeat is over ${marketQuoteLoopHeartbeatStaleAfterMs / 60_000} min old: the loop is not running, so Pluto's option band, the assignment-risk alert and the Volatility screen get no live quotes.`;
   return null;
 }
 
