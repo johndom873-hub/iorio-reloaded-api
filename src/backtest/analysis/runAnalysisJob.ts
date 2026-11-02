@@ -7,10 +7,11 @@ import { validateSessionRequestAgainstLab } from "../jobs/labSessionRequest.js";
 import { analysisSessionName, computeAnalysisBacktestFigures, type AnalysisBacktestFigures } from "./analysisBacktest.js";
 import { refreshTickerProfiles } from "../tickerProfileStore.js";
 import { analysisFormulasVersion, computeAnalysisFigures, type AnalysisFigures, type AnalysisStep } from "./analysisFigures.js";
-import { analysisTableFiguresOf, type AnalysisLabValues, type AnalysisReason } from "./analysisStore.js";
+import { analysisTableFiguresOf, analysisVolFarmerV4Of, type AnalysisLabValues, type AnalysisReason } from "./analysisStore.js";
+import { tickerValuesDifferingFromLab } from "../labTickerValuesStore.js";
 
 // The "analysis" job (scripts/run-backtest-job.ts): the figures, then the ticker's Vol Farmer v4 backtest at the lab's
-// values (or a trial's starting account) as an ordinary session, waited for, and its records; then the Data files table's
+// values with the ticker's own on top (or a trial's starting account and values) as an ordinary session, waited for, and its records; then the Data files table's
 // figures. Progress reports the step as the job's label (analysisSteps), the scan's days and the backtest's days as
 // done/total. No summary is written since v4 (Marcelo 2026-11-01: the verdict is the rule's).
 
@@ -44,14 +45,18 @@ function waitOrCancel(milliseconds: number, control: AnalysisJobControl): Promis
 }
 
 /**
- * Creates the analysis's backtest session and waits for it: the ticker alone under Vol Farmer v4 at the lab's values, from
- * the steady-weeklies start (F1) to the file's last day, on the lab's default account or a trial's.
+ * Creates the analysis's backtest session and waits for it: the ticker alone under Vol Farmer v4 at the lab's values, the
+ * ticker's own (or a trial's) as the session's overrides, from the steady-weeklies start (F1) to the file's last day, on
+ * the lab's default account or a trial's.
  */
 async function runAnalysisBacktest(symbol: string, labValues: AnalysisLabValues, figures: AnalysisFigures, analysisId: string, control: AnalysisJobControl): Promise<AnalysisBacktestFigures | { error: string }> {
   const contents = readBacktestDataFileContents(symbol);
   if (!contents?.firstDate || !contents.lastDate) return { error: "The data file has no complete days." };
   // The analysis is Vol Farmer v4's: v4 decides even when the lab's decision maker is another.
   const overrides: Record<string, unknown> = labValues.settings.decisionMaker === "vol_farmer_v4" ? {} : { decisionMaker: "vol_farmer_v4" };
+  // The five values the ticker (or the trial) holds apart from the lab's, so the session's settings carry them.
+  const ownValues = tickerValuesDifferingFromLab(labValues.effective.v4, analysisVolFarmerV4Of({ settings: labValues.settings, tickerValues: null, trial: null }));
+  if (Object.keys(ownValues).length > 0) overrides.volFarmerV4 = ownValues;
   let request: Awaited<ReturnType<typeof validateSessionRequestAgainstLab>>;
   try {
     request = await validateSessionRequestAgainstLab({

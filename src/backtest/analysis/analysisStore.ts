@@ -8,6 +8,8 @@ import { loadBacktestLabSettings, withCodeKeys } from "../labSettingsStore.js";
 import { defaultBacktestVolFarmerV4Settings, type BacktestDetectedSplit, type BacktestSettings, type BacktestTickerProfile, type BacktestTickerSuitability } from "../backtestTypes.js";
 import { loadTickerProfile } from "../tickerProfileStore.js";
 import { loadTickerSuitability } from "../tickerSuitabilityStore.js";
+import { BacktestLabSettingsValidationError } from "../labSettingsStore.js";
+import { loadAllTickerOwnValues, loadTickerOwnValues, mergedVolFarmerV4Problem, tickerFieldValuesOf, validateTickerOwnValuesInput, withTickerOwnValues, type StoredTickerOwnValues, type TickerFieldValues, type TickerOwnValues } from "../labTickerValuesStore.js";
 import { deriveJobDisplayStatus } from "../jobs/backtestJobRules.js";
 import { BacktestRequestError, cancelBacktestJob, findUnfinishedDownloadJob, insertClaimedAnalysisJob, startClaimedBacktestJob } from "../jobs/backtestJobStore.js";
 import { analysisFormulasVersion, computeAnalysisFileFigures, type AnalysisFigures, type AnalysisFigureValues, type AnalysisFileFigures, type AnalysisStep } from "./analysisFigures.js";
@@ -18,25 +20,32 @@ import type { SuitabilityCheck } from "./analysisSuitabilityRule.js";
 
 // The stored analyses (backtest_ticker_analyses): the values each was computed with, starting one as an "analysis" job,
 // and what the Analyse window and the Data files table read. Since Vol Farmer v4 (Marcelo 2026-11-01) an analysis reads the
-// lab's v4 values and its default account; a save of the lab marks the analyses it reaches out of date, and "Re-run out
-// of date" runs them again (no automatic re-runs).
+// lab's v4 values, with the ticker's own values on top (labTickerValuesStore.ts), and the lab's default account; a save of
+// the lab marks the analyses it reaches out of date, and "Re-run out of date" runs them again (no automatic re-runs).
 
-/** "manual": Re-run analysis; "global_settings": Re-run out of date (and, before v4, a save of the lab); "ticker_settings": before v4 only; "trial": Run a trial (never the stored analysis). */
+/** "manual": Re-run analysis; "global_settings": Re-run out of date (and, before v4, a save of the lab); "ticker_settings": Save and Analyse (the ticker's own values saved); "trial": Run a trial or Analyse Only (never the stored analysis). */
 export type AnalysisReason = "manual" | "ticker_settings" | "global_settings" | "trial";
 
-/** Run a trial: the analysis backtest at another starting account; nothing is saved as the ticker's analysis. */
+/** A trial: the analysis at another starting account, or with other values for the ticker's five (Analyse Only); nothing is saved as the ticker's analysis. */
 export interface AnalysisTrialValues {
   accountDollars: number;
+  /** Values for the ticker's five on top of its own and the lab's; absent: those. */
+  volFarmerV4?: Partial<TickerFieldValues>;
 }
 
 /** What a stored analysis was computed with. */
 export interface AnalysisLabValues {
   settings: BacktestSettings;
   defaultPotDollars: number;
+  /** The ticker's own values it read (null: the lab's); null when it had none, and in analyses stored before them. */
+  tickerValues: TickerOwnValues | null;
   trial: AnalysisTrialValues | null;
   /** The values the figures read, resolved from the above. */
   effective: AnalysisFigureValues;
 }
+
+/** What the hash reads: an analysis stored before the ticker's own values has no tickerValues. */
+type AnalysisHashedValues = Omit<AnalysisLabValues, "effective" | "tickerValues"> & { tickerValues?: TickerOwnValues | null };
 
 /** The figures the Data files table shows for an analysis (table_figures). */
 export interface AnalysisTableFigures {
@@ -54,11 +63,17 @@ export interface AnalysisTableFigures {
 
 export function validateAnalysisTrialValues(raw: unknown): AnalysisTrialValues {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new BacktestRequestError("values must be an object.", 400);
-  const unknown = Object.keys(raw).find((key) => key !== "accountDollars");
-  if (unknown) throw new BacktestRequestError(`values.${unknown} is not a value the analysis can try: only accountDollars, the starting account.`, 400);
-  const accountDollars = (raw as { accountDollars?: unknown }).accountDollars;
+  const unknown = Object.keys(raw).find((key) => key !== "accountDollars" && key !== "volFarmerV4");
+  if (unknown) throw new BacktestRequestError(`values.${unknown} is not a value the analysis can try: only accountDollars, the starting account, and volFarmerV4, the ticker's values.`, 400);
+  const { accountDollars, volFarmerV4 } = raw as { accountDollars?: unknown; volFarmerV4?: unknown };
   if (typeof accountDollars !== "number" || !Number.isFinite(accountDollars) || !(accountDollars > 0)) throw new BacktestRequestError("values.accountDollars must be a number above $0.", 400);
-  return { accountDollars };
+  if (volFarmerV4 === undefined) return { accountDollars };
+  try {
+    return { accountDollars, volFarmerV4: validateTickerOwnValuesInput(volFarmerV4, { allowNull: false, what: "values.volFarmerV4" }) as Partial<TickerFieldValues> };
+  } catch (error) {
+    if (error instanceof BacktestLabSettingsValidationError) throw new BacktestRequestError(error.message, 400);
+    throw error;
+  }
 }
 
 /** Sorted keys at every level, so equal values hash alike whatever order Postgres stored them in. */
@@ -68,16 +83,23 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/**
- * The lab values an analysis reads: v4's section (in the code's shape, withCodeKeys, so a setting added at its default or
- * one removed leaves runs current), the spread share fills give up, Pluto's window the looks keep to, and the default
- * account. A change to anything else leaves the hash as it was.
- */
-function analysisReadValues({ settings, defaultPotDollars, trial }: Omit<AnalysisLabValues, "effective">) {
-  return { defaultPotDollars, trial, settings: { volFarmerV4: withCodeKeys(defaultBacktestVolFarmerV4Settings, settings?.volFarmerV4), trading: { spreadCostChargedPct: settings?.trading?.spreadCostChargedPct }, pluto: { windowStartEt: settings?.pluto?.windowStartEt, windowEndEt: settings?.pluto?.windowEndEt } } };
+/** The v4 section an analysis runs: the lab's (in the code's shape), the ticker's own values on top, then a trial's. */
+export function analysisVolFarmerV4Of({ settings, tickerValues, trial }: Pick<AnalysisHashedValues, "settings" | "tickerValues" | "trial">) {
+  return withTickerOwnValues(withTickerOwnValues(withCodeKeys(defaultBacktestVolFarmerV4Settings, settings?.volFarmerV4), tickerValues), trial?.volFarmerV4);
 }
 
-export const hashAnalysisLabValues = (values: Omit<AnalysisLabValues, "effective">) => createHash("sha256").update(stableJson(analysisReadValues(values))).digest("hex").slice(0, 32);
+/**
+ * The lab values an analysis reads: v4's section as it runs it (analysisVolFarmerV4Of: in the code's shape, withCodeKeys,
+ * so a setting added at its default or one removed leaves runs current; with the ticker's own values on top, so a lab
+ * change to a value the ticker holds leaves its analysis current), the spread share fills give up, Pluto's window the
+ * looks keep to, and the default account. A change to anything else leaves the hash as it was.
+ */
+function analysisReadValues(values: AnalysisHashedValues) {
+  const { settings, defaultPotDollars, trial } = values;
+  return { defaultPotDollars, trial, settings: { volFarmerV4: analysisVolFarmerV4Of(values), trading: { spreadCostChargedPct: settings?.trading?.spreadCostChargedPct }, pluto: { windowStartEt: settings?.pluto?.windowStartEt, windowEndEt: settings?.pluto?.windowEndEt } } };
+}
+
+export const hashAnalysisLabValues = (values: AnalysisHashedValues) => createHash("sha256").update(stableJson(analysisReadValues(values))).digest("hex").slice(0, 32);
 
 /** A lab path's value among the values an analysis reads ("lab.defaultPotDollars", "volFarmerV4.callMaxAbsDelta", …). */
 function readValueAt(values: ReturnType<typeof analysisReadValues>, path: string): unknown {
@@ -91,33 +113,44 @@ function readValueAt(values: ReturnType<typeof analysisReadValues>, path: string
  * A save that puts a value back to what an analysis ran with brings that analysis back up to date.
  */
 export async function analysesOutOfDateAfter(lab: { settings: AnalysisLabValues["settings"]; defaultPotDollars: number }, changedPaths: readonly string[], connection: Knex = db): Promise<{ outOfDate: string[]; byPath: Record<string, string[]> }> {
-  const rows: { symbol: string; lab_values: Omit<AnalysisLabValues, "effective"> | null }[] = await connection("backtest_ticker_analyses")
+  const rows: { symbol: string; lab_values: AnalysisHashedValues | null }[] = await connection("backtest_ticker_analyses")
     .distinctOn("symbol")
     .whereNot({ reason: "trial" })
     .where({ status: "succeeded" })
     .orderBy([{ column: "symbol" }, { column: "created_at", order: "desc" }])
     .select("symbol", "lab_values");
-  const after = { settings: lab.settings, defaultPotDollars: lab.defaultPotDollars, trial: null };
-  const afterHash = hashAnalysisLabValues(after);
-  const afterValues = analysisReadValues(after);
-  const ranWith = rows.flatMap((row) => (row.lab_values ? [{ symbol: row.symbol, values: analysisReadValues({ ...row.lab_values, trial: null }), hash: hashAnalysisLabValues({ ...row.lab_values, trial: null }) }] : []));
-  const byPath: Record<string, string[]> = {};
-  for (const path of changedPaths) byPath[path] = ranWith.filter((row) => stableJson(readValueAt(row.values, path)) !== stableJson(readValueAt(afterValues, path))).map((row) => row.symbol);
-  return { outOfDate: ranWith.filter((row) => row.hash !== afterHash).map((row) => row.symbol), byPath };
+  const ownValuesBySymbol = await loadAllTickerOwnValues(connection);
+  const byPath: Record<string, string[]> = Object.fromEntries(changedPaths.map((path) => [path, []]));
+  const outOfDate: string[] = [];
+  for (const row of rows) {
+    if (!row.lab_values) continue;
+    // Each ticker against the save with its own values on top.
+    const after = { settings: lab.settings, defaultPotDollars: lab.defaultPotDollars, tickerValues: ownValuesBySymbol[row.symbol]?.values ?? null, trial: null };
+    const ranWith = { ...row.lab_values, trial: null };
+    if (hashAnalysisLabValues(ranWith) !== hashAnalysisLabValues(after)) outOfDate.push(row.symbol);
+    const [ranWithValues, afterValues] = [analysisReadValues(ranWith), analysisReadValues(after)];
+    for (const path of changedPaths) if (stableJson(readValueAt(ranWithValues, path)) !== stableJson(readValueAt(afterValues, path))) byPath[path]!.push(row.symbol);
+  }
+  return { outOfDate, byPath };
 }
 
-/** The lab's values now, and a trial's starting account on top. */
-export async function resolveAnalysisLabValues(trial: AnalysisTrialValues | null, connection: Knex = db): Promise<AnalysisLabValues & { hash: string }> {
-  const lab = await loadBacktestLabSettings(connection);
-  const v4 = { ...defaultBacktestVolFarmerV4Settings, ...lab.settings.volFarmerV4 };
+/** An analysis's values from the lab's, the ticker's own values and a trial's, and their hash. */
+export function analysisLabValuesOf(lab: { settings: BacktestSettings; defaultPotDollars: number }, tickerValues: TickerOwnValues | null, trial: AnalysisTrialValues | null): AnalysisLabValues & { hash: string } {
+  const stored = { settings: lab.settings, defaultPotDollars: lab.defaultPotDollars, tickerValues, trial };
+  const v4 = analysisVolFarmerV4Of(stored);
   const accountDollars = trial?.accountDollars ?? lab.defaultPotDollars;
   const potShareOfAccount = oneTickerPotShareOfAccount(v4);
-  const stored = { settings: lab.settings, defaultPotDollars: lab.defaultPotDollars, trial };
   return {
     ...stored,
     effective: { accountDollars, potDollars: accountDollars * potShareOfAccount, potShareOfAccount, firstPositionShare: v4.firstPositionPct / 100, v4, spreadShareCharged: lab.settings.trading.spreadCostChargedPct / 100 },
     hash: hashAnalysisLabValues(stored),
   };
+}
+
+/** The lab's values now, the symbol's own values on top, and a trial's. */
+export async function resolveAnalysisLabValues(symbol: string, trial: AnalysisTrialValues | null, connection: Knex = db): Promise<AnalysisLabValues & { hash: string }> {
+  const [lab, own] = await Promise.all([loadBacktestLabSettings(connection), loadTickerOwnValues(symbol, connection)]);
+  return analysisLabValuesOf(lab, own?.values ?? null, trial);
 }
 
 /** The unfinished analyses of a symbol (queued or running, not stopped), trial or saved. */
@@ -131,26 +164,44 @@ async function findActiveAnalyses(symbol: string, connection: Knex): Promise<{ i
   return rows.filter((row) => row.job_status !== null && ["queued", "running"].includes(deriveJobDisplayStatus(row.job_status as never, row.heartbeat_at ? new Date(row.heartbeat_at) : null, now)));
 }
 
-/**
- * Starts an analysis as a job. A trial runs beside a saved one; a saved one is refused while another saved one runs, and
- * while the ticker's download runs (the file is being written).
- */
-export async function startTickerAnalysis(input: { symbol: string; reason: AnalysisReason; trial?: AnalysisTrialValues | null }, connection: Knex = db): Promise<{ analysisId: string; jobId: string }> {
-  let symbol: string;
+function normalizedAnalysisSymbol(givenSymbol: string): string {
   try {
-    symbol = normalizeBacktestSymbol(input.symbol);
+    return normalizeBacktestSymbol(givenSymbol);
   } catch (error) {
     throw new BacktestRequestError(error instanceof Error ? error.message : String(error), 400);
   }
+}
+
+/**
+ * Why the ticker cannot be analysed now (BacktestRequestError): no data file, none of its days complete, its download
+ * running (the file is being written), or an analysis of the same kind (a trial, or a saved one) already running.
+ * Answers the symbol, normalized.
+ */
+export async function assertTickerCanBeAnalysed(givenSymbol: string, kind: "saved" | "trial", connection: Knex = db): Promise<string> {
+  const symbol = normalizedAnalysisSymbol(givenSymbol);
   const contents = readBacktestDataFileContents(symbol);
   if (!contents) throw new BacktestRequestError(`There is no data file for ${symbol}: download it first.`, 404);
   if (!contents.firstDate) throw new BacktestRequestError(`The ${symbol} data file has no complete days yet.`, 409);
   if (await findUnfinishedDownloadJob(symbol)) throw new BacktestRequestError(`${symbol}'s download is running: analyse it once the download finishes.`, 409);
+  const active = (await findActiveAnalyses(symbol, connection)).filter((row) => (row.reason === "trial") === (kind === "trial"));
+  if (active.length > 0) throw new BacktestRequestError(`An analysis of ${symbol} is already running.`, 409);
+  return symbol;
+}
+
+/**
+ * Starts an analysis as a job. A trial runs beside a saved one; a saved one is refused while another saved one runs, and
+ * while the ticker's download runs (the file is being written). A trial's values must leave a v4 section the lab could run.
+ */
+export async function startTickerAnalysis(input: { symbol: string; reason: AnalysisReason; trial?: AnalysisTrialValues | null }, connection: Knex = db): Promise<{ analysisId: string; jobId: string }> {
   const trial = input.reason === "trial" ? (input.trial ?? null) : null;
   if (input.reason === "trial" && trial === null) throw new BacktestRequestError("A trial needs a starting account.", 400);
-  const values = await resolveAnalysisLabValues(trial, connection);
-  const active = (await findActiveAnalyses(symbol, connection)).filter((row) => (row.reason === "trial") === (trial !== null));
-  if (active.length > 0) throw new BacktestRequestError(`An analysis of ${symbol} is already running.`, 409);
+  if (trial?.volFarmerV4) {
+    const tried = await resolveAnalysisLabValues(normalizedAnalysisSymbol(input.symbol), trial, connection);
+    const problem = mergedVolFarmerV4Problem(tried.effective.v4);
+    if (problem) throw new BacktestRequestError(`The trial's values: ${problem}`, 400);
+  }
+  const symbol = await assertTickerCanBeAnalysed(input.symbol, trial === null ? "saved" : "trial", connection);
+  const values = await resolveAnalysisLabValues(symbol, trial, connection);
   const { hash, ...labValues } = values;
   const ids = await connection.transaction(async (transaction) => {
     const jobId = await insertClaimedAnalysisJob(symbol, transaction);
@@ -247,7 +298,7 @@ function toRunView(row: AnalysisRow, now = new Date()): AnalysisRunView {
     jobId: row.job_id,
     sessionId: row.session_id,
     formulasVersion: row.formulas_version,
-    labValues: row.lab_values,
+    labValues: row.lab_values ? { ...row.lab_values, tickerValues: row.lab_values.tickerValues ?? null } : row.lab_values,
     // From the stored values, so a run saved before the hash covered only what an analysis reads compares alike.
     labValuesHash: row.lab_values ? hashAnalysisLabValues(row.lab_values) : row.lab_values_hash,
     optionLastDate: row.option_last_date,
@@ -286,6 +337,10 @@ export interface TickerAnalysisView {
   outOfDate: boolean;
   /** The lab's last save. */
   labSavedAt: string;
+  /** The ticker's own values (Save and Analyse keeps them); null when it has none. */
+  tickerValues: StoredTickerOwnValues | null;
+  /** The lab's five now: what each null of the ticker's own values reads. */
+  labTickerFieldValues: TickerFieldValues;
   /** The file now runs past the stored analysis's last day. */
   fileLastDate: string | null;
   currentFormulasVersion: number;
@@ -309,7 +364,8 @@ export async function loadTickerAnalysisView(givenSymbol: string, connection: Kn
     const body = await connection("backtest_ticker_analyses").where({ id: view.id }).first("figures");
     return { ...view, figures: body?.figures == null ? null : withBarIndicators(body.figures) };
   };
-  const [current, lab] = await Promise.all([resolveAnalysisLabValues(null, connection), loadBacktestLabSettings(connection)]);
+  const [lab, own] = await Promise.all([loadBacktestLabSettings(connection), loadTickerOwnValues(symbol, connection)]);
+  const current = analysisLabValuesOf(lab, own?.values ?? null, null);
   return {
     symbol,
     stored: await withBody(storedView),
@@ -319,6 +375,8 @@ export async function loadTickerAnalysisView(givenSymbol: string, connection: Kn
     currentHash: current.hash,
     outOfDate: storedView !== null && isOutOfDate(storedView, current.hash),
     labSavedAt: lab.updatedAt,
+    tickerValues: own,
+    labTickerFieldValues: tickerFieldValuesOf(analysisVolFarmerV4Of({ settings: lab.settings, tickerValues: null, trial: null })),
     fileLastDate: readBacktestDataFileContents(symbol)?.lastDate ?? null,
     currentFormulasVersion: analysisFormulasVersion,
     profile: await loadTickerProfile(symbol, connection),
@@ -387,8 +445,11 @@ export interface AnalysisTableRow {
   figuresFinishedAt: string | null;
 }
 
-/** For the Data files table: each symbol's latest saved analysis, its figures, and whether it is out of date. */
-export async function loadAnalysesForTable(connection: Knex = db): Promise<{ labSavedAt: string; outOfDate: string[]; bySymbol: Record<string, AnalysisTableRow> }> {
+/**
+ * For the Data files table: each symbol's latest saved analysis, its figures, and whether it is out of date (against the
+ * lab with the symbol's own values on top); every ticker's own values and the lab's five, for the Own values tag.
+ */
+export async function loadAnalysesForTable(connection: Knex = db): Promise<{ labSavedAt: string; outOfDate: string[]; bySymbol: Record<string, AnalysisTableRow>; tickerValuesBySymbol: Record<string, StoredTickerOwnValues>; labTickerFieldValues: TickerFieldValues }> {
   const latest: AnalysisRow[] = await selectAnalyses(connection)
     .distinctOn("a.symbol")
     .whereNot("a.reason", "trial")
@@ -400,7 +461,8 @@ export async function loadAnalysesForTable(connection: Knex = db): Promise<{ lab
     .where("a.status", "succeeded")
     .orderBy([{ column: "a.symbol" }, { column: "a.created_at", order: "desc" }])
     .select([...analysisColumns(connection), "a.table_figures"]);
-  const [current, lab] = await Promise.all([resolveAnalysisLabValues(null, connection), loadBacktestLabSettings(connection)]);
+  const [lab, tickerValuesBySymbol] = await Promise.all([loadBacktestLabSettings(connection), loadAllTickerOwnValues(connection)]);
+  const currentHashOf = (symbol: string) => analysisLabValuesOf(lab, tickerValuesBySymbol[symbol]?.values ?? null, null).hash;
   const now = new Date();
   const succeededBySymbol = new Map(succeeded.map((row) => [row.symbol, { view: toRunView(row, now), tableFigures: row.table_figures }]));
   const bySymbol: Record<string, AnalysisTableRow> = {};
@@ -412,13 +474,13 @@ export async function loadAnalysesForTable(connection: Knex = db): Promise<{ lab
       finishedAt: view.finishedAt,
       optionLastDate: done?.view.optionLastDate ?? view.optionLastDate,
       formulasVersion: done?.view.formulasVersion ?? view.formulasVersion,
-      outOfDate: done !== null && isOutOfDate(done.view, current.hash),
+      outOfDate: done !== null && isOutOfDate(done.view, currentHashOf(view.symbol)),
       tableFigures: done?.view.formulasVersion === analysisFormulasVersion ? done.tableFigures : null,
       figuresFinishedAt: done?.view.finishedAt ?? null,
     };
   }
   const outOfDate = Object.entries(bySymbol).filter(([, row]) => row.outOfDate && row.status !== "queued" && row.status !== "running").map(([symbol]) => symbol);
-  return { labSavedAt: lab.updatedAt, outOfDate, bySymbol };
+  return { labSavedAt: lab.updatedAt, outOfDate, bySymbol, tickerValuesBySymbol, labTickerFieldValues: tickerFieldValuesOf(analysisVolFarmerV4Of({ settings: lab.settings, tickerValues: null, trial: null })) };
 }
 
 /** Re-run out of date: starts a saved analysis of every symbol whose stored one is out of date (none running); the rest are listed with why. */

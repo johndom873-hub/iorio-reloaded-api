@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { TreasuryBillRates } from "../engine/treasuryBillRates.js";
 import { analysisSessionName } from "./analysisBacktest.js";
 import { treasuryBillCagr } from "./analysisSessions.js";
-import { hashAnalysisLabValues, validateAnalysisTrialValues } from "./analysisStore.js";
+import { analysisLabValuesOf, hashAnalysisLabValues, validateAnalysisTrialValues } from "./analysisStore.js";
+import { noTickerOwnValues } from "../labTickerValuesStore.js";
 import { barIndicatorsOf, sliceBarIndicators } from "./analysisPriceFigures.js";
-import type { BacktestSettings } from "../backtestTypes.js";
+import { defaultBacktestVolFarmerV4Settings, type BacktestSettings } from "../backtestTypes.js";
 
 describe("analysisSessionName", () => {
   it("names the session with the ticker, Vol Farmer v4 and the account, a trial's as one", () => {
@@ -38,6 +39,13 @@ describe("validateAnalysisTrialValues", () => {
     expect(() => validateAnalysisTrialValues({ accountDollars: 0 })).toThrow(/must be a number above/);
     expect(() => validateAnalysisTrialValues([])).toThrow(/must be an object/);
   });
+
+  it("takes some of the ticker's five values (Analyse Only), each in the lab's range", () => {
+    expect(validateAnalysisTrialValues({ accountDollars: 200_000, volFarmerV4: { callMinAbsDelta: 0.1, firstPositionPct: 60 } })).toEqual({ accountDollars: 200_000, volFarmerV4: { callMinAbsDelta: 0.1, firstPositionPct: 60 } });
+    expect(() => validateAnalysisTrialValues({ accountDollars: 200_000, volFarmerV4: { firstPositionPct: 95 } })).toThrow(/firstPositionPct must be a number from 10 to 90/);
+    expect(() => validateAnalysisTrialValues({ accountDollars: 200_000, volFarmerV4: { putMaxAbsDelta: null } })).toThrow(/putMaxAbsDelta must be a number/);
+    expect(() => validateAnalysisTrialValues({ accountDollars: 200_000, volFarmerV4: { rebalanceBandPct: 5 } })).toThrow(/not a value a ticker can have/);
+  });
 });
 
 describe("hashAnalysisLabValues", () => {
@@ -66,6 +74,33 @@ describe("hashAnalysisLabValues", () => {
     const saved = { pluto, trading, volFarmerV4: { firstPositionPct: 80 } } as unknown as BacktestSettings;
     const unsaved = { pluto, trading } as unknown as BacktestSettings;
     expect(hashAnalysisLabValues({ ...base, settings: saved })).toBe(hashAnalysisLabValues({ ...base, settings: unsaved }));
+  });
+});
+
+describe("an analysis's values with the ticker's own on top", () => {
+  const pluto = { windowStartEt: "10:00", windowEndEt: "15:30" };
+  const trading = { spreadCostChargedPct: 0 };
+  const lab = (volFarmerV4: Record<string, number>) => ({ settings: { pluto, trading, volFarmerV4: { ...defaultBacktestVolFarmerV4Settings, ...volFarmerV4 } } as unknown as BacktestSettings, defaultPotDollars: 200_000 });
+
+  it("runs the lab's v4 with the ticker's own values, then a trial's, on top", () => {
+    const values = analysisLabValuesOf(lab({}), { ...noTickerOwnValues, callMinAbsDelta: 0.1, firstPositionPct: 60 }, { accountDollars: 200_000, volFarmerV4: { putMaxAbsDelta: 0.2, firstPositionPct: 70 } });
+    expect(values.effective.v4).toMatchObject({ callMinAbsDelta: 0.1, callMaxAbsDelta: 0.5, firstPositionPct: 70, putMaxAbsDelta: 0.2, leapsMaxAccountPct: 10 });
+    expect(values.effective.firstPositionShare).toBeCloseTo(0.7, 12);
+  });
+
+  it("a lab change to a value the ticker holds leaves its hash; one to another value, or a change of its own, does not", () => {
+    const own = { ...noTickerOwnValues, callMinAbsDelta: 0.1 };
+    const hash = analysisLabValuesOf(lab({}), own, null).hash;
+    expect(analysisLabValuesOf(lab({ callMinAbsDelta: 0.08 }), own, null).hash).toBe(hash);
+    expect(analysisLabValuesOf(lab({ callMaxAbsDelta: 0.45 }), own, null).hash).not.toBe(hash);
+    expect(analysisLabValuesOf(lab({}), { ...own, callMinAbsDelta: 0.12 }, null).hash).not.toBe(hash);
+    // Its own value equal to the lab's hashes as having none.
+    expect(analysisLabValuesOf(lab({}), { ...noTickerOwnValues, callMinAbsDelta: 0.05 }, null).hash).toBe(analysisLabValuesOf(lab({}), null, null).hash);
+  });
+
+  it("an analysis stored before the ticker's own values hashes as one with none", () => {
+    const { settings, defaultPotDollars } = lab({});
+    expect(hashAnalysisLabValues({ settings, defaultPotDollars, trial: null })).toBe(analysisLabValuesOf(lab({}), null, null).hash);
   });
 });
 
