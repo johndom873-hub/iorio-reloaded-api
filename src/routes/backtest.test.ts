@@ -217,7 +217,8 @@ describe("backtest routes", () => {
     expect(template.settings.trading).not.toHaveProperty("commissionEstimator");
     expect(template.settings).toMatchObject({ decisionMaker: labDecisionMaker, policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
     expect(template.rows.map((row) => `${row.section} · ${row.group}`)).toEqual([
-      ...Array(9).fill("baseline_wheel · How the session runs"),
+      ...Array(4).fill("every_session · How the session runs"),
+      ...Array(5).fill("baseline_wheel · Looks and entries"),
       ...Array(14).fill("baseline_wheel · Put ladder"),
       ...Array(10).fill("baseline_wheel · Calls and Covered Calls"),
       ...Array(10).fill("baseline_wheel · Contract choice"),
@@ -238,7 +239,7 @@ describe("backtest routes", () => {
     const conditionPaths = template.rows.flatMap((row) => [...(row.appliesWhen?.allOf ?? []), ...(row.appliesWhen?.anyOf ?? [])].map((condition) => condition.path));
     expect(conditionPaths.filter((path) => !paths.includes(path))).toEqual([]);
     expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", hedgePutTenorDays: 0, hedgePutExpiry: "nearest", hedgePutStrikeFrom: "stock_price", hedgePutBelowPricePct: 0, hedgePutSize: "share_level", hedgePutCoveragePct: 100, hedgePutRollDaysLeft: 7, hedgePutCovers: "entries", hedgePutStaggeredExpiries: 3, hedgePutStrikeBy: "price", hedgePutAbsDelta: 0.25, hedgePutPriceGate: "off", hedgePutCostFallShare: 0.3, hedgePutIvMultiple: 1.3, hedgeInBreakEven: "excluded", hedgePutTurnover: "sell_when_shares_leave", hedgePutTurnoverDays: 30, hedgePutFarBelowPct: 10 });
-    expect(template.rows.find((row) => row.path === "decisionMaker")?.choices?.map((choice) => choice.value)).toEqual(["baseline", "steady_stake", "vol_farmer_v2", "vol_farmer_v3", "vol_farmer_v4"]);
+    expect(template.rows.find((row) => row.path === "decisionMaker")?.choices?.map((choice) => choice.value)).toEqual(["steady_stake", "vol_farmer_v4"]);
     // Vol Farmer v2 reads the Vol Farmer's Calls' |delta| range and spread limit; its own rows apply to it and to v3, which
     // has its band too.
     expect(template.settings.volFarmerV2).toEqual({ firstPositionPct: 50, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 0 });
@@ -253,7 +254,8 @@ describe("backtest routes", () => {
     expect(template.rows.find((row) => row.path === "volFarmerV4.callMaxAbsDelta")).toMatchObject({ label: "Calls' |delta| to", now: 0.5, editable: true });
     expect(template.rows.find((row) => row.path === "volFarmerV4.optionsExpiry")).toMatchObject({ label: "Calls and Puts expire", now: "today", choices: [{ value: "next" }, { value: "today" }] });
     expect(template.settings.volFarmer).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, callMinDte: 1, callMaxDte: 45, callExpiry: "in_range", putMinDte: 0, putMaxDte: 360, putMaxStrikeAbovePricePct: 0, protectionFallPct: 20, maxSpreadPctOfMid: 50, putCashReservePct: 10, crossing: "unwind", putExpiry: "in_range", hedgeRuleCallPremiums: "excluded", minPutProtectionPct: 0, hedgeWithoutCall: "none", putChoice: "most_protection", maxPutCostPctOfCallPremium: 0, putRoll: "none", hedgeAfterExpiry: "keep", afterAssignment: "end", hedgeRuleStockPnl: "excluded", putCashIn: "none", cashInPutMinProtectionPct: 0, hedge: "put" });
-    expect(template.rows.filter((row) => row.perTicker).map((row) => row.path)).toEqual(["baseline.ladderSharesPct", "baseline.ladderRungs", "baseline.ladderShock", "baseline.ladderShockPct", "baseline.ladderShockMinPct", "baseline.ladderShockMaxPct", "baseline.minAbsDelta", "baseline.maxAbsDelta"]);
+    // Only the Steady Stake's, v4's and the shared rows change: the retired decision makers' rows are shown, for their past sessions, not changed.
+    expect([...new Set(template.rows.filter((row) => row.editable).map((row) => row.section))]).toEqual(["every_session", "steady_stake", "vol_farmer_v4"]);
     // A row the CC + Put Ladder reads only under a condition says so.
     expect(template.rows.find((row) => row.path === "baseline.ladderShockPct")?.appliesWhen).toEqual({ allOf: [{ path: "baseline.putsWhenNoCall", oneOf: ["reserve_ladder"] }, { path: "baseline.ladderShock", oneOf: ["fixed"] }], explanation: "Applies only with the ladder's Stock shock set to Fixed." });
     // The looks inside Pluto's window are shown in How the session runs.
@@ -261,79 +263,76 @@ describe("backtest routes", () => {
       ["pluto.windowStartEt", "How the session runs", "time", plutoRow.window_start_et, false],
       ["pluto.windowEndEt", "How the session runs", "time", plutoRow.window_end_et, false],
     ]);
-    expect(template.rows.find((row) => row.path === "fixed.earningsDateKnownCalendarDaysAhead")).toMatchObject({ group: "How the session runs", label: "Earnings dates known 30 days ahead", unit: "days", now: 30, editable: false });
+    expect(template.rows.find((row) => row.path === "fixed.earningsDateKnownCalendarDaysAhead")).toMatchObject({ group: "Looks and entries", label: "Earnings dates known 30 days ahead", unit: "days", now: 30, editable: false });
     expect(template.rows.find((row) => row.path === "decisionMaker")).toMatchObject({ group: "How the session runs", unit: "choice", now: labDecisionMaker, editable: true });
     // The baseline wheel's own rows, in their groups' order.
     expect(template.rows.filter((row) => row.path.startsWith("baseline.")).map((row) => [row.path, row.now, row.editable])).toEqual([
-      ["baseline.looks", "every_look", true],
-      ["baseline.entry", "put", true],
-      ["baseline.dayValueOptions", "marked", true],
-      ["baseline.earnings", "ignore", true],
-      ["baseline.putsWhenNoCall", "off", true],
-      ["baseline.ladderSharesPct", 50, true],
-      ["baseline.ladderRungs", 5, true],
-      ["baseline.ladderShock", "history", true],
-      ["baseline.ladderShockPct", 70, true],
-      ["baseline.ladderShockMinPct", 60, true],
-      ["baseline.ladderShockMaxPct", 80, true],
-      ["baseline.ladderShockLookbackYears", 10, true],
-      ["baseline.ladderShockNoHistoryPct", 90, true],
-      ["baseline.ladderTop", "break_even", true],
-      ["baseline.ladderPace", "any_look", true],
-      ["baseline.ladderPutVersusCall", "call_first", true],
-      ["baseline.ladderPutYieldMarginPct", 0, true],
-      ["baseline.ladderPutDeltaRange", "delta_range", true],
-      ["baseline.callStrike", "delta_range", true],
-      ["baseline.entryCallStrike", "any", true],
-      ["baseline.entryWhenSharesUncovered", "wait", true],
-      ["baseline.callDeltaRange", "entry_range", true],
-      ["baseline.callMinAbsDelta", 0.05, true],
-      ["baseline.callMaxAbsDelta", 0.6, true],
-      ["baseline.minCallYieldPct", 0, true],
-      ["baseline.minCallYieldAppliesTo", "every_call", true],
-      ["baseline.maxAccountPctPerStock", 100, true],
-      ["baseline.maxSharesPctOfAccount", 100, true],
-      ["baseline.minAbsDelta", 0.05, true],
-      ["baseline.maxAbsDelta", 0.6, true],
-      ["baseline.minDte", 1, true],
-      ["baseline.maxDte", 45, true],
-      ["baseline.maxSpreadPctOfMid", 15, true],
-      ["baseline.ranking", "premium_yield", true],
-      ["baseline.expiryChoice", "any_in_range", true],
-      ["baseline.coverage", "best_contract", true],
-      ["baseline.volatilityEdgeFilter", "off", true],
-      ["baseline.minVolatilityEdgePoints", 0, true],
-      ["baseline.entryExtensionFilter", "off", true],
-      ["baseline.entryMaxExtensionZ", 1, true],
-      ["baseline.entryIvRankFilter", "off", true],
-      ["baseline.entryMaxIvRank", 80, true],
-      ["baseline.takeProfitPct", 0, true],
-      ["baseline.shareStopLossPct", 0, true],
-      ["baseline.hedgePutTenorDays", 0, true],
-      ["baseline.hedgePutCovers", "entries", true],
-      ["baseline.hedgePutExpiry", "nearest", true],
-      ["baseline.hedgePutStrikeBy", "price", true],
-      ["baseline.hedgePutStrikeFrom", "stock_price", true],
-      ["baseline.hedgePutBelowPricePct", 0, true],
-      ["baseline.hedgePutAbsDelta", 0.25, true],
-      ["baseline.hedgePutSize", "share_level", true],
-      ["baseline.hedgePutCoveragePct", 100, true],
-      ["baseline.hedgePutStaggeredExpiries", 3, true],
-      ["baseline.hedgePutRollDaysLeft", 7, true],
-      ["baseline.hedgeInBreakEven", "excluded", true],
-      ["baseline.hedgePutPriceGate", "off", true],
-      ["baseline.hedgePutCostFallShare", 0.3, true],
-      ["baseline.hedgePutIvMultiple", 1.3, true],
-      ["baseline.hedgePutTurnover", "sell_when_shares_leave", true],
-      ["baseline.hedgePutTurnoverDays", 30, true],
-      ["baseline.hedgePutFarBelowPct", 10, true],
+      ["baseline.looks", "every_look", false],
+      ["baseline.entry", "put", false],
+      ["baseline.dayValueOptions", "marked", false],
+      ["baseline.earnings", "ignore", false],
+      ["baseline.putsWhenNoCall", "off", false],
+      ["baseline.ladderSharesPct", 50, false],
+      ["baseline.ladderRungs", 5, false],
+      ["baseline.ladderShock", "history", false],
+      ["baseline.ladderShockPct", 70, false],
+      ["baseline.ladderShockMinPct", 60, false],
+      ["baseline.ladderShockMaxPct", 80, false],
+      ["baseline.ladderShockLookbackYears", 10, false],
+      ["baseline.ladderShockNoHistoryPct", 90, false],
+      ["baseline.ladderTop", "break_even", false],
+      ["baseline.ladderPace", "any_look", false],
+      ["baseline.ladderPutVersusCall", "call_first", false],
+      ["baseline.ladderPutYieldMarginPct", 0, false],
+      ["baseline.ladderPutDeltaRange", "delta_range", false],
+      ["baseline.callStrike", "delta_range", false],
+      ["baseline.entryCallStrike", "any", false],
+      ["baseline.entryWhenSharesUncovered", "wait", false],
+      ["baseline.callDeltaRange", "entry_range", false],
+      ["baseline.callMinAbsDelta", 0.05, false],
+      ["baseline.callMaxAbsDelta", 0.6, false],
+      ["baseline.minCallYieldPct", 0, false],
+      ["baseline.minCallYieldAppliesTo", "every_call", false],
+      ["baseline.maxAccountPctPerStock", 100, false],
+      ["baseline.maxSharesPctOfAccount", 100, false],
+      ["baseline.minAbsDelta", 0.05, false],
+      ["baseline.maxAbsDelta", 0.6, false],
+      ["baseline.minDte", 1, false],
+      ["baseline.maxDte", 45, false],
+      ["baseline.maxSpreadPctOfMid", 15, false],
+      ["baseline.ranking", "premium_yield", false],
+      ["baseline.expiryChoice", "any_in_range", false],
+      ["baseline.coverage", "best_contract", false],
+      ["baseline.volatilityEdgeFilter", "off", false],
+      ["baseline.minVolatilityEdgePoints", 0, false],
+      ["baseline.entryExtensionFilter", "off", false],
+      ["baseline.entryMaxExtensionZ", 1, false],
+      ["baseline.entryIvRankFilter", "off", false],
+      ["baseline.entryMaxIvRank", 80, false],
+      ["baseline.takeProfitPct", 0, false],
+      ["baseline.shareStopLossPct", 0, false],
+      ["baseline.hedgePutTenorDays", 0, false],
+      ["baseline.hedgePutCovers", "entries", false],
+      ["baseline.hedgePutExpiry", "nearest", false],
+      ["baseline.hedgePutStrikeBy", "price", false],
+      ["baseline.hedgePutStrikeFrom", "stock_price", false],
+      ["baseline.hedgePutBelowPricePct", 0, false],
+      ["baseline.hedgePutAbsDelta", 0.25, false],
+      ["baseline.hedgePutSize", "share_level", false],
+      ["baseline.hedgePutCoveragePct", 100, false],
+      ["baseline.hedgePutStaggeredExpiries", 3, false],
+      ["baseline.hedgePutRollDaysLeft", 7, false],
+      ["baseline.hedgeInBreakEven", "excluded", false],
+      ["baseline.hedgePutPriceGate", "off", false],
+      ["baseline.hedgePutCostFallShare", 0.3, false],
+      ["baseline.hedgePutIvMultiple", 1.3, false],
+      ["baseline.hedgePutTurnover", "sell_when_shares_leave", false],
+      ["baseline.hedgePutTurnoverDays", 30, false],
+      ["baseline.hedgePutFarBelowPct", 10, false],
     ]);
     expect(template.rows.find((row) => row.path === "decisionMaker")?.choices).toEqual([
-      { value: "baseline", label: "CC + Put Ladder (Covered Calls on the shares, a ladder of Puts below)" },
       { value: "steady_stake", label: "Steady Stake (a steady share stake, Calls and Puts on expiry days)" },
-      { value: "vol_farmer_v2", label: "Vol Farmer v2 (two Covered Calls at different levels, a LEAPS Call; research)" },
-      { value: "vol_farmer_v3", label: "Vol Farmer v3 (Vol Farmer v2 with its first position rebalanced to its share of the pot; research)" },
-      { value: "vol_farmer_v4", label: "Vol Farmer v4 (Vol Farmer v3 on values of its own: 80% of the pot in shares, Calls expiring at today's close)" },
+      { value: "vol_farmer_v4", label: "Vol Farmer v4 (80% of the pot in shares, Calls expiring at today's close)" },
     ]);
     expect(template.notReplayed).toHaveLength(4);
     expect(template.notReplayed.join(" ")).not.toMatch(/macro|daily-loss breaker and market stress|one look a day/i);
@@ -792,7 +791,7 @@ describe("backtest routes", () => {
 
     it("refuse a new rules or AI model session or batch, and the estimate of one, with nothing created", async () => {
       const sessionsBefore = await testDb("backtest_sessions").count({ total: "*" }).first();
-      const retired = { status: 400, body: { error: "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026); its past sessions stay readable." } };
+      const retired = { status: 400, body: { error: "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026, the CC + Put Ladder and Vol Farmer v2 and v3 on 2 Nov 2026); its past sessions stay readable." } };
       for (const decisionMaker of ["rules", "llm", "vol_farmer"]) {
         expect(await request("POST", "/backtest/sessions", sessionRequest("retired", { decisionMaker }))).toEqual(retired);
         expect(await request("POST", "/backtest/sessions/estimate", sessionRequest("retired", { decisionMaker }))).toEqual(retired);
@@ -818,12 +817,8 @@ describe("backtest routes", () => {
       const { name: _unnamed, ...withoutName } = sessionRequest("estimate");
       expect((await request("POST", "/backtest/sessions/estimate", withoutName)).status).toBe(200);
       expect((await request("POST", "/backtest/sessions/estimate", { ...sessionRequest("estimate"), endDate: "2026-09-14" })).status).toBe(400);
-      // With the baseline: a ticker whose values cannot run still answers 200, with its problems; creating it is refused.
-      const badDeltaRange = { ...sessionRequest("estimate", { decisionMaker: "baseline" }), symbolSettings: { [fileSymbol]: { baseline: { minAbsDelta: 0.9 } } } };
-      const withProblems = await request("POST", "/backtest/sessions/estimate", badDeltaRange);
-      expect(withProblems.status).toBe(200);
-      expect(withProblems.body).toMatchObject({ bookMode: "pots", capital: 1_000_000, resolvedBySymbol: { [fileSymbol]: { potDollars: 1_000_000, weight: 1, problems: [{ key: "minAbsDelta" }], fallback: { minAbsDelta: { source: "global" } } } } });
-      expect((await request("POST", "/backtest/sessions", badDeltaRange)).status).toBe(400);
+      // Per-ticker values were the CC + Put Ladder's: refused like creating the session.
+      expect(await request("POST", "/backtest/sessions/estimate", { ...sessionRequest("estimate"), symbolSettings: { [fileSymbol]: { baseline: { minAbsDelta: 0.9 } } } })).toEqual({ status: 400, body: { error: "symbolSettings were the CC + Put Ladder's per-ticker values, retired on 2 Nov 2026." } });
       expect(await testDb("backtest_sessions").count({ total: "*" }).first()).toEqual(sessionsBefore);
     });
 
@@ -1181,7 +1176,7 @@ describe("backtest routes", () => {
           expect((await listSessions()).sessions.map((entry) => entry.id)).toContain(session.id);
           // Its stopped job is not resumed: the engine no longer runs it.
           await testDb("backtest_jobs").where({ id: sessionJob.id }).update({ status: "failed" });
-          expect(await request("POST", `/backtest/jobs/${sessionJob.id}/resume`)).toEqual({ status: 409, body: { error: "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026); its past sessions stay readable." } });
+          expect(await request("POST", `/backtest/jobs/${sessionJob.id}/resume`)).toEqual({ status: 409, body: { error: "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026, the CC + Put Ladder and Vol Farmer v2 and v3 on 2 Nov 2026); its past sessions stay readable." } });
           expect((await testDb("backtest_jobs").where({ id: sessionJob.id }).first("status")).status).toBe("failed");
         }
       } finally {
@@ -1294,100 +1289,73 @@ describe("backtest routes", () => {
       expect((await request("DELETE", `/backtest/sessions/${single.session.id}`)).status).toBe(204);
     });
 
-    it("start a batch of runs in the queue, list it as one entry, add finished runs up into one portfolio, and delete it", async () => {
+    it("start a batch of one run, list it as one entry, add a past batch's finished runs up into one portfolio, and delete it", async () => {
       const batchName = `${sessionNamePrefix} batch`;
-      const pots = (shares: number) => ({ potDollars: 100_000, baseline: { ladderSharesPct: shares } });
-      const batchRequest = (runs: unknown[], extra: Record<string, unknown> = {}) => ({ name: batchName, startDate: "2026-09-02", endDate: "2026-09-10", tablesMode: "walk_forward", overrides: { decisionMaker: "baseline" }, settingsSource: "global", runs, ...extra });
-      const runOf = (shares: number, label: string) => ({ label, symbols: [fileSymbol], symbolSettings: { [fileSymbol]: pots(shares) } });
+      const batchRequest = (runs: unknown[], extra: Record<string, unknown> = {}) => ({ name: batchName, startDate: "2026-09-02", endDate: "2026-09-10", startingValue: 100_000, tablesMode: "walk_forward", overrides: { decisionMaker: "steady_stake" }, runs, ...extra });
+      const runOf = (label: string) => ({ label, symbols: [fileSymbol] });
 
-      // Shape and run checks: every problem named by its run.
+      // Shape and run checks; several runs were the CC + Put Ladder's.
       expect(await request("POST", "/backtest/batches", batchRequest([]))).toEqual({ status: 400, body: { error: "Give the batch at least one run." } });
-      expect(await request("POST", "/backtest/batches", batchRequest(Array.from({ length: 10 }, () => runOf(50, "x"))))).toEqual({ status: 400, body: { error: "A batch takes at most 9 runs." } });
-      expect(await request("POST", "/backtest/batches", batchRequest([runOf(30, "a"), runOf(70, "b")], { startingValue: 200_000 }))).toEqual({ status: 400, body: { error: "Several runs take each run's pots: leave out the starting value." } });
-      expect(await request("POST", "/backtest/batches", batchRequest([runOf(30, "a"), { symbols: [downloadSymbolA] }]))).toEqual({ status: 400, body: { error: `Run 2: There is no data file for ${downloadSymbolA}: download it first.` } });
-      expect(await request("POST", "/backtest/batches", batchRequest([runOf(30, "a"), runOf(70, "b")], { overrides: {} }))).toEqual({
-        status: 400,
-        body: { error: "Run 1: symbolSettings apply to the baseline only. Run 2: symbolSettings apply to the baseline only." },
-      });
+      expect(await request("POST", "/backtest/batches", batchRequest([runOf("a"), runOf("b")]))).toEqual({ status: 400, body: { error: "A batch holds one run: several runs were the CC + Put Ladder's, retired on 2 Nov 2026." } });
+      expect(await request("POST", "/backtest/batches", batchRequest([{ symbols: [downloadSymbolA] }]))).toEqual({ status: 400, body: { error: `There is no data file for ${downloadSymbolA}: download it first.` } });
+      expect(await request("POST", "/backtest/batches", batchRequest([{ ...runOf("a"), symbolSettings: { [fileSymbol]: { potDollars: 100_000 } } }]))).toEqual({ status: 400, body: { error: "The run: symbolSettings is not a run field (label or symbols)." } });
 
-      // Two places free: the third run waits in the queue.
-      const freshRunning = Number(
-        (await testDb("backtest_jobs").where({ kind: "backtest", status: "running" }).where("heartbeat_at", ">", testDb.raw("now() - interval '60 seconds'")).count("* as count").first())?.count,
+      const { status, body } = await request("POST", "/backtest/batches", batchRequest([runOf("Steady Stake")]));
+      expect(status).toBe(201);
+      const created = body as CreateBacktestBatchResponse;
+      expect(created.batch).toMatchObject({ name: batchName, runCount: 1 });
+      expect(created.runs.map(({ session }) => [session.name, session.startingValue, session.batch?.runNumber, session.batch?.runCount])).toEqual([[batchName, 100_000, 1, 1]]);
+      expect(spawnBacktestJobProcessMock).toHaveBeenCalledWith(created.runs[0]!.job.id);
+      expect(created).not.toHaveProperty("llmEstimate");
+      const batchId = created.batch.id;
+      const runOne = created.runs[0]!.session;
+
+      // A past batch of the CC + Put Ladder had several runs: a copy of run 1 stands in for its run 2.
+      const copied: { rows: { id: string }[] } = await testDb.raw(
+        `insert into backtest_sessions select (jsonb_populate_record(null::backtest_sessions, to_jsonb(s) || jsonb_build_object('id', gen_random_uuid(), 'run_number', 2, 'name', ?::text))).* from backtest_sessions s where s.id = ? returning id`,
+        [`${batchName} · Run 2 · past`, runOne.id],
       );
-      process.env.BACKTEST_MAX_PARALLEL_SESSIONS = String(freshRunning + 2);
-      try {
-        const { status, body } = await request("POST", "/backtest/batches", batchRequest([runOf(30, "share level 30%"), runOf(70, "share level 70%"), { label: "two tickers", symbols: [fileSymbol, secondFileSymbol], symbolSettings: { [fileSymbol]: pots(50), [secondFileSymbol]: pots(50) } }]));
-        expect(status).toBe(201);
-        const created = body as CreateBacktestBatchResponse;
-        expect(created.batch).toMatchObject({ name: batchName, runCount: 3 });
-        expect(created.runs.map(({ session }) => [session.name, session.startingValue, session.batch?.runNumber, session.batch?.runCount])).toEqual([
-          [`${batchName} · Run 1 · share level 30%`, 100_000, 1, 3],
-          [`${batchName} · Run 2 · share level 70%`, 100_000, 2, 3],
-          [`${batchName} · Run 3 · two tickers`, 200_000, 3, 3],
-        ]);
-        expect(created.runs.map(({ job }) => job.displayStatus)).toEqual(["running", "running", "queued"]);
-        expect(spawnBacktestJobProcessMock.mock.calls.map(([jobId]) => jobId)).toEqual([created.runs[0]!.job.id, created.runs[1]!.job.id]);
-        expect(created.warnings.length).toBeGreaterThan(0);
-        expect(created.warnings.every((warning) => /^Run [123]: /.test(warning))).toBe(true);
-        expect(created).not.toHaveProperty("llmEstimate");
-        const batchId = created.batch.id;
-        const [runOne, runTwo, runThree] = created.runs.map(({ session }) => session);
+      const runTwoId = copied.rows[0]!.id;
 
-        // The Sessions list: the batch is one entry, its runs together in run order.
-        const listed = await listSessions();
-        expect(listed.sessions.filter((entry) => entry.batch?.id === batchId).map((entry) => entry.batch?.runNumber)).toEqual([1, 2, 3]);
-        expect(listed.sessions.slice(0, 3).map((entry) => entry.id)).toEqual([runOne!.id, runTwo!.id, runThree!.id]);
-        const plainSessions = listed.sessions.filter((entry) => entry.batch?.id !== batchId).length;
-        expect(listed.total).toBe(plainSessions + 1);
+      // The Sessions list: the batch is one entry, its runs together in run order.
+      const listed = await listSessions();
+      expect(listed.sessions.filter((entry) => entry.batch?.id === batchId).map((entry) => entry.batch?.runNumber)).toEqual([1, 2]);
+      const plainSessions = listed.sessions.filter((entry) => entry.batch?.id !== batchId).length;
+      expect(listed.total).toBe(plainSessions + 1);
 
-        // Its page: the runs with their jobs; nothing to chart before a run finishes.
-        const detail = (await request("GET", `/backtest/batches/${batchId}`)).body as BacktestBatchDetail;
-        expect(detail.batch).toMatchObject({ id: batchId, name: batchName, runCount: 3, startDate: "2026-09-02", endDate: "2026-09-10", tablesMode: "walk_forward", decisionMaker: "baseline" });
-        expect(detail.runs.map((run) => [run.runNumber, run.job?.displayStatus, run.points.length, run.symbolSettings?.[fileSymbol]?.baseline.ladderSharesPct])).toEqual([
-          [1, "running", 0, 30],
-          [2, "running", 0, 70],
-          [3, "queued", 0, 50],
-        ]);
-        expect(await request("GET", `/backtest/batches/${batchId}/combined?runs=1,2`)).toEqual({ status: 409, body: { error: "Run 1 has not finished: only finished runs combine." } });
+      // Its page: the runs with their jobs; nothing to chart before a run finishes.
+      const detail = (await request("GET", `/backtest/batches/${batchId}`)).body as BacktestBatchDetail;
+      expect(detail.batch).toMatchObject({ id: batchId, name: batchName, runCount: 2, startDate: "2026-09-02", endDate: "2026-09-10", tablesMode: "walk_forward", decisionMaker: "steady_stake" });
+      expect(detail.runs.map((run) => [run.runNumber, run.points.length])).toEqual([[1, 0], [2, 0]]);
+      expect(await request("GET", `/backtest/batches/${batchId}/combined?runs=1,2`)).toEqual({ status: 409, body: { error: "Run 1 has not finished: only finished runs combine." } });
 
-        // Run 1 finishes: its place goes to run 3 the next time the queue moves (here, reading the batch).
-        await testDb("backtest_jobs").where({ id: created.runs[0]!.job.id }).update({ status: "succeeded", finished_at: testDb.fn.now() });
-        spawnBacktestJobProcessMock.mockClear();
-        expect(((await request("GET", `/backtest/batches/${batchId}`)).body as BacktestBatchDetail).runs[2]!.job?.displayStatus).toBe("running");
-        expect(spawnBacktestJobProcessMock).toHaveBeenCalledWith(created.runs[2]!.job.id);
+      // Runs 1 and 2 finished (the approved worked example): A 100,000 → 130,000, B 100,000 → 90,000; the sum peaks at
+      // 205,000 and falls to 165,000 (A 95,000 + B 70,000).
+      const finishedDays = (sessionId: string, values: number[], baselines: number[]) =>
+        ["2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08"].map((tradingDate, index) => ({ session_id: sessionId, trading_date: tradingDate, account_value: values[index], cash: values[index], exposure_dollars: 1_000, interest_dollars: 2, baseline_value: baselines[index], spy_baseline_value: 100_000 + index * 1_000 }));
+      await testDb("backtest_session_days").insert([...finishedDays(runOne.id, [100_000, 105_000, 95_000, 130_000], [100_000, 110_000, 90_000, 120_000]), ...finishedDays(runTwoId, [100_000, 100_000, 70_000, 90_000], [100_000, 110_000, 90_000, 120_000])]);
+      await testDb("backtest_sessions").whereIn("id", [runOne.id, runTwoId]).update({ status: "succeeded" });
+      expect(await request("GET", `/backtest/batches/${batchId}/combined?runs=1`)).toEqual({ status: 400, body: { error: "Combine two or more runs: ?runs=1,3" } });
+      expect(await request("GET", `/backtest/batches/${batchId}/combined?runs=1,7`)).toEqual({ status: 404, body: { error: "This batch has no Run 7." } });
+      const combinedResponse = await request("GET", `/backtest/batches/${batchId}/combined?runs=2,1`);
+      expect(combinedResponse).toMatchObject({ status: 200 });
+      const combined = combinedResponse.body as BacktestBatchCombined;
+      expect(combined.runNumbers).toEqual([1, 2]);
+      expect(combined.points.map((point) => point.value)).toEqual([200_000, 205_000, 165_000, 220_000]);
+      expect(combined.metrics).toMatchObject({ startValue: 200_000, endValue: 220_000, tradeCount: 0, interestDollars: 16 });
+      expect(combined.metrics.totalReturn).toBeCloseTo(0.1, 10);
+      expect(combined.metrics.maxDrawdown).toBeCloseTo(165_000 / 205_000 - 1, 10);
+      expect(combined.baselineFigures).toMatchObject({ startValue: 200_000, endValue: 240_000 });
+      expect(combined.spyBaselineFigures).toMatchObject({ startValue: 200_000, endValue: 206_000 });
+      expect(combined.daysLeftOut).toBe(0);
+      expect(((await request("GET", `/backtest/batches/${batchId}`)).body as BacktestBatchDetail).runs[0]!.points.map((point) => point.value)).toEqual([100_000, 105_000, 95_000, 130_000]);
 
-        // Runs 1 and 2 finished (the approved worked example): A 100,000 → 130,000, B 100,000 → 90,000; the sum peaks at
-        // 205,000 and falls to 165,000 (A 95,000 + B 70,000).
-        const finishedDays = (sessionId: string, values: number[], baselines: number[]) =>
-          ["2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08"].map((tradingDate, index) => ({ session_id: sessionId, trading_date: tradingDate, account_value: values[index], cash: values[index], exposure_dollars: 1_000, interest_dollars: 2, baseline_value: baselines[index], spy_baseline_value: 100_000 + index * 1_000 }));
-        await testDb("backtest_session_days").insert([...finishedDays(runOne!.id, [100_000, 105_000, 95_000, 130_000], [100_000, 110_000, 90_000, 120_000]), ...finishedDays(runTwo!.id, [100_000, 100_000, 70_000, 90_000], [100_000, 110_000, 90_000, 120_000])]);
-        await testDb("backtest_sessions").whereIn("id", [runOne!.id, runTwo!.id]).update({ status: "succeeded" });
-        expect(await request("GET", `/backtest/batches/${batchId}/combined?runs=1`)).toEqual({ status: 400, body: { error: "Combine two or more runs: ?runs=1,3" } });
-        expect(await request("GET", `/backtest/batches/${batchId}/combined?runs=1,7`)).toEqual({ status: 404, body: { error: "This batch has no Run 7." } });
-        const combinedResponse = await request("GET", `/backtest/batches/${batchId}/combined?runs=2,1`);
-        expect(combinedResponse).toMatchObject({ status: 200 });
-        const combined = combinedResponse.body as BacktestBatchCombined;
-        expect(combined.runNumbers).toEqual([1, 2]);
-        expect(combined.points.map((point) => point.value)).toEqual([200_000, 205_000, 165_000, 220_000]);
-        expect(combined.metrics).toMatchObject({ startValue: 200_000, endValue: 220_000, tradeCount: 0, interestDollars: 16 });
-        expect(combined.metrics.totalReturn).toBeCloseTo(0.1, 10);
-        expect(combined.metrics.maxDrawdown).toBeCloseTo(165_000 / 205_000 - 1, 10);
-        expect(combined.baselineFigures).toMatchObject({ startValue: 200_000, endValue: 240_000 });
-        expect(combined.spyBaselineFigures).toMatchObject({ startValue: 200_000, endValue: 206_000 });
-        expect(combined.daysLeftOut).toBe(0);
-        expect(((await request("GET", `/backtest/batches/${batchId}`)).body as BacktestBatchDetail).runs[0]!.points.map((point) => point.value)).toEqual([100_000, 105_000, 95_000, 130_000]);
-
-        // Delete: every run's session and job go, the unfinished ones stopped first.
-        terminateLeftoverJobProcessesMock.mockClear();
-        expect((await request("DELETE", `/backtest/batches/${batchId}`)).status).toBe(204);
-        expect(terminateLeftoverJobProcessesMock).toHaveBeenCalledWith(424_242, created.runs[1]!.job.id);
-        expect(await testDb("backtest_sessions").where({ batch_id: batchId }).first()).toBeUndefined();
-        expect(await testDb("backtest_jobs").whereIn("id", created.runs.map(({ job }) => job.id)).first()).toBeUndefined();
-        expect((await request("GET", `/backtest/batches/${batchId}`)).status).toBe(404);
-        expect((await request("DELETE", `/backtest/batches/${batchId}`)).status).toBe(404);
-      } finally {
-        process.env.BACKTEST_MAX_PARALLEL_SESSIONS = "1000";
-      }
+      // Delete: every run's session and job go.
+      expect((await request("DELETE", `/backtest/batches/${batchId}`)).status).toBe(204);
+      expect(await testDb("backtest_sessions").where({ batch_id: batchId }).first()).toBeUndefined();
+      expect(await testDb("backtest_jobs").where({ id: created.runs[0]!.job.id }).first()).toBeUndefined();
+      expect((await request("GET", `/backtest/batches/${batchId}`)).status).toBe(404);
+      expect((await request("DELETE", `/backtest/batches/${batchId}`)).status).toBe(404);
     });
 
     it("delete a session after stopping its running job", async () => {

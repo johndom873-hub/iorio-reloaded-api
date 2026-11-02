@@ -7,7 +7,7 @@ import { contractKey } from "../../lib/optionContractKey.js";
 import { addCalendarDays } from "../../lib/calendarDays.js";
 import { isEtfSector, tickerCalendarProfile } from "../../lib/tickerCalendarRelevance.js";
 import { effectiveWindowEndEt } from "../../pluto/sessionSchedule.js";
-import { isRetiredBacktestDecisionMaker, retiredBacktestDecisionMakerMessage, runsVolFarmerV2Steps, volFarmerStepSettingsOf, type BacktestAction, type BacktestBookMode, type BacktestBreakEvenLevel, type BacktestCycle, type BacktestCycleGap, type BacktestFill, type BacktestLadderLevel, type BacktestOrderShortfall, type BacktestPosition, type BacktestRunStatistics, type BacktestSettings, type BacktestSettingsOverrides, type BacktestSymbolSettings, type BacktestTablesMode } from "../backtestTypes.js";
+import { engineCannotRun, retiredBacktestDecisionMakerMessage, runsVolFarmerV2Steps, volFarmerStepSettingsOf, type BacktestAction, type BacktestBookMode, type BacktestBreakEvenLevel, type BacktestCycle, type BacktestCycleGap, type BacktestFill, type BacktestLadderLevel, type BacktestOrderShortfall, type BacktestPosition, type BacktestRunStatistics, type BacktestSettings, type BacktestSettingsOverrides, type BacktestSymbolSettings, type BacktestTablesMode } from "../backtestTypes.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
 import { calendarDaysBetween, computeBacktestMetrics, computeDailyReturns, cycleFiguresOf, type AccountDay } from "../sessionAnalytics.js";
@@ -398,8 +398,8 @@ function sessionSymbolsOf(session: Pick<SessionRow, "symbol" | "symbols">): stri
 export async function runBacktestSession(sessionId: string, hooks: BacktestRunHooks, connection: Knex = db): Promise<void> {
   const session = await loadSessionRow(sessionId, connection);
   const settings = applyBacktestOverrides(session.settingsSnapshot, session.overrides ?? {});
-  // A past rules or AI model session is never run again: its stored results stay as they are.
-  if (isRetiredBacktestDecisionMaker(settings.decisionMaker)) throw new Error(retiredBacktestDecisionMakerMessage);
+  // A past session of a decision maker whose code is gone is never run again: its stored results stay as they are.
+  if (engineCannotRun(settings.decisionMaker)) throw new Error(retiredBacktestDecisionMakerMessage);
   // With per-ticker pots the tickers take their turn at a look alphabetically, so the one that finds the cash short is
   // known in advance (approved by Marcelo 2026-10-15); a shared account keeps the order given.
   const symbolNames = session.bookMode === "pots" ? sessionSymbolsOf(session).sort() : sessionSymbolsOf(session);

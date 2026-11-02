@@ -3,7 +3,7 @@ import { db } from "../db/connection.js";
 import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { kellyFraction } from "../pluto/postModelGates.js";
 import { mapTradingSettingsRow } from "../lib/tradingSettingsStore.js";
-import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, defaultBacktestVolFarmerV3Settings, defaultBacktestVolFarmerV4Settings, type BacktestSettingApplicability, type BacktestSettingCondition, type BacktestSettingGroup, type BacktestSettingRow, type BacktestSettingSection, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
+import { defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, defaultBacktestVolFarmerSettings, defaultBacktestVolFarmerV2Settings, defaultBacktestVolFarmerV3Settings, defaultBacktestVolFarmerV4Settings, type BacktestSettingApplicability, type BacktestSettingCondition, type BacktestSettingGroup, type BacktestSettingRow, type BacktestSettingSection, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
 import { earningsDateKnownCalendarDaysAhead } from "./engine/backtestTickerInputs.js";
 
 // The New session settings table (docs/backtesting/): the values a session snapshots and may change for itself only. The
@@ -35,13 +35,10 @@ const rowDefinitionsBeforeVolFarmerV4: readonly RowDefinition[] = [
     label: "Decision maker",
     unit: "choice",
     editable: true,
-    note: "who decides the session's trades. The Steady Stake, Vol Farmer v2 and v4: only their own group's values, at the 10:00 look; Vol Farmer v3: Vol Farmer v2's values and its own",
+    note: "who decides the session's trades: the Steady Stake or Vol Farmer v4, each on its own group's values only",
     choices: [
-      { value: "baseline", label: "CC + Put Ladder (Covered Calls on the shares, a ladder of Puts below)" },
       { value: "steady_stake", label: "Steady Stake (a steady share stake, Calls and Puts on expiry days)" },
-      { value: "vol_farmer_v2", label: "Vol Farmer v2 (two Covered Calls at different levels, a LEAPS Call; research)" },
-      { value: "vol_farmer_v3", label: "Vol Farmer v3 (Vol Farmer v2 with its first position rebalanced to its share of the pot; research)" },
-      { value: "vol_farmer_v4", label: "Vol Farmer v4 (Vol Farmer v3 on values of its own: 80% of the pot in shares, Calls expiring at today's close)" },
+      { value: "vol_farmer_v4", label: "Vol Farmer v4 (80% of the pot in shares, Calls expiring at today's close)" },
     ],
   },
   { path: "volFarmer.callMinAbsDelta", label: "Calls' |delta| from", unit: "number", editable: true, note: "the Call sold is the one with the highest premium yield (annualized) inside the |delta| and days-to-expiry ranges whose strike passes the hedge rule; |delta| from each quote's own implied volatility" },
@@ -758,19 +755,16 @@ const onlyWithHistoryShock: BacktestSettingApplicability = { allOf: [ladderOn, {
 const volFarmerV2ReadsIt: ReadonlySet<string> = new Set<string>(["volFarmer.callMinAbsDelta", "volFarmer.callMaxAbsDelta", "volFarmer.maxSpreadPctOfMid"]);
 
 export const backtestSettingLayout: readonly { group: BacktestSettingGroup; section: BacktestSettingSection; rows: readonly { path: string; appliesWhen?: BacktestSettingApplicability }[] }[] = [
+  { group: "How the session runs", section: "every_session", rows: [{ path: "decisionMaker" }, { path: "pluto.windowStartEt" }, { path: "pluto.windowEndEt" }, { path: "trading.spreadCostChargedPct" }] },
   {
-    group: "How the session runs",
+    group: "Looks and entries",
     section: "baseline_wheel",
     rows: [
-      { path: "decisionMaker" },
       { path: "baseline.looks", appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["baseline"] }], explanation: "Applies only with the CC + Put Ladder as decision maker." } },
-      { path: "pluto.windowStartEt" },
-      { path: "pluto.windowEndEt" },
       { path: "baseline.entry" },
       { path: "baseline.dayValueOptions" },
       { path: "baseline.earnings" },
       { path: "fixed.earningsDateKnownCalendarDaysAhead" },
-      { path: "trading.spreadCostChargedPct" },
     ],
   },
   {
@@ -921,8 +915,12 @@ export const backtestNotReplayed: readonly string[] = [
   "Early assignment and dividends.",
 ];
 
-/** Paths a session may override. */
-export const editableBacktestSettingPaths: ReadonlySet<string> = new Set(backtestSettingRowDefinitions.filter((row) => row.editable).map((row) => row.path));
+/** The sections of the retired decision makers (Marcelo 2026-10-30, 2026-11-02): their rows still label past sessions, but no session or lab save changes them. */
+export const retiredBacktestSettingSections: ReadonlySet<BacktestSettingSection> = new Set(["baseline_wheel", "vol_farmer", "vol_farmer_v2", "vol_farmer_v3"]);
+const sectionByPath = new Map(backtestSettingLayout.flatMap(({ section, rows }) => rows.map(({ path }) => [path, section] as const)));
+
+/** Paths a session or a lab save may change: the editable rows outside the retired sections. */
+export const editableBacktestSettingPaths: ReadonlySet<string> = new Set(backtestSettingRowDefinitions.filter((row) => row.editable && !retiredBacktestSettingSections.has(sectionByPath.get(row.path)!)).map((row) => row.path));
 
 /** The value a row's path addresses inside the settings ("pluto.windowStartEt", "trading.spreadCostChargedPct", "baseline.ladderRungs", "decisionMaker"). */
 export function readBacktestSettingValue(settings: BacktestSettings, settingPath: string): number | string {
@@ -939,9 +937,6 @@ export function readBacktestSettingValue(settings: BacktestSettings, settingPath
   throw new Error(`Not a settings path: ${settingPath}`);
 }
 
-const tickerBaselinePaths = new Set(backtestTickerBaselineKeys.map((key) => `baseline.${key}`));
-/** A baseline value that can differ by ticker in a session of per-ticker pots. */
-const isTickerBaselinePath = (path: string) => tickerBaselinePaths.has(path);
 
 const rowDefinitionByPath = new Map(backtestSettingRowDefinitions.map((row) => [row.path, row]));
 const placedPaths = backtestSettingLayout.flatMap((group) => group.rows.map((row) => row.path));
@@ -955,7 +950,7 @@ export function buildBacktestSettingRows(settings: BacktestSettings): BacktestSe
     section,
     ...(appliesWhen ? { appliesWhen } : {}),
     ...row,
-    ...(isTickerBaselinePath(row.path) ? { perTicker: true as const } : {}),
+    editable: editableBacktestSettingPaths.has(row.path),
     now: fixedValue ?? readBacktestSettingValue(settings, row.path),
   }));
 }

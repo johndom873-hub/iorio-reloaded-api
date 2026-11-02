@@ -8,7 +8,6 @@ import {
   backtestMaxSymbolsPerSession,
   backtestSessionsPageDefaultLimit,
   backtestSessionsPageMaxLimit,
-  backtestTickerBaselineKeys,
   activeBacktestDecisionMakers,
   defaultBacktestBaselineSettings,
   defaultBacktestSteadyStakeSettings,
@@ -16,7 +15,6 @@ import {
   defaultBacktestVolFarmerV2Settings,
   defaultBacktestVolFarmerV3Settings,
   defaultBacktestVolFarmerV4Settings,
-  runsVolFarmerV2Steps,
   volFarmerV2LooksChoices,
   volFarmerV3CallStrikeFloorChoices,
   volFarmerV3PutsSoldChoices,
@@ -39,15 +37,11 @@ import {
   type BacktestVolFarmerV3Settings,
   type BacktestVolFarmerV4Settings,
   type BacktestSymbolResolution,
-  type BacktestSymbolSettingSource,
   type BacktestSymbolSettings,
-  type BacktestTickerProblem,
   type BacktestTablesMode,
-  type BacktestTickerBaselineKey,
-  type BacktestTickerBaselineSettings,
-  type BacktestTickerValues,
   isRetiredBacktestDecisionMaker,
   retiredBacktestDecisionMakerMessage,
+  retiredBacktestDecisionMakers,
 } from "../backtestTypes.js";
 import { isIsoCalendarDate } from "./backtestJobRules.js";
 
@@ -79,10 +73,6 @@ export interface BacktestSessionRequestContext {
   coverageFor: (symbol: string) => DataFileCoverage | null;
   /** What the symbol's file holds between two dates (both included); null when the symbol has no file. */
   periodContentsFor: (symbol: string, startDate: string, endDate: string) => DataFilePeriodContents | null;
-  /** The ticker's saved lab values (its pot and baseline values); null when it has none. */
-  tickerValuesFor: (symbol: string) => BacktestTickerValues | null;
-  /** The lab's pot for a ticker without its own; null when none is set. */
-  defaultPotDollars: number | null;
 }
 
 export interface ValidatedBacktestSessionRequest {
@@ -91,29 +81,22 @@ export interface ValidatedBacktestSessionRequest {
   symbols: string[];
   startDate: string;
   endDate: string;
-  /** The session's capital: the starting value given, else Σ the pots. */
+  /** The session's capital: the starting value given. */
   startingValue: number;
   tablesMode: BacktestTablesMode;
   /** Only the values that differ from the snapshot. */
   overrides: BacktestSettingsOverrides;
-  /** "pots" when the baseline decides; "shared_account" with the Steady Stake and the Vol Farmers. */
+  /** Always "shared_account" now: "pots" was the retired CC + Put Ladder's, read back from its past sessions only. */
   bookMode: BacktestBookMode;
-  /** Each ticker's pot, weight and values ("pots"); null otherwise. */
+  /** The CC + Put Ladder's per-ticker pots and values: null for every new session (the columns stay for past ones). */
   symbolSettings: Record<string, BacktestSymbolSettings> | null;
-  /** The same with where a reset of each value returns ("pots"); null otherwise. */
   symbolResolution: Record<string, BacktestSymbolResolution> | null;
-  /** How a "pots" session was asked for (Run again); null otherwise. */
   settingsSource: BacktestSettingsSource | null;
   potsFromStartingValue: boolean | null;
 }
 
-/**
- * `warnings` do not stop the session: what it will do differently because of what its data files hold. A request refused
- * only for its tickers' values carries their resolution (`symbolResolution`), each ticker with its problems.
- */
-export type BacktestSessionRequestValidation =
-  | { ok: true; value: ValidatedBacktestSessionRequest; warnings: string[] }
-  | { ok: false; error: string; symbolResolution?: { capital: number | null; bySymbol: Record<string, BacktestSymbolResolution> }; warnings?: string[] };
+/** `warnings` do not stop the session: what it will do differently because of what its data files hold. */
+export type BacktestSessionRequestValidation = { ok: true; value: ValidatedBacktestSessionRequest; warnings: string[] } | { ok: false; error: string };
 
 const maximumNameLength = 120;
 /** starting_value is decimal(16,2). */
@@ -174,40 +157,13 @@ export function validateBacktestSettingsOverrides(raw: unknown, snapshot: Backte
     if (Object.keys(changed).length > 0) overrides.steadyStake = changed as Partial<BacktestSteadyStakeSettings>;
   }
 
-  // Every Vol Farmer value can change for a session.
-  if (raw.volFarmer !== undefined) {
-    if (!isPlainObject(raw.volFarmer)) return { ok: false, error: "overrides.volFarmer must be an object." };
-    const snapshotVolFarmer = { ...defaultBacktestVolFarmerSettings, ...snapshot.volFarmer };
-    const unknownField = Object.keys(raw.volFarmer).find((field) => !(field in defaultBacktestVolFarmerSettings));
-    if (unknownField) return { ok: false, error: `volFarmer.${unknownField} is not a Vol Farmer setting.` };
-    const problem = validateVolFarmerSettings({ ...snapshotVolFarmer, ...raw.volFarmer });
-    if (problem) return { ok: false, error: problem };
-    const changed = changedEntries(snapshotVolFarmer, raw.volFarmer);
-    if (Object.keys(changed).length > 0) overrides.volFarmer = changed as Partial<BacktestVolFarmerSettings>;
-  }
-
-  // Every Vol Farmer v2 value can change for a session.
-  if (raw.volFarmerV2 !== undefined) {
-    if (!isPlainObject(raw.volFarmerV2)) return { ok: false, error: "overrides.volFarmerV2 must be an object." };
-    const snapshotVolFarmerV2 = { ...defaultBacktestVolFarmerV2Settings, ...snapshot.volFarmerV2 };
-    const unknownField = Object.keys(raw.volFarmerV2).find((field) => !(field in defaultBacktestVolFarmerV2Settings));
-    if (unknownField) return { ok: false, error: `volFarmerV2.${unknownField} is not a Vol Farmer v2 setting.` };
-    const problem = validateVolFarmerV2Settings({ ...snapshotVolFarmerV2, ...raw.volFarmerV2 });
-    if (problem) return { ok: false, error: problem };
-    const changed = changedEntries(snapshotVolFarmerV2, raw.volFarmerV2);
-    if (Object.keys(changed).length > 0) overrides.volFarmerV2 = changed as Partial<BacktestVolFarmerV2Settings>;
-  }
-
-  // Every Vol Farmer v3 value can change for a session.
-  if (raw.volFarmerV3 !== undefined) {
-    if (!isPlainObject(raw.volFarmerV3)) return { ok: false, error: "overrides.volFarmerV3 must be an object." };
-    const snapshotVolFarmerV3 = { ...defaultBacktestVolFarmerV3Settings, ...snapshot.volFarmerV3 };
-    const unknownField = Object.keys(raw.volFarmerV3).find((field) => !(field in defaultBacktestVolFarmerV3Settings));
-    if (unknownField) return { ok: false, error: `volFarmerV3.${unknownField} is not a Vol Farmer v3 setting.` };
-    const problem = validateVolFarmerV3Settings({ ...snapshotVolFarmerV3, ...raw.volFarmerV3 });
-    if (problem) return { ok: false, error: problem };
-    const changed = changedEntries(snapshotVolFarmerV3, raw.volFarmerV3);
-    if (Object.keys(changed).length > 0) overrides.volFarmerV3 = changed as Partial<BacktestVolFarmerV3Settings>;
+  // The retired decision makers' sections (the original Vol Farmer's, v2's and v3's) take no change.
+  for (const section of ["volFarmer", "volFarmerV2", "volFarmerV3"] as const) {
+    const values = raw[section];
+    if (values === undefined) continue;
+    if (!isPlainObject(values)) return { ok: false, error: `overrides.${section} must be an object.` };
+    const field = Object.keys(values)[0];
+    if (field !== undefined) return { ok: false, error: `${section}.${field} cannot be changed for a session.` };
   }
 
   // Every Vol Farmer v4 value can change for a session.
@@ -223,7 +179,7 @@ export function validateBacktestSettingsOverrides(raw: unknown, snapshot: Backte
   }
 
   if (raw.decisionMaker !== undefined) {
-    if (raw.decisionMaker === "rules" || raw.decisionMaker === "llm" || raw.decisionMaker === "vol_farmer") return { ok: false, error: retiredBacktestDecisionMakerMessage };
+    if ((retiredBacktestDecisionMakers as readonly unknown[]).includes(raw.decisionMaker)) return { ok: false, error: retiredBacktestDecisionMakerMessage };
     if (!(activeBacktestDecisionMakers as readonly unknown[]).includes(raw.decisionMaker)) return { ok: false, error: `decisionMaker must be ${activeBacktestDecisionMakers.slice(0, -1).join(", ")} or ${activeBacktestDecisionMakers.at(-1)}.` };
     if (raw.decisionMaker !== (snapshot.decisionMaker ?? "rules")) overrides.decisionMaker = raw.decisionMaker as BacktestSettingsOverrides["decisionMaker"];
   }
@@ -478,157 +434,16 @@ export function validateCreateBacktestSessionRequest(body: unknown, context: Bac
   // A lab still set to a retired decision maker starts none: the request must name another.
   const effective = applyBacktestOverrides(context.snapshot, overrides.overrides);
   if (isRetiredBacktestDecisionMaker(effective.decisionMaker)) return { ok: false, error: retiredBacktestDecisionMakerMessage };
-  // Per-ticker pots and values are the baseline's; the Steady Stake and the Vol Farmers run on the session's settings and its starting value.
-  if (effective.decisionMaker !== "baseline") {
-    if (body.symbolSettings !== undefined && body.symbolSettings !== null) return { ok: false, error: "symbolSettings apply to the baseline only." };
-    if (typeof startingValue !== "number") return { ok: false, error: "The starting account value must be a number above 0." };
-    // Vol Farmer v2's set allocations (v3's too, v4's its own) name the session's tickers.
-    const allocationSection = effective.decisionMaker === "vol_farmer_v4" ? "volFarmerV4" : "volFarmerV2";
-    const allocations = allocationSection === "volFarmerV4" ? { ...defaultBacktestVolFarmerV4Settings, ...effective.volFarmerV4 }.tickerAllocationPct : { ...defaultBacktestVolFarmerV2Settings, ...effective.volFarmerV2 }.tickerAllocationPct;
-    const stranger = Object.keys(allocations).find((symbol) => !symbols.includes(symbol));
-    if (runsVolFarmerV2Steps(effective.decisionMaker) && stranger !== undefined) return { ok: false, error: `${allocationSection}.tickerAllocationPct.${stranger}: ${stranger} is not one of the session's symbols.` };
-    return { ok: true, value: { ...base, startingValue, bookMode: "shared_account", symbolSettings: null, symbolResolution: null, settingsSource: null, potsFromStartingValue: null }, warnings };
+  // Every decision maker still offered runs one shared account on the session's starting value; per-ticker pots and
+  // values were the CC + Put Ladder's.
+  if (body.symbolSettings !== undefined && body.symbolSettings !== null) return { ok: false, error: "symbolSettings were the CC + Put Ladder's per-ticker values, retired on 2 Nov 2026." };
+  if (typeof startingValue !== "number") return { ok: false, error: "The starting account value must be a number above 0." };
+  // Vol Farmer v4's set allocations name the session's tickers.
+  if (effective.decisionMaker === "vol_farmer_v4") {
+    const stranger = Object.keys({ ...defaultBacktestVolFarmerV4Settings, ...effective.volFarmerV4 }.tickerAllocationPct).find((symbol) => !symbols.includes(symbol));
+    if (stranger !== undefined) return { ok: false, error: `volFarmerV4.tickerAllocationPct.${stranger}: ${stranger} is not one of the session's symbols.` };
   }
-
-  const settingsSource = body.settingsSource ?? "per_ticker";
-  if (settingsSource !== "per_ticker" && settingsSource !== "global") return { ok: false, error: "settingsSource must be per_ticker or global." };
-  const requestValues = validateRequestTickerValues(body.symbolSettings, symbols, context.editablePaths);
-  if (!requestValues.ok) return requestValues;
-  const resolved = resolveBacktestSymbolSettings({
-    symbols,
-    globalBaseline: { ...defaultBacktestBaselineSettings, ...context.snapshot.baseline },
-    sessionBaseline: effective.baseline,
-    sessionOverrides: overrides.overrides.baseline ?? {},
-    settingsSource,
-    tickerValuesFor: context.tickerValuesFor,
-    requestValues: requestValues.values,
-    startingValue: typeof startingValue === "number" ? startingValue : null,
-    defaultPotDollars: context.defaultPotDollars,
-  });
-  if (!resolved.ok) return resolved;
-  const tickerProblem = firstTickerProblem(resolved.bySymbol);
-  if (tickerProblem !== null || resolved.capital === null) return { ok: false, error: tickerProblem ?? "A ticker has no pot.", symbolResolution: { capital: resolved.capital, bySymbol: resolved.bySymbol }, warnings };
-  return { ok: true, value: { ...base, startingValue: resolved.capital, bookMode: "pots", symbolSettings: storedSymbolSettings(resolved.bySymbol), symbolResolution: resolved.bySymbol, settingsSource, potsFromStartingValue: typeof startingValue === "number" }, warnings };
-}
-
-const isTickerBaselineKey = (key: string): key is BacktestTickerBaselineKey => (backtestTickerBaselineKeys as readonly string[]).includes(key);
-
-/** The request's symbolSettings: keyed by the session's symbols (normalized), each a pot above 0 and per-ticker baseline values only. Their values are checked once merged. */
-function validateRequestTickerValues(raw: unknown, symbols: readonly string[], editablePaths: ReadonlySet<string>): { ok: true; values: Record<string, BacktestTickerValues> } | { ok: false; error: string } {
-  if (raw === undefined || raw === null) return { ok: true, values: {} };
-  if (!isPlainObject(raw)) return { ok: false, error: "symbolSettings must be an object of symbols." };
-  const values: Record<string, BacktestTickerValues> = {};
-  for (const [givenSymbol, given] of Object.entries(raw)) {
-    let symbol: string;
-    try {
-      symbol = normalizeBacktestSymbol(givenSymbol);
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-    if (!symbols.includes(symbol)) return { ok: false, error: `symbolSettings.${givenSymbol}: ${symbol} is not one of the session's symbols.` };
-    if (!isPlainObject(given)) return { ok: false, error: `symbolSettings.${symbol} must be an object.` };
-    const unknownKey = Object.keys(given).find((key) => key !== "potDollars" && key !== "baseline");
-    if (unknownKey) return { ok: false, error: `symbolSettings.${symbol}.${unknownKey} is not a ticker value (potDollars or baseline).` };
-    const tickerValues: BacktestTickerValues = {};
-    if (given.potDollars !== undefined) {
-      const pot = given.potDollars;
-      if (typeof pot !== "number" || !Number.isFinite(pot) || pot <= 0 || pot > maximumStartingValue) return { ok: false, error: `symbolSettings.${symbol}.potDollars must be a number above 0.` };
-      tickerValues.potDollars = pot;
-    }
-    if (given.baseline !== undefined) {
-      if (!isPlainObject(given.baseline)) return { ok: false, error: `symbolSettings.${symbol}.baseline must be an object.` };
-      const sessionWide = Object.keys(given.baseline).find((key) => !isTickerBaselineKey(key));
-      if (sessionWide) return { ok: false, error: `baseline.${sessionWide} cannot differ between tickers: change it for the whole session.` };
-      const notEditable = Object.keys(given.baseline).find((key) => !editablePaths.has(`baseline.${key}`));
-      if (notEditable) return { ok: false, error: `baseline.${notEditable} cannot be changed for a session.` };
-      tickerValues.baseline = given.baseline as Partial<BacktestTickerBaselineSettings>;
-    }
-    values[symbol] = tickerValues;
-  }
-  return { ok: true, values };
-}
-
-/**
- * Each ticker's pot, weight and baseline values in a session of per-ticker pots (approved by Marcelo 2026-10-15). A
- * value comes from, last one given winning: the lab's global values < the ticker's lab values (settingsSource
- * "per_ticker") < the request's session-wide overrides < the request's values for the ticker. Pots: a starting value
- * splits equally (pot = starting value ÷ tickers); without one, the request's pot, else the ticker's lab pot
- * ("per_ticker"), else the lab's default pot. w = pot ÷ Σ pots; the session's capital is Σ pots.
- */
-export function resolveBacktestSymbolSettings(input: {
-  symbols: readonly string[];
-  /** The lab's global values, every default filled in. */
-  globalBaseline: BacktestBaselineSettings;
-  /** The global values with the session-wide overrides: every value the tickers share. */
-  sessionBaseline: BacktestBaselineSettings;
-  /** Only the values the request changes for the whole session. */
-  sessionOverrides: Partial<BacktestBaselineSettings>;
-  settingsSource: BacktestSettingsSource;
-  tickerValuesFor: (symbol: string) => BacktestTickerValues | null;
-  requestValues: Record<string, BacktestTickerValues>;
-  startingValue: number | null;
-  defaultPotDollars: number | null;
-}): { ok: true; bySymbol: Record<string, BacktestSymbolResolution>; capital: number | null } | { ok: false; error: string } {
-  const { symbols, globalBaseline, sessionBaseline, sessionOverrides, settingsSource, requestValues, startingValue, defaultPotDollars } = input;
-  if (startingValue !== null) {
-    const withPot = symbols.find((symbol) => requestValues[symbol]?.potDollars !== undefined);
-    if (withPot) return { ok: false, error: `Give either a starting value (split equally) or each ticker's pot, not both (${withPot} has a pot).` };
-  }
-  const tickers: Omit<BacktestSymbolResolution, "weight">[] = [];
-  for (const symbol of symbols) {
-    const fromLab = settingsSource === "per_ticker" ? input.tickerValuesFor(symbol) : null;
-    const fromRequest = requestValues[symbol] ?? null;
-    const baseline = {} as Record<BacktestTickerBaselineKey, unknown>;
-    const source = {} as BacktestSymbolResolution["source"];
-    const fallback: BacktestSymbolResolution["fallback"] = {};
-    for (const key of backtestTickerBaselineKeys) {
-      // Each layer given, lowest first; the last one wins and the one before it is where a reset returns.
-      const layers: [BacktestSymbolSettingSource, unknown][] = [["global", globalBaseline[key]]];
-      for (const [layer, value] of [["ticker", fromLab?.baseline?.[key]], ["session", sessionOverrides[key]], ["request", fromRequest?.baseline?.[key]]] as const) if (value !== undefined) layers.push([layer, value]);
-      const [winner, below] = [layers.at(-1)!, layers.at(-2)];
-      [source[key], baseline[key]] = winner;
-      if (below) fallback[key] = { value: below[1] as number | string, source: below[0] };
-    }
-    const tickerBaseline = baseline as BacktestTickerBaselineSettings;
-    const problems: BacktestTickerProblem[] = [];
-    const problem = validateBaselineSettings({ ...sessionBaseline, ...tickerBaseline });
-    if (problem) problems.push({ key: /^baseline\.(\w+)/.exec(problem)?.[1] ?? null, message: problem });
-    let potDollars: number | null = null;
-    if (startingValue !== null) [potDollars, source.potDollars] = [startingValue / symbols.length, "session"];
-    else {
-      const potLayers: [BacktestSymbolSettingSource, number][] = [];
-      if (defaultPotDollars !== null) potLayers.push(["global", defaultPotDollars]);
-      if (fromLab?.potDollars !== undefined) potLayers.push(["ticker", fromLab.potDollars]);
-      if (fromRequest?.potDollars !== undefined) potLayers.push(["request", fromRequest.potDollars]);
-      const [winner, below] = [potLayers.at(-1), potLayers.at(-2)];
-      if (winner) [source.potDollars, potDollars] = winner;
-      else {
-        source.potDollars = "global";
-        problems.push({ key: "potDollars", message: `${symbol} has no pot: give the session a starting value or the ticker a pot.` });
-      }
-      if (below) fallback.potDollars = { value: below[1], source: below[0] };
-    }
-    tickers.push({ potDollars, baseline: tickerBaseline, source, fallback, problems });
-  }
-  const everyPot = tickers.every((ticker) => ticker.potDollars !== null);
-  const capital = startingValue ?? (everyPot ? tickers.reduce((sum, ticker) => sum + ticker.potDollars!, 0) : null);
-  if (capital !== null && capital > maximumStartingValue) return { ok: false, error: "The pots add up to too large a starting account value." };
-  const bySymbol = Object.fromEntries(symbols.map((symbol, index) => [symbol, { ...tickers[index]!, weight: capital === null ? null : tickers[index]!.potDollars! / capital }]));
-  return { ok: true, bySymbol, capital };
-}
-
-/** The first ticker problem as the create route words it ("HOOD: baseline.ladderRungs must be …", "HOOD has no pot: …"); null when every ticker can run. */
-export function firstTickerProblem(bySymbol: Record<string, BacktestSymbolResolution>): string | null {
-  for (const [symbol, resolution] of Object.entries(bySymbol)) {
-    const problem = resolution.problems[0];
-    if (problem) return problem.key === "potDollars" ? problem.message : `${symbol}: ${problem.message}`;
-  }
-  return null;
-}
-
-/** The settings a session stores per ticker: the resolution of a request whose tickers can all run. */
-export function storedSymbolSettings(bySymbol: Record<string, BacktestSymbolResolution>): Record<string, BacktestSymbolSettings> {
-  return Object.fromEntries(Object.entries(bySymbol).map(([symbol, { potDollars, weight, baseline, source }]) => [symbol, { potDollars: potDollars!, weight: weight!, baseline, source }]));
+  return { ok: true, value: { ...base, startingValue, bookMode: "shared_account", symbolSettings: null, symbolResolution: null, settingsSource: null, potsFromStartingValue: null }, warnings };
 }
 
 /** The filters of a page of a session's actions or fills, every default filled in. */

@@ -18,23 +18,36 @@ export type BacktestTablesMode = "walk_forward" | "current";
  * (BacktestVolFarmerV3Settings; the lab only). "vol_farmer_v4": Vol Farmer v3 on values of its own
  * (BacktestVolFarmerV4Settings), the lab's default. Retired, their past sessions readable but none created or run again:
  * "rules" (Pluto's stand-in rules on the Signals model, BacktestPolicySettings) and "llm" (the AI model through the
- * subscription) with Signals (Marcelo 2026-10-27), and "vol_farmer", the original Vol Farmer of
- * BacktestVolFarmerSettings (Marcelo 2026-10-30; v2 still reads three of its values).
+ * subscription) with Signals (Marcelo 2026-10-27), "vol_farmer", the original Vol Farmer of
+ * BacktestVolFarmerSettings (Marcelo 2026-10-30; v2 still reads three of its values), and "baseline", "vol_farmer_v2"
+ * and "vol_farmer_v3" (Marcelo 2026-11-02; the engine still runs them, v4 on v2's and v3's steps).
  */
 export type BacktestDecisionMaker = "rules" | "llm" | "baseline" | "steady_stake" | "vol_farmer" | "vol_farmer_v2" | "vol_farmer_v3" | "vol_farmer_v4";
 
 /** The decision makers a session can still be created and run with. */
-export const activeBacktestDecisionMakers = ["baseline", "steady_stake", "vol_farmer_v2", "vol_farmer_v3", "vol_farmer_v4"] as const satisfies readonly BacktestDecisionMaker[];
+export const activeBacktestDecisionMakers = ["steady_stake", "vol_farmer_v4"] as const satisfies readonly BacktestDecisionMaker[];
+
+/** The retired ones: their past sessions stay readable. */
+export const retiredBacktestDecisionMakers = ["rules", "llm", "vol_farmer", "baseline", "vol_farmer_v2", "vol_farmer_v3"] as const satisfies readonly BacktestDecisionMaker[];
+
+/** The decision makers the engine has no code for any more. */
+const decisionMakersWithoutEngine: readonly BacktestDecisionMaker[] = ["rules", "llm", "vol_farmer"];
 
 /** Vol Farmer v2, v3 and v4: all run v2's steps (volFarmerV2Steps.ts), v3 and v4 with v3's rebalancing (volFarmerStepSettingsOf). */
 export function runsVolFarmerV2Steps(decisionMaker: BacktestDecisionMaker): boolean {
   return decisionMaker === "vol_farmer_v2" || decisionMaker === "vol_farmer_v3" || decisionMaker === "vol_farmer_v4";
 }
 
-export const retiredBacktestDecisionMakerMessage = "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026); its past sessions stay readable.";
+export const retiredBacktestDecisionMakerMessage =
+  "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026, the CC + Put Ladder and Vol Farmer v2 and v3 on 2 Nov 2026); its past sessions stay readable.";
 
 export function isRetiredBacktestDecisionMaker(decisionMaker: BacktestDecisionMaker): boolean {
   return !(activeBacktestDecisionMakers as readonly BacktestDecisionMaker[]).includes(decisionMaker);
+}
+
+/** The engine refuses only the decision makers whose code is gone; the requests and jobs refuse every retired one. */
+export function engineCannotRun(decisionMaker: BacktestDecisionMaker): boolean {
+  return decisionMakersWithoutEngine.includes(decisionMaker);
 }
 
 /**
@@ -992,13 +1005,14 @@ export interface BacktestSettingChoice {
 }
 
 /** One row of the New session settings table. `path` addresses the value inside BacktestSettings, e.g. "baseline.ladderRungs" or "trading.spreadCostChargedPct". */
-export type BacktestSettingGroup = "How the session runs" | "Put ladder" | "Calls and Covered Calls" | "Contract choice" | "Entry filters" | "Exits" | "Hedge" | "Steady Stake" | "Original Vol Farmer (retired)" | "Vol Farmer v2" | "Vol Farmer v3" | "Vol Farmer v4";
+export type BacktestSettingGroup = "How the session runs" | "Looks and entries" | "Put ladder" | "Calls and Covered Calls" | "Contract choice" | "Entry filters" | "Exits" | "Hedge" | "Steady Stake" | "Original Vol Farmer (retired)" | "Vol Farmer v2" | "Vol Farmer v3" | "Vol Farmer v4";
 
-/** "baseline_wheel": rows a CC + Put Ladder session reads, a few shared with the others;
- *  "steady_stake": rows only the Steady Stake reads; "vol_farmer": rows the Vol Farmer reads (a few Vol Farmer v2 too);
- *  "vol_farmer_v2": rows Vol Farmer v2 reads (v3 too); "vol_farmer_v3": rows only Vol Farmer v3 reads; "vol_farmer_v4":
- *  rows only Vol Farmer v4 reads, all of its own. */
-export type BacktestSettingSection = "baseline_wheel" | "steady_stake" | "vol_farmer" | "vol_farmer_v2" | "vol_farmer_v3" | "vol_farmer_v4";
+/** "every_session": rows every decision maker reads (the decision maker, the looks' window, the spread cost);
+ *  "baseline_wheel": rows only a CC + Put Ladder session reads (retired); "steady_stake": rows only the Steady Stake reads;
+ *  "vol_farmer": rows the original Vol Farmer reads (retired; a few Vol Farmer v2 too); "vol_farmer_v2": rows Vol Farmer
+ *  v2 reads (v3 too; retired); "vol_farmer_v3": rows only Vol Farmer v3 reads (retired); "vol_farmer_v4": rows only Vol
+ *  Farmer v4 reads, all of its own. */
+export type BacktestSettingSection = "every_session" | "baseline_wheel" | "steady_stake" | "vol_farmer" | "vol_farmer_v2" | "vol_farmer_v3" | "vol_farmer_v4";
 
 /** A row's value against another row's: `oneOf` / `noneOf` its choice values, or a number `above`. */
 export interface BacktestSettingCondition {
@@ -1031,8 +1045,6 @@ export interface BacktestSettingRow {
   note: string | null;
   /** The values a "choice" row can take, the default first. */
   choices?: BacktestSettingChoice[];
-  /** One of the baseline values that can differ by ticker in a session of per-ticker pots (backtestTickerBaselineKeys). */
-  perTicker?: true;
 }
 
 export interface BacktestSettingsTemplate {
@@ -1044,21 +1056,8 @@ export interface BacktestSettingsTemplate {
 
 /** The lab's global settings (separate from Pluto's live settings): the New session table's rows plus the default pot. */
 export interface BacktestLabSettingsView extends BacktestSettingsTemplate {
-  /** The dollars each ticker starts with when it has no pot of its own. */
+  /** The account each ticker's analysis starts with (the Analysis starting account). */
   defaultPotDollars: number;
-  updatedAt: string;
-}
-
-/** A ticker's lab values as stored; null = the lab's global value. */
-export interface BacktestLabTickerOverrides {
-  symbol: string;
-  potDollars: number | null;
-  ladderSharesPct: number | null;
-  ladderRungs: number | null;
-  /** A fixed shock instead of the global shock rule. */
-  ladderShockPct: number | null;
-  minAbsDelta: number | null;
-  maxAbsDelta: number | null;
   updatedAt: string;
 }
 
@@ -1114,28 +1113,18 @@ export interface CreateBacktestSessionRequest {
   symbol?: string;
   startDate: string;
   endDate: string;
-  /**
-   * The session's capital. With the baseline deciding, it is split equally into the tickers' pots and can be left out:
-   * each ticker's pot is then its symbolSettings pot, else its lab pot (settingsSource "per_ticker"), else the lab's
-   * default pot. Required with the Steady Stake and the Vol Farmers.
-   */
+  /** The session's capital: required (it was optional for the retired CC + Put Ladder's per-ticker pots). */
   startingValue?: number;
   tablesMode: BacktestTablesMode;
   overrides: BacktestSettingsOverrides;
-  /** The baseline only; "per_ticker" unless given. */
+  /** The retired CC + Put Ladder's per-ticker values: ignored, and refused when given. */
   settingsSource?: BacktestSettingsSource;
-  /** The baseline only: values for some of the session's tickers, over every other source. */
   symbolSettings?: Record<string, BacktestTickerValues>;
 }
 
-/** A batch takes 1 to this many runs (Marcelo 2026-10-17). */
-export const backtestMaxRunsPerBatch = 9;
-
 /**
- * POST /backtest/batches: the New session form's request. Every run shares the name's batch, the period, the tables, the
- * settings and where ticker values come from; each run has its own symbols and ticker values. Two or more runs need the
- * baseline as decision maker and each run's pots (no starting value). A run's session is named "<name> · Run 2 · <label>"
- * (one run: the name), cut to 120 characters.
+ * POST /backtest/batches: the New session form's request, one run (several runs were the retired CC + Put Ladder's,
+ * each with its own ticker values). Its session is named after the batch, cut to 120 characters.
  */
 export interface CreateBacktestBatchRequest {
   name: string;

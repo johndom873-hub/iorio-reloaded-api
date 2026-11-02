@@ -28,8 +28,8 @@ const snapshot: BacktestSettings = {
     orderUnfilledCancelMinutes: 30,
   },
   kellyFraction: 0.25,
-  // A lab set to Vol Farmer v2: a session on the shared account, its starting value given.
-  decisionMaker: "vol_farmer_v2",
+  // A lab set to Vol Farmer v4: a session on the shared account, its starting value given.
+  decisionMaker: "vol_farmer_v4",
 };
 
 const context: BacktestSessionRequestContext = {
@@ -38,30 +38,28 @@ const context: BacktestSessionRequestContext = {
   coverageFor: (symbol) =>
     symbol === "AAOI" ? { firstDate: "2020-01-02", lastDate: "2026-10-09" } : symbol === "HOOD" ? { firstDate: "2021-07-29", lastDate: "2026-10-09" } : symbol === "INTC" ? { firstDate: "2020-01-02", lastDate: "2026-06-30" } : symbol === "OLDF" ? { firstDate: "2016-01-04", lastDate: "2019-12-31" } : symbol === "EMPTY" ? { firstDate: null, lastDate: null } : null,
   periodContentsFor: () => wholePeriod,
-  tickerValuesFor: () => null,
-  defaultPotDollars: null,
 };
 /** A file that holds every weekday of the period, intraday quotes included. */
 const wholePeriod: DataFilePeriodContents = { missingWeekdays: 0, firstMissingWeekday: null, lastMissingWeekday: null, completeDays: 100, completeDaysWithoutIntradayQuotes: 0 };
 
 const validRequest = { name: " Edge Yield 20% ", symbol: "aaoi", startDate: "2021-01-04", endDate: "2026-09-30", startingValue: 1_000_000, tablesMode: "walk_forward", overrides: {} };
 
-describe("Vol Farmer v2's allocations and excess allowance", () => {
+describe("Vol Farmer v4's allocations and excess allowance", () => {
   const { symbol: _oneSymbol, ...withoutSymbol } = validRequest;
-  const request = (volFarmerV2: Record<string, unknown>) => validateCreateBacktestSessionRequest({ ...withoutSymbol, symbols: ["AAOI", "HOOD"], startDate: "2021-08-02", overrides: { volFarmerV2 } }, context);
+  const request = (volFarmerV4: Record<string, unknown>) => validateCreateBacktestSessionRequest({ ...withoutSymbol, symbols: ["AAOI", "HOOD"], startDate: "2021-08-02", overrides: { volFarmerV4 } }, context);
 
   it("keeps each ticker's set allocation and the allowance as the session's", () => {
-    expect(request({ tickerAllocationPct: { AAOI: 60 }, excessAllowancePct: 26.3158 })).toMatchObject({ ok: true, value: { overrides: { volFarmerV2: { tickerAllocationPct: { AAOI: 60 }, excessAllowancePct: 26.3158 } } } });
+    expect(request({ tickerAllocationPct: { AAOI: 60 }, excessAllowancePct: 26.3158 })).toMatchObject({ ok: true, value: { overrides: { volFarmerV4: { tickerAllocationPct: { AAOI: 60 }, excessAllowancePct: 26.3158 } } } });
   });
 
   it("refuses an allowance out of range, an allocation of 0 or above 100, set ones above 100% together and a symbol not in the session", () => {
-    expect(request({ excessAllowancePct: -1 })).toEqual({ ok: false, error: "volFarmerV2.excessAllowancePct must be a number from 0 to 1000." });
-    expect(request({ excessAllowancePct: 1001 })).toEqual({ ok: false, error: "volFarmerV2.excessAllowancePct must be a number from 0 to 1000." });
-    expect(request({ tickerAllocationPct: [] })).toEqual({ ok: false, error: "volFarmerV2.tickerAllocationPct must be an object of symbols." });
-    expect(request({ tickerAllocationPct: { AAOI: 0 } })).toEqual({ ok: false, error: "volFarmerV2.tickerAllocationPct.AAOI must be a number above 0 and at most 100." });
-    expect(request({ tickerAllocationPct: { AAOI: 101 } })).toEqual({ ok: false, error: "volFarmerV2.tickerAllocationPct.AAOI must be a number above 0 and at most 100." });
-    expect(request({ tickerAllocationPct: { AAOI: 60, HOOD: 50 } })).toEqual({ ok: false, error: "volFarmerV2.tickerAllocationPct: the set allocations add up to 110%, at most 100%." });
-    expect(request({ tickerAllocationPct: { INTC: 10 } })).toEqual({ ok: false, error: "volFarmerV2.tickerAllocationPct.INTC: INTC is not one of the session's symbols." });
+    expect(request({ excessAllowancePct: -1 })).toEqual({ ok: false, error: "volFarmerV4.excessAllowancePct must be a number from 0 to 1000." });
+    expect(request({ excessAllowancePct: 1001 })).toEqual({ ok: false, error: "volFarmerV4.excessAllowancePct must be a number from 0 to 1000." });
+    expect(request({ tickerAllocationPct: [] })).toEqual({ ok: false, error: "volFarmerV4.tickerAllocationPct must be an object of symbols." });
+    expect(request({ tickerAllocationPct: { AAOI: 0 } })).toEqual({ ok: false, error: "volFarmerV4.tickerAllocationPct.AAOI must be a number above 0 and at most 100." });
+    expect(request({ tickerAllocationPct: { AAOI: 101 } })).toEqual({ ok: false, error: "volFarmerV4.tickerAllocationPct.AAOI must be a number above 0 and at most 100." });
+    expect(request({ tickerAllocationPct: { AAOI: 60, HOOD: 50 } })).toEqual({ ok: false, error: "volFarmerV4.tickerAllocationPct: the set allocations add up to 110%, at most 100%." });
+    expect(request({ tickerAllocationPct: { INTC: 10 } })).toEqual({ ok: false, error: "volFarmerV4.tickerAllocationPct.INTC: INTC is not one of the session's symbols." });
   });
 });
 
@@ -141,8 +139,8 @@ describe("validateCreateBacktestSessionRequest", () => {
 
 describe("validateBacktestSettingsOverrides", () => {
   it("keeps only the values that differ from the snapshot", () => {
-    const result = validateBacktestSettingsOverrides({ trading: { spreadCostChargedPct: 40 }, baseline: { ladderRungs: 3, entry: "put" } }, snapshot, editableBacktestSettingPaths);
-    expect(result).toEqual({ ok: true, overrides: { trading: { spreadCostChargedPct: 40 }, baseline: { ladderRungs: 3 } } });
+    const result = validateBacktestSettingsOverrides({ trading: { spreadCostChargedPct: 40 }, steadyStake: { stakePct: 70, callAbsDelta: 0.2 } }, snapshot, editableBacktestSettingPaths);
+    expect(result).toEqual({ ok: true, overrides: { trading: { spreadCostChargedPct: 40 }, steadyStake: { stakePct: 70 } } });
     expect(validateBacktestSettingsOverrides({ trading: { spreadCostChargedPct: 50 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: {} });
   });
 
@@ -167,34 +165,35 @@ describe("validateBacktestSettingsOverrides", () => {
     expect(validateBacktestSettingsOverrides({ trading: { spreadCostChargedPct: 120 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "spreadCostChargedPct must be between 0 and 100." });
   });
 
-  it("refuses the retired rules and AI model as decision makers, and takes the others", () => {
-    const retired = { ok: false, error: "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026); its past sessions stay readable." };
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "rules" }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "llm" }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer" }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "decisionMaker must be baseline, steady_stake, vol_farmer_v2, vol_farmer_v3 or vol_farmer_v4." });
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer_v2" }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: {} });
-    // Vol Farmer v3: v2's values and its band, 0 to 50% of the pot.
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer_v3", volFarmerV3: { rebalanceBandPct: 10 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { decisionMaker: "vol_farmer_v3", volFarmerV3: { rebalanceBandPct: 10 } } });
-    expect(validateBacktestSettingsOverrides({ volFarmerV3: { rebalanceBandPct: 51 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV3.rebalanceBandPct must be a number from 0 to 50." });
-    expect(validateBacktestSettingsOverrides({ volFarmerV3: { stakePct: 80 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV3.stakePct is not a Vol Farmer v3 setting." });
-    expect(validateBacktestSettingsOverrides({ volFarmerV3: { rebalances: "both_positions", firstPositionAfterCalledAway: "rebuild" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmerV3: { rebalances: "both_positions", firstPositionAfterCalledAway: "rebuild" } } });
-    expect(validateBacktestSettingsOverrides({ volFarmerV3: { rebalances: "all" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV3.rebalances must be one of first_position, both_positions." });
+  it("refuses every retired decision maker and takes the Steady Stake and Vol Farmer v4", () => {
+    const retired = { ok: false, error: "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026, the CC + Put Ladder and Vol Farmer v2 and v3 on 2 Nov 2026); its past sessions stay readable." };
+    for (const decisionMaker of ["rules", "llm", "vol_farmer", "baseline", "vol_farmer_v2", "vol_farmer_v3"]) {
+      expect(validateBacktestSettingsOverrides({ decisionMaker }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
+      expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker } }, context)).toEqual(retired);
+    }
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "decisionMaker must be steady_stake or vol_farmer_v4." });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer_v4" }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: {} });
     // Vol Farmer v4: every value its own, each checked under its own name.
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "vol_farmer_v4", volFarmerV4: { firstPositionPct: 70, callMaxAbsDelta: 0.4 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { decisionMaker: "vol_farmer_v4", volFarmerV4: { firstPositionPct: 70, callMaxAbsDelta: 0.4 } } });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "steady_stake", volFarmerV4: { firstPositionPct: 70, callMaxAbsDelta: 0.4 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { decisionMaker: "steady_stake", volFarmerV4: { firstPositionPct: 70, callMaxAbsDelta: 0.4 } } });
     expect(validateBacktestSettingsOverrides({ volFarmerV4: { callMaxAbsDelta: 1.2 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV4.callMaxAbsDelta must be a number from 0.01 to 0.99." });
     expect(validateBacktestSettingsOverrides({ volFarmerV4: { firstPositionPct: 95 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV4.firstPositionPct must be a number from 10 to 90." });
     expect(validateBacktestSettingsOverrides({ volFarmerV4: { rebalanceBandPct: 51 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV4.rebalanceBandPct must be a number from 0 to 50." });
     expect(validateBacktestSettingsOverrides({ volFarmerV4: { stakePct: 80 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV4.stakePct is not a Vol Farmer v4 setting." });
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } } });
-    expect(validateBacktestSettingsOverrides({ baseline: { minAbsDelta: 0.7 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "baseline.minAbsDelta must not be above baseline.maxAbsDelta." });
-    expect(validateBacktestSettingsOverrides({ baseline: { strangle: true } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "baseline.strangle cannot be changed for a session." });
-    expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "rules" } }, context)).toEqual(retired);
-    expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "llm" } }, context)).toEqual(retired);
     // A lab still set to a retired decision maker (or a snapshot from before the choice, a rules one) starts nothing unless the request names another.
-    for (const retiredSnapshot of [{ ...snapshot, decisionMaker: "rules" as const }, { ...snapshot, decisionMaker: undefined }]) {
+    for (const retiredSnapshot of [{ ...snapshot, decisionMaker: "baseline" as const }, { ...snapshot, decisionMaker: undefined }]) {
       expect(validateCreateBacktestSessionRequest(validRequest, { ...context, snapshot: retiredSnapshot })).toEqual(retired);
       expect(validateCreateBacktestSessionRequest({ ...validRequest, overrides: { decisionMaker: "steady_stake" } }, { ...context, snapshot: retiredSnapshot })).toMatchObject({ ok: true, value: { overrides: { decisionMaker: "steady_stake" } } });
+    }
+  });
+
+  it("refuses changes to the retired decision makers' settings: the CC + Put Ladder's, the original Vol Farmer's, v2's and v3's", () => {
+    for (const [overrides, path] of [
+      [{ baseline: { ladderRungs: 3 } }, "baseline.ladderRungs"],
+      [{ volFarmer: { putMinDte: 30 } }, "volFarmer.putMinDte"],
+      [{ volFarmerV2: { firstPositionPct: 60 } }, "volFarmerV2.firstPositionPct"],
+      [{ volFarmerV3: { rebalanceBandPct: 10 } }, "volFarmerV3.rebalanceBandPct"],
+    ] as const) {
+      expect(validateBacktestSettingsOverrides(overrides, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: `${path} cannot be changed for a session.` });
     }
   });
 
@@ -203,117 +202,20 @@ describe("validateBacktestSettingsOverrides", () => {
     expect(validateBacktestSettingsOverrides({ steadyStake: { stakePct: 0 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "steadyStake.stakePct must be a number from 1 to 100." });
     expect(validateBacktestSettingsOverrides({ steadyStake: { ladderRungs: 3 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "steadyStake.ladderRungs is not a Steady Stake setting." });
     expect(validateBacktestSettingsOverrides({ steadyStake: 70 }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "overrides.steadyStake must be an object." });
-    // The original Vol Farmer's values (v2 reads three of them): only those that differ from the defaults are kept; ranges in order, Calls up to the 45 days the engine reads.
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putMinDte: 30, putMaxDte: 360, protectionFallPct: 20 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmer: { putMinDte: 30 } } });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putMinDte: 400 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.putMinDte must not be above volFarmer.putMaxDte." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { callMaxDte: 60 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.callMaxDte must be a whole number from 0 to 45 (the Calls the engine reads)." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putMaxStrikeAbovePricePct: 12 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.putMaxStrikeAbovePricePct must be a number from −20 to 10." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { stakePct: 70 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.stakePct is not a Vol Farmer setting." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putCashReservePct: 60 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.putCashReservePct must be a number from 0 to 50." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { crossing: "hold_to_expiry", putExpiry: "with_the_call", hedgeRuleCallPremiums: "included", minPutProtectionPct: 20, hedgeWithoutCall: "put" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmer: { crossing: "hold_to_expiry", putExpiry: "with_the_call", hedgeRuleCallPremiums: "included", minPutProtectionPct: 20, hedgeWithoutCall: "put" } } });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { crossing: "roll" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.crossing must be one of unwind, hold_to_expiry, unwind_if_net_positive." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { callExpiry: "next", crossing: "unwind_if_net_positive", hedgeAfterExpiry: "sell_if_in_profit", afterAssignment: "continue_if_under_water", hedgeRuleStockPnl: "included" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmer: { callExpiry: "next", crossing: "unwind_if_net_positive", hedgeAfterExpiry: "sell_if_in_profit", afterAssignment: "continue_if_under_water", hedgeRuleStockPnl: "included" } } });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { afterAssignment: "rebuy" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.afterAssignment must be one of end, continue_if_under_water." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putChoice: "cheapest_per_year", hedgeWithoutCall: "cheapest_per_year" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmer: { putChoice: "cheapest_per_year", hedgeWithoutCall: "cheapest_per_year" } } });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putChoice: "cheapest" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.putChoice must be one of most_protection, cheapest_per_year." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { minPutProtectionPct: 120 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.minPutProtectionPct must be a number from 0 to 100." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { maxPutCostPctOfCallPremium: 600 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.maxPutCostPctOfCallPremium must be a number from 0 to 500." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putCashIn: "when_no_call", cashInPutMinProtectionPct: 30 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmer: { putCashIn: "when_no_call", cashInPutMinProtectionPct: 30 } } });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { putCashIn: "always" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.putCashIn must be one of none, when_no_call." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { hedge: "none" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: true, overrides: { volFarmer: { hedge: "none" } } });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { hedge: "call" } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.hedge must be one of put, none." });
-    expect(validateBacktestSettingsOverrides({ volFarmer: { cashInPutMinProtectionPct: -5 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmer.cashInPutMinProtectionPct must be a number from 0 to 100." });
     expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "steady_stake" } }, context)).toMatchObject({ ok: true, value: { bookMode: "shared_account", overrides: { decisionMaker: "steady_stake" } } });
   });
 });
 
-describe("per-ticker pots (the baseline)", () => {
-  const ladderOverrides = { decisionMaker: "baseline", baseline: { entry: "covered_call", putsWhenNoCall: "reserve_ladder" } };
-  const potsRequest = { name: "Pots", symbols: ["hood", "aaoi"], startDate: "2021-08-02", endDate: "2026-09-30", tablesMode: "walk_forward", overrides: ladderOverrides };
-  const lab: BacktestSessionRequestContext = { ...context, tickerValuesFor: (symbol) => (symbol === "HOOD" ? { potDollars: 300_000, baseline: { ladderSharesPct: 30 } } : null), defaultPotDollars: 100_000 };
-  const resolved = (body: Record<string, unknown>, requestContext: BacktestSessionRequestContext = lab) => {
-    const result = validateCreateBacktestSessionRequest(body, requestContext);
-    if (!result.ok) throw new Error(result.error);
-    return result.value;
-  };
+describe("one shared account (the per-ticker pots were the CC + Put Ladder's)", () => {
+  const twoTickers = { ...validRequest, symbols: ["HOOD", "AAOI"], symbol: undefined, startDate: "2021-08-02" };
 
-  it("splits a starting value equally: w = 1 ÷ tickers, every value the lab's global one", () => {
-    const value = resolved({ ...potsRequest, startingValue: 200_000 }, { ...lab, tickerValuesFor: () => null });
-    expect(value).toMatchObject({ startingValue: 200_000, bookMode: "pots" });
-    expect(value.symbolSettings!.HOOD).toMatchObject({ potDollars: 100_000, weight: 0.5, baseline: { ladderSharesPct: 50, ladderRungs: 5, minAbsDelta: 0.05 } });
-    expect(value.symbolSettings!.HOOD!.source).toMatchObject({ potDollars: "session", ladderSharesPct: "global", minAbsDelta: "global" });
-    expect(Object.keys(value.symbolSettings!)).toEqual(["HOOD", "AAOI"]);
+  it("runs every session on one shared account with a starting value", () => {
+    expect(validateCreateBacktestSessionRequest(twoTickers, context)).toMatchObject({ ok: true, value: { startingValue: 1_000_000, bookMode: "shared_account", symbolSettings: null, symbolResolution: null, settingsSource: null, potsFromStartingValue: null } });
+    expect(validateCreateBacktestSessionRequest({ ...twoTickers, startingValue: undefined }, context)).toEqual({ ok: false, error: "The starting account value must be a number above 0." });
   });
 
-  it("takes a ticker's lab pot and values, else the lab's default pot; capital = Σ pots, w = pot ÷ Σ pots", () => {
-    const value = resolved(potsRequest);
-    expect(value.startingValue).toBe(400_000);
-    expect(value.symbolSettings!.HOOD).toMatchObject({ potDollars: 300_000, weight: 0.75, baseline: { ladderSharesPct: 30 }, source: { potDollars: "ticker", ladderSharesPct: "ticker" } });
-    expect(value.symbolSettings!.AAOI).toMatchObject({ potDollars: 100_000, weight: 0.25, baseline: { ladderSharesPct: 50 }, source: { potDollars: "global", ladderSharesPct: "global" } });
-  });
-
-  it("lets the session-wide overrides beat the ticker's lab values, and the request's ticker values beat both", () => {
-    const sessionWide = { ...ladderOverrides, baseline: { ...ladderOverrides.baseline, ladderSharesPct: 70 } };
-    const value = resolved({ ...potsRequest, overrides: sessionWide, symbolSettings: { aaoi: { potDollars: 50_000, baseline: { ladderSharesPct: 40, ladderRungs: 8 } } } });
-    expect(value.symbolSettings!.HOOD).toMatchObject({ baseline: { ladderSharesPct: 70 }, source: { ladderSharesPct: "session", potDollars: "ticker" } });
-    expect(value.symbolSettings!.AAOI).toMatchObject({ potDollars: 50_000, baseline: { ladderSharesPct: 40, ladderRungs: 8 }, source: { potDollars: "request", ladderSharesPct: "request", ladderRungs: "request" } });
-    expect(value.startingValue).toBe(350_000);
-  });
-
-  it("ignores the tickers' lab values with settingsSource global", () => {
-    const value = resolved({ ...potsRequest, settingsSource: "global" });
-    expect(value.symbolSettings!.HOOD).toMatchObject({ potDollars: 100_000, weight: 0.5, baseline: { ladderSharesPct: 50 }, source: { potDollars: "global", ladderSharesPct: "global" } });
-  });
-
-  it("gives one ticker its whole starting value: weight 1, as when the tickers share one account", () => {
-    const value = resolved({ ...potsRequest, symbols: ["HOOD"], startingValue: 250_000 });
-    expect(value.symbolSettings!.HOOD).toMatchObject({ potDollars: 250_000, weight: 1 });
-  });
-
-  it.each([
-    [{ startingValue: 200_000, symbolSettings: { HOOD: { potDollars: 10_000 } } }, lab, "Give either a starting value (split equally) or each ticker's pot, not both (HOOD has a pot)."],
-    [{}, { ...lab, defaultPotDollars: null }, "AAOI has no pot: give the session a starting value or the ticker a pot."],
-    [{ symbolSettings: { HOOD: { baseline: { maxDte: 10 } } } }, lab, "baseline.maxDte cannot differ between tickers: change it for the whole session."],
-    [{ symbolSettings: { INTC: { potDollars: 10_000 } } }, lab, "symbolSettings.INTC: INTC is not one of the session's symbols."],
-    [{ symbolSettings: { HOOD: { potDollars: -5 } } }, lab, "symbolSettings.HOOD.potDollars must be a number above 0."],
-    [{ symbolSettings: { HOOD: { pot: 5 } } }, lab, "symbolSettings.HOOD.pot is not a ticker value (potDollars or baseline)."],
-    [{ symbolSettings: { AAOI: { baseline: { ladderRungs: 0 } } } }, lab, "AAOI: baseline.ladderRungs must be a whole number from 1 to 20."],
-    [{ symbolSettings: { AAOI: { baseline: { minAbsDelta: 0.4, maxAbsDelta: 0.3 } } } }, lab, "AAOI: baseline.minAbsDelta must not be above baseline.maxAbsDelta."],
-    [{ settingsSource: "mine" }, lab, "settingsSource must be per_ticker or global."],
-  ])("refuses %j", (change, requestContext, error) => {
-    expect(validateCreateBacktestSessionRequest({ ...potsRequest, ...change }, requestContext)).toMatchObject({ ok: false, error });
-  });
-
-  it("records how the session was asked for, for Run again", () => {
-    expect(resolved({ ...potsRequest, startingValue: 200_000 })).toMatchObject({ settingsSource: "per_ticker", potsFromStartingValue: true });
-    expect(resolved({ ...potsRequest, settingsSource: "global" })).toMatchObject({ settingsSource: "global", potsFromStartingValue: false });
-  });
-
-  it("gives each value not from the lab's global values the value a reset returns to", () => {
-    const value = resolved({ ...potsRequest, symbolSettings: { HOOD: { potDollars: 50_000, baseline: { ladderSharesPct: 40 } } } });
-    // HOOD: share level 40 (this session) over its lab 30; pot $50,000 over its lab $300,000. AAOI keeps the global values: nothing to reset.
-    expect(value.symbolResolution!.HOOD!.fallback).toEqual({ ladderSharesPct: { value: 30, source: "ticker" }, potDollars: { value: 300_000, source: "ticker" } });
-    expect(value.symbolResolution!.AAOI!.fallback).toEqual({});
-    expect(value.symbolResolution!.AAOI!.problems).toEqual([]);
-  });
-
-  it("resolves every ticker even when some cannot run, each with its own problems, the create refused on the first", () => {
-    const result = validateCreateBacktestSessionRequest({ ...potsRequest, symbolSettings: { HOOD: { baseline: { ladderRungs: 0 } } } }, { ...lab, defaultPotDollars: null });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error).toBe("HOOD: baseline.ladderRungs must be a whole number from 1 to 20.");
-    const { capital, bySymbol } = result.symbolResolution!;
-    // AAOI has no pot (no lab pot, no default): capital and weights are unknown.
-    expect(capital).toBeNull();
-    expect(bySymbol.HOOD).toMatchObject({ potDollars: 300_000, weight: null, problems: [{ key: "ladderRungs", message: "baseline.ladderRungs must be a whole number from 1 to 20." }] });
-    expect(bySymbol.AAOI).toMatchObject({ potDollars: null, weight: null, problems: [{ key: "potDollars", message: "AAOI has no pot: give the session a starting value or the ticker a pot." }] });
-  });
-
-  it("keeps the rules and the AI model on one shared account with a starting value", () => {
-    const rules = { ...validRequest, symbols: ["HOOD", "AAOI"], symbol: undefined, startDate: "2021-08-02" };
-    expect(validateCreateBacktestSessionRequest(rules, lab)).toMatchObject({ ok: true, value: { startingValue: 1_000_000, bookMode: "shared_account", symbolSettings: null } });
-    expect(validateCreateBacktestSessionRequest({ ...rules, startingValue: undefined }, lab)).toEqual({ ok: false, error: "The starting account value must be a number above 0." });
-    expect(validateCreateBacktestSessionRequest({ ...rules, symbolSettings: { HOOD: { potDollars: 1 } } }, lab)).toEqual({ ok: false, error: "symbolSettings apply to the baseline only." });
+  it("refuses per-ticker values", () => {
+    expect(validateCreateBacktestSessionRequest({ ...twoTickers, symbolSettings: { HOOD: { potDollars: 1 } } }, context)).toEqual({ ok: false, error: "symbolSettings were the CC + Put Ladder's per-ticker values, retired on 2 Nov 2026." });
   });
 });
 

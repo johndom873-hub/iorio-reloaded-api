@@ -83,7 +83,6 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await testDb("backtest_ticker_analyses").whereIn("symbol", [symbol, symbolWithoutFile]).delete();
   await testDb("backtest_jobs").whereIn("symbol", [symbol, symbolWithoutFile]).delete();
-  await testDb("backtest_lab_ticker_overrides").where({ symbol }).delete();
   await testDb("backtest_ticker_profiles").where({ symbol }).delete();
   await testDb("backtest_ticker_suitability").where({ symbol }).delete();
   await testDb("backtest_lab_settings_audit").where({ user_id: userId }).delete();
@@ -227,10 +226,6 @@ describe("analysis routes", () => {
   });
 
   it("a lab save marks the analyses out of date instead of re-running them; Re-run out of date runs them", async () => {
-    // A ticker's own (CC + Put Ladder) values: the analysis doesn't read them, so nothing runs.
-    const tickerSave = await call<{ changes: unknown[] }>("PUT", `/lab-ticker-overrides/${symbol}`, { potDollars: 90_000 });
-    expect(tickerSave.status).toBe(200);
-    expect(tickerSave.body).not.toHaveProperty("analyses");
     // The save's confirmation names the analysed tickers a v4 value would put out of date (a dry run).
     const preview = await call<{ changes: { field: string; outOfDate: string[] }[]; outOfDate: string[] }>("POST", "/lab-settings/preview", { overrides: { volFarmerV4: { callMaxAbsDelta: 0.45 } } });
     expect(preview.status).toBe(200);

@@ -1,9 +1,8 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
-import { normalizeBacktestSymbol } from "./backtestDataDirectory.js";
 import { applyBacktestOverrides } from "./backtestSettingsOverrides.js";
 import { editableBacktestSettingPaths, loadCurrentBacktestSettings, readBacktestSettingValue } from "./settingsTemplate.js";
-import { validateBacktestSettingsOverrides, validateBaselineSettings } from "./jobs/backtestSessionRequest.js";
+import { validateBacktestSettingsOverrides } from "./jobs/backtestSessionRequest.js";
 import {
   defaultBacktestBaselineSettings,
   defaultBacktestModelSettings,
@@ -15,14 +14,11 @@ import {
   defaultBacktestVolFarmerV4Settings,
   type BacktestLabAuditRow,
   type BacktestLabChange,
-  type BacktestLabTickerOverrides,
   type BacktestSettings,
-  type BacktestTickerBaselineSettings,
-  type BacktestTickerValues,
 } from "./backtestTypes.js";
 
-// The backtesting lab's settings (Marcelo 2026-10-15): the global values every new session and every ticker's analysis
-// start from, and each ticker's own lab values. Separate from Pluto's live settings: seeded once, on first read, as a
+// The backtesting lab's settings (Marcelo 2026-10-15): the values every new session and every ticker's analysis start
+// from (the tickers' own lab values were the CC + Put Ladder's, retired 2026-11-02). Separate from Pluto's live settings: seeded once, on first read, as a
 // copy of the New session snapshot of that moment (Pluto's and the trading settings plus the code defaults), and never
 // synced with them afterwards.
 
@@ -37,21 +33,8 @@ export interface BacktestLabSettings {
   updatedByUserId: string | null;
 }
 
-export type BacktestLabTickerField = Exclude<keyof BacktestLabTickerOverrides, "symbol" | "updatedAt">;
-
-const tickerColumns: Record<BacktestLabTickerField, string> = {
-  potDollars: "pot_dollars",
-  ladderSharesPct: "ladder_shares_pct",
-  ladderRungs: "ladder_rungs",
-  ladderShockPct: "ladder_shock_pct",
-  minAbsDelta: "min_abs_delta",
-  maxAbsDelta: "max_abs_delta",
-};
-const tickerFields = Object.keys(tickerColumns) as BacktestLabTickerField[];
-
 export class BacktestLabSettingsValidationError extends Error {}
 
-const numberOrNull = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
 
 /** The section with the code's keys only: a stored value where there is one, else `base`'s; a key the code no longer has is dropped. */
 /** A stored section in the code's current shape: the code's keys, each from the stored copy when it has it, else `base`. */
@@ -131,99 +114,6 @@ export async function updateBacktestLabSettings(input: { overrides?: unknown; de
       .insert(changes.map((change) => ({ user_id: userId, symbol: null, field: change.field, old_value: change.oldValue, new_value: change.newValue })))
       .returning("id");
     return { lab: await loadBacktestLabSettings(trx), changes, auditIds: inserted.map((row) => Number(row.id)) };
-  });
-}
-
-function rowToTickerOverrides(row: Record<string, unknown>): BacktestLabTickerOverrides {
-  return {
-    symbol: row.symbol as string,
-    potDollars: numberOrNull(row.pot_dollars),
-    ladderSharesPct: numberOrNull(row.ladder_shares_pct),
-    ladderRungs: numberOrNull(row.ladder_rungs),
-    ladderShockPct: numberOrNull(row.ladder_shock_pct),
-    minAbsDelta: numberOrNull(row.min_abs_delta),
-    maxAbsDelta: numberOrNull(row.max_abs_delta),
-    updatedAt: new Date(row.updated_at as string).toISOString(),
-  };
-}
-
-/** Every ticker with lab values of its own, by symbol. */
-export async function loadBacktestLabTickerOverrides(connection: Knex = db): Promise<BacktestLabTickerOverrides[]> {
-  const rows = await connection("backtest_lab_ticker_overrides").orderBy("symbol");
-  return rows.map(rowToTickerOverrides);
-}
-
-/** A ticker's lab values in a session request's terms: a fixed shock becomes ladderShock "fixed" with its percent. */
-export function tickerOverridesToValues(overrides: BacktestLabTickerOverrides): BacktestTickerValues {
-  const baseline: Partial<BacktestTickerBaselineSettings> = {};
-  if (overrides.ladderSharesPct !== null) baseline.ladderSharesPct = overrides.ladderSharesPct;
-  if (overrides.ladderRungs !== null) baseline.ladderRungs = overrides.ladderRungs;
-  if (overrides.ladderShockPct !== null) Object.assign(baseline, { ladderShock: "fixed", ladderShockPct: overrides.ladderShockPct });
-  if (overrides.minAbsDelta !== null) baseline.minAbsDelta = overrides.minAbsDelta;
-  if (overrides.maxAbsDelta !== null) baseline.maxAbsDelta = overrides.maxAbsDelta;
-  return { ...(overrides.potDollars !== null ? { potDollars: overrides.potDollars } : {}), ...(Object.keys(baseline).length > 0 ? { baseline } : {}) };
-}
-
-/** The lab values of the given tickers that have any, keyed by symbol (the session request's tickerValuesFor). */
-export async function loadBacktestTickerOverrides(symbols: readonly string[], connection: Knex = db): Promise<Record<string, BacktestTickerValues>> {
-  if (symbols.length === 0) return {};
-  const rows = await connection("backtest_lab_ticker_overrides").whereIn("symbol", symbols);
-  return Object.fromEntries(rows.map((row) => [row.symbol as string, tickerOverridesToValues(rowToTickerOverrides(row))]));
-}
-
-const ranges: Record<BacktestLabTickerField, { min: number; max: number; minExclusive?: boolean; integer?: boolean; label: string }> = {
-  potDollars: { min: 0, max: maximumPotDollars, minExclusive: true, label: "potDollars must be a number above 0" },
-  ladderSharesPct: { min: 1, max: 99, label: "ladderSharesPct must be a number from 1 to 99" },
-  ladderRungs: { min: 1, max: 20, integer: true, label: "ladderRungs must be a whole number from 1 to 20" },
-  ladderShockPct: { min: 1, max: 99, label: "ladderShockPct must be a number from 1 to 99" },
-  minAbsDelta: { min: 0, max: 1, minExclusive: true, label: "minAbsDelta must be a number above 0 and at most 1" },
-  maxAbsDelta: { min: 0, max: 1, minExclusive: true, label: "maxAbsDelta must be a number above 0 and at most 1" },
-};
-
-/**
- * Saves a ticker's lab values: each given field a number, or null to use the global value again; fields left out keep
- * theirs. The merged values are checked against the global ones (a |delta| range must stay a range). A ticker left with
- * no values of its own has no row. One audit row per changed field.
- */
-export async function saveBacktestLabTickerOverrides(givenSymbol: string, input: Record<string, unknown>, userId: string | null, connection: Knex = db): Promise<{ overrides: BacktestLabTickerOverrides | null; changes: BacktestLabChange[] }> {
-  let symbol: string;
-  try {
-    symbol = normalizeBacktestSymbol(givenSymbol);
-  } catch (error) {
-    throw new BacktestLabSettingsValidationError(error instanceof Error ? error.message : String(error));
-  }
-  const unknownField = Object.keys(input).find((field) => !(tickerFields as string[]).includes(field));
-  if (unknownField) throw new BacktestLabSettingsValidationError(`${unknownField} is not a ticker lab value (${tickerFields.join(", ")}).`);
-  for (const [field, value] of Object.entries(input)) {
-    if (value === null) continue;
-    const range = ranges[field as BacktestLabTickerField];
-    const ok = typeof value === "number" && Number.isFinite(value) && (range.minExclusive ? value > range.min : value >= range.min) && value <= range.max && (!range.integer || Number.isInteger(value));
-    if (!ok) throw new BacktestLabSettingsValidationError(`${range.label}, or null for the global value.`);
-  }
-  return connection.transaction(async (trx) => {
-    const lab = await loadBacktestLabSettings(trx);
-    const existingRow = await trx("backtest_lab_ticker_overrides").where({ symbol }).first();
-    const before: Record<BacktestLabTickerField, number | null> = existingRow ? rowToTickerOverrides(existingRow) : { potDollars: null, ladderSharesPct: null, ladderRungs: null, ladderShockPct: null, minAbsDelta: null, maxAbsDelta: null };
-    const after = { ...before };
-    for (const field of tickerFields) if (input[field] !== undefined) after[field] = input[field] as number | null;
-    const effective = { ...lab.settings.baseline!, ...tickerOverridesToValues({ symbol, ...after, updatedAt: "" }).baseline };
-    const problem = validateBaselineSettings(effective as unknown as Record<string, unknown>);
-    if (problem) throw new BacktestLabSettingsValidationError(`${symbol}: ${problem}`);
-    const changes: BacktestLabChange[] = tickerFields
-      .filter((field) => before[field] !== after[field])
-      .map((field) => ({ field, oldValue: before[field] === null ? "global" : String(before[field]), newValue: after[field] === null ? "global" : String(after[field]) }));
-    if (changes.length === 0) return { overrides: existingRow ? rowToTickerOverrides(existingRow) : null, changes };
-    if (tickerFields.every((field) => after[field] === null)) await trx("backtest_lab_ticker_overrides").where({ symbol }).delete();
-    else {
-      const columns = Object.fromEntries(tickerFields.map((field) => [tickerColumns[field], after[field]]));
-      await trx("backtest_lab_ticker_overrides")
-        .insert({ symbol, ...columns, updated_at: trx.fn.now(), updated_by_user_id: userId })
-        .onConflict("symbol")
-        .merge({ ...columns, updated_at: trx.fn.now(), updated_by_user_id: userId });
-    }
-    await trx("backtest_lab_settings_audit").insert(changes.map((change) => ({ user_id: userId, symbol, field: change.field, old_value: change.oldValue, new_value: change.newValue })));
-    const saved = await trx("backtest_lab_ticker_overrides").where({ symbol }).first();
-    return { overrides: saved ? rowToTickerOverrides(saved) : null, changes };
   });
 }
 

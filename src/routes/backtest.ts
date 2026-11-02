@@ -12,8 +12,6 @@ import {
   analysisReadsLabPath,
   loadBacktestLabAudit,
   loadBacktestLabSettings,
-  loadBacktestLabTickerOverrides,
-  saveBacktestLabTickerOverrides,
   updateBacktestLabSettings,
   type BacktestLabSettings,
 } from "../backtest/labSettingsStore.js";
@@ -31,7 +29,7 @@ import {
   resumeBacktestJob,
 } from "../backtest/jobs/backtestJobStore.js";
 import { validateBacktestBookPageQuery, validateBacktestSessionsPageQuery } from "../backtest/jobs/backtestSessionRequest.js";
-import { checkSessionRequestAgainstLab, validateBatchRequestAgainstLab, validateSessionRequestAgainstLab } from "../backtest/jobs/labSessionRequest.js";
+import { validateBatchRequestAgainstLab, validateSessionRequestAgainstLab } from "../backtest/jobs/labSessionRequest.js";
 import { registerTickerAnalysisRoutes } from "./backtestAnalysisRoutes.js";
 import { analysesOutOfDateAfter } from "../backtest/analysis/analysisStore.js";
 import { loadBacktestSessionPriceChart } from "../backtest/analysis/sessionPriceChart.js";
@@ -199,31 +197,12 @@ backtestRouter.get("/lab-settings/audit", async (request, response) => {
   response.json(await loadBacktestLabAudit({ symbol }));
 });
 
-backtestRouter.get("/lab-ticker-overrides", async (_request, response) => {
-  response.json(await loadBacktestLabTickerOverrides());
-});
-
-backtestRouter.get("/lab-ticker-overrides/:symbol", async (request, response) => {
-  const symbol = await withLabValidation(async () => normalizeBacktestSymbol(request.params.symbol ?? ""));
-  const overrides = (await loadBacktestLabTickerOverrides()).find((row) => row.symbol === symbol) ?? null;
-  response.json({ symbol, overrides });
-});
-
-// Body: any of potDollars, ladderSharesPct, ladderRungs, ladderShockPct, minAbsDelta, maxAbsDelta: a number, or null for
-// the global value again.
-backtestRouter.put("/lab-ticker-overrides/:symbol", async (request, response) => {
-  const body = (request.body ?? {}) as Record<string, unknown>;
-  const { overrides, changes } = await withLabValidation(() => saveBacktestLabTickerOverrides(request.params.symbol ?? "", body, request.session.userId ?? null));
-  // The analysis reads no ticker's own values since Vol Farmer v4 (they are the CC + Put Ladder's): nothing to re-run.
-  response.json({ overrides, changes });
-});
-
 backtestRouter.post("/sessions", async (request, response) => {
   const { snapshot, value, warnings } = await validateSessionRequestAgainstLab(request.body);
   response.status(201).json({ ...(await createBacktestSession(value, snapshot)), warnings, resolvedBySymbol: value.symbolSettings });
 });
 
-// The New session form starts a batch: 1 to 9 runs on one period and the same settings (CreateBacktestBatchRequest).
+// The New session form starts a batch of one run (CreateBacktestBatchRequest; several runs were the CC + Put Ladder's).
 backtestRouter.post("/batches", async (request, response) => {
   const { name, runs, warnings } = await validateBatchRequestAgainstLab(request.body);
   const created = await createBacktestBatch(name, runs);
@@ -259,12 +238,8 @@ backtestRouter.delete("/batches/:id", async (request, response) => {
 // needed yet), nothing created.
 backtestRouter.post("/sessions/estimate", async (request, response) => {
   const body = (request.body ?? {}) as Record<string, unknown>;
-  const checked = await checkSessionRequestAgainstLab({ ...body, name: typeof body.name === "string" && body.name.trim() !== "" ? body.name : "estimate" });
-  // Tickers whose values cannot run still answer, each with its problems, so the screen shows them all at once.
-  const estimate: BacktestSessionEstimateResponse =
-    checked.kind === "ticker_problems"
-      ? { warnings: checked.warnings, capital: checked.tickerProblems.capital, bookMode: "pots", resolvedBySymbol: checked.tickerProblems.bySymbol }
-      : { warnings: checked.warnings, capital: checked.value.startingValue, bookMode: checked.value.bookMode, resolvedBySymbol: checked.value.symbolResolution };
+  const checked = await validateSessionRequestAgainstLab({ ...body, name: typeof body.name === "string" && body.name.trim() !== "" ? body.name : "estimate" });
+  const estimate: BacktestSessionEstimateResponse = { warnings: checked.warnings, capital: checked.value.startingValue, bookMode: checked.value.bookMode, resolvedBySymbol: null };
   response.json(estimate);
 });
 

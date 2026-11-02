@@ -6,10 +6,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import knexLibrary, { type Knex } from "knex";
-import type { BacktestLabAuditRow, BacktestLabChange, BacktestLabSettingsView, BacktestLabTickerOverrides, BacktestSettingsTemplate } from "../backtest/backtestTypes.js";
+import type { BacktestLabAuditRow, BacktestLabChange, BacktestLabSettingsView, BacktestSettingsTemplate } from "../backtest/backtestTypes.js";
 
-// The lab settings routes on the real backtest router against the test database: the global values stored and read back
-// (and the New session table starting from them), a ticker's own values stored, read back and cleared, and the audit.
+// The lab settings routes on the real backtest router against the test database: the values stored and read back (and
+// the New session table starting from them), the retired decision makers refused, and the audit.
 const dataDirectory = mkdtempSync(path.join(os.tmpdir(), "backtest-lab-route-test-"));
 process.env.BACKTEST_DATA_DIR = dataDirectory;
 
@@ -25,7 +25,6 @@ const { backtestRouter } = await import("./backtest.js");
 const { errorHandler } = await import("../middleware/errorHandler.js");
 const testDb: Knex = db;
 const suffix = `${Date.now() % 100000}`;
-const symbol = `LR${suffix}`.slice(0, 8);
 let server: Server;
 let baseUrl: string;
 let userId: string;
@@ -56,7 +55,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
-  await testDb("backtest_lab_ticker_overrides").where({ symbol }).delete();
   await testDb("backtest_lab_settings_audit").where({ user_id: userId }).delete();
   await testDb("backtest_lab_settings").where({ id: 1 }).delete();
   if (savedRow) await testDb("backtest_lab_settings").insert({ ...savedRow, settings: JSON.stringify(savedRow.settings) });
@@ -66,77 +64,61 @@ afterAll(async () => {
 });
 
 describe("lab settings routes", () => {
-  it("stores a global change, reads it back, and the New session table starts from it", async () => {
+  it("stores a change, reads it back, and the New session table starts from it", async () => {
     const before = await call<BacktestLabSettingsView>("GET", "/lab-settings");
     expect(before.status).toBe(200);
-    const spread = before.body.settings.baseline!.maxSpreadPctOfMid === 40 ? 45 : 40;
-    const saved = await call<{ settings: BacktestLabSettingsView; changes: BacktestLabChange[] }>("PUT", "/lab-settings", { overrides: { baseline: { maxSpreadPctOfMid: spread } }, defaultPotDollars: 120_000 });
+    const stake = before.body.settings.steadyStake!.stakePct === 70 ? 75 : 70;
+    const saved = await call<{ settings: BacktestLabSettingsView; changes: BacktestLabChange[] }>("PUT", "/lab-settings", { overrides: { steadyStake: { stakePct: stake } }, defaultPotDollars: 120_000 });
     expect(saved.status).toBe(200);
-    expect(saved.body.changes.map((change) => change.field).sort()).toEqual(["baseline.maxSpreadPctOfMid", "lab.defaultPotDollars"]);
+    expect(saved.body.changes.map((change) => change.field).sort()).toEqual(["lab.defaultPotDollars", "steadyStake.stakePct"]);
 
     const after = await call<BacktestLabSettingsView>("GET", "/lab-settings");
-    expect(after.body.settings.baseline!.maxSpreadPctOfMid).toBe(spread);
+    expect(after.body.settings.steadyStake!.stakePct).toBe(stake);
     expect(after.body.defaultPotDollars).toBe(120_000);
-    expect(after.body.rows.find((row) => row.path === "baseline.maxSpreadPctOfMid")?.now).toBe(spread);
+    expect(after.body.rows.find((row) => row.path === "steadyStake.stakePct")?.now).toBe(stake);
     const template = await call<BacktestSettingsTemplate>("GET", "/settings-template");
-    expect(template.body.settings.baseline!.maxSpreadPctOfMid).toBe(spread);
+    expect(template.body.settings.steadyStake!.stakePct).toBe(stake);
 
     const audit = await call<BacktestLabAuditRow[]>("GET", "/lab-settings/audit?symbol=");
     expect(audit.body.slice(0, 2).every((row) => row.userDisplayName === "Lab Settings Tester" && row.symbol === null)).toBe(true);
-    const refused = await call<{ error: string }>("PUT", "/lab-settings", { overrides: { baseline: { minDte: 90 } } });
+    const refused = await call<{ error: string }>("PUT", "/lab-settings", { overrides: { steadyStake: { stakePct: 0 } } });
     expect(refused.status).toBe(400);
   });
 
-  it("stores a ticker's own values, reads them back, refuses invalid ones and clears them", async () => {
-    const saved = await call<{ overrides: BacktestLabTickerOverrides; changes: BacktestLabChange[] }>("PUT", `/lab-ticker-overrides/${symbol}`, { ladderRungs: 6, minAbsDelta: 0.05, maxAbsDelta: 0.25 });
-    expect(saved.status).toBe(200);
-    expect(saved.body.overrides).toMatchObject({ symbol, ladderRungs: 6, minAbsDelta: 0.05, maxAbsDelta: 0.25, potDollars: null });
-
-    const one = await call<{ symbol: string; overrides: BacktestLabTickerOverrides | null }>("GET", `/lab-ticker-overrides/${symbol.toLowerCase()}`);
-    expect(one.body.overrides?.ladderRungs).toBe(6);
-    const all = await call<BacktestLabTickerOverrides[]>("GET", "/lab-ticker-overrides");
-    expect(all.body.some((row) => row.symbol === symbol)).toBe(true);
-
-    expect((await call("PUT", `/lab-ticker-overrides/${symbol}`, { ladderRungs: 0 })).status).toBe(400);
-    expect((await call("PUT", `/lab-ticker-overrides/${symbol}`, { ladderSharesPct: 150 })).status).toBe(400);
-
-    const audit = await call<BacktestLabAuditRow[]>("GET", `/lab-settings/audit?symbol=${symbol}`);
-    expect(audit.body.map((row) => row.field).sort()).toEqual(["ladderRungs", "maxAbsDelta", "minAbsDelta"]);
-
-    const cleared = await call<{ overrides: BacktestLabTickerOverrides | null }>("PUT", `/lab-ticker-overrides/${symbol}`, { ladderRungs: null, minAbsDelta: null, maxAbsDelta: null });
-    expect(cleared.body.overrides).toBeNull();
-    expect((await call<{ overrides: unknown }>("GET", `/lab-ticker-overrides/${symbol}`)).body.overrides).toBeNull();
+  it("has no ticker overrides any more: they were the CC + Put Ladder's", async () => {
+    expect((await fetch(`${baseUrl}/backtest/lab-ticker-overrides`)).status).toBe(404);
+    expect((await fetch(`${baseUrl}/backtest/lab-ticker-overrides/AAPL`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ potDollars: 1 }) })).status).toBe(404);
   });
 
-  it("previews a global save without writing it: each change, and no analysis out of date for a value Vol Farmer v4 doesn't read", async () => {
+  it("previews a save without writing it: each change, and no analysis out of date for a value Vol Farmer v4 doesn't read", async () => {
     const before = await call<BacktestLabSettingsView>("GET", "/lab-settings");
-    const rungs = before.body.settings.baseline!.ladderRungs === 4 ? 3 : 4;
+    const stake = before.body.settings.steadyStake!.stakePct === 60 ? 65 : 60;
     const auditBefore = await call<BacktestLabAuditRow[]>("GET", "/lab-settings/audit?symbol=");
 
     type Preview = { changes: (BacktestLabChange & { outOfDate: string[] })[]; outOfDate: string[] };
-    const preview = await call<Preview>("POST", "/lab-settings/preview", { overrides: { baseline: { ladderRungs: rungs } } });
+    const preview = await call<Preview>("POST", "/lab-settings/preview", { overrides: { steadyStake: { stakePct: stake } } });
     expect(preview.status).toBe(200);
     expect(preview.body.changes).toHaveLength(1);
-    expect(preview.body.changes[0]).toMatchObject({ field: "baseline.ladderRungs", oldValue: String(before.body.settings.baseline!.ladderRungs), newValue: String(rungs), outOfDate: [] });
+    expect(preview.body.changes[0]).toMatchObject({ field: "steadyStake.stakePct", oldValue: String(before.body.settings.steadyStake!.stakePct), newValue: String(stake), outOfDate: [] });
     expect(preview.body.outOfDate).toEqual([]);
     // Nothing written: the value and the history are as they were.
-    expect((await call<BacktestLabSettingsView>("GET", "/lab-settings")).body.settings.baseline!.ladderRungs).toBe(before.body.settings.baseline!.ladderRungs);
+    expect((await call<BacktestLabSettingsView>("GET", "/lab-settings")).body.settings.steadyStake!.stakePct).toBe(before.body.settings.steadyStake!.stakePct);
     expect((await call<BacktestLabAuditRow[]>("GET", "/lab-settings/audit?symbol=")).body[0]?.id).toBe(auditBefore.body[0]?.id);
-    expect((await call("POST", "/lab-settings/preview", { overrides: { baseline: { minDte: 90 } } })).status).toBe(400);
+    expect((await call("POST", "/lab-settings/preview", { overrides: { baseline: { ladderRungs: 4 } } })).status).toBe(400);
 
     // The save re-runs nothing (Marcelo 2026-11-01): its history row has no re-run count, and no analysis goes out of date.
-    const saved = await call<{ analyses: { markedOutOfDate: string[] } }>("PUT", "/lab-settings", { overrides: { baseline: { ladderRungs: rungs } } });
+    const saved = await call<{ analyses: { markedOutOfDate: string[] } }>("PUT", "/lab-settings", { overrides: { steadyStake: { stakePct: stake } } });
     expect(saved.body.analyses.markedOutOfDate).toEqual([]);
     const audit = await call<BacktestLabAuditRow[]>("GET", "/lab-settings/audit?symbol=");
-    expect(audit.body[0]).toMatchObject({ field: "baseline.ladderRungs", analysesRerun: null });
+    expect(audit.body[0]).toMatchObject({ field: "steadyStake.stakePct", analysesRerun: null });
   });
 
-  it("refuses the retired rules' values and decision makers in the lab, and a save of the decision maker alone puts no analysis out of date", async () => {
-    for (const overrides of [{ kellyFraction: 0.3 }, { policy: { roll: "never" } }, { pluto: { capitalBudgetPct: 40 } }, { decisionMaker: "rules" }, { decisionMaker: "llm" }, { decisionMaker: "vol_farmer" }]) {
+  it("refuses the retired values and decision makers in the lab, and a save of the decision maker alone puts no analysis out of date", async () => {
+    for (const overrides of [{ kellyFraction: 0.3 }, { policy: { roll: "never" } }, { pluto: { capitalBudgetPct: 40 } }, { baseline: { ladderRungs: 4 } }, { volFarmerV2: { firstPositionPct: 60 } }, ...["rules", "llm", "vol_farmer", "baseline", "vol_farmer_v2", "vol_farmer_v3"].map((decisionMaker) => ({ decisionMaker }))]) {
       expect((await call("PUT", "/lab-settings", { overrides })).status).toBe(400);
     }
     const before = await call<BacktestLabSettingsView>("GET", "/lab-settings");
-    const decisionMaker = before.body.settings.decisionMaker === "steady_stake" ? "vol_farmer_v2" : "steady_stake";
+    const decisionMaker = before.body.settings.decisionMaker === "steady_stake" ? "vol_farmer_v4" : "steady_stake";
     const body = { overrides: { decisionMaker } };
 
     type Preview = { changes: (BacktestLabChange & { outOfDate: string[] })[]; outOfDate: string[] };
