@@ -8,6 +8,30 @@ import knexLibrary, { type Knex } from "knex";
 
 const tablesNotCopied = ["knex_migrations", "knex_migrations_lock"];
 
+/** Whether the process that named a schema is still running (another user's process counts as running). */
+function processIsRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Drops the schemas a killed or interrupted run left behind (its afterAll never ran): their copied defaults still use the
+ * public schema's sequences, so a migration dropping one of those tables fails on the test database (2026-11-02).
+ */
+async function dropSchemasOfEndedRuns(connection: Knex): Promise<void> {
+  const rows: { nspname: string }[] = (await connection.raw(`SELECT nspname FROM pg_namespace WHERE nspname LIKE 'isolated\\_test\\_%'`)).rows;
+  for (const { nspname: schemaName } of rows) {
+    const pid = Number(schemaName.split("_")[2]);
+    if (!Number.isInteger(pid) || pid <= 0 || processIsRunning(pid)) continue;
+    // Another test file's worker may be dropping the same schema at the same moment: best effort.
+    await connection.raw(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`).catch(() => undefined);
+  }
+}
+
 export async function createIsolatedTestDatabase(): Promise<Knex> {
   config();
   if (!process.env.TEST_DATABASE_URL) throw new Error("TEST_DATABASE_URL must be set to run database tests.");
@@ -15,6 +39,7 @@ export async function createIsolatedTestDatabase(): Promise<Knex> {
 
   const setupConnection = knexLibrary({ client: "pg", connection: process.env.TEST_DATABASE_URL, pool: { min: 0, max: 1 } });
   try {
+    await dropSchemasOfEndedRuns(setupConnection);
     await setupConnection.raw(`CREATE SCHEMA "${schemaName}"`);
     const tables = await setupConnection.raw(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`);
     for (const { table_name: tableName } of tables.rows as { table_name: string }[]) {
