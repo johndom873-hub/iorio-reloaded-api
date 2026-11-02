@@ -185,7 +185,7 @@ describe("evaluateOrderPath", () => {
 
 describe("evaluatePlutoCash", () => {
   // Net liquidation $100,000 and a 60% budget: a $60,000 budget, warned below $3,000 free.
-  const account = { netLiquidationValue: 100_000, totalCashValue: 50_000, settledCash: 50_000, buyingPower: 50_000, excessLiquidity: 50_000 };
+  const account = { netLiquidationValue: 100_000, totalCashValue: 50_000, settledCash: 50_000, settledCashIsTotalCash: false, buyingPower: 50_000, excessLiquidity: 50_000 };
   const pluto = { capitalBudgetPct: 60, enabledTickerCount: 3, committedOnPlutoTickers: 40_000, cashLockedInCsps: 10_000, inFlightNotional: 0 };
 
   it("measures the free cash as the budget left when the account has more ($60,000 − $40,000 = $20,000 < $50,000 − $10,000)", () => {
@@ -201,6 +201,8 @@ describe("evaluatePlutoCash", () => {
   it("measures it as the settled cash left when that is the smallest ($14,000 settled − $10,000 = $4,000), and as none when IBKR reports no settled cash", () => {
     expect(evaluatePlutoCash({ ...account, settledCash: 14_000 }, pluto)).toEqual({ name: "Pluto cash", status: "ok", detail: "free cash $4,000 is 6.7% of Pluto's $60,000 budget (60% of net liquidation), limited by the settled cash left (settled cash less the open Puts' strikes and the orders working); the budget has $20,000 left" });
     expect(evaluatePlutoCash({ ...account, settledCash: null }, pluto)).toMatchObject({ status: "warn", detail: expect.stringContaining("free cash $0 is 0.0% of Pluto's $60,000 budget (60% of net liquidation), limited by IBKR reporting no settled cash, so Pluto buys nothing and sells no Put") });
+    // The paper account: no settled cash reported, so the total cash stands in and only the account's free cash limits.
+    expect(evaluatePlutoCash({ ...account, totalCashValue: 25_000, settledCash: 25_000, settledCashIsTotalCash: true }, pluto)).toEqual({ name: "Pluto cash", status: "ok", detail: "free cash $15,000 is 25.0% of Pluto's $60,000 budget (60% of net liquidation), limited by the account's free cash; the budget has $20,000 left; IBKR reports no settled cash on the paper account, so the total cash stands in" });
   });
 
   it("warns at none free when the budget is overcommitted, and passes at exactly 5% ($3,000 of $60,000)", () => {
@@ -223,7 +225,7 @@ describe("evaluatePlutoCash", () => {
 });
 
 describe("evaluateAccount", () => {
-  const healthy = { netLiquidationValue: 100_000, totalCashValue: 60_000, settledCash: 60_000, buyingPower: 200_000, excessLiquidity: 50_000 };
+  const healthy = { netLiquidationValue: 100_000, totalCashValue: 60_000, settledCash: 60_000, settledCashIsTotalCash: false, buyingPower: 200_000, excessLiquidity: 50_000 };
 
   it("shows the figures and the largest put strike the max order size allows", () => {
     const result = evaluateAccount(healthy, 15);

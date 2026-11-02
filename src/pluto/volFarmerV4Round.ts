@@ -78,7 +78,7 @@ import { loadVolFarmerV4LeftoverStockLeg, loadVolFarmerV4LegStatuses, loadVolFar
 // orders, planned on the shares after it, are undone and planned again once it ends, and the ticker waits while it works.
 // The account is a cash account (Marcelo 2026-10-31): the free cash is also held to the settled cash left, IBKR's settled
 // cash less the cash the open Puts hold, the orders in flight and the round's earlier orders; with no settled cash
-// reported, nothing is bought and no Put sold.
+// reported, nothing is bought and no Put sold, except on the paper account (a margin account), where the total cash stands in.
 // v4's buyback (Marcelo 2026-11-02, the lab's callsInTheMoneyAtLastLook): in the trading window's last 2 minutes, on a day
 // the setting buys back (every day, or only the last session before a weekend), each of its Calls expiring today with the
 // stock at or above its strike is bought back at the mid through the close route, its shares kept, if the settled cash left
@@ -127,6 +127,8 @@ export interface VolFarmerV4RoundInput {
   totalCashValue: number | null;
   /** IBKR's settled cash (the cash account's): null when IBKR reported none, and then nothing is bought. */
   settledCashValue: number | null;
+  /** The paper account reports no settled cash, so settledCashValue is its total cash (settledCashForTrading). */
+  settledCashIsTotalCash: boolean;
   netLiquidationValue: number;
   cancelByMs: number | null;
   /** Today's trading window end (the session's, clamped before the close): v4's buyback runs in the minutes before it. */
@@ -417,6 +419,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   const openOptionLegs = openLegs.filter((leg) => leg.legType === "option" && leg.expiryDate !== null && leg.strikePrice !== null);
   const legStatusById = await loadVolFarmerV4LegStatuses([...new Set([...memoryLegIds, ...openOptionLegs.map((leg) => leg.id)])]);
   if (round.settledFreeCash === null && pass === "cycles_calls_puts") note("IBKR reports no settled cash, so the free cash is 0: nothing is bought and no Put sold");
+  if (input.settledCashIsTotalCash && pass === "cycles_calls_puts") note("IBKR reports no settled cash on the paper account, so the total cash stands in");
   const snapshot = {
     legStatusById,
     openOptionContracts: openOptionLegs.map((leg) => ({ expiry: leg.expiryDate!, strike: leg.strikePrice! })),
