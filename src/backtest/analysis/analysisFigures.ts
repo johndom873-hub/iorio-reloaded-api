@@ -11,59 +11,165 @@ import { BacktestSymbolFile } from "../engine/backtestSymbolFile.js";
 import { loadBacktestBarHistory, type StoredDailyBar } from "../engine/backtestBarHistory.js";
 import { readSplitScheduleCache, refreshSplitScheduleForSymbol, type SplitSchedule } from "../engine/splitFactors.js";
 import { loadTreasuryBillRates } from "../engine/treasuryBillRates.js";
-import { ladderShock } from "../engine/backtestBaselineLadder.js";
-import type { BacktestBaselineSettings } from "../backtestTypes.js";
-import { summarizeChainScan, type AnalysisChainSummary, type ChainMapContract, type ChainScanDayRow } from "./analysisChainScan.js";
-import { scanChainDaysInParallel } from "./analysisChainScanPool.js";
-import { computeOptionActivity, type AnalysisOptionActivity } from "./analysisOptionActivity.js";
+import { optionCommissionDollars, stockCommissionDollars } from "../engine/ledger/ledgerFills.js";
+import { volFarmerV2BreakEven, volFarmerV2CallPremiumShare, volFarmerV2ImpliedMoveStep, volFarmerV2PutStrikeCap } from "../engine/volFarmerV2Steps.js";
+import type { BacktestVolFarmerV4Settings } from "../backtestTypes.js";
 import { openDaysFromCalendarRows } from "../../lib/marketSessionStatus.js";
 import { loadMarketCalendarRowsFrom } from "../engine/backtestTradingCalendar.js";
-import { buildChainScanDayInputs, tenOclockPriceAsTraded } from "./analysisDayInputs.js";
+import { computeOptionActivity, type AnalysisOptionActivity } from "./analysisOptionActivity.js";
+import { buildSameDayCallScanDays, expiryDaysAmong, tenOclockPriceAsTraded } from "./analysisDayInputs.js";
 import { correlationRows, impliedReportMove, reportMove, reportSessionDates, summarizeEarnings, type AnalysisCorrelationRow, type AnalysisEarningsSummary, type AnalysisReport } from "./analysisEarningsAndCorrelation.js";
 import {
   barChecks,
+  barIndicatorsOf,
   impliedVersusRealised,
+  impliedVolatilityRange,
+  marketFits,
   maxDrawdownByRange,
-  maxDrawdownOf,
+  median,
+  openingGaps,
   stockProfile,
   toOhlcvBars,
+  trendSplit,
+  weeklySkew,
   yangZhangSeries,
   type AnalysisBarChecks,
   type AnalysisBarIndicators,
   type AnalysisIvPremiumStats,
+  type AnalysisMarketFit,
   type AnalysisMaxDrawdown,
+  type AnalysisOpeningGaps,
   type AnalysisPriceRange,
   type AnalysisProfile,
+  type AnalysisTrendSplit,
 } from "./analysisPriceFigures.js";
+import { countExpiryWeeks, expiryWeeksBy, steadyWeekliesStartMonth, wholeWeeksBetween } from "./analysisExpiryWeeks.js";
+import { scanSameDayCallsInParallel } from "./analysisSameDayCallsPool.js";
+import type { SameDayCall, SameDayCallDay } from "./analysisSameDayCalls.js";
+import { bandAt, largestPotOfDay, potFittingDayShare, smallestPotFor, targetReachedAt, targetReachedOverDays } from "./analysisPotSizing.js";
+import { fallsOfAStep, stepStatistics, stepsOfBars, type FallOfAStep, type StepOnDay, type StepStatistics } from "./analysisStepFalls.js";
+import { sameDayMonthsBefore, sharesPerLot } from "./analysisSuitabilityRule.js";
 
-// The Analyse window's figures for one ticker, from its data file, its IBKR daily bars, its earnings and the other data
-// files (for correlation), at the values given. Everything but the analysis backtest's figures (analysisBacktestFigures.ts).
+// The Analyse window's figures for one ticker under Vol Farmer v4 (Marcelo 2026-11-01), from its data file, its IBKR daily
+// bars, its earnings and the other data files (for correlation), at the lab's v4 values: the weeks with an expiry (F1),
+// the Calls v4 could sell on each expiry day (F5) and the pots they fit (F2–F4), what v4 would do today (F10), the Step
+// and the falls of a Step (F7, F9), and the stock profile (F12–F16 with the 10-15 sheet's). Everything but the analysis
+// backtest's figures (analysisBacktest.ts). The formulas are in FORMULAS.md, "Analyse window (Vol Farmer v4)".
 
 /** Bumped when a formula or the figures' shape changes: a stored analysis with an older version shows as such. */
-export const analysisFormulasVersion = 7;
+export const analysisFormulasVersion = 8;
 
-export type AnalysisStep = "bars" | "chains" | "earnings_correlation" | "saving" | "backtest" | "summary";
-export const analysisSteps: readonly AnalysisStep[] = ["bars", "chains", "earnings_correlation", "saving", "backtest", "summary"];
+export type AnalysisStep = "bars" | "calls" | "earnings_correlation" | "saving" | "backtest";
+export const analysisSteps: readonly AnalysisStep[] = ["bars", "calls", "earnings_correlation", "saving", "backtest"];
 
-/** The values the figures depend on: the ticker's effective baseline values and its pot. */
+/** The values the figures depend on: the analysis backtest's account and pot, and the lab's v4 values. */
 export interface AnalysisFigureValues {
+  /** The analysis backtest's starting account: the lab's default, or a trial's starting value. */
+  accountDollars: number;
+  /** The one ticker's pot: the account × potShareOfAccount. */
   potDollars: number;
-  baseline: BacktestBaselineSettings;
-  /** trading.spreadCostChargedPct ÷ 100: the share of the half-spread a fill gives up. */
+  /** The pot's share of the account with one ticker: its allocation of 100% and the excess allowance (1.2 at 20%). */
+  potShareOfAccount: number;
+  /** The first position's share of the pot (firstPositionPct ÷ 100: 0.8). */
+  firstPositionShare: number;
+  v4: BacktestVolFarmerV4Settings;
+  /** trading.spreadCostChargedPct ÷ 100: the share of the half-spread a fill gives up (0 = the mid). */
   spreadShareCharged: number;
+}
+
+/** F1: the whole weeks with an expiry day, and the month steady weeklies start in. */
+export interface AnalysisExpiryWeeks {
+  /** Complete file days whose 10:00 quotes list a Call expiring that day. */
+  expiryDays: number;
+  wholeWeeks: number;
+  weeksWithExpiryDay: number;
+  /** Weeks by the year of their last session; expiry days by their own year. */
+  byYear: Record<string, { expiryDays: number; wholeWeeks: number; weeksWithExpiryDay: number }>;
+  /** "2020-01"; null when no month starts a run of months with an expiry in 90% of their whole weeks. */
+  steadyWeekliesFrom: string | null;
+  /** The analysis backtest's first day: the first complete day of that month, else the file's first. */
+  backtestStartDate: string;
+}
+
+/** F5 over every expiry day, F4 over the last 12 months'. */
+export interface AnalysisSameDayCalls {
+  expiryDays: number;
+  /** Expiry days with a Call v4 could sell. */
+  daysWithCall: number;
+  byYear: Record<string, { expiryDays: number; daysWithCall: number }>;
+  /** Expiry days without a 10:00 price (not scanned). */
+  daysWithoutPrice: number;
+  /** Expiry days with a price and no Call v4 could sell. */
+  daysWithNoCall: string[];
+  lastTwelveMonths: { fromDate: string; expiryDays: number; daysWithCall: number; largestPotDollars: number | null };
+  scanSeconds: number;
+}
+
+/** F2–F4 over the last 12 months, at the analysis's pot. */
+export interface AnalysisSize {
+  fromDate: string;
+  toDate: string;
+  highestPriceAsTraded: number | null;
+  highestOn: string | null;
+  smallestPotDollars: number | null;
+  smallestAccountDollars: number | null;
+  accountDollars: number;
+  potDollars: number;
+  targetReached: ReturnType<typeof targetReachedOverDays>;
+  largestPotByCallVolume: { potDollars: number | null; expiryDays: number };
+}
+
+/** F10: the last day's 10:00 look replayed as v4 would open a cycle on it. */
+export interface AnalysisToday {
+  date: string;
+  isExpiryDay: boolean;
+  priceAsTraded: number | null;
+  accountDollars: number;
+  potDollars: number;
+  lots: number;
+  sharesDollars: number;
+  targetDollars: number;
+  shareOfTarget: number | null;
+  /** F5's pick; null on a day without a Call expiring at its close, or when none passes. */
+  call: SameDayCall | null;
+  /** The first position's break-even after buying the lots and selling the Call (B-E1); null without lots. */
+  firstBreakEven: number | null;
+  band: { floorDollars: number; topDollars: number; oneMoreLotDollars: number } | null;
+  /** Whether v4 would sell Puts today: on an expiry day, when the best Call pays under putsStartCallYieldPct a year. */
+  putsNow: boolean;
+  putsStartCallYieldPct: number;
+  /** The Step from the previous session's IV, and the highest strike a Put would be sold at (B-E1 less the Step); null without an IV. */
+  step: { stepPct: number; impliedVolatility: number; ivDate: string } | null;
+  putStrikeCap: number | null;
+}
+
+/** The Vol Farmer v4 profile's figures (F9, F7's counts, F12–F16), every bar of the file. */
+export interface AnalysisStockProfile {
+  steps: StepStatistics & { now: (StepOnDay & { date: string }) | null };
+  falls: { count: number; perYear: number | null; reachedTwoSteps: number; backWithinAYear: number; medianDaysDown: number | null; medianDaysBack: number | null };
+  trend: AnalysisTrendSplit;
+  market: { all: AnalysisMarketFit; sinceBacktest: AnalysisMarketFit | null; spyDownDays: AnalysisMarketFit; spyUpDays: AnalysisMarketFit } | null;
+  gaps: AnalysisOpeningGaps;
+  weeklySkew: ReturnType<typeof weeklySkew>;
+  ivRange: ReturnType<typeof impliedVolatilityRange>;
+  /** The last bar's IV and its percentile over the last 252 bars. */
+  ivNow: { date: string; impliedVolatility: number; percentile: number | null } | null;
 }
 
 export interface AnalysisFigures {
   formulasVersion: number;
   symbol: string;
-  /** The last complete option day and the last daily bar the figures read. */
+  /** The first and last complete option day, and the last daily bar the figures read. */
+  optionFirstDate: string;
   optionLastDate: string;
   barsLastDate: string | null;
   /** IBKR daily bars, split-adjusted: [date, open, high, low, close, implied volatility]. */
   bars: [string, number, number, number, number, number | null][];
   /** 21-day Yang-Zhang, one per bar (null until 21 sessions). */
   yangZhang21: (number | null)[];
-  /** IV Percentile and the 50- and 200-day averages, one per bar: added when the figures are read (analysisStore.ts), not stored. */
+  /** F9's stand-in, one per bar: the 63-day Yang-Zhang on a bar without an IV; null on bars with one (the IV pane's dashed line). */
+  realisedStandIn: (number | null)[];
+  /** IV Percentile, one per bar: added when the figures are read (analysisStore.ts), not stored. */
   barIndicators?: AnalysisBarIndicators;
   volatility: {
     impliedNow: number | null;
@@ -72,32 +178,21 @@ export interface AnalysisFigures {
     impliedVersusRealised: { all: AnalysisIvPremiumStats; lastYear: AnalysisIvPremiumStats; byYear: Record<string, AnalysisIvPremiumStats> };
   };
   maxDrawdown: Record<AnalysisPriceRange, AnalysisMaxDrawdown | null>;
-  /** The shock the rule gives a cycle starting the next weekday, with what it read. */
-  shock: { startDate: string; windowFrom: string; closes: number; maxDrawdown: number | null; shock: number; rule: BacktestBaselineSettings["ladderShock"] };
-  chains: AnalysisChainSummary & {
-    lastDay: { date: string; spot: number | null; shock: number; cap: number | null; bestCappedPut: ChainScanDayRow["bestCappedPut"]; bestEntryCall: ChainScanDayRow["bestEntryCall"]; passingCalls: number; passingPuts: number; passingCappedPuts: number } | null;
-    /** The last day's chain, priced at the mid: the chain yield map. */
-    chainMap: ChainMapContract[];
-    scanSeconds: number;
-  };
-  /**
-   * Each scanned day with a 10:00 price: [date, price as traded, shock, the best capped Put's volume limit, its strike, the
-   * best entry Call's volume limit, the best capped Put's previous-session volume] (the contract fields null when none
-   * passed; the last field absent on analyses computed before 2026-10-19). The window computes the fits and the
-   * largest pots from them.
-   */
-  fitDays: AnalysisFitDayRow[];
-  /** True when the lab's volatility-edge filter or Edge Yield ranking applies: the largest pot's contracts were chosen without them. */
-  largestPotWithoutModel: boolean;
+  expiryWeeks: AnalysisExpiryWeeks;
+  sameDayCalls: AnalysisSameDayCalls;
+  size: AnalysisSize;
+  today: AnalysisToday;
+  /** F7 over every bar, oldest first (v4's account in each, F11, is the analysis backtest's). */
+  falls: FallOfAStep[];
+  stockProfile: AnalysisStockProfile;
+  /** The 10-15 sheet's profile (CAGR, R², swings, variance ratio) over every bar and the last two years. */
+  profile: { all: AnalysisProfile | null; twoYear: AnalysisProfile | null };
   /** Options volume and open interest from the file (analysisOptionActivity.ts); null when the file can't be read. */
   optionActivity: AnalysisOptionActivity | null;
   earnings: AnalysisEarningsSummary & { exDividendDates: string[]; hasTickerRow: boolean };
   correlation: { rows: AnalysisCorrelationRow[]; skipped: Record<string, string>; spySource: "file" | "database" | null };
-  profile: { all: AnalysisProfile | null; twoYear: AnalysisProfile | null };
   dataQuality: AnalysisDataQuality;
 }
-
-export type AnalysisFitDayRow = [string, number, number, number | null, number | null, number | null, (number | null)?];
 
 export interface AnalysisDataQuality {
   completeDays: number;
@@ -111,6 +206,8 @@ export interface AnalysisDataQuality {
   unavailableDays: number;
   intradayDays: number | null;
   quoteRowsPerDay: { min: number | null; max: number | null; lastDay: number | null };
+  /** Complete days whose 10:00 quotes have no ask above zero. */
+  daysWithEveryQuoteAtZero: number;
   schemaVersion: string | null;
   maxDte: string | null;
   barsFetchedAt: string | null;
@@ -120,13 +217,10 @@ export interface AnalysisDataQuality {
   splits: SplitSchedule["segments"] | null;
   barChecks: AnalysisBarChecks;
   sizeBytes: number;
-  scannedDays: number;
-  daysWithoutPrice: number;
-  daysWithNothingPassing: string[];
 }
 
-/** The figures the data file gives on its own, without the chain scan: what the Analyse window shows before a ticker's first analysis. */
-export type AnalysisFileFigures = Omit<AnalysisFigures, "chains" | "fitDays" | "largestPotWithoutModel" | "dataQuality"> & { dataQuality: Omit<AnalysisDataQuality, "scannedDays" | "daysWithoutPrice" | "daysWithNothingPassing"> };
+/** The figures the data file gives without the scan of its expiry days: what the Analyse window shows before a ticker's first analysis. */
+export type AnalysisFileFigures = Omit<AnalysisFigures, "sameDayCalls" | "size" | "today">;
 
 export interface AnalysisFigureProgress {
   step: AnalysisStep;
@@ -136,12 +230,6 @@ export interface AnalysisFigureProgress {
 
 const addCalendarDays = (dateIso: string, days: number) => new Date(Date.parse(`${dateIso}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 const yearsBefore = (dateIso: string, years: number) => `${Number(dateIso.slice(0, 4)) - years}${dateIso.slice(4)}`;
-
-function nextWeekday(dateIso: string): string {
-  let next = addCalendarDays(dateIso, 1);
-  while ([0, 6].includes(new Date(`${next}T00:00:00Z`).getUTCDay())) next = addCalendarDays(next, 1);
-  return next;
-}
 
 /** The symbol's IBKR daily bars as a session reads them: the file's, else the local DB's. */
 export async function loadDailyBarsOf(symbol: string, connection: Knex): Promise<{ bars: StoredDailyBar[]; source: "file" | "database" | null }> {
@@ -206,15 +294,25 @@ async function loadCalendarEvents(symbol: string, connection: Knex): Promise<{ h
   };
 }
 
-/** What every figure reads: the file's complete days, the daily bars, the split schedule, the T-bill rates, the 10:00 prices and the ticker's calendar. */
+/**
+ * What every figure reads: the file's complete days and its expiry days, the days whose 10:00 quotes are all at zero, the
+ * daily bars, the split schedule, the T-bill rates, the 10:00 prices and the ticker's calendar.
+ */
 async function loadAnalysisInputs(symbol: string, connection: Knex) {
   const dataDirectory = requireBacktestDataDirectory();
   const contents = readBacktestDataFileContents(symbol);
   if (!contents || !contents.firstDate || !contents.lastDate) throw new Error(`The ${symbol} data file has no complete days yet.`);
   const file = BacktestSymbolFile.open(symbol);
   let completeDays: string[];
+  let expiryDays: Set<string>;
+  let daysWithEveryQuoteAtZero = 0;
   try {
     completeDays = file.loadDays().filter((day) => day.status === "complete").map((day) => day.tradingDate);
+    expiryDays = expiryDaysAmong(file, completeDays);
+    for (const date of completeDays) {
+      const quotes = file.loadQuotes(date);
+      if (quotes.length > 0 && quotes.every((quote) => !(quote.ask !== null && quote.ask > 0))) daysWithEveryQuoteAtZero += 1;
+    }
   } finally {
     file.close();
   }
@@ -233,18 +331,61 @@ async function loadAnalysisInputs(symbol: string, connection: Knex) {
   })();
   if (!intradayPrices) throw new Error(`The ${symbol} data file has no IBKR 30-minute bars: the 10:00 prices cannot be read. Its download writes them.`);
   const calendar = await loadCalendarEvents(symbol, connection);
-  return { contents: { ...contents, firstDate: contents.firstDate, lastDate: contents.lastDate }, completeDays, dailyBars, barsSource, ohlcv, closes, schedule, rates, intradayPrices, calendar };
+  return { contents: { ...contents, firstDate: contents.firstDate, lastDate: contents.lastDate }, completeDays, expiryDays, daysWithEveryQuoteAtZero, dailyBars, barsSource, ohlcv, closes, schedule, rates, intradayPrices, calendar };
 }
 
 type AnalysisInputs = Awaited<ReturnType<typeof loadAnalysisInputs>>;
 
-/** Every figure that needs no chain scan; `capByDate`, each scanned day's first-rung cap, gives the option activity's capped Puts (none without a scan). */
-async function fileFiguresOf(symbol: string, values: AnalysisFigureValues, inputs: AnalysisInputs, capByDate: ReadonlyMap<string, number>, connection: Knex): Promise<AnalysisFileFigures> {
-  const { contents, completeDays, barsSource, ohlcv, closes, schedule, intradayPrices, calendar } = inputs;
+/** F1 over the file's complete days. */
+function expiryWeeksOf(completeDays: readonly string[], expiryDays: ReadonlySet<string>): AnalysisExpiryWeeks {
+  const weeks = wholeWeeksBetween(completeDays, expiryDays, completeDays[0]!, completeDays.at(-1)!);
+  const byYear: AnalysisExpiryWeeks["byYear"] = {};
+  for (const [year, count] of expiryWeeksBy(weeks, "year")) byYear[year] = { expiryDays: 0, ...count };
+  for (const date of expiryDays) (byYear[date.slice(0, 4)] ??= { expiryDays: 0, wholeWeeks: 0, weeksWithExpiryDay: 0 }).expiryDays += 1;
+  const steadyWeekliesFrom = steadyWeekliesStartMonth(weeks);
+  const backtestStartDate = (steadyWeekliesFrom === null ? null : completeDays.find((date) => date.startsWith(steadyWeekliesFrom))) ?? completeDays[0]!;
+  return { expiryDays: expiryDays.size, ...countExpiryWeeks(weeks), byYear: Object.fromEntries(Object.entries(byYear).sort(([a], [b]) => a.localeCompare(b))), steadyWeekliesFrom, backtestStartDate };
+}
+
+/** F9 and F7 over every bar, and the profile's other figures (F12–F16). */
+function stockProfileOf(ohlcv: AnalysisInputs["ohlcv"], spyCloses: readonly { tradingDate: string; close: number }[] | null, backtestStartDate: string) {
+  const steps = stepsOfBars(ohlcv);
+  const statistics = stepStatistics(steps);
+  const closes = ohlcv.map((bar) => ({ tradingDate: bar.tradingDate, close: bar.close }));
+  const falls = statistics.median === null ? [] : fallsOfAStep(closes, steps, statistics.median);
+  const lastIndex = ohlcv.length - 1;
+  const lastStep = lastIndex >= 0 ? steps[lastIndex] : null;
+  const indicators = barIndicatorsOf(ohlcv);
+  const lastBar = ohlcv.at(-1);
+  const years = ohlcv.length < 2 ? null : (Date.parse(`${ohlcv.at(-1)!.tradingDate}T00:00:00Z`) - Date.parse(`${ohlcv[0]!.tradingDate}T00:00:00Z`)) / (365.25 * 86_400_000);
+  const profile: AnalysisStockProfile = {
+    steps: { ...statistics, now: lastStep && lastBar ? { ...lastStep, date: lastBar.tradingDate } : null },
+    falls: {
+      count: falls.length,
+      perYear: years ? falls.length / years : null,
+      reachedTwoSteps: falls.filter((fall) => fall.steps >= 2).length,
+      backWithinAYear: falls.filter((fall) => fall.daysBack !== null && fall.daysBack <= 365).length,
+      medianDaysDown: median(falls.map((fall) => fall.daysDown)),
+      medianDaysBack: median(falls.flatMap((fall) => (fall.daysBack === null ? [] : [fall.daysBack]))),
+    },
+    trend: trendSplit(ohlcv.map((bar) => bar.close)),
+    market: spyCloses === null ? null : marketFits(closes, spyCloses, backtestStartDate),
+    gaps: openingGaps(ohlcv),
+    weeklySkew: weeklySkew(closes),
+    ivRange: impliedVolatilityRange(ohlcv),
+    ivNow: lastBar && lastBar.impliedVolatility !== null && lastBar.impliedVolatility > 0 ? { date: lastBar.tradingDate, impliedVolatility: lastBar.impliedVolatility, percentile: indicators.ivPercentile.at(-1)?.[0] ?? null } : null,
+  };
+  const realisedStandIn = steps.map((entry) => (entry?.source === "realised" ? entry.volatility : null));
+  return { falls, profile, realisedStandIn };
+}
+
+/** Every figure that needs no scan of the expiry days. */
+async function fileFiguresOf(symbol: string, inputs: AnalysisInputs, connection: Knex): Promise<AnalysisFileFigures> {
+  const { contents, completeDays, expiryDays, daysWithEveryQuoteAtZero, barsSource, ohlcv, closes, schedule, intradayPrices, calendar } = inputs;
   const activityDatabase = openBacktestDataFileReadOnly(symbol);
   let optionActivity: AnalysisOptionActivity | null = null;
   try {
-    if (activityDatabase) optionActivity = computeOptionActivity(activityDatabase, completeDays.at(-1)!, capByDate);
+    if (activityDatabase) optionActivity = computeOptionActivity(activityDatabase, completeDays.at(-1)!, new Map());
   } finally {
     activityDatabase?.close();
   }
@@ -287,12 +428,11 @@ async function fileFiguresOf(symbol: string, values: AnalysisFigureValues, input
     if (other === "SPY") spySource = loaded.source;
     others[other] = otherCloses;
   }
+  const spyCloses = symbol === "SPY" ? closes : (others.SPY ?? null);
   const reportSessions = reportSessionDates(closes, pastReports.map((event) => event.date));
   const lastClose = closes.at(-1)?.tradingDate ?? null;
-
-  const shockStart = nextWeekday(completeDays.at(-1)!);
-  const shockWindowFrom = yearsBefore(shockStart, values.baseline.ladderShockLookbackYears);
-  const shockWindow = closes.filter((bar) => bar.tradingDate >= shockWindowFrom && bar.tradingDate < shockStart);
+  const expiryWeeks = expiryWeeksOf(completeDays, expiryDays);
+  const { falls, profile, realisedStandIn } = stockProfileOf(ohlcv, spyCloses, expiryWeeks.backtestStartDate);
   const quality = readFileQuality(symbol, contents.firstDate, contents.lastDate);
   const impliedDays = ohlcv.filter((bar) => bar.impliedVolatility !== null);
   const yz = (window: number) => {
@@ -303,24 +443,21 @@ async function fileFiguresOf(symbol: string, values: AnalysisFigureValues, input
   return {
     formulasVersion: analysisFormulasVersion,
     symbol,
+    optionFirstDate: firstOptionDay,
     optionLastDate: completeDays.at(-1)!,
     barsLastDate: lastBarDate,
     bars: ohlcv.map((bar) => [bar.tradingDate, bar.open, bar.high, bar.low, bar.close, bar.impliedVolatility]),
     yangZhang21: yangZhangSeries(ohlcv, 21),
+    realisedStandIn,
     volatility: { impliedNow: ohlcv.at(-1)?.impliedVolatility ?? null, yangZhang21Now: yz(21), yangZhang63Now: yz(63), impliedVersusRealised: impliedVersusRealised(ohlcv) },
     maxDrawdown: maxDrawdownByRange(closes),
-    shock: {
-      startDate: shockStart,
-      windowFrom: shockWindowFrom,
-      closes: shockWindow.length,
-      maxDrawdown: maxDrawdownOf(shockWindow)?.depth ?? null,
-      shock: ladderShock(values.baseline, closes.map((bar) => ({ date: bar.tradingDate, close: bar.close })), shockStart),
-      rule: values.baseline.ladderShock,
-    },
+    expiryWeeks,
+    falls,
+    stockProfile: profile,
+    profile: { all: stockProfile(ohlcv, null, reportSessions), twoYear: lastClose ? stockProfile(ohlcv, yearsBefore(lastClose, 2), reportSessions) : null },
     optionActivity,
     earnings: { ...earnings, exDividendDates: calendar.exDividendDates, hasTickerRow: calendar.hasTickerRow },
     correlation: { rows: correlationRows(closes, others), skipped, spySource },
-    profile: { all: stockProfile(ohlcv, null, reportSessions), twoYear: lastClose ? stockProfile(ohlcv, yearsBefore(lastClose, 2), reportSessions) : null },
     dataQuality: {
       completeDays: contents.completeDays,
       firstDate: contents.firstDate,
@@ -332,6 +469,7 @@ async function fileFiguresOf(symbol: string, values: AnalysisFigureValues, input
       unavailableDays: contents.unavailableDays,
       intradayDays: contents.intradayDays,
       quoteRowsPerDay: quality.quoteRowsPerDay,
+      daysWithEveryQuoteAtZero,
       schemaVersion: quality.schemaVersion,
       maxDte: quality.maxDte,
       barsFetchedAt: quality.barsFetchedAt,
@@ -345,13 +483,101 @@ async function fileFiguresOf(symbol: string, values: AnalysisFigureValues, input
   };
 }
 
-/** The figures the data file gives without an analysis (no chain scan, no backtest): the Analyse window before a ticker's first analysis. Reads the files read-only. */
-export async function computeAnalysisFileFigures(input: { symbol: string; values: AnalysisFigureValues; connection?: Knex }): Promise<AnalysisFileFigures> {
-  const connection = input.connection ?? db;
-  return fileFiguresOf(input.symbol, input.values, await loadAnalysisInputs(input.symbol, connection), new Map(), connection);
+/** F5 by year and F4 over the last 12 months, from the scan's rows. */
+function sameDayCallsOf(rows: readonly SameDayCallDay[], lastDate: string, scanSeconds: number, firstPositionShare: number): AnalysisSameDayCalls {
+  const priced = rows.filter((row) => row.spot !== null);
+  const byYear: AnalysisSameDayCalls["byYear"] = {};
+  for (const row of rows) {
+    const entry = (byYear[row.date.slice(0, 4)] ??= { expiryDays: 0, daysWithCall: 0 });
+    entry.expiryDays += 1;
+    if (row.best !== null) entry.daysWithCall += 1;
+  }
+  const fromDate = sameDayMonthsBefore(lastDate, 12);
+  const lastYear = rows.filter((row) => row.date > fromDate);
+  const dayPots = lastYear.flatMap((row) => (row.spot === null ? [] : [largestPotOfDay(row.mostLotsByVolume, row.spot, firstPositionShare)]));
+  return {
+    expiryDays: rows.length,
+    daysWithCall: rows.filter((row) => row.best !== null).length,
+    byYear,
+    daysWithoutPrice: rows.length - priced.length,
+    daysWithNoCall: priced.filter((row) => row.best === null).map((row) => row.date),
+    lastTwelveMonths: { fromDate, expiryDays: lastYear.length, daysWithCall: lastYear.filter((row) => row.best !== null).length, largestPotDollars: potFittingDayShare(dayPots) },
+    scanSeconds,
+  };
 }
 
-/** Every figure but the analysis backtest's. Reads the files read-only; `onProgress` reports each step and the chain scan's days. */
+/** F2–F4 over the last 12 months of complete days. */
+function sizeOf(inputs: AnalysisInputs, values: AnalysisFigureValues, sameDayCalls: AnalysisSameDayCalls): AnalysisSize {
+  const toDate = inputs.completeDays.at(-1)!;
+  const fromDate = sameDayMonthsBefore(toDate, 12);
+  const prices = inputs.completeDays.filter((date) => date > fromDate).flatMap((date) => {
+    const price = tenOclockPriceAsTraded(date, inputs.intradayPrices, inputs.schedule);
+    return price === null ? [] : [{ date, price }];
+  });
+  const highest = prices.reduce<{ date: string; price: number } | null>((top, entry) => (top === null || entry.price > top.price ? entry : top), null);
+  const smallest = highest === null ? null : smallestPotFor(highest.price, values.firstPositionShare, values.potShareOfAccount);
+  return {
+    fromDate,
+    toDate,
+    highestPriceAsTraded: highest?.price ?? null,
+    highestOn: highest?.date ?? null,
+    smallestPotDollars: smallest?.potDollars ?? null,
+    smallestAccountDollars: smallest?.accountDollars ?? null,
+    accountDollars: values.accountDollars,
+    potDollars: values.potDollars,
+    targetReached: targetReachedOverDays(values.potDollars, prices.map((entry) => entry.price), values.firstPositionShare),
+    largestPotByCallVolume: { potDollars: sameDayCalls.lastTwelveMonths.largestPotDollars, expiryDays: sameDayCalls.lastTwelveMonths.expiryDays },
+  };
+}
+
+/** F10: the last day's look replayed as v4 opens a cycle: the lots, the Call, B-E1, the band, and the Put level a Step under B-E1. */
+function todayOf(inputs: AnalysisInputs, values: AnalysisFigureValues, lastDayRow: SameDayCallDay | null): AnalysisToday {
+  const date = inputs.completeDays.at(-1)!;
+  const price = tenOclockPriceAsTraded(date, inputs.intradayPrices, inputs.schedule);
+  const isExpiryDay = inputs.expiryDays.has(date);
+  const call = isExpiryDay && lastDayRow?.date === date ? lastDayRow.best : null;
+  const reached = price === null ? null : targetReachedAt(values.potDollars, price, values.firstPositionShare);
+  const lots = reached?.lots ?? 0;
+  const shares = lots * sharesPerLot;
+  let firstBreakEven: number | null = null;
+  if (price !== null && lots > 0) {
+    const costPerShare = price + stockCommissionDollars(shares) / shares;
+    const premiums = call === null ? [] : [{ legId: "today", dollars: volFarmerV2CallPremiumShare(call.fillPrice, lots, lots, optionCommissionDollars(lots)), shares }];
+    firstBreakEven = volFarmerV2BreakEven({ shares, costPerShare, premiums });
+  }
+  // The engine's Step at a look: the previous session's IV (the bar before the last day's).
+  const previousBar = [...inputs.ohlcv].reverse().find((bar) => bar.tradingDate < date) ?? null;
+  const previousIv = previousBar && previousBar.impliedVolatility !== null && previousBar.impliedVolatility > 0 ? previousBar.impliedVolatility : null;
+  const step = previousIv === null || previousBar === null ? null : { ...volFarmerV2ImpliedMoveStep(previousIv), impliedVolatility: previousIv, ivDate: previousBar.tradingDate };
+  const putsStartCallYieldPct = values.v4.putsStartCallYieldPct;
+  const band = price === null ? null : bandAt(values.potDollars, price, values.firstPositionShare, values.v4.rebalanceBandPct);
+  return {
+    date,
+    isExpiryDay,
+    priceAsTraded: price,
+    accountDollars: values.accountDollars,
+    potDollars: values.potDollars,
+    lots,
+    sharesDollars: reached?.sharesDollars ?? 0,
+    targetDollars: reached?.targetDollars ?? values.potDollars * values.firstPositionShare,
+    shareOfTarget: reached?.shareOfTarget ?? null,
+    call,
+    firstBreakEven,
+    band: band && { floorDollars: band.floorDollars, topDollars: band.topDollars, oneMoreLotDollars: band.oneMoreLotDollars },
+    putsNow: isExpiryDay && (call?.premiumYield ?? 0) < putsStartCallYieldPct / 100,
+    putsStartCallYieldPct,
+    step: step && { stepPct: step.stepPct, impliedVolatility: step.impliedVolatility, ivDate: step.ivDate },
+    putStrikeCap: step === null || firstBreakEven === null ? null : volFarmerV2PutStrikeCap(firstBreakEven, step.stepPct),
+  };
+}
+
+/** The figures the data file gives without an analysis (no scan, no backtest): the Analyse window before a ticker's first analysis. Reads the files read-only. */
+export async function computeAnalysisFileFigures(input: { symbol: string; connection?: Knex }): Promise<AnalysisFileFigures> {
+  const connection = input.connection ?? db;
+  return fileFiguresOf(input.symbol, await loadAnalysisInputs(input.symbol, connection), connection);
+}
+
+/** Every figure but the analysis backtest's. Reads the files read-only; `onProgress` reports each step and the scan's days. */
 export async function computeAnalysisFigures(input: { symbol: string; values: AnalysisFigureValues; onProgress?: (progress: AnalysisFigureProgress) => void; connection?: Knex }): Promise<AnalysisFigures> {
   const { symbol, values } = input;
   const connection = input.connection ?? db;
@@ -359,41 +585,24 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
 
   report("bars");
   const inputs = await loadAnalysisInputs(symbol, connection);
-  const { completeDays, intradayPrices, schedule, rates, dailyBars, calendar } = inputs;
-  const skipsEarnings = values.baseline.earnings === "skip_spanning" && calendar.calendarChecksApply;
+  const { completeDays, expiryDays, intradayPrices, schedule, rates } = inputs;
+  const scannedDays = completeDays.filter((date) => expiryDays.has(date));
 
-  report("chains", 0, completeDays.length);
-  const days = buildChainScanDayInputs({ completeDays, intradayPrices, schedule, rates, dailyBars, shockSettings: values.baseline, earnings: skipsEarnings ? calendar.earnings.map((event) => ({ dateIso: event.date, eventTime: event.eventTime })) : null });
+  report("calls", 0, scannedDays.length);
   // The sessions its premium yields count (tradingSessionsHeld.ts): the file's complete days, then the market calendar for the 45 days after them.
   const afterLastDay = addCalendarDays(completeDays.at(-1)!, 1);
   const openDays = [...completeDays, ...openDaysFromCalendarRows(afterLastDay, addCalendarDays(afterLastDay, 44), await loadMarketCalendarRowsFrom(afterLastDay, connection))];
   const scanStarted = Date.now();
-  const { rows, chainMap } = await scanChainDaysInParallel({
+  const rows = await scanSameDayCallsInParallel({
     filePath: backtestDataFilePath(symbol),
-    days,
-    settings: { ...values.baseline, spreadShareCharged: values.spreadShareCharged },
+    days: buildSameDayCallScanDays({ completeDays, scannedDays, intradayPrices, schedule, rates }),
+    settings: { callMinAbsDelta: values.v4.callMinAbsDelta, callMaxAbsDelta: values.v4.callMaxAbsDelta, maxSpreadPctOfMid: values.v4.maxSpreadPctOfMid, spreadShareCharged: values.spreadShareCharged },
     openDays,
-    chainMapDate: completeDays.at(-1)!,
-    onChunkDone: (daysDone) => report("chains", daysDone, completeDays.length),
+    onChunkDone: (daysDone) => report("calls", daysDone, scannedDays.length),
   });
-  const scanSeconds = (Date.now() - scanStarted) / 1000;
-  const capByDate = new Map(rows.flatMap((row) => (row.cap === null ? [] : [[row.date, row.cap] as [string, number]])));
-  const summary = summarizeChainScan(rows);
-  const last = rows.at(-1) ?? null;
-  const passing = (row: ChainScanDayRow, view: "C" | "P" | "Pcap") => Object.values(row.cells[view]).reduce((sum, cell) => sum + (cell?.count ?? 0), 0);
+  const sameDayCalls = sameDayCallsOf(rows, completeDays.at(-1)!, (Date.now() - scanStarted) / 1000, values.firstPositionShare);
 
   report("earnings_correlation");
-  const fileFigures = await fileFiguresOf(symbol, values, inputs, capByDate, connection);
-  return {
-    ...fileFigures,
-    chains: {
-      ...summary,
-      lastDay: last && { date: last.date, spot: last.spot, shock: last.shock, cap: last.cap, bestCappedPut: last.bestCappedPut, bestEntryCall: last.bestEntryCall, passingCalls: passing(last, "C"), passingPuts: passing(last, "P"), passingCappedPuts: passing(last, "Pcap") },
-      chainMap,
-      scanSeconds,
-    },
-    fitDays: rows.filter((row) => row.spot !== null).map((row): AnalysisFitDayRow => [row.date, row.spot!, row.shock, row.largestPotPut?.volumeCap ?? null, row.largestPotPut?.strike ?? null, row.largestPotCall?.volumeCap ?? null, row.largestPotPut?.previousVolume ?? null]),
-    largestPotWithoutModel: values.baseline.volatilityEdgeFilter !== "off" || values.baseline.ranking === "edge_yield",
-    dataQuality: { ...fileFigures.dataQuality, scannedDays: rows.length - summary.daysWithoutPrice, daysWithoutPrice: summary.daysWithoutPrice, daysWithNothingPassing: summary.daysWithNothingPassing },
-  };
+  const fileFigures = await fileFiguresOf(symbol, inputs, connection);
+  return { ...fileFigures, sameDayCalls, size: sizeOf(inputs, values, sameDayCalls), today: todayOf(inputs, values, rows.at(-1) ?? null) };
 }

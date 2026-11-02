@@ -41,7 +41,7 @@ import type {
 import { ladderRungReached } from "../engine/backtestBaselineLadder.js";
 import { hedgePutCostYield, hedgePutCostYieldOnCalendarDays } from "../engine/baselineSaleSteps.js";
 import { optionCommissionDollars } from "../engine/ledger/ledgerFills.js";
-import { loadLadderRungs } from "../analysis/analysisBacktest.js";
+import { loadLadderRungs } from "../analysis/sessionLadderFigures.js";
 import { loadSessionFreeCash } from "../analysis/sessionFreeCash.js";
 import { backtestCaptureLookTimeEt, backtestEngineVersion, runsVolFarmerV2Steps } from "../backtestTypes.js";
 import { computeCycleAccuracyBands, computeDaysWithNoOptions, computeDrawdowns, computeMonthlyReturns, computePnlSources, computeTradeAccuracyBands, cycleFiguresOf, type ClosedTradeFigures } from "../sessionAnalytics.js";

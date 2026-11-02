@@ -6,18 +6,19 @@ import { BacktestRequestError } from "../backtest/jobs/backtestJobStore.js";
 import { listAnalysisSessions } from "../backtest/analysis/analysisSessions.js";
 import {
   cancelTickerAnalysis,
+  loadAnalysesForTable,
   loadAnalysisFileFigures,
-  loadAnalysisStatusBySymbol,
   loadTickerAnalysisRun,
   loadTickerAnalysisView,
   listTickerAnalysisRuns,
+  rerunOutOfDateAnalyses,
   startTickerAnalysis,
   validateAnalysisTrialValues,
 } from "../backtest/analysis/analysisStore.js";
 
 // The Analyse window's routes (under /backtest): the stored analysis, the data file's figures before a first analysis,
-// starting one (Update Analysis, or Run with these values when the body has values), cancelling it, its history, the
-// ticker's backtests, and fetching its earnings.
+// starting one (Re-run analysis, or Run a trial when the body has a starting account), cancelling it, its history, the
+// ticker's backtests, fetching its earnings, and the Data files table's Re-run out of date.
 
 const symbolParameter = (raw: unknown): string => {
   try {
@@ -30,9 +31,14 @@ const symbolParameter = (raw: unknown): string => {
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function registerTickerAnalysisRoutes(router: Router): void {
-  // Each data file's latest saved analysis: the Data files table's Analyse column.
+  // Each data file's latest saved analysis, its Vol Farmer v4 figures and whether it is out of date: the Data files table's columns.
   router.get("/analyses", async (_request, response) => {
-    response.json(Object.fromEntries(await loadAnalysisStatusBySymbol()));
+    response.json(await loadAnalysesForTable());
+  });
+
+  // Starts a saved analysis of every ticker whose stored one is out of date.
+  router.post("/analyses/rerun-out-of-date", async (_request, response) => {
+    response.status(202).json(await rerunOutOfDateAnalyses());
   });
 
   router.get("/analyses/runs/:id", async (request, response) => {
@@ -62,7 +68,7 @@ export function registerTickerAnalysisRoutes(router: Router): void {
     response.json(await listAnalysisSessions(symbolParameter(request.params.symbol)));
   });
 
-  // Body: {} for Update Analysis; { values: { … } } for Run with these values (nothing saved).
+  // Body: {} for Re-run analysis; { values: { accountDollars } } for Run a trial (nothing saved as the ticker's analysis).
   router.post("/analyses/:symbol", async (request, response) => {
     const symbol = symbolParameter(request.params.symbol);
     const body = (request.body ?? {}) as { values?: unknown };

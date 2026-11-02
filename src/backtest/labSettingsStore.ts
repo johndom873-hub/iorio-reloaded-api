@@ -104,7 +104,7 @@ export async function loadBacktestLabSettings(connection: Knex = db): Promise<Ba
  * steadyStake, volFarmer, volFarmerV2, volFarmerV3, volFarmerV4), checked as a session's overrides are, and `defaultPotDollars`. One audit row per
  * value that changed; an empty list when nothing did.
  */
-/** Saves the global lab values; `dryRun` validates and answers the changes without writing (the save's confirmation). */
+/** Saves the global lab values; `dryRun` validates and answers the changes and the values the save would leave, without writing (the save's confirmation). */
 export async function updateBacktestLabSettings(input: { overrides?: unknown; defaultPotDollars?: unknown }, userId: string | null, connection: Knex = db, options: { dryRun?: boolean } = {}): Promise<{ lab: BacktestLabSettings; changes: BacktestLabChange[]; auditIds: number[] }> {
   return connection.transaction(async (trx) => {
     const current = await loadBacktestLabSettings(trx);
@@ -124,7 +124,8 @@ export async function updateBacktestLabSettings(input: { overrides?: unknown; de
       if (String(before) !== String(after)) changes.push({ field: path, oldValue: String(before), newValue: String(after) });
     }
     if (defaultPotDollars !== current.defaultPotDollars) changes.push({ field: "lab.defaultPotDollars", oldValue: String(current.defaultPotDollars), newValue: String(defaultPotDollars) });
-    if (changes.length === 0 || options.dryRun) return { lab: current, changes, auditIds: [] };
+    if (changes.length === 0) return { lab: current, changes, auditIds: [] };
+    if (options.dryRun) return { lab: { ...current, settings: next, defaultPotDollars }, changes, auditIds: [] };
     await trx("backtest_lab_settings").where({ id: 1 }).update({ settings: JSON.stringify(next), default_pot_dollars: defaultPotDollars, updated_at: trx.fn.now(), updated_by_user_id: userId });
     const inserted: { id: number | string }[] = await trx("backtest_lab_settings_audit")
       .insert(changes.map((change) => ({ user_id: userId, symbol: null, field: change.field, old_value: change.oldValue, new_value: change.newValue })))
@@ -251,30 +252,6 @@ export async function noteLabAuditAnalysesRerun(auditIds: readonly number[], cou
   if (auditIds.length > 0) await connection("backtest_lab_settings_audit").whereIn("id", auditIds).update({ analyses_rerun: count });
 }
 
-/**
- * The global values each ticker field stands in for: a ticker with its own value is not affected by a change to these.
- * A fixed shock replaces the whole shock rule.
- */
-const globalPathsByTickerField: Record<BacktestLabTickerField, readonly string[]> = {
-  potDollars: ["lab.defaultPotDollars"],
-  ladderSharesPct: ["baseline.ladderSharesPct"],
-  ladderRungs: ["baseline.ladderRungs"],
-  ladderShockPct: ["baseline.ladderShock", "baseline.ladderShockPct", "baseline.ladderShockMinPct", "baseline.ladderShockMaxPct", "baseline.ladderShockNoHistoryPct", "baseline.ladderShockLookbackYears"],
-  minAbsDelta: ["baseline.minAbsDelta"],
-  maxAbsDelta: ["baseline.maxAbsDelta"],
-};
-
-/** Whether a ticker's own values replace this global value (it keeps its override when the value changes). */
-export function tickerOverridesGlobalPath(path: string, overrides: Pick<BacktestLabTickerOverrides, BacktestLabTickerField> | null): boolean {
-  return overrides !== null && tickerFields.some((field) => overrides[field] !== null && globalPathsByTickerField[field].includes(path));
-}
-
-/** The global values a ticker's analysis reads: it runs the CC + Put Ladder whatever the lab's decision maker. */
+/** The global values a ticker's analysis reads: it runs Vol Farmer v4 whatever the lab's decision maker (Marcelo 2026-11-01). */
 const analysisReadPaths: ReadonlySet<string> = new Set(["lab.defaultPotDollars", "trading.spreadCostChargedPct", "pluto.windowStartEt", "pluto.windowEndEt"]);
-export const analysisReadsLabPath = (path: string) => path.startsWith("baseline.") || path.startsWith("model.") || analysisReadPaths.has(path);
-
-/** Whether a change to these global values reaches a ticker's analysis: some changed value it reads and its own values don't replace. */
-export function globalChangeReachesTicker(changedFields: readonly string[], overrides: Pick<BacktestLabTickerOverrides, BacktestLabTickerField> | null): boolean {
-  const covered = new Set(overrides ? tickerFields.filter((field) => overrides[field] !== null).flatMap((field) => globalPathsByTickerField[field]) : []);
-  return changedFields.some((field) => analysisReadsLabPath(field) && !covered.has(field));
-}
+export const analysisReadsLabPath = (path: string) => path.startsWith("volFarmerV4.") || analysisReadPaths.has(path);

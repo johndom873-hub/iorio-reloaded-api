@@ -11,10 +11,10 @@ import type { AnalysisFileFigures } from "../backtest/analysis/analysisFigures.j
 import { treasuryBillCachePath, treasuryBillSeriesId, type TreasuryBillCache } from "../backtest/engine/treasuryBillRates.js";
 import type { AnalysisRunView, TickerAnalysisView } from "../backtest/analysis/analysisStore.js";
 
-// The Analyse window's routes on the real backtest router against the test database: starting an analysis (Update
-// Analysis and Run with these values) stores its row and claims its job, the refusals, the window's view and history,
-// the data file's figures before a first analysis, cancelling, and a ticker's lab save re-running its analysis. The job
-// process itself is not started (spawn mocked).
+// The Analyse window's routes on the real backtest router against the test database: starting an analysis (Re-run
+// analysis and Run a trial) stores its row and claims its job, the refusals, the window's view and history, the data
+// file's figures before a first analysis, cancelling, the Data files table's figures, and a lab save marking analyses out
+// of date for Re-run out of date. The job process itself is not started (spawn mocked).
 const dataDirectory = mkdtempSync(path.join(os.tmpdir(), "backtest-analysis-route-test-"));
 process.env.BACKTEST_DATA_DIR = dataDirectory;
 
@@ -99,21 +99,24 @@ describe("analysis routes", () => {
   it("starts with no analysis", async () => {
     const view = await call<TickerAnalysisView>("GET", `/analyses/${symbol}`);
     expect(view.status).toBe(200);
-    expect(view.body).toMatchObject({ symbol, stored: null, trial: null, active: [], latestProblem: null, fileLastDate: "2026-03-04" });
+    expect(view.body).toMatchObject({ symbol, stored: null, trial: null, active: [], latestProblem: null, outOfDate: false, fileLastDate: "2026-03-04" });
     expect(view.body.currentHash).toMatch(/^[0-9a-f]{32}$/);
+    expect(Date.parse(view.body.labSavedAt)).not.toBeNaN();
     expect(view.body).toMatchObject({ profile: null, suitability: null });
   });
 
-  it("gives the data file's figures before any analysis, without the chain scan's, storing nothing; refuses a ticker without a file", async () => {
+  it("gives the data file's figures before any analysis, without the expiry days' scan, storing nothing; refuses a ticker without a file", async () => {
     const figures = await call<AnalysisFileFigures>("GET", `/analyses/${symbol}/file-figures`);
     expect(figures.status).toBe(200);
-    expect(figures.body).toMatchObject({ symbol, optionLastDate: "2026-03-04", barsLastDate: "2026-03-04" });
+    expect(figures.body).toMatchObject({ symbol, optionFirstDate: "2026-03-02", optionLastDate: "2026-03-04", barsLastDate: "2026-03-04" });
     expect(figures.body.bars.map(([date]) => date)).toEqual(["2026-03-02", "2026-03-03", "2026-03-04"]);
     // One per bar; three bars are too few for any of them.
     expect(figures.body.barIndicators).toEqual({ ivPercentile: [null, null, null] });
-    expect(figures.body.dataQuality).toMatchObject({ completeDays: 3, firstDate: "2026-03-02", lastDate: "2026-03-04" });
-    for (const scanField of ["chains", "fitDays", "largestPotWithoutModel"]) expect(figures.body).not.toHaveProperty(scanField);
-    for (const scanField of ["scannedDays", "daysWithoutPrice", "daysWithNothingPassing"]) expect(figures.body.dataQuality).not.toHaveProperty(scanField);
+    expect(figures.body.dataQuality).toMatchObject({ completeDays: 3, firstDate: "2026-03-02", lastDate: "2026-03-04", daysWithEveryQuoteAtZero: 0 });
+    // The file's only Calls expire on 20 Mar: no expiry day, and Mon 2 to Wed 4 Mar holds no whole week.
+    expect(figures.body.expiryWeeks).toEqual({ expiryDays: 0, wholeWeeks: 0, weeksWithExpiryDay: 0, byYear: {}, steadyWeekliesFrom: null, backtestStartDate: "2026-03-02" });
+    expect(figures.body.falls).toEqual([]);
+    for (const scanField of ["sameDayCalls", "size", "today"]) expect(figures.body).not.toHaveProperty(scanField);
     expect(await testDb("backtest_ticker_analyses").where({ symbol }).first()).toBeUndefined();
     expect(await testDb("backtest_jobs").where({ symbol }).first()).toBeUndefined();
 
@@ -132,33 +135,39 @@ describe("analysis routes", () => {
     await testDb("backtest_ticker_suitability").where({ symbol }).delete();
   });
 
-  it("Update Analysis stores the analysis with the ticker's lab values and claims an analysis job", async () => {
+  it("Re-run analysis stores the analysis with the lab's v4 values and default account, and claims an analysis job", async () => {
     const started = await call<AnalysisRunView>("POST", `/analyses/${symbol}`, {});
     expect(started.status).toBe(202);
     savedRunId = started.body.id;
-    expect(started.body).toMatchObject({ symbol, reason: "manual", status: "running", sessionId: null, summaryStatus: "pending" });
+    expect(started.body).toMatchObject({ symbol, reason: "manual", status: "running", sessionId: null, formulasVersion: 8 });
     const view = await call<TickerAnalysisView>("GET", `/analyses/${symbol}`);
     expect(started.body.labValuesHash).toBe(view.body.currentHash);
-    expect(started.body.labValues.trial).toBeNull();
-    expect(started.body.labValues.effective.potDollars).toBe(started.body.labValues.tickerOverrides?.potDollars ?? started.body.labValues.defaultPotDollars);
+    const { trial, defaultPotDollars, effective } = started.body.labValues;
+    expect(trial).toBeNull();
+    // The account is the lab's default; with one ticker the pot is the account × (1 + the excess allowance).
+    expect(effective.accountDollars).toBe(defaultPotDollars);
+    expect(effective.potShareOfAccount).toBeCloseTo(1 + effective.v4.excessAllowancePct / 100, 12);
+    expect(effective.potDollars).toBeCloseTo(effective.accountDollars * effective.potShareOfAccount, 6);
+    expect(effective.firstPositionShare).toBeCloseTo(effective.v4.firstPositionPct / 100, 12);
+    expect((await testDb("backtest_ticker_analyses").where({ id: savedRunId }).first("summary_status")).summary_status).toBe("skipped");
 
     const job = await testDb("backtest_jobs").where({ id: started.body.jobId }).first("kind", "symbol", "status", "pid");
     expect(job).toEqual({ kind: "analysis", symbol, status: "running", pid: 424_243 });
     expect(spawnBacktestJobProcessMock).toHaveBeenCalledWith(started.body.jobId);
   });
 
-  it("refuses a second Update while one runs, a bad trial, and a ticker without a file or with a download running", async () => {
+  it("refuses a second Re-run while one runs, a bad trial, and a ticker without a file or with a download running", async () => {
     expect((await call<{ error: string }>("POST", `/analyses/${symbol}`, {})).body.error).toMatch(/already running/);
-    const unknown = await call<{ error: string }>("POST", `/analyses/${symbol}`, { values: { minimumBid: 0.1 } });
+    const unknown = await call<{ error: string }>("POST", `/analyses/${symbol}`, { values: { accountDollars: 50_000, ladderRungs: 4 } });
     expect(unknown.status).toBe(400);
-    const inverted = await call<{ error: string }>("POST", `/analyses/${symbol}`, { values: { minAbsDelta: 0.5, maxAbsDelta: 0.3 } });
-    expect(inverted.status).toBe(400);
-    expect(inverted.body.error).toMatch(/minAbsDelta/);
+    expect(unknown.body.error).toMatch(/not a value/);
+    const negative = await call<{ error: string }>("POST", `/analyses/${symbol}`, { values: { accountDollars: -5 } });
+    expect(negative.status).toBe(400);
     expect((await call("POST", `/analyses/${symbolWithoutFile}`, {})).status).toBe(404);
 
     const [download] = await testDb("backtest_jobs").insert({ kind: "download", symbol, start_date: "2026-03-01", end_date: "2026-03-31", status: "queued" }).returning("id");
     try {
-      const refused = await call<{ error: string }>("POST", `/analyses/${symbol}`, { values: { ladderRungs: 4 } });
+      const refused = await call<{ error: string }>("POST", `/analyses/${symbol}`, { values: { accountDollars: 50_000 } });
       expect(refused.status).toBe(409);
       expect(refused.body.error).toMatch(/download is running/);
     } finally {
@@ -167,13 +176,14 @@ describe("analysis routes", () => {
     expect(spawnBacktestJobProcessMock).not.toHaveBeenCalled();
   });
 
-  it("Run with these values runs beside a saved analysis, with the trial's values on top of the ticker's", async () => {
-    const trial = await call<AnalysisRunView>("POST", `/analyses/${symbol}`, { values: { potDollars: 50_000, ladderSharesPct: 30, ladderShockPct: 75 } });
+  it("Run a trial runs beside a saved analysis, at its own starting account", async () => {
+    const trial = await call<AnalysisRunView>("POST", `/analyses/${symbol}`, { values: { accountDollars: 500_000 } });
     expect(trial.status).toBe(202);
     trialRunId = trial.body.id;
     expect(trial.body.reason).toBe("trial");
-    expect(trial.body.labValues.trial).toEqual({ potDollars: 50_000, ladderSharesPct: 30, ladderShockPct: 75 });
-    expect(trial.body.labValues.effective).toMatchObject({ potDollars: 50_000, baseline: { ladderSharesPct: 30, ladderShock: "fixed", ladderShockPct: 75 } });
+    expect(trial.body.labValues.trial).toEqual({ accountDollars: 500_000 });
+    expect(trial.body.labValues.effective.accountDollars).toBe(500_000);
+    expect(trial.body.labValues.effective.potDollars).toBeCloseTo(500_000 * trial.body.labValues.effective.potShareOfAccount, 6);
 
     const view = await call<TickerAnalysisView>("GET", `/analyses/${symbol}`);
     expect(view.body.active.map((run) => run.reason).sort()).toEqual(["manual", "trial"]);
@@ -181,12 +191,13 @@ describe("analysis routes", () => {
     expect(runs.body.map((run) => run.id)).toEqual([trialRunId, savedRunId]);
   });
 
-  it("the window opens the latest succeeded saved analysis with its figures, and a newer succeeded trial", async () => {
-    await testDb("backtest_ticker_analyses").where({ id: savedRunId }).update({ status: "succeeded", figures: JSON.stringify({ symbol, marker: "saved" }), summary_status: "written", summary: JSON.stringify({ headline: "Saved." }), option_last_date: "2026-03-04", finished_at: testDb.fn.now() });
+  it("the window opens the latest succeeded saved analysis with its figures and a newer succeeded trial; the table gets its figures", async () => {
+    const tableFigures = { verdict: "suits", failedChecks: [], uncoveredWindows: [], optionsIncomeTwelveMonths: 0.878, v4Cagr: 0.497, holdCagr: 0.437, v4ExcessCalmar: 0.78, holdExcessCalmar: 0.62, smallestPotDollars: 80_351 };
+    await testDb("backtest_ticker_analyses").where({ id: savedRunId }).update({ status: "succeeded", figures: JSON.stringify({ symbol, marker: "saved" }), table_figures: JSON.stringify(tableFigures), option_last_date: "2026-03-04", finished_at: testDb.fn.now() });
     await testDb("backtest_jobs").where({ symbol, kind: "analysis" }).whereIn("id", testDb("backtest_ticker_analyses").where({ id: savedRunId }).select("job_id")).update({ status: "succeeded", finished_at: testDb.fn.now() });
     let view = await call<TickerAnalysisView>("GET", `/analyses/${symbol}`);
-    expect(view.body.stored).toMatchObject({ id: savedRunId, status: "succeeded", figures: { marker: "saved" }, summary: { headline: "Saved." }, optionLastDate: "2026-03-04" });
-    expect(view.body.trial).toBeNull();
+    expect(view.body.stored).toMatchObject({ id: savedRunId, status: "succeeded", figures: { marker: "saved" }, optionLastDate: "2026-03-04" });
+    expect(view.body).toMatchObject({ trial: null, outOfDate: false });
 
     // Stored figures with bars gain the price chart's indicators as they are read, one per bar.
     await testDb("backtest_ticker_analyses").where({ id: trialRunId }).update({ status: "succeeded", figures: JSON.stringify({ symbol, marker: "trial", bars: [["2026-03-04", 10, 11, 9, 10.5, 0.4]] }), finished_at: testDb.fn.now() });
@@ -194,8 +205,9 @@ describe("analysis routes", () => {
     expect(view.body.trial).toMatchObject({ id: trialRunId, figures: { marker: "trial", barIndicators: { ivPercentile: [null] } } });
     expect(view.body.active).toEqual([]);
 
-    const statuses = await call<Record<string, { status: string; optionLastDate: string | null }>>("GET", "/analyses");
-    expect(statuses.body[symbol]).toMatchObject({ status: "succeeded", optionLastDate: "2026-03-04" });
+    const table = await call<{ labSavedAt: string; outOfDate: string[]; bySymbol: Record<string, unknown> }>("GET", "/analyses");
+    expect(table.body.bySymbol[symbol]).toMatchObject({ status: "succeeded", optionLastDate: "2026-03-04", formulasVersion: 8, outOfDate: false, tableFigures });
+    expect(table.body.outOfDate).not.toContain(symbol);
   });
 
   it("cancels a running analysis, refuses to cancel a finished one, and never resumes an analysis job", async () => {
@@ -214,20 +226,37 @@ describe("analysis routes", () => {
     expect((await call<AnalysisRunView>("GET", `/analyses/runs/${started.body.id}`)).body.status).toBe("cancelled");
   });
 
-  it("a ticker's lab save re-runs its analysis, replacing a saved one still running", async () => {
-    const running = await call<AnalysisRunView>("POST", `/analyses/${symbol}`, {});
-    expect(running.status).toBe(202);
-    const saved = await call<{ changes: unknown[]; analyses: { started: string[]; skipped: unknown[] } }>("PUT", `/lab-ticker-overrides/${symbol}`, { potDollars: 90_000 });
-    expect(saved.status).toBe(200);
-    expect(saved.body.analyses).toEqual({ started: [symbol], skipped: [] });
-    expect((await testDb("backtest_jobs").where({ id: running.body.jobId }).first("cancel_requested")).cancel_requested).toBe(true);
+  it("a lab save marks the analyses out of date instead of re-running them; Re-run out of date runs them", async () => {
+    // A ticker's own (CC + Put Ladder) values: the analysis doesn't read them, so nothing runs.
+    const tickerSave = await call<{ changes: unknown[] }>("PUT", `/lab-ticker-overrides/${symbol}`, { potDollars: 90_000 });
+    expect(tickerSave.status).toBe(200);
+    expect(tickerSave.body).not.toHaveProperty("analyses");
+    // The save's confirmation names the analysed tickers a v4 value would put out of date (a dry run).
+    const preview = await call<{ changes: { field: string; outOfDate: string[] }[]; outOfDate: string[] }>("POST", "/lab-settings/preview", { overrides: { volFarmerV4: { callMaxAbsDelta: 0.45 } } });
+    expect(preview.status).toBe(200);
+    expect(preview.body.outOfDate).toContain(symbol);
+    expect(preview.body.changes.find((change) => change.field === "volFarmerV4.callMaxAbsDelta")!.outOfDate).toContain(symbol);
+    // A save back to the values an analysis ran with leaves it up to date: with it run at 0.45, 0.45 marks nothing.
+    const ranWith = await testDb("backtest_ticker_analyses").where({ id: savedRunId }).first("lab_values");
+    const ranAt045 = { ...ranWith.lab_values, settings: { ...ranWith.lab_values.settings, volFarmerV4: { ...ranWith.lab_values.settings.volFarmerV4, callMaxAbsDelta: 0.45 } } };
+    await testDb("backtest_ticker_analyses").where({ id: savedRunId }).update({ lab_values: JSON.stringify(ranAt045) });
+    const backToIt = await call<{ changes: { field: string; outOfDate: string[] }[]; outOfDate: string[] }>("POST", "/lab-settings/preview", { overrides: { volFarmerV4: { callMaxAbsDelta: 0.45 } } });
+    expect(backToIt.body.outOfDate).not.toContain(symbol);
+    expect(backToIt.body.changes.find((change) => change.field === "volFarmerV4.callMaxAbsDelta")!.outOfDate).not.toContain(symbol);
+    await testDb("backtest_ticker_analyses").where({ id: savedRunId }).update({ lab_values: JSON.stringify(ranWith.lab_values) });
 
+    // The stored analysis computed with other values (the lab's default account then) is out of date.
+    const stored = await testDb("backtest_ticker_analyses").where({ id: savedRunId }).first("lab_values");
+    await testDb("backtest_ticker_analyses").where({ id: savedRunId }).update({ lab_values: JSON.stringify({ ...stored.lab_values, defaultPotDollars: stored.lab_values.defaultPotDollars + 1 }) });
+    expect((await call<TickerAnalysisView>("GET", `/analyses/${symbol}`)).body.outOfDate).toBe(true);
+    const table = await call<{ outOfDate: string[]; bySymbol: Record<string, { outOfDate: boolean }> }>("GET", "/analyses");
+    expect(table.body.bySymbol[symbol]!.outOfDate).toBe(true);
+    expect(table.body.outOfDate).toContain(symbol);
+
+    const rerun = await call<{ started: string[]; skipped: { symbol: string }[] }>("POST", "/analyses/rerun-out-of-date");
+    expect(rerun.status).toBe(202);
+    expect(rerun.body.started).toContain(symbol);
     const runs = await call<AnalysisRunView[]>("GET", `/analyses/${symbol}/runs`);
-    expect(runs.body[0]).toMatchObject({ reason: "ticker_settings", status: "running" });
-    expect(runs.body[0]!.labValues.effective.potDollars).toBe(90_000);
-
-    // Nothing changed: no re-run.
-    const unchanged = await call<{ analyses: { started: string[] } }>("PUT", `/lab-ticker-overrides/${symbol}`, { potDollars: 90_000 });
-    expect(unchanged.body.analyses.started).toEqual([]);
+    expect(runs.body[0]).toMatchObject({ reason: "global_settings", status: "running" });
   });
 });

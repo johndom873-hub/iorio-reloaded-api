@@ -7,7 +7,7 @@ import { easternInstant } from "../../lib/easternIsoDate.js";
 import { maximumSpreadFractionOfMid } from "../../lib/impliedVolatilitySurface.js";
 import type { PlutoSettings } from "../../pluto/settingsStore.js";
 import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, type BacktestAction, type BacktestBaselineSettings, type BacktestFill, type BacktestSessionDetail, type BacktestSettingsOverrides, type BacktestSymbolSettings } from "../backtestTypes.js";
-import { loadAnalysisLadder } from "../analysis/analysisBacktest.js";
+import { loadSessionLadder } from "../analysis/sessionLadderFigures.js";
 import { computeParityStockPrice } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile } from "./testSupport/syntheticBacktestData.js";
@@ -337,7 +337,7 @@ describe("a session of several symbols on one book", () => {
     const storedLevels: { symbol: string; trading_date: string }[] = await testDb("backtest_ladder_levels").where({ session_id: session.sessionId }).select("symbol", testDb.raw("trading_date::text as trading_date"));
     expect(storedLevels.length).toBeGreaterThan(0);
     expect(new Set(storedLevels.map((row) => `${row.symbol}|${row.trading_date}`)).size).toBe(storedLevels.length);
-    const ladderOfB = await loadAnalysisLadder(session.sessionId, "WTB", testDb);
+    const ladderOfB = await loadSessionLadder(session.sessionId, "WTB", testDb);
     expect(ladderOfB.ladderLevels.map(([date]) => date)).toEqual(storedLevels.filter((row) => row.symbol === "WTB").map((row) => row.trading_date).sort());
     const ladderPutsOfB = filled.filter((action) => action.symbol === "WTB" && action.kind === "open_cash_secured_put" && "ladderCap" in (action.candidateScores ?? {}));
     expect(ladderOfB.ladderRungsSold.flatMap(([, , fills]) => fills).length).toBe(ladderPutsOfB.length);

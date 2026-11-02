@@ -1,9 +1,8 @@
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
 import { BacktestRequestError } from "../jobs/backtestJobStore.js";
-import { loadAnalysisLadder, tooLargeDaysOf, type AnalysisBacktestFigures } from "./analysisBacktest.js";
 import { loadDailyBarsOf, type AnalysisFigures } from "./analysisFigures.js";
-import { loadAnalysisOrders } from "./analysisPotSizing.js";
+import { loadSessionLadder, loadSessionOrders, tooLargeDaysOf, type SessionLadderFigures, type SessionTooLargeDay } from "./sessionLadderFigures.js";
 import { barIndicatorsOf, maxDrawdownByRange, sliceBarIndicators, toOhlcvBars, type AnalysisBarIndicators } from "./analysisPriceFigures.js";
 import { loadCashAvailableByDay, type CashAvailableByDay } from "./sessionFreeCash.js";
 import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
@@ -33,13 +32,13 @@ export interface BacktestSessionPriceChart {
   maxDrawdown: AnalysisFigures["maxDrawdown"];
   /** One per bar, worked out over the whole file: the first day has its look-back even when the file starts earlier. */
   barIndicators: AnalysisBarIndicators;
-  ladderLevels: AnalysisBacktestFigures["ladderLevels"];
+  ladderLevels: SessionLadderFigures["ladderLevels"];
   /** Vol Farmer v2: [date, B-E, B-E2] after each 10:00 look, split-adjusted; null while that position holds no shares. Empty for other sessions. */
   breakEvenLevels: [string, number | null, number | null][];
   /** Vol Farmer v2: its LEAPS Calls' purchases and ends, by date. */
   leapsEvents: SessionLeapsEvent[];
-  ladderRungsSold: AnalysisBacktestFigures["ladderRungsSold"];
-  tooLargeDays: AnalysisBacktestFigures["tooLargeDays"];
+  ladderRungsSold: SessionLadderFigures["ladderRungsSold"];
+  tooLargeDays: SessionTooLargeDay[];
   /** The whole account's free cash each day at its 10:00 marks (sessionFreeCash.ts), every symbol's in a session of several. */
   cashAvailable: CashAvailableByDay;
   /** The symbol's splits in the session's period (the bars before one are its traded prices ÷ the ratio); empty when none or not yet analysed. */
@@ -55,8 +54,8 @@ export async function loadBacktestSessionPriceChart(sessionId: string, symbol: s
   if (!symbols.includes(symbol)) throw new BacktestRequestError(`The session does not trade ${symbol}.`, 400);
   const [{ bars: dailyBars }, orders, ladder, cashAvailable, breakEvenLevels, leapsEvents] = await Promise.all([
     loadDailyBarsOf(symbol, connection),
-    loadAnalysisOrders(sessionId, symbol, connection),
-    loadAnalysisLadder(sessionId, symbol, connection),
+    loadSessionOrders(sessionId, symbol, connection),
+    loadSessionLadder(sessionId, symbol, connection),
     loadCashAvailableByDay(sessionId, connection),
     loadBreakEvenLevels(sessionId, symbol, connection),
     loadLeapsEvents(sessionId, symbol, connection),

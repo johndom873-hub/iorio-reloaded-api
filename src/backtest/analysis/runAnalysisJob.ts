@@ -1,6 +1,5 @@
 import { db } from "../../db/connection.js";
-import type { BacktestBaselineSettings } from "../backtestTypes.js";
-import { readBacktestDataFileContents, readBacktestDataFilePeriodContents } from "../dataFileSummary.js";
+import { readBacktestDataFileContents } from "../dataFileSummary.js";
 import { createBacktestSession } from "../jobs/backtestSessionStore.js";
 import { cancelBacktestJob } from "../jobs/backtestJobStore.js";
 import { deriveJobDisplayStatus } from "../jobs/backtestJobRules.js";
@@ -8,13 +7,12 @@ import { validateSessionRequestAgainstLab } from "../jobs/labSessionRequest.js";
 import { analysisSessionName, computeAnalysisBacktestFigures, type AnalysisBacktestFigures } from "./analysisBacktest.js";
 import { refreshTickerProfiles } from "../tickerProfileStore.js";
 import { analysisFormulasVersion, computeAnalysisFigures, type AnalysisFigures, type AnalysisStep } from "./analysisFigures.js";
-import { listAnalysisSessions } from "./analysisSessions.js";
-import type { AnalysisLabValues, AnalysisReason } from "./analysisStore.js";
-import { analysisSummaryPromptVersion, buildAnalysisSummaryDigest, writeAnalysisSummary } from "./analysisSummary.js";
+import { analysisTableFiguresOf, type AnalysisLabValues, type AnalysisReason } from "./analysisStore.js";
 
-// The "analysis" job (scripts/run-backtest-job.ts): the figures, then (a saved analysis only) the ticker's backtest at
-// its lab values as an ordinary session, waited for, and its order records; then Claude's summary. Progress reports the
-// step as the job's label (analysisSteps), the chain scan's days and the backtest's days as done/total.
+// The "analysis" job (scripts/run-backtest-job.ts): the figures, then the ticker's Vol Farmer v4 backtest at the lab's
+// values (or a trial's starting account) as an ordinary session, waited for, and its records; then the Data files table's
+// figures. Progress reports the step as the job's label (analysisSteps), the scan's days and the backtest's days as
+// done/total. No summary is written since v4 (Marcelo 2026-11-01: the verdict is the rule's).
 
 export interface AnalysisJobControl {
   readonly cancelRequested: boolean;
@@ -28,6 +26,9 @@ export type StoredAnalysisFigures = AnalysisFigures & { analysisBacktest: Analys
 export class AnalysisCancelledError extends Error {}
 
 const backtestPollMilliseconds = 3_000;
+
+/** The file's daily bars as split-adjusted closes (each wheel cycle's stock change). */
+const closesOf = (figures: Pick<AnalysisFigures, "bars">) => figures.bars.map(([tradingDate, , , , close]) => ({ tradingDate, close }));
 
 function waitOrCancel(milliseconds: number, control: AnalysisJobControl): Promise<void> {
   return new Promise((resolve) => {
@@ -43,47 +44,24 @@ function waitOrCancel(milliseconds: number, control: AnalysisJobControl): Promis
 }
 
 /**
- * Creates the analysis's backtest session (the file's whole period) and waits for it: at the lab's values and the ticker's
- * overrides, or for an Analyse Only run at its values (Marcelo 2026-10-19: both buttons run the same analysis), the ladder
- * values as the ticker's and the global-only ones (days to expiry, spread limit) as the session's overrides.
+ * Creates the analysis's backtest session and waits for it: the ticker alone under Vol Farmer v4 at the lab's values, from
+ * the steady-weeklies start (F1) to the file's last day, on the lab's default account or a trial's.
  */
-async function runAnalysisBacktest(symbol: string, labValues: AnalysisLabValues, analysisId: string, control: AnalysisJobControl): Promise<AnalysisBacktestFigures | { error: string }> {
+async function runAnalysisBacktest(symbol: string, labValues: AnalysisLabValues, figures: AnalysisFigures, analysisId: string, control: AnalysisJobControl): Promise<AnalysisBacktestFigures | { error: string }> {
   const contents = readBacktestDataFileContents(symbol);
   if (!contents?.firstDate || !contents.lastDate) return { error: "The data file has no complete days." };
-  const { baseline, potDollars } = labValues.effective;
-  // The analysis is the CC + Put Ladder's: the baseline decides even when the lab's decision maker is another.
-  const overrides: Record<string, unknown> = labValues.settings.decisionMaker === "baseline" ? {} : { decisionMaker: "baseline" };
-  let trialValues: Record<string, unknown> = {};
-  if (labValues.trial) {
-    const globalBaseline: Partial<BacktestBaselineSettings> = labValues.settings.baseline ?? {};
-    const globalOnly = Object.fromEntries((["minDte", "maxDte", "maxSpreadPctOfMid"] as const).filter((key) => baseline[key] !== globalBaseline[key]).map((key) => [key, baseline[key]]));
-    if (Object.keys(globalOnly).length > 0) overrides.baseline = globalOnly;
-    trialValues = {
-      symbolSettings: {
-        [symbol]: {
-          potDollars,
-          baseline: {
-            ladderSharesPct: baseline.ladderSharesPct,
-            ladderRungs: baseline.ladderRungs,
-            minAbsDelta: baseline.minAbsDelta,
-            maxAbsDelta: baseline.maxAbsDelta,
-            ...(baseline.ladderShock === "fixed" ? { ladderShock: "fixed", ladderShockPct: baseline.ladderShockPct } : { ladderShock: baseline.ladderShock }),
-          },
-        },
-      },
-    };
-  }
+  // The analysis is Vol Farmer v4's: v4 decides even when the lab's decision maker is another.
+  const overrides: Record<string, unknown> = labValues.settings.decisionMaker === "vol_farmer_v4" ? {} : { decisionMaker: "vol_farmer_v4" };
   let request: Awaited<ReturnType<typeof validateSessionRequestAgainstLab>>;
   try {
     request = await validateSessionRequestAgainstLab({
-      name: analysisSessionName(symbol, potDollars, baseline),
+      name: analysisSessionName(symbol, labValues.effective.accountDollars, labValues.trial !== null),
       symbols: [symbol],
-      startDate: contents.firstDate,
+      startDate: figures.expiryWeeks.backtestStartDate,
       endDate: contents.lastDate,
       tablesMode: "walk_forward",
-      settingsSource: "per_ticker",
+      startingValue: labValues.effective.accountDollars,
       overrides,
-      ...trialValues,
     });
   } catch (error) {
     return { error: `The backtest could not start: ${error instanceof Error ? error.message : String(error)}` };
@@ -103,13 +81,13 @@ async function runAnalysisBacktest(symbol: string, labValues: AnalysisLabValues,
     await control.reportProgress(Number(row.progress_done), Number(row.progress_total), "backtest" satisfies AnalysisStep);
     await waitOrCancel(backtestPollMilliseconds, control);
   }
-  return computeAnalysisBacktestFigures(session.id, symbol);
+  return computeAnalysisBacktestFigures(session.id, symbol, figures.falls, closesOf(figures));
 }
 
 /**
- * The session of an earlier saved analysis at the same values over the same data, still there and finished: running it
- * again would give the same backtest, so its figures are read again instead (Fetch earnings, an Update with nothing new).
- * Only from an analysis of the same formulas version: a new version may need records older sessions lack.
+ * The session of an earlier analysis at the same values over the same data, still there and finished: running it again
+ * would give the same backtest, so its figures are read again instead (Fetch earnings, a Re-run with nothing new). Only
+ * from an analysis of the same formulas version: a new version may need records older sessions lack.
  */
 async function reusableAnalysisSession(analysisId: string, symbol: string, labValuesHash: string, optionLastDate: string, barsLastDate: string | null): Promise<string | null> {
   const row: { session_id: string } | undefined = await db("backtest_ticker_analyses as a")
@@ -155,34 +133,10 @@ export async function runAnalysisJob(jobId: string, control: AnalysisJobControl)
     await control.reportProgress(0, 0, "backtest" satisfies AnalysisStep);
     const reusedSessionId = await reusableAnalysisSession(analysis.id, analysis.symbol, analysis.lab_values_hash, figures.optionLastDate, figures.barsLastDate);
     if (reusedSessionId) await db("backtest_ticker_analyses").where({ id: analysis.id }).update({ session_id: reusedSessionId });
-    stored.analysisBacktest = reusedSessionId
-      ? await computeAnalysisBacktestFigures(reusedSessionId, analysis.symbol)
-      : await runAnalysisBacktest(analysis.symbol, analysis.lab_values, analysis.id, control);
-    await db("backtest_ticker_analyses").where({ id: analysis.id }).update({ figures: JSON.stringify(stored) });
+    stored.analysisBacktest = reusedSessionId ? await computeAnalysisBacktestFigures(reusedSessionId, analysis.symbol, figures.falls, closesOf(figures)) : await runAnalysisBacktest(analysis.symbol, analysis.lab_values, figures, analysis.id, control);
     if (control.cancelRequested) throw new AnalysisCancelledError();
-
-    await control.reportProgress(0, 0, "summary" satisfies AnalysisStep);
     const backtest = stored.analysisBacktest && "sessionId" in stored.analysisBacktest ? stored.analysisBacktest : null;
-    // The data file's missing weekdays over the last 12 months (the window after the same date a year before), for the verdict's first test.
-    const yearBefore = `${Number(figures.optionLastDate.slice(0, 4)) - 1}${figures.optionLastDate.slice(4)}`;
-    const lastTwelveMonthsFrom = new Date(Date.parse(`${yearBefore}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
-    const lastTwelveMonths = readBacktestDataFilePeriodContents(analysis.symbol, lastTwelveMonthsFrom, figures.optionLastDate);
-    const digest = buildAnalysisSummaryDigest({ figures, values: analysis.lab_values.effective, backtest, sessions: await listAnalysisSessions(analysis.symbol), missingWeekdaysLastTwelveMonths: lastTwelveMonths?.missingWeekdays ?? null });
-    const outcome = await writeAnalysisSummary(digest);
-    const call = "call" in outcome ? outcome.call : null;
-    await finish({
-      status: "succeeded",
-      summary_status: outcome.status,
-      summary: outcome.status === "written" ? JSON.stringify(outcome.summary) : null,
-      summary_error: outcome.status === "written" ? null : outcome.error,
-      summary_model: call?.servedModelId ?? null,
-      summary_prompt_version: analysisSummaryPromptVersion,
-      summary_tokens_in: call?.tokensIn ?? null,
-      summary_tokens_out: call?.tokensOut ?? null,
-      summary_cost_usd: call?.costUsd ?? null,
-      summary_latency_ms: call?.latencyMs ?? null,
-      summary_raw_output: call?.rawText ?? null,
-    });
+    await finish({ status: "succeeded", figures: JSON.stringify(stored), table_figures: JSON.stringify(analysisTableFiguresOf(figures, backtest)), summary_status: "skipped" });
     return { status: "succeeded", error: null };
   } catch (error) {
     if (error instanceof AnalysisCancelledError || control.cancelRequested) {

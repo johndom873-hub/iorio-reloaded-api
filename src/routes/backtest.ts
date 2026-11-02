@@ -10,13 +10,10 @@ import { backtestNotReplayed, buildBacktestSettingRows, editableBacktestSettingP
 import {
   BacktestLabSettingsValidationError,
   analysisReadsLabPath,
-  globalChangeReachesTicker,
   loadBacktestLabAudit,
   loadBacktestLabSettings,
   loadBacktestLabTickerOverrides,
-  noteLabAuditAnalysesRerun,
   saveBacktestLabTickerOverrides,
-  tickerOverridesGlobalPath,
   updateBacktestLabSettings,
   type BacktestLabSettings,
 } from "../backtest/labSettingsStore.js";
@@ -36,7 +33,7 @@ import {
 import { validateBacktestBookPageQuery, validateBacktestSessionsPageQuery } from "../backtest/jobs/backtestSessionRequest.js";
 import { checkSessionRequestAgainstLab, validateBatchRequestAgainstLab, validateSessionRequestAgainstLab } from "../backtest/jobs/labSessionRequest.js";
 import { registerTickerAnalysisRoutes } from "./backtestAnalysisRoutes.js";
-import { listAnalysedSymbols, rerunAnalysesAfterSave } from "../backtest/analysis/analysisStore.js";
+import { analysesOutOfDateAfter } from "../backtest/analysis/analysisStore.js";
 import { loadBacktestSessionPriceChart } from "../backtest/analysis/sessionPriceChart.js";
 import { loadBacktestSessionStockPrices } from "../backtest/analysis/sessionStockPrices.js";
 import {
@@ -174,31 +171,24 @@ backtestRouter.get("/lab-settings", async (_request, response) => {
 // the values that changed.
 backtestRouter.put("/lab-settings", async (request, response) => {
   const body = (request.body ?? {}) as { overrides?: unknown; defaultPotDollars?: unknown };
-  const { lab, changes, auditIds } = await withLabValidation(() => updateBacktestLabSettings(body, request.session.userId ?? null));
-  // Saving the global lab values re-runs every stored analysis they reach: a ticker's own value for a field shields it.
-  const changedFields = changes.map((change) => change.field);
-  const overridesBySymbol = new Map((await loadBacktestLabTickerOverrides()).map((row) => [row.symbol, row]));
-  const reached = changedFields.length === 0 ? [] : (await listAnalysedSymbols()).filter((symbol) => globalChangeReachesTicker(changedFields, overridesBySymbol.get(symbol) ?? null));
-  const analyses = await rerunAnalysesAfterSave(reached, "global_settings");
-  await noteLabAuditAnalysesRerun(auditIds, analyses.started.length);
-  response.json({ settings: labSettingsView(lab), changes, analyses });
+  const { lab, changes } = await withLabValidation(() => updateBacktestLabSettings(body, request.session.userId ?? null));
+  // A save no longer re-runs the stored analyses (Marcelo 2026-11-01): those that ran with other values than it leaves show
+  // as out of date, and the Data files table's Re-run out of date runs them again.
+  const readChanges = changes.filter((change) => analysisReadsLabPath(change.field)).map((change) => change.field);
+  const markedOutOfDate = readChanges.length > 0 ? (await analysesOutOfDateAfter(lab, readChanges)).outOfDate : [];
+  response.json({ settings: labSettingsView(lab), changes, analyses: { markedOutOfDate } });
 });
 
-// The save's confirmation: the same body as PUT, nothing written. Each change with the analysed tickers it re-runs and
-// the tickers whose own value keeps it from reaching them; `reruns` is every ticker the save re-runs.
+// The save's confirmation: the same body as PUT, nothing written. Each change with the analysed tickers that ran with
+// another value of it; `outOfDate` is every ticker whose stored analysis the save leaves out of date.
 backtestRouter.post("/lab-settings/preview", async (request, response) => {
   const body = (request.body ?? {}) as { overrides?: unknown; defaultPotDollars?: unknown };
-  const { changes } = await withLabValidation(() => updateBacktestLabSettings(body, request.session.userId ?? null, undefined, { dryRun: true }));
-  const overrides = await loadBacktestLabTickerOverrides();
-  const overridesBySymbol = new Map(overrides.map((row) => [row.symbol, row]));
-  const analysed = await listAnalysedSymbols();
+  const { lab, changes } = await withLabValidation(() => updateBacktestLabSettings(body, request.session.userId ?? null, undefined, { dryRun: true }));
+  const readChanges = changes.filter((change) => analysisReadsLabPath(change.field)).map((change) => change.field);
+  const after = readChanges.length > 0 ? await analysesOutOfDateAfter(lab, readChanges) : { outOfDate: [], byPath: {} as Record<string, string[]> };
   response.json({
-    changes: changes.map((change) => ({
-      ...change,
-      reruns: analysisReadsLabPath(change.field) ? analysed.filter((symbol) => !tickerOverridesGlobalPath(change.field, overridesBySymbol.get(symbol) ?? null)) : [],
-      keptOverrides: overrides.filter((row) => tickerOverridesGlobalPath(change.field, row)).map((row) => row.symbol),
-    })),
-    reruns: changes.length === 0 ? [] : analysed.filter((symbol) => globalChangeReachesTicker(changes.map((change) => change.field), overridesBySymbol.get(symbol) ?? null)),
+    changes: changes.map((change) => ({ ...change, outOfDate: after.byPath[change.field] ?? [] })),
+    outOfDate: after.outOfDate,
   });
 });
 
@@ -224,9 +214,8 @@ backtestRouter.get("/lab-ticker-overrides/:symbol", async (request, response) =>
 backtestRouter.put("/lab-ticker-overrides/:symbol", async (request, response) => {
   const body = (request.body ?? {}) as Record<string, unknown>;
   const { overrides, changes } = await withLabValidation(() => saveBacktestLabTickerOverrides(request.params.symbol ?? "", body, request.session.userId ?? null));
-  // Save for the ticker updates its analysis at once, so the stored analysis always matches its saved values.
-  const symbol = normalizeBacktestSymbol(request.params.symbol ?? "");
-  response.json({ overrides, changes, analyses: changes.length === 0 ? { started: [], skipped: [] } : await rerunAnalysesAfterSave([symbol], "ticker_settings") });
+  // The analysis reads no ticker's own values since Vol Farmer v4 (they are the CC + Put Ladder's): nothing to re-run.
+  response.json({ overrides, changes });
 });
 
 backtestRouter.post("/sessions", async (request, response) => {

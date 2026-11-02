@@ -4,61 +4,61 @@ import { db } from "../../db/connection.js";
 import { normalizeBacktestSymbol, readBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { cachedSplitsBetween } from "../engine/splitFactors.js";
 import { readBacktestDataFileContents } from "../dataFileSummary.js";
-import { loadBacktestLabSettings, loadBacktestLabTickerOverrides, tickerOverridesToValues, withCodeKeys } from "../labSettingsStore.js";
-import { defaultBacktestBaselineSettings, type BacktestBaselineSettings, type BacktestDetectedSplit, type BacktestLabTickerOverrides, type BacktestSettings, type BacktestTickerProfile, type BacktestTickerSuitability } from "../backtestTypes.js";
+import { loadBacktestLabSettings, withCodeKeys } from "../labSettingsStore.js";
+import { defaultBacktestVolFarmerV4Settings, type BacktestDetectedSplit, type BacktestSettings, type BacktestTickerProfile, type BacktestTickerSuitability } from "../backtestTypes.js";
 import { loadTickerProfile } from "../tickerProfileStore.js";
-import { withFreshSessionFigures } from "./analysisBacktest.js";
 import { loadTickerSuitability } from "../tickerSuitabilityStore.js";
-import { validateBaselineSettings } from "../jobs/backtestSessionRequest.js";
 import { deriveJobDisplayStatus } from "../jobs/backtestJobRules.js";
 import { BacktestRequestError, cancelBacktestJob, findUnfinishedDownloadJob, insertClaimedAnalysisJob, startClaimedBacktestJob } from "../jobs/backtestJobStore.js";
 import { analysisFormulasVersion, computeAnalysisFileFigures, type AnalysisFigures, type AnalysisFigureValues, type AnalysisFileFigures, type AnalysisStep } from "./analysisFigures.js";
+import type { AnalysisBacktestFigures } from "./analysisBacktest.js";
 import { barIndicatorsOf } from "./analysisPriceFigures.js";
+import { oneTickerPotShareOfAccount } from "./analysisPotSizing.js";
+import type { SuitabilityCheck } from "./analysisSuitabilityRule.js";
 
 // The stored analyses (backtest_ticker_analyses): the values each was computed with, starting one as an "analysis" job,
-// and what the Analyse window and the Data files table read.
+// and what the Analyse window and the Data files table read. Since Vol Farmer v4 (Marcelo 2026-11-01) an analysis reads the
+// lab's v4 values and its default account; a save of the lab marks the analyses it reaches out of date, and "Re-run out
+// of date" runs them again (no automatic re-runs).
 
-/** "manual": Update Analysis; "ticker_settings" / "global_settings": a save of the lab values re-ran it; "trial": Run with these values (never the stored analysis). */
+/** "manual": Re-run analysis; "global_settings": Re-run out of date (and, before v4, a save of the lab); "ticker_settings": before v4 only; "trial": Run a trial (never the stored analysis). */
 export type AnalysisReason = "manual" | "ticker_settings" | "global_settings" | "trial";
 
-/** Run with these values: the settings panel's values, over the ticker's lab values; nothing is saved. */
+/** Run a trial: the analysis backtest at another starting account; nothing is saved as the ticker's analysis. */
 export interface AnalysisTrialValues {
-  potDollars?: number;
-  ladderSharesPct?: number;
-  ladderRungs?: number;
-  /** A fixed shock; null: the lab's shock rule. */
-  ladderShockPct?: number | null;
-  minAbsDelta?: number;
-  maxAbsDelta?: number;
-  minDte?: number;
-  maxDte?: number;
-  maxSpreadPctOfMid?: number;
+  accountDollars: number;
 }
-
-const trialNumberFields = ["potDollars", "ladderSharesPct", "ladderRungs", "ladderShockPct", "minAbsDelta", "maxAbsDelta", "minDte", "maxDte", "maxSpreadPctOfMid"] as const;
 
 /** What a stored analysis was computed with. */
 export interface AnalysisLabValues {
   settings: BacktestSettings;
   defaultPotDollars: number;
-  tickerOverrides: Omit<BacktestLabTickerOverrides, "updatedAt"> | null;
   trial: AnalysisTrialValues | null;
   /** The values the figures read, resolved from the above. */
   effective: AnalysisFigureValues;
 }
 
+/** The figures the Data files table shows for an analysis (table_figures). */
+export interface AnalysisTableFigures {
+  verdict: "suits" | "doesnt_suit";
+  failedChecks: SuitabilityCheck[];
+  uncoveredWindows: number[];
+  /** S1 over the last 12 months, a yearly fraction. */
+  optionsIncomeTwelveMonths: number | null;
+  v4Cagr: number | null;
+  holdCagr: number | null;
+  v4ExcessCalmar: number | null;
+  holdExcessCalmar: number | null;
+  smallestPotDollars: number | null;
+}
+
 export function validateAnalysisTrialValues(raw: unknown): AnalysisTrialValues {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new BacktestRequestError("values must be an object.", 400);
-  const unknown = Object.keys(raw).find((key) => !(trialNumberFields as readonly string[]).includes(key));
-  if (unknown) throw new BacktestRequestError(`values.${unknown} is not a value the analysis can try.`, 400);
-  const values: AnalysisTrialValues = {};
-  for (const [key, value] of Object.entries(raw)) {
-    if (value === null && key === "ladderShockPct") values.ladderShockPct = null;
-    else if (typeof value !== "number" || !Number.isFinite(value)) throw new BacktestRequestError(`values.${key} must be a number.`, 400);
-    else values[key as Exclude<(typeof trialNumberFields)[number], "ladderShockPct">] = value;
-  }
-  if (values.potDollars !== undefined && !(values.potDollars > 0)) throw new BacktestRequestError("The pot must be above $0.", 400);
-  return values;
+  const unknown = Object.keys(raw).find((key) => key !== "accountDollars");
+  if (unknown) throw new BacktestRequestError(`values.${unknown} is not a value the analysis can try: only accountDollars, the starting account.`, 400);
+  const accountDollars = (raw as { accountDollars?: unknown }).accountDollars;
+  if (typeof accountDollars !== "number" || !Number.isFinite(accountDollars) || !(accountDollars > 0)) throw new BacktestRequestError("values.accountDollars must be a number above $0.", 400);
+  return { accountDollars };
 }
 
 /** Sorted keys at every level, so equal values hash alike whatever order Postgres stored them in. */
@@ -68,34 +68,56 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/** The lab values an analysis reads (analysisReadsLabPath): a change to Pluto's own rows leaves the hash as it was. Stored runs
- *  may hold partial settings (written by tests or older code), hence the optional reads. The baseline takes the code's shape
- *  on both sides (withCodeKeys, as the lab loads it), so a setting added at its default, or one removed, leaves runs current. */
-function analysisReadValues({ settings, defaultPotDollars, tickerOverrides, trial }: Omit<AnalysisLabValues, "effective">) {
-  return { defaultPotDollars, tickerOverrides, trial, settings: { baseline: settings?.baseline && withCodeKeys(defaultBacktestBaselineSettings, settings.baseline), model: settings?.model, trading: { spreadCostChargedPct: settings?.trading?.spreadCostChargedPct }, pluto: { windowStartEt: settings?.pluto?.windowStartEt, windowEndEt: settings?.pluto?.windowEndEt } } };
+/**
+ * The lab values an analysis reads: v4's section (in the code's shape, withCodeKeys, so a setting added at its default or
+ * one removed leaves runs current), the spread share fills give up, Pluto's window the looks keep to, and the default
+ * account. A change to anything else leaves the hash as it was.
+ */
+function analysisReadValues({ settings, defaultPotDollars, trial }: Omit<AnalysisLabValues, "effective">) {
+  return { defaultPotDollars, trial, settings: { volFarmerV4: withCodeKeys(defaultBacktestVolFarmerV4Settings, settings?.volFarmerV4), trading: { spreadCostChargedPct: settings?.trading?.spreadCostChargedPct }, pluto: { windowStartEt: settings?.pluto?.windowStartEt, windowEndEt: settings?.pluto?.windowEndEt } } };
 }
 
 export const hashAnalysisLabValues = (values: Omit<AnalysisLabValues, "effective">) => createHash("sha256").update(stableJson(analysisReadValues(values))).digest("hex").slice(0, 32);
 
-/** The ticker's lab values now (the lab's global values, its overrides on top), and a trial's on top of those. */
-export async function resolveAnalysisLabValues(symbol: string, trial: AnalysisTrialValues | null, connection: Knex = db): Promise<AnalysisLabValues & { hash: string }> {
-  const [lab, overrides] = await Promise.all([loadBacktestLabSettings(connection), loadBacktestLabTickerOverrides(connection)]);
-  const override = overrides.find((row) => row.symbol === symbol) ?? null;
-  const tickerValues = override ? tickerOverridesToValues(override) : null;
-  // The window's |delta| range is the Calls' (Marcelo 2026-10-16): every Call on minAbsDelta–maxAbsDelta, whatever the lab's callDeltaRange.
-  const baseline: BacktestBaselineSettings = { ...defaultBacktestBaselineSettings, ...lab.settings.baseline, ...(tickerValues?.baseline ?? {}), callDeltaRange: "entry_range" };
-  let potDollars = tickerValues?.potDollars ?? lab.defaultPotDollars;
-  if (trial) {
-    const { potDollars: trialPot, ladderShockPct, ...rest } = trial;
-    Object.assign(baseline, rest);
-    if (ladderShockPct !== undefined) Object.assign(baseline, ladderShockPct === null ? { ladderShock: lab.settings.baseline?.ladderShock ?? defaultBacktestBaselineSettings.ladderShock, ladderShockPct: lab.settings.baseline?.ladderShockPct ?? defaultBacktestBaselineSettings.ladderShockPct } : { ladderShock: "fixed", ladderShockPct });
-    if (trialPot !== undefined) potDollars = trialPot;
-    const problem = validateBaselineSettings(baseline as unknown as Record<string, unknown>);
-    if (problem) throw new BacktestRequestError(problem, 400);
-  }
-  const tickerOverrides = override ? (({ updatedAt: _updatedAt, ...fields }) => fields)(override) : null;
-  const stored = { settings: lab.settings, defaultPotDollars: lab.defaultPotDollars, tickerOverrides, trial };
-  return { ...stored, effective: { potDollars, baseline, spreadShareCharged: lab.settings.trading.spreadCostChargedPct / 100 }, hash: hashAnalysisLabValues(stored) };
+/** A lab path's value among the values an analysis reads ("lab.defaultPotDollars", "volFarmerV4.callMaxAbsDelta", …). */
+function readValueAt(values: ReturnType<typeof analysisReadValues>, path: string): unknown {
+  if (path === "lab.defaultPotDollars") return values.defaultPotDollars;
+  return path.split(".").reduce<unknown>((node, key) => (node !== null && typeof node === "object" ? (node as Record<string, unknown>)[key] : undefined), values.settings);
+}
+
+/**
+ * The stored analyses a lab save leaves out of date (its confirmation and its answer): the analysed tickers whose latest
+ * succeeded analysis ran with other values than the save leaves, and, for each changed value, those that ran with another.
+ * A save that puts a value back to what an analysis ran with brings that analysis back up to date.
+ */
+export async function analysesOutOfDateAfter(lab: { settings: AnalysisLabValues["settings"]; defaultPotDollars: number }, changedPaths: readonly string[], connection: Knex = db): Promise<{ outOfDate: string[]; byPath: Record<string, string[]> }> {
+  const rows: { symbol: string; lab_values: Omit<AnalysisLabValues, "effective"> | null }[] = await connection("backtest_ticker_analyses")
+    .distinctOn("symbol")
+    .whereNot({ reason: "trial" })
+    .where({ status: "succeeded" })
+    .orderBy([{ column: "symbol" }, { column: "created_at", order: "desc" }])
+    .select("symbol", "lab_values");
+  const after = { settings: lab.settings, defaultPotDollars: lab.defaultPotDollars, trial: null };
+  const afterHash = hashAnalysisLabValues(after);
+  const afterValues = analysisReadValues(after);
+  const ranWith = rows.flatMap((row) => (row.lab_values ? [{ symbol: row.symbol, values: analysisReadValues({ ...row.lab_values, trial: null }), hash: hashAnalysisLabValues({ ...row.lab_values, trial: null }) }] : []));
+  const byPath: Record<string, string[]> = {};
+  for (const path of changedPaths) byPath[path] = ranWith.filter((row) => stableJson(readValueAt(row.values, path)) !== stableJson(readValueAt(afterValues, path))).map((row) => row.symbol);
+  return { outOfDate: ranWith.filter((row) => row.hash !== afterHash).map((row) => row.symbol), byPath };
+}
+
+/** The lab's values now, and a trial's starting account on top. */
+export async function resolveAnalysisLabValues(trial: AnalysisTrialValues | null, connection: Knex = db): Promise<AnalysisLabValues & { hash: string }> {
+  const lab = await loadBacktestLabSettings(connection);
+  const v4 = { ...defaultBacktestVolFarmerV4Settings, ...lab.settings.volFarmerV4 };
+  const accountDollars = trial?.accountDollars ?? lab.defaultPotDollars;
+  const potShareOfAccount = oneTickerPotShareOfAccount(v4);
+  const stored = { settings: lab.settings, defaultPotDollars: lab.defaultPotDollars, trial };
+  return {
+    ...stored,
+    effective: { accountDollars, potDollars: accountDollars * potShareOfAccount, potShareOfAccount, firstPositionShare: v4.firstPositionPct / 100, v4, spreadShareCharged: lab.settings.trading.spreadCostChargedPct / 100 },
+    hash: hashAnalysisLabValues(stored),
+  };
 }
 
 /** The unfinished analyses of a symbol (queued or running, not stopped), trial or saved. */
@@ -110,9 +132,8 @@ async function findActiveAnalyses(symbol: string, connection: Knex): Promise<{ i
 }
 
 /**
- * Starts an analysis as a job. A trial runs beside a saved one; a save of the lab values replaces the saved analysis
- * running (its job is cancelled, its backtest session with it); Update Analysis is refused while one runs, and while the
- * ticker's download runs (the file is being written).
+ * Starts an analysis as a job. A trial runs beside a saved one; a saved one is refused while another saved one runs, and
+ * while the ticker's download runs (the file is being written).
  */
 export async function startTickerAnalysis(input: { symbol: string; reason: AnalysisReason; trial?: AnalysisTrialValues | null }, connection: Knex = db): Promise<{ analysisId: string; jobId: string }> {
   let symbol: string;
@@ -125,44 +146,21 @@ export async function startTickerAnalysis(input: { symbol: string; reason: Analy
   if (!contents) throw new BacktestRequestError(`There is no data file for ${symbol}: download it first.`, 404);
   if (!contents.firstDate) throw new BacktestRequestError(`The ${symbol} data file has no complete days yet.`, 409);
   if (await findUnfinishedDownloadJob(symbol)) throw new BacktestRequestError(`${symbol}'s download is running: analyse it once the download finishes.`, 409);
-  const trial = input.reason === "trial" ? (input.trial ?? {}) : null;
-  const values = await resolveAnalysisLabValues(symbol, trial, connection);
+  const trial = input.reason === "trial" ? (input.trial ?? null) : null;
+  if (input.reason === "trial" && trial === null) throw new BacktestRequestError("A trial needs a starting account.", 400);
+  const values = await resolveAnalysisLabValues(trial, connection);
   const active = (await findActiveAnalyses(symbol, connection)).filter((row) => (row.reason === "trial") === (trial !== null));
-  if (active.length > 0) {
-    if (input.reason === "manual" || input.reason === "trial") throw new BacktestRequestError(`An analysis of ${symbol} is already running.`, 409);
-    for (const row of active) if (row.job_id) await cancelBacktestJob(row.job_id).catch(() => undefined);
-  }
+  if (active.length > 0) throw new BacktestRequestError(`An analysis of ${symbol} is already running.`, 409);
   const { hash, ...labValues } = values;
   const ids = await connection.transaction(async (transaction) => {
     const jobId = await insertClaimedAnalysisJob(symbol, transaction);
     const [row] = await transaction("backtest_ticker_analyses")
-      .insert({ symbol, job_id: jobId, status: "queued", formulas_version: analysisFormulasVersion, lab_values: JSON.stringify(labValues), lab_values_hash: hash, reason: input.reason, summary_status: "pending" })
+      .insert({ symbol, job_id: jobId, status: "queued", formulas_version: analysisFormulasVersion, lab_values: JSON.stringify(labValues), lab_values_hash: hash, reason: input.reason, summary_status: "skipped" })
       .returning("id");
     return { analysisId: row.id as string, jobId };
   });
   await startClaimedBacktestJob(ids.jobId);
   return ids;
-}
-
-/** Re-runs the stored analyses a save of lab values reaches: one ticker's, or every analysed ticker's that the change reaches. */
-export async function rerunAnalysesAfterSave(symbols: readonly string[], reason: "ticker_settings" | "global_settings"): Promise<{ started: string[]; skipped: { symbol: string; reason: string }[] }> {
-  const started: string[] = [];
-  const skipped: { symbol: string; reason: string }[] = [];
-  for (const symbol of symbols) {
-    try {
-      await startTickerAnalysis({ symbol, reason });
-      started.push(symbol);
-    } catch (error) {
-      skipped.push({ symbol, reason: error instanceof Error ? error.message : String(error) });
-    }
-  }
-  return { started, skipped };
-}
-
-/** Symbols with at least one saved analysis (not a trial), for a global save's re-run. */
-export async function listAnalysedSymbols(connection: Knex = db): Promise<string[]> {
-  const rows: { symbol: string }[] = await connection("backtest_ticker_analyses").whereNot({ reason: "trial" }).distinct("symbol").orderBy("symbol");
-  return rows.map((row) => row.symbol);
 }
 
 export interface AnalysisRunView {
@@ -182,8 +180,6 @@ export interface AnalysisRunView {
   optionLastDate: string | null;
   barsLastDate: string | null;
   figuresSeconds: number | null;
-  summaryStatus: string;
-  summaryError: string | null;
   error: string | null;
   createdAt: string;
   finishedAt: string | null;
@@ -200,11 +196,7 @@ interface AnalysisRow {
   option_last_date: string | null;
   bars_last_date: string | null;
   session_id: string | null;
-  figures?: unknown;
   figures_seconds: string | null;
-  summary_status: string;
-  summary?: unknown;
-  summary_error: string | null;
   error: string | null;
   reason: AnalysisReason;
   created_at: Date;
@@ -228,8 +220,6 @@ const analysisColumns = (connection: Knex) => [
   connection.raw("a.bars_last_date::text as bars_last_date"),
   "a.session_id",
   "a.figures_seconds",
-  "a.summary_status",
-  "a.summary_error",
   "a.error",
   "a.reason",
   "a.created_at",
@@ -263,8 +253,6 @@ function toRunView(row: AnalysisRow, now = new Date()): AnalysisRunView {
     optionLastDate: row.option_last_date,
     barsLastDate: row.bars_last_date,
     figuresSeconds: row.figures_seconds === null ? null : Number(row.figures_seconds),
-    summaryStatus: row.summary_status,
-    summaryError: row.summary_error,
     error: row.error,
     createdAt: new Date(row.created_at).toISOString(),
     finishedAt: row.finished_at ? new Date(row.finished_at).toISOString() : null,
@@ -280,17 +268,24 @@ function withBarIndicators<T>(figures: T): T {
   return { ...figures, barIndicators: barIndicatorsOf(bars.map((bar) => ({ close: bar[4], impliedVolatility: bar[5] }))) };
 }
 
+/** Out of date: computed with other lab values than the lab's now, or with older formulas. */
+const isOutOfDate = (view: Pick<AnalysisRunView, "labValuesHash" | "formulasVersion">, currentHash: string) => view.labValuesHash !== currentHash || view.formulasVersion < analysisFormulasVersion;
+
 export interface TickerAnalysisView {
   symbol: string;
-  /** The latest succeeded saved analysis, with its figures and summary. */
-  stored: (AnalysisRunView & { figures: unknown; summary: unknown }) | null;
-  /** The latest trial that succeeded after the stored one, with its figures and summary. */
-  trial: (AnalysisRunView & { figures: unknown; summary: unknown }) | null;
+  /** The latest succeeded saved analysis, with its figures. */
+  stored: (AnalysisRunView & { figures: unknown }) | null;
+  /** The latest trial that succeeded after the stored one, with its figures. */
+  trial: (AnalysisRunView & { figures: unknown }) | null;
   /** Analyses not finished yet (a saved one and a trial at most), and the latest that failed or stopped since the stored one. */
   active: AnalysisRunView[];
   latestProblem: AnalysisRunView | null;
-  /** The ticker's lab values now, and their hash: a stored analysis with another hash was computed with other values. */
+  /** The lab's values now, and their hash: a stored analysis with another hash was computed with other values. */
   currentHash: string;
+  /** The stored analysis was computed with other lab values, or older formulas. */
+  outOfDate: boolean;
+  /** The lab's last save. */
+  labSavedAt: string;
   /** The file now runs past the stored analysis's last day. */
   fileLastDate: string | null;
   currentFormulasVersion: number;
@@ -311,10 +306,10 @@ export async function loadTickerAnalysisView(givenSymbol: string, connection: Kn
   const trialView = views.find((view) => view.reason === "trial" && view.status === "succeeded" && (!storedView || view.createdAt > storedView.createdAt)) ?? null;
   const withBody = async (view: AnalysisRunView | null) => {
     if (!view) return null;
-    const body = await connection("backtest_ticker_analyses").where({ id: view.id }).first("figures", "summary");
-    return { ...view, figures: body?.figures == null ? null : withBarIndicators(await withFreshSessionFigures(body.figures, symbol, connection)), summary: body?.summary ?? null };
+    const body = await connection("backtest_ticker_analyses").where({ id: view.id }).first("figures");
+    return { ...view, figures: body?.figures == null ? null : withBarIndicators(body.figures) };
   };
-  const current = await resolveAnalysisLabValues(symbol, null, connection);
+  const [current, lab] = await Promise.all([resolveAnalysisLabValues(null, connection), loadBacktestLabSettings(connection)]);
   return {
     symbol,
     stored: await withBody(storedView),
@@ -322,6 +317,8 @@ export async function loadTickerAnalysisView(givenSymbol: string, connection: Kn
     active: views.filter((view) => view.status === "queued" || view.status === "running"),
     latestProblem: views.find((view) => ["failed", "stopped"].includes(view.status) && view.reason !== "trial" && (!storedView || view.createdAt > storedView.createdAt)) ?? null,
     currentHash: current.hash,
+    outOfDate: storedView !== null && isOutOfDate(storedView, current.hash),
+    labSavedAt: lab.updatedAt,
     fileLastDate: readBacktestDataFileContents(symbol)?.lastDate ?? null,
     currentFormulasVersion: analysisFormulasVersion,
     profile: await loadTickerProfile(symbol, connection),
@@ -330,14 +327,13 @@ export async function loadTickerAnalysisView(givenSymbol: string, connection: Kn
   };
 }
 
-/** The figures the data file gives without an analysis, at the ticker's values now (only the shock reads them): the window before a ticker's first analysis. Nothing is stored. */
+/** The figures the data file gives without an analysis: the window before a ticker's first analysis. Nothing is stored. */
 export async function loadAnalysisFileFigures(givenSymbol: string, connection: Knex = db): Promise<AnalysisFileFigures> {
   const symbol = normalizeBacktestSymbol(givenSymbol);
   const contents = readBacktestDataFileContents(symbol);
   if (!contents) throw new BacktestRequestError(`There is no data file for ${symbol}: download it first.`, 404);
   if (!contents.firstDate) throw new BacktestRequestError(`The ${symbol} data file has no complete days yet.`, 409);
-  const { effective } = await resolveAnalysisLabValues(symbol, null, connection);
-  return withBarIndicators(await computeAnalysisFileFigures({ symbol, values: effective, connection }));
+  return withBarIndicators(await computeAnalysisFileFigures({ symbol, connection }));
 }
 
 export async function loadTickerAnalysisRun(analysisId: string, connection: Knex = db): Promise<AnalysisRunView> {
@@ -362,16 +358,81 @@ export async function cancelTickerAnalysis(analysisId: string, connection: Knex 
   return loadTickerAnalysisRun(analysisId, connection);
 }
 
-/** For the Data files table: each symbol's latest saved analysis state. */
-export async function loadAnalysisStatusBySymbol(connection: Knex = db): Promise<Map<string, { status: AnalysisRunView["status"]; finishedAt: string | null; optionLastDate: string | null; labValuesHash: string }>> {
-  const rows: AnalysisRow[] = await selectAnalyses(connection)
+/** The Data files table's figures of a finished analysis; null when its backtest failed. */
+export function analysisTableFiguresOf(figures: AnalysisFigures, backtest: AnalysisBacktestFigures | null): AnalysisTableFigures | null {
+  if (backtest === null) return null;
+  const twelveMonths = backtest.rule.windows.find((window) => window.months === 12) ?? null;
+  return {
+    verdict: backtest.rule.verdict.suits ? "suits" : "doesnt_suit",
+    failedChecks: backtest.rule.verdict.failedChecks,
+    uncoveredWindows: backtest.rule.verdict.uncoveredWindows,
+    optionsIncomeTwelveMonths: twelveMonths?.optionsIncome.yearlyShare ?? null,
+    v4Cagr: backtest.metrics ? Number(backtest.metrics.cagr) : null,
+    holdCagr: backtest.buyAndHoldMetrics ? Number(backtest.buyAndHoldMetrics.cagr) : null,
+    v4ExcessCalmar: backtest.excessCalmar.v4,
+    holdExcessCalmar: backtest.excessCalmar.hold,
+    smallestPotDollars: figures.size.smallestPotDollars,
+  };
+}
+
+export interface AnalysisTableRow {
+  status: AnalysisRunView["status"];
+  finishedAt: string | null;
+  optionLastDate: string | null;
+  formulasVersion: number;
+  outOfDate: boolean;
+  /** The latest succeeded saved analysis's figures; null before one, or when its backtest failed. */
+  tableFigures: AnalysisTableFigures | null;
+  /** When the latest saved analysis is running or failed: when the one the figures are from finished. */
+  figuresFinishedAt: string | null;
+}
+
+/** For the Data files table: each symbol's latest saved analysis, its figures, and whether it is out of date. */
+export async function loadAnalysesForTable(connection: Knex = db): Promise<{ labSavedAt: string; outOfDate: string[]; bySymbol: Record<string, AnalysisTableRow> }> {
+  const latest: AnalysisRow[] = await selectAnalyses(connection)
     .distinctOn("a.symbol")
     .whereNot("a.reason", "trial")
     .orderBy([{ column: "a.symbol" }, { column: "a.created_at", order: "desc" }])
     .select(analysisColumns(connection));
+  const succeeded: (AnalysisRow & { table_figures: AnalysisTableFigures | null })[] = await selectAnalyses(connection)
+    .distinctOn("a.symbol")
+    .whereNot("a.reason", "trial")
+    .where("a.status", "succeeded")
+    .orderBy([{ column: "a.symbol" }, { column: "a.created_at", order: "desc" }])
+    .select([...analysisColumns(connection), "a.table_figures"]);
+  const [current, lab] = await Promise.all([resolveAnalysisLabValues(null, connection), loadBacktestLabSettings(connection)]);
   const now = new Date();
-  return new Map(rows.map((row) => {
+  const succeededBySymbol = new Map(succeeded.map((row) => [row.symbol, { view: toRunView(row, now), tableFigures: row.table_figures }]));
+  const bySymbol: Record<string, AnalysisTableRow> = {};
+  for (const row of latest) {
     const view = toRunView(row, now);
-    return [view.symbol, { status: view.status, finishedAt: view.finishedAt, optionLastDate: view.optionLastDate, labValuesHash: view.labValuesHash }];
-  }));
+    const done = succeededBySymbol.get(view.symbol) ?? null;
+    bySymbol[view.symbol] = {
+      status: view.status,
+      finishedAt: view.finishedAt,
+      optionLastDate: done?.view.optionLastDate ?? view.optionLastDate,
+      formulasVersion: done?.view.formulasVersion ?? view.formulasVersion,
+      outOfDate: done !== null && isOutOfDate(done.view, current.hash),
+      tableFigures: done?.view.formulasVersion === analysisFormulasVersion ? done.tableFigures : null,
+      figuresFinishedAt: done?.view.finishedAt ?? null,
+    };
+  }
+  const outOfDate = Object.entries(bySymbol).filter(([, row]) => row.outOfDate && row.status !== "queued" && row.status !== "running").map(([symbol]) => symbol);
+  return { labSavedAt: lab.updatedAt, outOfDate, bySymbol };
+}
+
+/** Re-run out of date: starts a saved analysis of every symbol whose stored one is out of date (none running); the rest are listed with why. */
+export async function rerunOutOfDateAnalyses(connection: Knex = db): Promise<{ started: string[]; skipped: { symbol: string; reason: string }[] }> {
+  const { outOfDate } = await loadAnalysesForTable(connection);
+  const started: string[] = [];
+  const skipped: { symbol: string; reason: string }[] = [];
+  for (const symbol of outOfDate) {
+    try {
+      await startTickerAnalysis({ symbol, reason: "global_settings" }, connection);
+      started.push(symbol);
+    } catch (error) {
+      skipped.push({ symbol, reason: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return { started, skipped };
 }

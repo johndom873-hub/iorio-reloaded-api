@@ -16,7 +16,6 @@ const { db } = await import("../db/connection.js");
 const { loadCurrentBacktestSettings } = await import("./settingsTemplate.js");
 const {
   BacktestLabSettingsValidationError,
-  globalChangeReachesTicker,
   labSeedDefaultPotDollars,
   loadBacktestLabAudit,
   loadBacktestLabSettings,
@@ -103,25 +102,4 @@ describe("lab settings store", () => {
       const history = await loadBacktestLabAudit({ symbol }, trx);
       expect(history.filter((row) => row.newValue === "global")).toHaveLength(3);
     }));
-});
-
-describe("globalChangeReachesTicker", () => {
-  const none = { potDollars: null, ladderSharesPct: null, ladderRungs: null, ladderShockPct: null, minAbsDelta: null, maxAbsDelta: null };
-  it("reaches a ticker without its own values", () => {
-    expect(globalChangeReachesTicker(["baseline.ladderRungs"], null)).toBe(true);
-    expect(globalChangeReachesTicker(["baseline.ladderRungs"], none)).toBe(true);
-  });
-  it("skips a ticker whose own values replace every changed value; a fixed shock replaces the whole shock rule", () => {
-    expect(globalChangeReachesTicker(["baseline.ladderRungs"], { ...none, ladderRungs: 6 })).toBe(false);
-    expect(globalChangeReachesTicker(["baseline.ladderShockMaxPct", "baseline.ladderShockLookbackYears"], { ...none, ladderShockPct: 60 })).toBe(false);
-    expect(globalChangeReachesTicker(["lab.defaultPotDollars"], { ...none, potDollars: 50_000 })).toBe(false);
-  });
-  it("reaches it when any changed value is not one of its own", () => {
-    expect(globalChangeReachesTicker(["baseline.ladderRungs", "baseline.maxSpreadPctOfMid"], { ...none, ladderRungs: 6 })).toBe(true);
-    expect(globalChangeReachesTicker(["baseline.minAbsDelta"], { ...none, maxAbsDelta: 0.25 })).toBe(true);
-  });
-  it("never reaches it with values an analysis doesn't read: Pluto's own rows and the decision maker", () => {
-    expect(globalChangeReachesTicker(["pluto.capitalBudgetPct", "kellyFraction", "policy.roll", "trading.maxOrderPctOfPortfolio", "decisionMaker"], null)).toBe(false);
-    expect(globalChangeReachesTicker(["kellyFraction", "trading.spreadCostChargedPct"], null)).toBe(true);
-  });
 });

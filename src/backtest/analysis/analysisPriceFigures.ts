@@ -4,7 +4,9 @@ import { isCompleteBar, type StoredDailyBar } from "../engine/backtestBarHistory
 // The Analyse window's figures from a symbol's IBKR daily bars (split-adjusted, not adjusted for dividends), the formulas
 // approved 2026-10-15 (docs: the Analyse Modal Decisions page): Max drawdown per range, 21- and 63-day Yang-Zhang
 // volatility, implied minus what followed (F7), the stock profile (F14 trend, F15 swings, F16 jumps, F17 trending or
-// range-bound) and the bar checks (one-day moves over 35%, calendar gaps over 10 days, F18 runs of 5+ identical closes).
+// range-bound) and the bar checks (one-day moves over 35%, calendar gaps over 10 days, F18 runs of 5+ identical closes);
+// and the Vol Farmer v4 profile's (approved 2026-10-29, carried over 2026-11-01): F12 trend split, F13 market, F14 opening
+// gaps, F15 weekly skew, F16 IV range.
 
 const dayMilliseconds = 86_400_000;
 const daysBetween = (fromIso: string, toIso: string) => (Date.parse(`${toIso}T00:00:00Z`) - Date.parse(`${fromIso}T00:00:00Z`)) / dayMilliseconds;
@@ -291,4 +293,143 @@ export function barChecks(bars: readonly { tradingDate: string; close: number }[
     }
   }
   return { bigMoves, gaps, flatRuns };
+}
+
+/** PERCENTILE.INC: the value at rank (n − 1) × p of the sorted values, interpolated between ranks; null without values. */
+export function percentileInclusive(values: readonly number[], share: number): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const position = (sorted.length - 1) * share;
+  const lower = Math.floor(position);
+  const upper = Math.min(lower + 1, sorted.length - 1);
+  return sorted[lower]! + (sorted[upper]! - sorted[lower]!) * (position - lower);
+}
+
+const mondayKeyOf = (dateIso: string) => {
+  const weekday = new Date(`${dateIso}T00:00:00Z`).getUTCDay();
+  return new Date(Date.parse(`${dateIso}T00:00:00Z`) - ((weekday + 6) % 7) * dayMilliseconds).toISOString().slice(0, 10);
+};
+
+export interface AnalysisTrendSplit {
+  days: number;
+  uptrend: number;
+  downtrend: number;
+  neither: number;
+}
+
+const trendAverageBars = 200;
+const trendSlopeSessions = 20;
+
+/**
+ * F12: each day from the 220th bar is in an uptrend when its close is above its 200-day average and that average above
+ * its level 20 sessions earlier, in a downtrend when both are below, else neither.
+ */
+export function trendSplit(closes: readonly number[]): AnalysisTrendSplit {
+  const split: AnalysisTrendSplit = { days: 0, uptrend: 0, downtrend: 0, neither: 0 };
+  const prefix = [0];
+  for (const close of closes) prefix.push(prefix.at(-1)! + close);
+  const averageEndingAt = (index: number) => (prefix[index + 1]! - prefix[index + 1 - trendAverageBars]!) / trendAverageBars;
+  for (let index = trendAverageBars + trendSlopeSessions - 1; index < closes.length; index++) {
+    const average = averageEndingAt(index);
+    const earlier = averageEndingAt(index - trendSlopeSessions);
+    split.days += 1;
+    if (closes[index]! > average && average > earlier) split.uptrend += 1;
+    else if (closes[index]! < average && average < earlier) split.downtrend += 1;
+    else split.neither += 1;
+  }
+  return split;
+}
+
+export interface AnalysisMarketFit {
+  days: number;
+  beta: number | null;
+  correlation: number | null;
+}
+
+function marketFitOf(pairs: readonly [number, number][]): AnalysisMarketFit {
+  if (pairs.length < 2) return { days: pairs.length, beta: null, correlation: null };
+  const meanTicker = pairs.reduce((sum, [ticker]) => sum + ticker, 0) / pairs.length;
+  const meanMarket = pairs.reduce((sum, [, market]) => sum + market, 0) / pairs.length;
+  let covariance = 0;
+  let tickerVariance = 0;
+  let marketVariance = 0;
+  for (const [ticker, market] of pairs) {
+    covariance += (ticker - meanTicker) * (market - meanMarket);
+    tickerVariance += (ticker - meanTicker) ** 2;
+    marketVariance += (market - meanMarket) ** 2;
+  }
+  return { days: pairs.length, beta: marketVariance === 0 ? null : covariance / marketVariance, correlation: tickerVariance === 0 || marketVariance === 0 ? null : covariance / Math.sqrt(tickerVariance * marketVariance) };
+}
+
+const logReturnsByDate = (bars: readonly { tradingDate: string; close: number }[]) => new Map(bars.slice(1).map((bar, index) => [bar.tradingDate, Math.log(bar.close / bars[index]!.close)]));
+
+/**
+ * F13: beta and correlation of the ticker's daily log returns on SPY's, on the days both traded: every shared day, those
+ * from `sinceDate` (the backtest's first day), and SPY's down and up days only (downside and upside beta).
+ */
+export function marketFits(ticker: readonly { tradingDate: string; close: number }[], spy: readonly { tradingDate: string; close: number }[], sinceDate: string | null): { all: AnalysisMarketFit; sinceBacktest: AnalysisMarketFit | null; spyDownDays: AnalysisMarketFit; spyUpDays: AnalysisMarketFit } {
+  const tickerReturns = logReturnsByDate(ticker);
+  const spyReturns = logReturnsByDate(spy);
+  const shared = [...tickerReturns.keys()].filter((date) => spyReturns.has(date)).sort().map((date) => ({ date, pair: [tickerReturns.get(date)!, spyReturns.get(date)!] as [number, number] }));
+  return {
+    all: marketFitOf(shared.map((entry) => entry.pair)),
+    sinceBacktest: sinceDate === null ? null : marketFitOf(shared.filter((entry) => entry.date >= sinceDate).map((entry) => entry.pair)),
+    spyDownDays: marketFitOf(shared.filter((entry) => entry.pair[1] < 0).map((entry) => entry.pair)),
+    spyUpDays: marketFitOf(shared.filter((entry) => entry.pair[1] > 0).map((entry) => entry.pair)),
+  };
+}
+
+export interface AnalysisOpeningGaps {
+  gaps: number;
+  up: number;
+  down: number;
+  /** gaps ÷ the years from the first day a gap could be measured to the last bar. */
+  perYear: number | null;
+  firstMeasuredOn: string | null;
+  /** The largest by |ln(open ÷ previous close)|, as a simple move (e^gap − 1). */
+  largest: { date: string; move: number } | null;
+}
+
+/** F14: gap = ln(open ÷ the previous close); it counts when |gap| > 2 × the 63-day Yang-Zhang ending the day before ÷ √252. */
+export function openingGaps(bars: readonly DailyOhlcvBar[]): AnalysisOpeningGaps {
+  const result: AnalysisOpeningGaps = { gaps: 0, up: 0, down: 0, perYear: null, firstMeasuredOn: null, largest: null };
+  let largestLog = 0;
+  for (let index = 1; index < bars.length; index++) {
+    const volatility = computeYangZhangVolatility(bars as DailyOhlcvBar[], 63, index);
+    if (!volatility.available) continue;
+    result.firstMeasuredOn ??= bars[index]!.tradingDate;
+    const gap = Math.log(bars[index]!.open / bars[index - 1]!.close);
+    if (!(Math.abs(gap) > (2 * volatility.annualizedVolatility) / Math.sqrt(252))) continue;
+    result.gaps += 1;
+    if (gap > 0) result.up += 1;
+    else result.down += 1;
+    if (Math.abs(gap) > Math.abs(largestLog)) {
+      largestLog = gap;
+      result.largest = { date: bars[index]!.tradingDate, move: Math.exp(gap) - 1 };
+    }
+  }
+  if (result.firstMeasuredOn !== null) {
+    const years = daysBetween(result.firstMeasuredOn, bars.at(-1)!.tradingDate) / 365.25;
+    result.perYear = years > 0 ? result.gaps / years : null;
+  }
+  return result;
+}
+
+/** F15: the skew (m₃ ÷ m₂^1.5) of the weekly log returns between the last closes of consecutive calendar weeks, and the worst week. */
+export function weeklySkew(bars: readonly { tradingDate: string; close: number }[]): { weeks: number; skew: number | null; worstWeek: { endDate: string; move: number } | null } {
+  const weekCloses = bars.filter((bar, index) => index === bars.length - 1 || mondayKeyOf(bars[index + 1]!.tradingDate) !== mondayKeyOf(bar.tradingDate));
+  const returns = weekCloses.slice(1).map((bar, index) => ({ endDate: bar.tradingDate, value: Math.log(bar.close / weekCloses[index]!.close) }));
+  if (returns.length < 3) return { weeks: returns.length, skew: null, worstWeek: null };
+  const mean = returns.reduce((sum, entry) => sum + entry.value, 0) / returns.length;
+  const secondMoment = returns.reduce((sum, entry) => sum + (entry.value - mean) ** 2, 0) / returns.length;
+  const thirdMoment = returns.reduce((sum, entry) => sum + (entry.value - mean) ** 3, 0) / returns.length;
+  const worst = returns.reduce((lowest, entry) => (entry.value < lowest.value ? entry : lowest), returns[0]!);
+  return { weeks: returns.length, skew: secondMoment === 0 ? null : thirdMoment / secondMoment ** 1.5, worstWeek: { endDate: worst.endDate, move: Math.exp(worst.value) - 1 } };
+}
+
+/** F16: the median, 10th and 90th percentile of every daily IV. */
+export function impliedVolatilityRange(bars: readonly { tradingDate: string; impliedVolatility: number | null }[]): { days: number; firstDate: string | null; median: number | null; tenth: number | null; ninetieth: number | null } {
+  const withIv = bars.filter((bar) => bar.impliedVolatility !== null && bar.impliedVolatility > 0);
+  const values = withIv.map((bar) => bar.impliedVolatility!);
+  return { days: values.length, firstDate: withIv[0]?.tradingDate ?? null, median: percentileInclusive(values, 0.5), tenth: percentileInclusive(values, 0.1), ninetieth: percentileInclusive(values, 0.9) };
 }
