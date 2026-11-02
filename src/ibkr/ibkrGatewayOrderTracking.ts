@@ -27,6 +27,7 @@ import type { fetchIbkrCompletedOrders } from "./ibkrGatewayFetchCompletedOrders
 import type { fetchIbkrOpenOrders } from "./ibkrGatewayFetchOpenOrders.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { exitFromClosingFills } from "../lib/partialCloseSlice.js";
+import { closingTradeOtherThanSettlementSql } from "../lib/settlementExecution.js";
 
 // How the worker follows an order after it is placed: IBKR's order-status and error events, the executions and commissions
 // that become the trades ledger, and the sweep that settles orders IBKR no longer lists. Kept apart from
@@ -409,7 +410,8 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
 
   /**
    * An assignment's stock fill, told by its price: exactly the strike of a short option on the ticker with no closing
-   * trade, still open or closed within lateClosingFillWindowMs (early assignments included: no expiry condition).
+   * trade (IBKR's $0 settlement record of the option, which can arrive first, does not count), still open or closed
+   * within lateClosingFillWindowMs (early assignments included: no expiry condition).
    *   - a call assigned (shares sold): the stock leg of the position holding that call, open or just closed;
    *   - a put assigned (shares bought): the ticker's leftover-stock position, or wait for the reconciliation to create it.
    *     Never a covered call's leg: those shares are the put's, and would blend into that position's own cost.
@@ -424,7 +426,7 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
       .where({ "pl.leg_type": "option", "pl.side": "short", "pl.option_type": execution.side === "SLD" ? "call" : "put" })
       .whereRaw("abs(pl.strike_price - ?) < 0.00005", [execution.price])
       .andWhere((builder) => builder.whereNull("pl.exit_at").orWhere("pl.exit_at", ">=", new Date(executedAt.getTime() - lateClosingFillWindowMs)))
-      .whereNotExists(db("trades as closing").whereRaw("closing.position_leg_id = pl.id").where("closing.is_closing_trade", true))
+      .whereNotExists(db("trades as closing").whereRaw("closing.position_leg_id = pl.id").whereRaw(closingTradeOtherThanSettlementSql("closing")))
       .select("pl.id", "pl.position_id as positionId");
     if (assignedOptionLegs.length === 0) return null;
     const assignedPositionIds = new Set(assignedOptionLegs.map((leg) => leg.positionId));

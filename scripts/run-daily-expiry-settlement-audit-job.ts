@@ -30,7 +30,7 @@ async function main() {
     console.log(`Expiry settlement audit (${mode}): ${result.legsExamined} expired short leg(s) examined, ${changes.length} correction(s), ${skipped.length} skipped.`);
 
     return {
-      details: { mode, legsExamined: result.legsExamined, corrections: changes.length, skipped: skipped.map((action) => action.description), pnlDelta },
+      details: { mode, legsExamined: result.legsExamined, corrections: changes.length, changes: changes.map((action) => action.description), skipped: skipped.map((action) => action.description), pnlDelta },
       notify,
       // Skipped legs that need someone (no expiry bar, share-count mismatch, untracked shares, a call too close to
       // call) leave realized P&L wrong until fixed, so the nightly run is recorded as a failure every night they

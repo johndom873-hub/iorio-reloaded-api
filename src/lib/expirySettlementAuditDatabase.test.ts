@@ -11,6 +11,7 @@ vi.mock("../db/connection.js", async () => {
 
 const { db } = await import("../db/connection.js");
 const { runExpirySettlementAudit, summarizeExpirySettlement } = await import("./expirySettlementAudit.js");
+const { easternInstant } = await import("./easternIsoDate.js");
 
 const testDb: Knex = db;
 const createdTickerIds: string[] = [];
@@ -81,6 +82,7 @@ beforeAll(() => {
 afterAll(async () => {
   if (createdTickerIds.length > 0) {
     const positionIds = (await testDb("positions").whereIn("ticker_id", createdTickerIds).select("id")).map((row) => row.id);
+    await testDb("trades").whereIn("position_leg_id", testDb("position_legs").whereIn("position_id", positionIds).select("id")).del();
     await testDb("position_legs").whereIn("position_id", positionIds).del();
     await testDb("positions").whereIn("id", positionIds).del();
     await testDb("daily_price_bars").whereIn("ticker_id", createdTickerIds).del();
@@ -169,5 +171,146 @@ describe("expiry settlement audit — acknowledged legs", () => {
     await testDb("position_legs").where({ id: legId }).update({ settlement_audit_acknowledged_at: null });
     const afterwards = await runExpirySettlementAudit("dry_run", testDb);
     expect(afterwards.actions.filter((action) => action.positionId === positionId).map((action) => action.kind)).toEqual(["skipped"]);
+  });
+});
+
+async function insertExpiredShortOption(positionId: string, optionType: "call" | "put", strike: number, contracts: number, expiryDate: string, exitAt: Date): Promise<string> {
+  const [leg] = await testDb("position_legs")
+    .insert({ position_id: positionId, leg_type: "option", side: "short", quantity: contracts, option_type: optionType, strike_price: strike, expiry_date: expiryDate, multiplier: 100, entry_price: 1.5, entry_at: daysAgo(10), exit_price: 0, exit_at: exitAt })
+    .returning(["id"]);
+  return leg.id;
+}
+
+let auditTradeCounter = 0;
+async function insertTrade(legId: string, trade: { side: "buy" | "sell"; quantity: number; price: number; executedAt: Date; ibkrOrderId: string; sourceOrderRequestId?: string }): Promise<void> {
+  await testDb("trades").insert({
+    position_leg_id: legId,
+    ibkr_exec_id: `audit-test-${Date.now()}-${(auditTradeCounter += 1)}`,
+    ibkr_order_id: trade.ibkrOrderId,
+    side: trade.side,
+    quantity: trade.quantity,
+    price: trade.price,
+    executed_at: trade.executedAt,
+    is_closing_trade: true,
+    source_order_request_id: trade.sourceOrderRequestId ?? null,
+  });
+}
+
+const closeReasonOf = async (positionId: string) => (await testDb("positions").where({ id: positionId }).first("close_reason")).close_reason;
+
+describe("expiry settlement audit — IBKR's $0 settlement record is not a closing trade (Marcelo 2026-11-02)", () => {
+  it("TSLA: a $365 Call settled by IBKR (option at $0, shares sold at $365) and closed at $372.22 is relabelled assigned", async () => {
+    const tickerId = await createTicker();
+    const expiryDate = isoDate(daysAgo(3));
+    await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: expiryDate, close_price: 372.22 });
+    const coveredCallId = await insertPosition(tickerId, "covered_call", "expired_worthless");
+    const settledAt = daysAgo(2);
+    const stockLegId = await insertStockLeg(coveredCallId, 100, 364.361169, daysAgo(10), 365, settledAt);
+    const callLegId = await insertExpiredShortOption(coveredCallId, "call", 365, 1, expiryDate, settledAt);
+    await insertTrade(callLegId, { side: "buy", quantity: 1, price: 0, executedAt: settledAt, ibkrOrderId: "0" });
+    await insertTrade(stockLegId, { side: "sell", quantity: 100, price: 365, executedAt: settledAt, ibkrOrderId: "0" });
+
+    const result = await runExpirySettlementAudit("apply", testDb);
+    expect(result.actions.filter((action) => action.positionId === coveredCallId).map((action) => action.kind)).toEqual(["close_reason"]);
+    expect(await closeReasonOf(coveredCallId)).toBe("assigned");
+  });
+
+  it("a Call bought back (a real fill, by an app order or not) is still not examined", async () => {
+    const tickerId = await createTicker();
+    const expiryDate = isoDate(daysAgo(3));
+    await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: expiryDate, close_price: 120 });
+    const coveredCallId = await insertPosition(tickerId, "covered_call", "closed_via_external_trade");
+    const callLegId = await insertExpiredShortOption(coveredCallId, "call", 110, 1, expiryDate, daysAgo(4));
+    await insertTrade(callLegId, { side: "buy", quantity: 1, price: 0, executedAt: daysAgo(4), ibkrOrderId: "4242" });
+
+    const result = await runExpirySettlementAudit("apply", testDb);
+    expect(result.actions.filter((action) => action.positionId === coveredCallId)).toEqual([]);
+    expect(await closeReasonOf(coveredCallId)).toBe("closed_via_external_trade");
+  });
+});
+
+describe("expiry settlement audit — an option is examined from 16:00 Eastern on its expiry date", () => {
+  it("a Put settled the same evening is examined at 22:15 Eastern, not at 15:59", async () => {
+    const tickerId = await createTicker();
+    const expiryDate = isoDate(daysAgo(3));
+    await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: expiryDate, close_price: 90 });
+    const putPositionId = await insertPosition(tickerId, "cash_secured_put", "expired_worthless");
+    await insertExpiredShortOption(putPositionId, "put", 100, 1, expiryDate, daysAgo(3));
+    const actionKindsAt = async (hour: number, minute: number) =>
+      (await runExpirySettlementAudit("dry_run", testDb, easternInstant(expiryDate, hour, minute))).actions.filter((action) => action.positionId === putPositionId).map((action) => action.kind);
+
+    expect(await actionKindsAt(15, 59)).toEqual([]);
+    expect(await actionKindsAt(22, 15)).toContain("close_reason");
+  });
+});
+
+describe("expiry settlement audit — an out-of-the-money option labelled assigned (Marcelo 2026-11-02)", () => {
+  async function seedTwoNvdaPuts(tickerId: string) {
+    const expiryDate = isoDate(daysAgo(3));
+    const settledAt = daysAgo(2);
+    await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: expiryDate, close_price: 214.13 });
+    const assignedPutId = await insertPosition(tickerId, "cash_secured_put", "assigned");
+    const assignedPutLegId = await insertExpiredShortOption(assignedPutId, "put", 220, 2, expiryDate, settledAt);
+    await insertTrade(assignedPutLegId, { side: "buy", quantity: 2, price: 0, executedAt: settledAt, ibkrOrderId: "0" });
+    const expiredPutId = await insertPosition(tickerId, "cash_secured_put", "assigned");
+    const expiredPutLegId = await insertExpiredShortOption(expiredPutId, "put", 212.5, 2, expiryDate, settledAt);
+    await insertTrade(expiredPutLegId, { side: "buy", quantity: 2, price: 0, executedAt: settledAt, ibkrOrderId: "0" });
+    const leftoverId = await insertPosition(tickerId, "unstructured", null);
+    await testDb("positions").where({ id: leftoverId }).update({ status: "open", closed_at: null });
+    const leftoverStockLegId = await insertStockLeg(leftoverId, 200, 220, new Date(settledAt.getTime() + 5_000), null, null);
+    await insertTrade(leftoverStockLegId, { side: "buy", quantity: 200, price: 220, executedAt: settledAt, ibkrOrderId: "0" });
+    await testDb("trades").where({ position_leg_id: leftoverStockLegId }).update({ is_closing_trade: false });
+    await testDb("position_share_sources").insert([
+      { position_id: leftoverId, source_position_id: assignedPutId, shares_received: 200 },
+      { position_id: leftoverId, source_position_id: expiredPutId, shares_received: 200 },
+    ]);
+    return { assignedPutId, expiredPutId, leftoverId, expiryDate };
+  }
+
+  it("NVDA: the $212.5 Put (close $214.13, no fill at $212.5) becomes expired_worthless and loses its share-source link; the $220 Put keeps both", async () => {
+    const tickerId = await createTicker();
+    const { assignedPutId, expiredPutId, leftoverId } = await seedTwoNvdaPuts(tickerId);
+
+    const dryRun = await runExpirySettlementAudit("dry_run", testDb);
+    expect(dryRun.actions.filter((action) => action.positionId === expiredPutId).map((action) => action.kind)).toEqual(["close_reason", "share_sources_removed"]);
+    expect(await closeReasonOf(expiredPutId)).toBe("assigned");
+
+    const applied = await runExpirySettlementAudit("apply", testDb);
+    const removal = applied.actions.find((action) => action.positionId === expiredPutId && action.kind === "share_sources_removed")!;
+    expect(removal.description).toContain(leftoverId);
+    expect(await closeReasonOf(expiredPutId)).toBe("expired_worthless");
+    expect(await closeReasonOf(assignedPutId)).toBe("assigned");
+    expect((await testDb("position_share_sources").where({ position_id: leftoverId }).select("source_position_id")).map((row) => row.source_position_id)).toEqual([assignedPutId]);
+
+    const secondRun = await runExpirySettlementAudit("apply", testDb);
+    expect(secondRun.actions.filter((action) => action.positionId === expiredPutId)).toEqual([]);
+  });
+
+  it("a Put assigned early (its fill at the strike is recorded) keeps 'assigned' though the stock closed above the strike at expiry", async () => {
+    const tickerId = await createTicker();
+    const expiryDate = isoDate(daysAgo(3));
+    const assignedAt = daysAgo(5);
+    await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: expiryDate, close_price: 60 });
+    const putPositionId = await insertPosition(tickerId, "cash_secured_put", "assigned");
+    await insertExpiredShortOption(putPositionId, "put", 50, 1, expiryDate, assignedAt);
+    const leftoverId = await insertPosition(tickerId, "unstructured", null);
+    const stockLegId = await insertStockLeg(leftoverId, 100, 50, assignedAt, 58, daysAgo(1));
+    await insertTrade(stockLegId, { side: "buy", quantity: 100, price: 50, executedAt: new Date(assignedAt.getTime() - 60_000), ibkrOrderId: "0" });
+    await testDb("trades").where({ position_leg_id: stockLegId }).update({ is_closing_trade: false });
+
+    const result = await runExpirySettlementAudit("apply", testDb);
+    expect(result.actions.filter((action) => action.positionId === putPositionId)).toEqual([]);
+    expect(await closeReasonOf(putPositionId)).toBe("assigned");
+  });
+
+  it("a Put labelled assigned that closed less than $0.05 above its strike is left for review, not relabelled", async () => {
+    const tickerId = await createTicker();
+    const expiryDate = isoDate(daysAgo(3));
+    await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: expiryDate, close_price: 50.03 });
+    const putPositionId = await insertPosition(tickerId, "cash_secured_put", "assigned");
+    await insertExpiredShortOption(putPositionId, "put", 50, 1, expiryDate, daysAgo(2));
+
+    await runExpirySettlementAudit("apply", testDb);
+    expect(await closeReasonOf(putPositionId)).toBe("assigned");
   });
 });

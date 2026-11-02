@@ -17,6 +17,7 @@ const { db } = await import("../db/connection.js");
 const { reconcileHeldPositions, closeReasonStockRolledIntoCoveredCall } = await import("./ibkrGatewayReconcilePositions.js");
 const { createExecutionRecorder } = await import("./ibkrGatewayOrderTracking.js");
 const { isOptionPastExpiry, optionPastExpirySql } = await import("../lib/optionExpiryClock.js");
+const { easternInstant, easternIsoDate } = await import("../lib/easternIsoDate.js");
 // Pluto's book is tested here too: a reconciliation pass closes every open leg it is not given, so the
 // Pluto-book scenarios live beside the other tests that run passes.
 const { loadPlutoBook } = await import("../pluto/book.js");
@@ -1465,5 +1466,280 @@ describe("reconcileHeldPositions — positions_changed tells screens to re-fetch
     const received = await notificationsDuring(() => runPass(held));
 
     expect(received.some((notification) => notification.type === "positions_changed" && notification.symbols!.includes(ticker.symbol))).toBe(false);
+  });
+});
+
+describe("reconcileHeldPositions — IBKR's settlement of an expired option (Marcelo 2026-11-02)", () => {
+  async function insertSettlementExecution(legId: string, side: "buy" | "sell", quantity: number, price: number): Promise<void> {
+    await testDb("trades").insert({ position_leg_id: legId, ibkr_exec_id: `reconcile-test-settlement-${legId}`, ibkr_order_id: "0", side, quantity, price, executed_at: new Date(Date.now() - 60_000), is_closing_trade: true });
+  }
+
+  it("a Covered Call assigned, settled on the expiry evening (22:15 Eastern): the same pass corrects it to assigned at the strike", async () => {
+    const expiryDate = easternIsoDate(new Date());
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    const stockLegId = await insertStockLeg(coveredCallId, stockConId, 100, 100);
+    await insertShortOptionLeg(coveredCallId, callConId, "call", 105, expiryDate, 2);
+    await testDb("daily_price_bars").insert({ ticker_id: ticker.id, trading_date: expiryDate, close_price: 110 });
+
+    const previousMode = process.env.EXPIRY_SETTLEMENT_MODE;
+    process.env.EXPIRY_SETTLEMENT_MODE = "apply";
+    vi.useFakeTimers({ toFake: ["Date"], now: easternInstant(expiryDate, 22, 15) });
+    try {
+      await runPass([]);
+    } finally {
+      vi.useRealTimers();
+      process.env.EXPIRY_SETTLEMENT_MODE = previousMode;
+    }
+
+    const coveredCall = (await positionsFor(ticker.id)).find((position) => position.id === coveredCallId)!;
+    expect([coveredCall.status, coveredCall.close_reason]).toEqual(["closed", "assigned"]);
+    expect(Number((await testDb("position_legs").where({ id: stockLegId }).first()).exit_price)).toBe(105);
+  });
+
+  it("IBKR's settlement records saved before the pass (call at $0, shares sold at the strike): the Covered Call closes as assigned, not as an outside trade", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    const stockLegId = await insertStockLeg(coveredCallId, stockConId, 100, 100);
+    const callLegId = await insertShortOptionLeg(coveredCallId, callConId, "call", 105, isoDateDaysFromToday(-1), 2);
+    await insertSettlementExecution(callLegId, "buy", 1, 0);
+    await insertSettlementExecution(stockLegId, "sell", 100, 105);
+    telegramMessages.length = 0;
+
+    await runPass([]);
+
+    const coveredCall = (await positionsFor(ticker.id)).find((position) => position.id === coveredCallId)!;
+    expect(coveredCall.close_reason).toBe("assigned");
+    expect(await anomaliesFor(coveredCallId)).toHaveLength(0);
+    expect(telegramMessages.some((message) => message.includes(ticker.symbol) && message.toLowerCase().includes("assigned"))).toBe(true);
+  });
+
+  it("a Put whose $0 settlement record arrived before its assignment's stock fill: the fill still goes to the leftover-stock position, not a Covered Call's leg", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const putConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    const coveredCallStockLegId = await insertStockLeg(coveredCallId, stockConId, 100, 92);
+    await insertShortOptionLeg(coveredCallId, callConId, "call", 94, isoDateDaysFromToday(7), 1.1);
+    const cspId = await insertPosition(ticker.id, "cash_secured_put");
+    const putLegId = await insertShortOptionLeg(cspId, putConId, "put", 100, isoDateDaysFromToday(-1), 1.3);
+    await insertSettlementExecution(putLegId, "buy", 1, 0);
+
+    const recorder = createExecutionRecorder({ db: testDb, isAccountBindingMismatch: () => false, requestReconciliation: () => {} });
+    await recorder.recordExecution(
+      { conId: stockConId, symbol: ticker.symbol, secType: SecType.STK } as never,
+      { execId: `reconcile-test-put-assignment-${putLegId}`, orderId: 0, side: "BOT", shares: 100, price: 100, time: "20261102 21:30:00 America/New_York" } as never,
+    );
+
+    expect(await testDb("trades").where({ position_leg_id: coveredCallStockLegId })).toHaveLength(0);
+    expect(recorder.bufferedOpeningExecutionCount(String(stockConId))).toBe(1);
+  });
+});
+
+describe("reconcileHeldPositions — two Puts expiring together, one assigned (Marcelo 2026-11-02)", () => {
+  // TSLA 2026-10-16: the $367.5 and $352.5 Puts expired, TSLA closed $354.72, IBKR delivered 100 shares.
+  async function twoTslaPuts(order: "assigned first" | "expired first", expiryClose: number | null) {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const expiry = isoDateDaysFromToday(-1);
+    const insertPut = async (strike: number) => {
+      const positionId = await insertPosition(ticker.id, "cash_secured_put");
+      await insertShortOptionLeg(positionId, (nextConId += 1), "put", strike, expiry, 2.5);
+      return positionId;
+    };
+    const [assignedPutId, expiredPutId] = order === "assigned first" ? [await insertPut(367.5), await insertPut(352.5)] : await (async () => {
+      const expired = await insertPut(352.5);
+      return [await insertPut(367.5), expired];
+    })();
+    if (expiryClose !== null) await testDb("daily_price_bars").insert({ ticker_id: ticker.id, trading_date: expiry, close_price: expiryClose });
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 365)]);
+    const positions = await positionsFor(ticker.id);
+    const leftover = positions.find((position) => position.strategy_key === "unstructured")!;
+    return {
+      assignedPut: positions.find((position) => position.id === assignedPutId)!,
+      expiredPut: positions.find((position) => position.id === expiredPutId)!,
+      leftoverSources: await testDb("position_share_sources").where({ position_id: leftover.id }).select("source_position_id", "shares_received"),
+    };
+  }
+
+  it.each([
+    ["assigned first", 354.72],
+    ["expired first", 354.72],
+    ["assigned first", null],
+    ["expired first", null],
+  ] as const)("the $367.5 Put is assigned and the $352.5 Put expired (%s, expiry close %s); the leftover's shares come from the $367.5 Put only", async (order, expiryClose) => {
+    const { assignedPut, expiredPut, leftoverSources } = await twoTslaPuts(order, expiryClose);
+    expect(assignedPut.close_reason).toBe("assigned");
+    expect(expiredPut.close_reason).toBe("expired_worthless");
+    expect(leftoverSources).toEqual([{ source_position_id: assignedPut.id, shares_received: 100 }]);
+    expect(await anomaliesFor(assignedPut.id)).toHaveLength(0);
+  });
+
+  it("the expiry close wins over the shares when they disagree, and the disagreement is logged", async () => {
+    // Both Puts out of the money at $370: the 100 untracked shares were not delivered by either.
+    const { assignedPut: higherStrikePut, expiredPut: lowerStrikePut } = await twoTslaPuts("assigned first", 370);
+    expect(higherStrikePut.close_reason).toBe("expired_worthless");
+    expect(lowerStrikePut.close_reason).toBe("expired_worthless");
+    expect((await anomaliesFor(higherStrikePut.id)).map((anomaly) => anomaly.anomaly_type)).toEqual(["put_assignment_evidence_conflict"]);
+    expect(await anomaliesFor(lowerStrikePut.id)).toHaveLength(0);
+  });
+});
+
+describe("reconcileHeldPositions — share-source links count the shares each position really received (Marcelo 2026-11-02)", () => {
+  async function linksOf(positionId: string): Promise<{ source_position_id: string; shares_received: number }[]> {
+    return testDb("position_share_sources").where({ position_id: positionId }).select("source_position_id", "shares_received").orderBy("shares_received", "desc");
+  }
+
+  async function coveredCallWithOwnShares(tickerId: string, stockConId: number, shares: number, callConId: number, expiry: string): Promise<string> {
+    const positionId = await insertPosition(tickerId, "covered_call");
+    await insertStockLeg(positionId, stockConId, shares, 100);
+    const callLegId = await insertShortOptionLeg(positionId, callConId, "call", 110, expiry, 1);
+    await testDb("position_legs").where({ id: callLegId }).update({ quantity: shares / 100 });
+    return positionId;
+  }
+
+  it("INTC: a Covered Call keeping its own 100 shares while a sibling expires with 400 retained records nothing; the leftover records the 400", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const keptCallConId = (nextConId += 1);
+    const keptCoveredCallId = await coveredCallWithOwnShares(ticker.id, stockConId, 100, keptCallConId, isoDateDaysFromToday(7));
+    const expiredCoveredCallId = await coveredCallWithOwnShares(ticker.id, stockConId, 400, (nextConId += 1), isoDateDaysFromToday(-1));
+
+    await runPass([heldStock(ticker.symbol, stockConId, 500, 100), heldShortOption(ticker.symbol, keptCallConId, OptionType.Call, 110, isoDateDaysFromToday(7), 100)]);
+
+    const leftover = (await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!;
+    expect(await linksOf(keptCoveredCallId)).toEqual([]);
+    expect(await linksOf(leftover.id)).toEqual([{ source_position_id: expiredCoveredCallId, shares_received: 400 }]);
+  });
+
+  it("NVDA: one Call sold on 200 leftover shares: the Covered Call records 100 from the leftover, the new leftover the other 100", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const oldLeftoverId = await insertPosition(ticker.id, "unstructured", "cc_expired_leftover_stock");
+    await insertStockLeg(oldLeftoverId, stockConId, 200, 218.927307);
+
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 218.927307), heldShortOption(ticker.symbol, callConId, OptionType.Call, 215, isoDateDaysFromToday(3), 23)]);
+
+    const positions = await positionsFor(ticker.id);
+    const coveredCall = positions.find((position) => position.strategy_key === "covered_call")!;
+    const newLeftover = positions.find((position) => position.strategy_key === "unstructured" && position.id !== oldLeftoverId)!;
+    expect(await linksOf(coveredCall.id)).toEqual([{ source_position_id: oldLeftoverId, shares_received: 100 }]);
+    expect(await linksOf(newLeftover.id)).toEqual([{ source_position_id: oldLeftoverId, shares_received: 100 }]);
+  });
+
+  it("an existing 100-share leftover takes 400 more from an expiring Covered Call: it records 400, not 500", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const keptCallConId = (nextConId += 1);
+    await coveredCallWithOwnShares(ticker.id, stockConId, 100, keptCallConId, isoDateDaysFromToday(7));
+    const leftoverId = await insertPosition(ticker.id, "unstructured", "unknown");
+    await insertStockLeg(leftoverId, stockConId, 100, 100);
+    const expiredCoveredCallId = await coveredCallWithOwnShares(ticker.id, stockConId, 400, (nextConId += 1), isoDateDaysFromToday(-1));
+
+    await runPass([heldStock(ticker.symbol, stockConId, 600, 100), heldShortOption(ticker.symbol, keptCallConId, OptionType.Call, 110, isoDateDaysFromToday(7), 100)]);
+
+    expect(await linksOf(leftoverId)).toEqual([{ source_position_id: expiredCoveredCallId, shares_received: 400 }]);
+  });
+
+  it("two Covered Calls expiring in one pass beside a third that keeps its shares: the leftover records each one's own shares", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const keptCallConId = (nextConId += 1);
+    await coveredCallWithOwnShares(ticker.id, stockConId, 100, keptCallConId, isoDateDaysFromToday(7));
+    const expiredWith200Id = await coveredCallWithOwnShares(ticker.id, stockConId, 200, (nextConId += 1), isoDateDaysFromToday(-1));
+    const expiredWith100Id = await coveredCallWithOwnShares(ticker.id, stockConId, 100, (nextConId += 1), isoDateDaysFromToday(-1));
+
+    await runPass([heldStock(ticker.symbol, stockConId, 400, 100), heldShortOption(ticker.symbol, keptCallConId, OptionType.Call, 110, isoDateDaysFromToday(7), 100)]);
+
+    const leftover = (await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!;
+    expect(await linksOf(leftover.id)).toEqual([
+      { source_position_id: expiredWith200Id, shares_received: 200 },
+      { source_position_id: expiredWith100Id, shares_received: 100 },
+    ]);
+  });
+
+  it("HOOD: a 3-contract roll filling one lot at a time: the new Covered Call records 100 shares from the old one per lot, 300 in all", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const oldCallConId = (nextConId += 1);
+    const newCallConId = (nextConId += 1);
+    const oldCoveredCallId = await coveredCallWithOwnShares(ticker.id, stockConId, 300, oldCallConId, isoDateDaysFromToday(3));
+    const holdings = (lotsRolled: number) => [
+      heldStock(ticker.symbol, stockConId, 300, 100),
+      ...(lotsRolled < 3 ? [heldShortOption(ticker.symbol, oldCallConId, OptionType.Call, 110, isoDateDaysFromToday(3), 100, 3 - lotsRolled)] : []),
+      heldShortOption(ticker.symbol, newCallConId, OptionType.Call, 112, isoDateDaysFromToday(10), 150, lotsRolled),
+    ];
+
+    await runPass(holdings(1));
+    const newCoveredCallId = (await testDb("position_legs").where({ ibkr_contract_id: String(newCallConId) }).first("position_id")).position_id;
+    expect(await linksOf(newCoveredCallId)).toEqual([{ source_position_id: oldCoveredCallId, shares_received: 100 }]);
+    await runPass(holdings(1));
+    await runPass(holdings(2));
+    await runPass(holdings(3));
+
+    expect(await linksOf(newCoveredCallId)).toEqual([{ source_position_id: oldCoveredCallId, shares_received: 300 }]);
+    expect(Number((await testDb("position_legs").where({ position_id: newCoveredCallId, leg_type: "stock" }).whereNull("exit_at").first()).quantity)).toBe(300);
+  });
+
+  it("a 3-contract Call sold one lot at a time on 300 leftover shares: each lot's shares are linked, including those of the leftover closed by the last lot", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const originalLeftoverId = await insertPosition(ticker.id, "unstructured", "csp_assigned_stock");
+    await insertStockLeg(originalLeftoverId, stockConId, 300, 101);
+    const holdings = (contractsFilled: number) => [heldStock(ticker.symbol, stockConId, 300, 101), heldShortOption(ticker.symbol, callConId, OptionType.Call, 103, isoDateDaysFromToday(20), 150, contractsFilled)];
+
+    await runPass(holdings(1));
+    const positions = await positionsFor(ticker.id);
+    const coveredCallId = positions.find((position) => position.strategy_key === "covered_call")!.id;
+    const nextLeftoverId = positions.find((position) => position.strategy_key === "unstructured" && position.id !== originalLeftoverId)!.id;
+    expect(await linksOf(coveredCallId)).toEqual([{ source_position_id: originalLeftoverId, shares_received: 100 }]);
+    expect(await linksOf(nextLeftoverId)).toEqual([{ source_position_id: originalLeftoverId, shares_received: 200 }]);
+
+    await runPass(holdings(2));
+    await runPass(holdings(2));
+    await runPass(holdings(3));
+
+    expect((await positionsFor(ticker.id)).find((position) => position.id === nextLeftoverId)!.status).toBe("closed");
+    expect(await linksOf(coveredCallId)).toEqual([
+      { source_position_id: nextLeftoverId, shares_received: 200 },
+      { source_position_id: originalLeftoverId, shares_received: 100 },
+    ]);
+  });
+
+  it("a Covered Call whose own order bought its 100 shares, opened in the pass a sibling expires with 100 retained: the leftover gets the sibling's shares, the new Call none", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const newCallConId = (nextConId += 1);
+    const expiredCoveredCallId = await coveredCallWithOwnShares(ticker.id, stockConId, 100, (nextConId += 1), isoDateDaysFromToday(-1));
+    const [order] = await testDb("order_requests")
+      .insert({
+        requested_by_user_id: await plutoTestUser(),
+        request_type: "open_covered_call",
+        status: "filled",
+        payload: JSON.stringify({ symbol: ticker.symbol, strategyKey: "covered_call", legs: [{ role: "stock", action: "BUY", symbol: ticker.symbol, quantity: 100 }, { role: "option", right: "C", action: "SELL", symbol: ticker.symbol, quantity: 1 }] }),
+      })
+      .returning(["id"]);
+    drainPendingOpeningExecutionsHook = async (conId, newLegId) => {
+      if (conId !== String(newCallConId)) return;
+      await testDb("trades").insert({ position_leg_id: newLegId, ibkr_exec_id: `reconcile-test-own-buy-${newLegId}`, side: "sell", quantity: 1, price: 1.2, executed_at: new Date(), source_order_request_id: order.id });
+    };
+    try {
+      await runPass([heldStock(ticker.symbol, stockConId, 200, 100), heldShortOption(ticker.symbol, newCallConId, OptionType.Call, 110, isoDateDaysFromToday(7), 120)]);
+    } finally {
+      drainPendingOpeningExecutionsHook = undefined;
+    }
+
+    const positions = await positionsFor(ticker.id);
+    const newCoveredCall = positions.find((position) => position.strategy_key === "covered_call" && position.id !== expiredCoveredCallId)!;
+    const leftover = positions.find((position) => position.strategy_key === "unstructured")!;
+    expect(await linksOf(newCoveredCall.id)).toEqual([]);
+    expect(await linksOf(leftover.id)).toEqual([{ source_position_id: expiredCoveredCallId, shares_received: 100 }]);
   });
 });

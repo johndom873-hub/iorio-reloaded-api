@@ -1,6 +1,8 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { requireEnvironmentVariable } from "../config/env.js";
+import { optionPastExpirySql } from "./optionExpiryClock.js";
+import { closingTradeOtherThanSettlementSql } from "./settlementExecution.js";
 
 // Approved 2026-09-19 (see PROGRESS.md, "Expiry-classification audit"): the
 // worker calls a short option that vanishes without a closing trade
@@ -34,12 +36,16 @@ import { requireEnvironmentVariable } from "../config/env.js";
 //     expired with its shares retained, then a put assigned) IBKR reports ONE leg at the
 //     blended cost, so the target is the blended cost with the put priced at the strike
 //     (see expectBlendedAssignmentEntries); approved 2026-10-01.
-// A leg with settlement_audit_acknowledged_at set is left out entirely (reviewed by hand).
+//   OTM by at least marginalThreshold, position reads 'assigned', no assignment fill (stock at the strike, for the
+//     option's shares, no app order) -> close_reason 'expired_worthless'; a put's share-source links (the shares it was
+//     said to deliver) are deleted. Approved 2026-11-02 (Marcelo).
+// A leg with settlement_audit_acknowledged_at set is left out entirely (reviewed by hand). IBKR's $0 settlement record
+// of the option is not a closing trade here (settlementExecution.ts).
 
 export type ExpirySettlementMode = "dry_run" | "apply";
 
 export interface ExpirySettlementAction {
-  kind: "call_away_stock_exit" | "put_assigned_stock_entry" | "close_reason" | "option_exit_price" | "skipped" | "marginal_call";
+  kind: "call_away_stock_exit" | "put_assigned_stock_entry" | "close_reason" | "share_sources_removed" | "option_exit_price" | "skipped" | "marginal_call";
   symbol: string;
   description: string;
   /** The position whose expired short leg this action concerns — lets a caller (the worker's
@@ -118,8 +124,11 @@ function reviewAction(kind: "skipped" | "marginal_call", leg: ExpiredShortOption
   return { kind, symbol: leg.symbol, positionId: leg.positionId, headline, detail, description: `${headline} — ${detail}`, informational };
 }
 
-async function loadExpiredShortOptionLegs(database: Knex): Promise<ExpiredShortOptionLeg[]> {
-  const result = await database.raw(`
+// Past the 16:00 Eastern close of its expiry date at `now`, so the worker's run in the pass that settles the option (the
+// same evening, before midnight Eastern) already sees it.
+async function loadExpiredShortOptionLegs(database: Knex, now: Date): Promise<ExpiredShortOptionLeg[]> {
+  const result = await database.raw(
+    `
     SELECT pl.id, pl.position_id AS "positionId", p.ticker_id AS "tickerId", t.symbol,
            pl.option_type AS "optionType", pl.strike_price::float AS strike, pl.quantity, pl.multiplier,
            pl.entry_price::float AS "entryPrice", pl.exit_at AS "exitAt", pl.exit_price::float AS "exitPrice", p.close_reason AS "closeReason",
@@ -129,13 +138,55 @@ async function loadExpiredShortOptionLegs(database: Knex): Promise<ExpiredShortO
     JOIN tickers t ON t.id = p.ticker_id
     LEFT JOIN daily_price_bars b ON b.ticker_id = t.id AND b.trading_date = pl.expiry_date
     WHERE pl.leg_type = 'option' AND pl.side = 'short'
-      AND pl.expiry_date < (now() AT TIME ZONE 'America/New_York')::date
+      AND ${optionPastExpirySql("pl.expiry_date", "?::timestamptz")}
       AND pl.exit_at IS NOT NULL AND (pl.exit_price = 0 OR pl.exit_price IS NULL)
       AND pl.settlement_audit_acknowledged_at IS NULL
-      AND NOT EXISTS (SELECT 1 FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade)
+      AND NOT EXISTS (SELECT 1 FROM trades tr WHERE tr.position_leg_id = pl.id AND ${closingTradeOtherThanSettlementSql("tr")})
     ORDER BY pl.expiry_date, t.symbol, pl.strike_price
-  `);
+  `,
+    [now],
+  );
   return result.rows;
+}
+
+// How far from the option's close an assignment's stock fill can be: an early assignment's fill comes before the
+// reconciliation closes the option, an expiry's after it.
+const assignmentFillWindow = "36 hours";
+
+/** Whether the ticker has the stock fill an assignment of this leg makes: no app order, at its strike, for its shares. */
+async function hasAssignmentFill(database: Knex, leg: ExpiredShortOptionLeg): Promise<boolean> {
+  const result = await database.raw(
+    `SELECT 1 FROM trades tr
+     JOIN position_legs stock_leg ON stock_leg.id = tr.position_leg_id
+     JOIN positions stock_position ON stock_position.id = stock_leg.position_id
+     WHERE stock_position.ticker_id = ? AND stock_leg.leg_type = 'stock' AND tr.source_order_request_id IS NULL
+       AND tr.side = ? AND tr.quantity = ? AND abs(tr.price - ?) < 0.00005
+       AND tr.executed_at BETWEEN ?::timestamptz - interval '${assignmentFillWindow}' AND ?::timestamptz + interval '${assignmentFillWindow}'
+     LIMIT 1`,
+    [leg.tickerId, leg.optionType === "call" ? "sell" : "buy", leg.quantity * leg.multiplier, leg.strike, leg.exitAt, leg.exitAt],
+  );
+  return result.rows.length > 0;
+}
+
+async function relabelOutOfTheMoneyAssignment(database: Knex, leg: ExpiredShortOptionLeg, mode: ExpirySettlementMode, actions: ExpirySettlementAction[]): Promise<void> {
+  if (leg.positionStatus !== "closed" || (await hasAssignmentFill(database, leg))) return;
+  actions.push({
+    kind: "close_reason",
+    symbol: leg.symbol,
+    positionId: leg.positionId,
+    description: `${leg.symbol} ${leg.optionType} $${leg.strike} (expiry ${leg.expiryDate}): out of the money at the expiry close ${money(leg.expiryClose!)} with no assignment fill — close_reason assigned -> expired_worthless`,
+  });
+  if (mode === "apply") await database("positions").where({ id: leg.positionId }).update({ close_reason: "expired_worthless" });
+  if (leg.optionType !== "put") return;
+  const links: { position_id: string; shares_received: number | null }[] = await database("position_share_sources").where({ source_position_id: leg.positionId }).select("position_id", "shares_received");
+  if (links.length === 0) return;
+  actions.push({
+    kind: "share_sources_removed",
+    symbol: leg.symbol,
+    positionId: leg.positionId,
+    description: `${leg.symbol} put $${leg.strike} (expiry ${leg.expiryDate}) delivered no shares: its share-source link(s) deleted, to ${links.map((link) => `position ${link.position_id} (${link.shares_received ?? "unknown"} sh)`).join(", ")}`,
+  });
+  if (mode === "apply") await database("position_share_sources").where({ source_position_id: leg.positionId }).del();
 }
 
 async function setCloseReasonAssigned(database: Knex, leg: ExpiredShortOptionLeg, mode: ExpirySettlementMode, actions: ExpirySettlementAction[]): Promise<void> {
@@ -358,8 +409,8 @@ async function realizedPnlTotal(database: Knex): Promise<number> {
   return Number(result.rows[0].total);
 }
 
-async function findAndCorrect(database: Knex): Promise<Omit<ExpirySettlementResult, "mode">> {
-  const legs = await loadExpiredShortOptionLegs(database);
+async function findAndCorrect(database: Knex, now: Date): Promise<Omit<ExpirySettlementResult, "mode">> {
+  const legs = await loadExpiredShortOptionLegs(database, now);
   const actions: ExpirySettlementAction[] = [];
   const before = await realizedPnlTotal(database);
 
@@ -383,6 +434,10 @@ async function findAndCorrect(database: Knex): Promise<Omit<ExpirySettlementResu
       continue;
     }
     const distanceInTheMoney = leg.optionType === "call" ? leg.expiryClose - leg.strike : leg.strike - leg.expiryClose;
+    if (distanceInTheMoney <= -marginalThreshold && leg.closeReason === "assigned") {
+      await relabelOutOfTheMoneyAssignment(database, leg, "apply", actions);
+      continue;
+    }
     if (distanceInTheMoney <= 0) continue; // OTM: worthless is right
     if (distanceInTheMoney < marginalThreshold) {
       actions.push(reviewAction("marginal_call", leg, `finished only ${money(distanceInTheMoney)} in the money (close ${money(leg.expiryClose)}) — too close to call, manual review`));
@@ -406,14 +461,14 @@ class DryRunRollback extends Error {
  * depends on the corrections applying in sequence) is identical to what apply
  * would do. apply commits the same transaction.
  */
-export async function runExpirySettlementAudit(mode: ExpirySettlementMode, database: Knex = db): Promise<ExpirySettlementResult> {
+export async function runExpirySettlementAudit(mode: ExpirySettlementMode, database: Knex = db, now: Date = new Date()): Promise<ExpirySettlementResult> {
   if (mode === "apply") {
-    const outcome = await database.transaction((transaction) => findAndCorrect(transaction));
+    const outcome = await database.transaction((transaction) => findAndCorrect(transaction, now));
     return { mode, ...outcome };
   }
   try {
     await database.transaction(async (transaction) => {
-      throw new DryRunRollback(await findAndCorrect(transaction));
+      throw new DryRunRollback(await findAndCorrect(transaction, now));
     });
   } catch (error) {
     if (error instanceof DryRunRollback) return { mode, ...error.outcome };

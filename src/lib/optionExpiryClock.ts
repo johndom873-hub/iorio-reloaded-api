@@ -13,7 +13,10 @@ export function isOptionPastExpiry(expiryIsoDate: string, now: Date = new Date()
   return Number(easternHourFormatter.format(now)) >= optionExpiryCloseHourEastern;
 }
 
-/** The same rule as a SQL boolean over a date column. */
-export function optionPastExpirySql(expiryDateColumn: string): string {
-  return `(${expiryDateColumn} + interval '${optionExpiryCloseHourEastern} hours') <= (now() AT TIME ZONE 'America/New_York')`;
+/**
+ * The same rule as a SQL boolean over a date column, at the database's now() or at `instantSql` (a timestamptz
+ * expression such as "?::timestamptz", for a caller that passes its own clock).
+ */
+export function optionPastExpirySql(expiryDateColumn: string, instantSql = "now()"): string {
+  return `(${expiryDateColumn} + interval '${optionExpiryCloseHourEastern} hours') <= (${instantSql} AT TIME ZONE 'America/New_York')`;
 }
