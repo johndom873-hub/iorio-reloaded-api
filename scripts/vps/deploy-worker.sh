@@ -35,6 +35,16 @@ HEALTH_CHECK_TIMEOUT_S=30
 
 cd "$REMOTE_DIR"
 
+# One deploy per target at a time: a second run used to delete the first one's $NEXT_DIR mid-build (2026-11-02, two
+# manual runs 16 s apart). A second run waits for the first, then finds its commit deployed and skips. The wait stays
+# well inside the release phase's 150 s SSH timeout (run-release-phase.ts); past it, nothing is touched.
+LOCK_WAIT_S=75
+exec 9>"/run/lock/iorio-deploy-worker-${TARGET}.lock"
+if ! flock -w "$LOCK_WAIT_S" 9; then
+  echo "Another $TARGET worker deploy is still running after ${LOCK_WAIT_S}s: nothing changed." >&2
+  exit 1
+fi
+
 echo "--- fetching origin/main ---"
 git fetch origin main
 NEW_COMMIT=$(git rev-parse origin/main)
