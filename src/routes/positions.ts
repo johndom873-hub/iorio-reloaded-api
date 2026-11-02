@@ -2006,10 +2006,18 @@ positionsRouter.post("/:id/recovery-path", async (request, response) => {
 // any subset of the position's open legs may be included (partial close),
 // and the worker's existing reconciliation pass (not this route) is what
 // decides whether the position is fully closed afterward.
+//
+// keepShares (Marcelo 2026-11-02, Vol Farmer v4's buyback) buys back a
+// covered call's short Call legs alone, each whole or its own `quantity`,
+// and leaves its shares open: once the Call has gone, the reconciliation
+// hands them to a leftover-stock position (cc_call_bought_back_stock), as
+// when a Call expires.
 positionsRouter.post("/:id/close", async (request, response) => {
-  const { legs, contractsToClose } = request.body as {
+  const { legs, contractsToClose, keepShares } = request.body as {
     legs?: { legId: string; limitPrice: number; quantity?: number }[];
     contractsToClose?: number;
+    /** A covered call's short Call bought back alone, its shares kept (Vol Farmer v4's buyback, Marcelo 2026-11-02). */
+    keepShares?: boolean;
   };
 
   if (!legs || legs.length === 0) {
@@ -2028,6 +2036,14 @@ positionsRouter.post("/:id/close", async (request, response) => {
   }
   if (contractsToClose !== undefined && (!Number.isInteger(contractsToClose) || contractsToClose <= 0)) {
     response.status(400).json({ error: "contractsToClose must be a positive integer." });
+    return;
+  }
+  if (keepShares !== undefined && typeof keepShares !== "boolean") {
+    response.status(400).json({ error: "keepShares must be true or false." });
+    return;
+  }
+  if (keepShares === true && contractsToClose !== undefined) {
+    response.status(400).json({ error: "contractsToClose is not supported with keepShares — provide a quantity per Call leg instead." });
     return;
   }
 
@@ -2059,7 +2075,19 @@ positionsRouter.post("/:id/close", async (request, response) => {
       return;
     }
   }
-  if (!isUnstructured) {
+  if (keepShares === true) {
+    // Only the Call legs close, whole or by their own quantity: the shares stay on the position, and the reconciliation
+    // hands them to a leftover-stock position once the Call has gone, as when it expires.
+    if (position.strategy_key !== "covered_call") {
+      response.status(400).json({ error: "keepShares only buys back a covered call's Call." });
+      return;
+    }
+    const notShortCall = existingLegs.find((leg) => providedLegIds.has(leg.id) && !(leg.leg_type === "option" && leg.option_type === "call" && leg.side === "short"));
+    if (notShortCall) {
+      response.status(400).json({ error: "keepShares buys back the position's short Call legs only: its shares stay open." });
+      return;
+    }
+  } else if (!isUnstructured) {
     const allLegsCovered = existingLegIds.size === providedLegIds.size && [...existingLegIds].every((id) => providedLegIds.has(id));
     if (!allLegsCovered) {
       response.status(400).json({ error: "All open legs of this position must be included when closing it." });
@@ -2088,7 +2116,7 @@ positionsRouter.post("/:id/close", async (request, response) => {
   const quantityByLegId = new Map(legs.map((leg) => [leg.legId, leg.quantity]));
 
   function quantityForLeg(leg: (typeof existingLegs)[number]): number {
-    if (isUnstructured) {
+    if (isUnstructured || keepShares === true) {
       const requestedQuantity = quantityByLegId.get(leg.id);
       return requestedQuantity ?? leg.quantity;
     }
@@ -2097,7 +2125,7 @@ positionsRouter.post("/:id/close", async (request, response) => {
     return contractsToClose * optionLeg!.multiplier; // stock leg — derived, never independently set
   }
 
-  if (isUnstructured) {
+  if (isUnstructured || keepShares === true) {
     for (const leg of legsToClose) {
       if (quantityForLeg(leg) > leg.quantity) {
         response.status(400).json({

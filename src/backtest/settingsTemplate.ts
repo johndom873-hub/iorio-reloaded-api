@@ -291,10 +291,11 @@ const rowDefinitionsBeforeVolFarmerV4: readonly RowDefinition[] = [
     label: "Calls in the money at the last look",
     unit: "choice",
     editable: true,
-    note: "a Call expiring at today's close still open at the day's last look (15:30 on a full day) with the price at or above its strike: left to be assigned at the close, or bought back on that look's quotes as any buyback fills (the Spread cost share applies), the shares kept through the night (a Call quoted on one side only is left to the close). NVDA 220 Call, NVDA 223.99 at 15:30, mid 4.025 on 2,500 shares, no spread cost: $10,062.50 paid, the shares kept",
+    note: "a Call expiring at today's close still open at the day's last look (15:30 on a full day) with the price at or above its strike: left to be assigned at the close, or bought back on that look's quotes as any buyback fills (the Spread cost share applies), the shares kept through the night (a Call quoted on one side only is left to the close), or bought back so only at the last session before a weekend (a Friday, or the Thursday before a Friday holiday). NVDA 220 Call, NVDA 223.99 at 15:30, mid 4.025 on 2,500 shares, no spread cost: $10,062.50 paid, the shares kept",
     choices: [
       { value: "assigned", label: "Left to be assigned" },
       { value: "bought_back", label: "Bought back, the shares kept" },
+      { value: "bought_back_before_weekends", label: "Bought back before weekends only" },
     ],
   },
   {

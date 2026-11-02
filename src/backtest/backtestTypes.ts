@@ -494,7 +494,8 @@ export interface BacktestVolFarmerV3Settings {
    * buyback fills (trading.spreadCostChargedPct applies) with its commission, the shares kept through the night instead of
    * called away and bought again at the next look. A Call without a two-sided quote then is left to the close. NVDA 220
    * Call, NVDA 223.99 at 15:30, mid 4.025 on 2,500 shares, no spread cost: $10,062.50 paid, the shares kept. Older
-   * snapshots have none: assigned.
+   * snapshots have none: assigned. "bought_back_before_weekends" (Marcelo 2026-11-02): bought back only at the last session
+   * before a weekend (a Friday, or the Thursday before a Friday holiday), left to be assigned on the other days.
    */
   callsInTheMoneyAtLastLook: VolFarmerV3CallsInTheMoneyAtLastLook;
 }
@@ -513,7 +514,7 @@ export const volFarmerV3RebalancesChoices = ["first_position", "both_positions"]
 export type VolFarmerV3Rebalances = (typeof volFarmerV3RebalancesChoices)[number];
 export const volFarmerV3FirstPositionAfterCalledAwayChoices = ["wait", "rebuild"] as const;
 export type VolFarmerV3FirstPositionAfterCalledAway = (typeof volFarmerV3FirstPositionAfterCalledAwayChoices)[number];
-export const volFarmerV3CallsInTheMoneyAtLastLookChoices = ["assigned", "bought_back"] as const;
+export const volFarmerV3CallsInTheMoneyAtLastLookChoices = ["assigned", "bought_back", "bought_back_before_weekends"] as const;
 export type VolFarmerV3CallsInTheMoneyAtLastLook = (typeof volFarmerV3CallsInTheMoneyAtLastLookChoices)[number];
 
 export const defaultBacktestVolFarmerV3Settings: BacktestVolFarmerV3Settings = { rebalanceBandPct: 5, rebalances: "first_position", firstPositionAfterCalledAway: "wait", optionsExpiry: "next", optionsMaxDaysToExpiry: 45, callStrikeFloor: "break_even", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned" };

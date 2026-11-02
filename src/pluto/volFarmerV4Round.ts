@@ -3,7 +3,7 @@ import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
 import { sharesPerContract } from "../backtest/engine/backtestBook.js";
 import { baselineQuoteRejection } from "../backtest/engine/baselineSaleSteps.js";
 import { newVolFarmerV2SymbolState, runVolFarmerV2Turn, volFarmerV2TurnOrder, type VolFarmerV2Market, type VolFarmerV2SymbolState } from "../backtest/engine/volFarmerV2Steps.js";
-import type { BacktestVolFarmerV3Settings } from "../backtest/backtestTypes.js";
+import type { BacktestVolFarmerV3Settings, VolFarmerV3CallsInTheMoneyAtLastLook } from "../backtest/backtestTypes.js";
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { liveExpiryStrikes } from "../ibkr/liveOptionChainLookups.js";
 import { fetchPricesPoolFirst } from "../ibkr/pricePool.js";
@@ -21,12 +21,14 @@ import { loadPreviousClose } from "../lib/tickerCalendarQueries.js";
 import { describePriceAdjustment } from "../ibkr/dailyBarSplitCheck.js";
 import { noticePlutoTicker } from "./plutoTickerNotices.js";
 import { strategyDeltaVerdict, type StrategyDeltaContext } from "../lib/strategyOrderGates.js";
-import { daysToExpiry, describeExpiry } from "../lib/optionContractLabel.js";
+import { daysToExpiry, describeExpiry, describeOptionContract } from "../lib/optionContractLabel.js";
 import { optionMidLimitPrice } from "../lib/optionLimitPrice.js";
 import { strategyBookCapitalVerdict, loadCommittedCapitalOnSymbols } from "../lib/orderLimits.js";
 import { computeTickerExposure } from "../lib/positionExposure.js";
+import type { PositionLegFigures } from "../lib/positionSelectors.js";
 import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { frozenSymbolSet } from "../lib/tickerFreeze.js";
+import { isLastSessionBeforeWeekend } from "../lib/tradingWeek.js";
 import { loadInFlightNotionals, loadInFlightNotionalsBySymbol, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
 import { executePlutoOrder, watchPlutoOrder, type ExecuteInput } from "./executor.js";
 import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
@@ -43,12 +45,15 @@ import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, tickerP
 import {
   adoptVolFarmerV4Holdings,
   createVolFarmerV4LiveBook,
+  pendingVolFarmerV4CallBuyBack,
   pendingVolFarmerV4Order,
   replaceVolFarmerV4LegRef,
   settleVolFarmerV4Order,
   sharesOfPlannedOrder,
   unfilledVolFarmerV4Outcome,
+  volFarmerV4BuyBackMinutesBeforeWindowEnd,
   volFarmerV4RulesOf,
+  type VolFarmerV4Memory,
   type VolFarmerV4PendingOrder,
   type VolFarmerV4PlannedOrder,
 } from "./volFarmerV4LiveBook.js";
@@ -74,6 +79,11 @@ import { loadVolFarmerV4LeftoverStockLeg, loadVolFarmerV4LegStatuses, loadVolFar
 // The account is a cash account (Marcelo 2026-10-31): the free cash is also held to the settled cash left, IBKR's settled
 // cash less the cash the open Puts hold, the orders in flight and the round's earlier orders; with no settled cash
 // reported, nothing is bought and no Put sold.
+// v4's buyback (Marcelo 2026-11-02, the lab's callsInTheMoneyAtLastLook): in the trading window's last 2 minutes, on a day
+// the setting buys back (every day, or only the last session before a weekend), each of its Calls expiring today with the
+// stock at or above its strike is bought back at the mid through the close route, its shares kept, if the settled cash left
+// pays for it; nothing else is sent for the ticker in those minutes, so no new Call covers the shares kept. One unfilled
+// at the cancel before the close (or after the platform's unfilled-order sweep) is left to be assigned.
 
 /** The expiry v4 sells today under its Options expiry setting (YYYY-MM-DD): today's, when one ends at the close, or the next listed after today. */
 export function volFarmerV4SoldExpiry(expirations: readonly string[], todayIso: string, optionsExpiry: BacktestVolFarmerV3Settings["optionsExpiry"]): string | null {
@@ -119,6 +129,8 @@ export interface VolFarmerV4RoundInput {
   settledCashValue: number | null;
   netLiquidationValue: number;
   cancelByMs: number | null;
+  /** Today's trading window end (the session's, clamped before the close): v4's buyback runs in the minutes before it. */
+  windowEndAtMs: number | null;
   /** Only these symbols (a round about some tickers); empty = every enabled ticker. */
   symbols: string[];
   /** SPY's stress level holds: no opening order, a sale of LEAPS or shares only. */
@@ -146,6 +158,44 @@ interface VolFarmerV4OrderToSend {
 }
 
 const isShareOrder = (order: VolFarmerV4PlannedOrder) => order.kind === "buy_shares" || order.kind === "sell_shares";
+
+/**
+ * Whether a round at `nowMs` is in v4's buyback minutes on a day its setting buys back: every day, or only the last session
+ * before a weekend (a Friday, or the Thursday before a Friday holiday). Example: with the window ending at 15:30 ET, a
+ * Friday round at 15:28:16 is one; one at 15:27:59 is not, nor a Thursday's at 15:29 under "before weekends only".
+ */
+export function isVolFarmerV4BuyBackRound(input: { callsInTheMoneyAtLastLook: VolFarmerV3CallsInTheMoneyAtLastLook; nowMs: number; windowEndAtMs: number | null; todayIso: string; nextSessionIso: string | undefined }): boolean {
+  if (input.callsInTheMoneyAtLastLook === "assigned" || input.windowEndAtMs === null) return false;
+  if (input.nowMs < input.windowEndAtMs - volFarmerV4BuyBackMinutesBeforeWindowEnd * 60_000) return false;
+  return input.callsInTheMoneyAtLastLook === "bought_back" || isLastSessionBeforeWeekend(input.todayIso, input.nextSessionIso);
+}
+
+/** A Call v4 buys back: its leg, the contracts the leg holds and each position's of them. */
+export interface VolFarmerV4CallToBuyBack {
+  legId: string;
+  expiry: string;
+  strike: number;
+  contracts: number;
+  contractsByPosition: { first: number; second: number };
+}
+
+/**
+ * The Calls v4 buys back at a buyback round: each open leg of its positions' Calls expiring today with the stock at or
+ * above its strike, not already being bought back by an order still pending, for the contracts v4 holds of it (never more
+ * than the leg holds: a leg the book has not yet cut after a part fill is not bought back past what is still short). A
+ * Call on the ticker that is not v4's stays.
+ */
+export function volFarmerV4CallsToBuyBack(input: { state: VolFarmerV2SymbolState; openLegs: readonly PositionLegFigures[]; pending: readonly VolFarmerV4PendingOrder[]; stockPrice: number; todayIso: string }): VolFarmerV4CallToBuyBack[] {
+  const beingBoughtBack = new Set(input.pending.flatMap((order) => (order.kind === "buy_back_call" && order.boughtBackLegId !== undefined ? [order.boughtBackLegId] : [])));
+  const contractsOf = (name: "first" | "second", legId: string) => (input.state[name]?.calls.filter((call) => call.legId === legId).reduce((sum, call) => sum + call.shares, 0) ?? 0) / sharesPerContract;
+  return input.openLegs
+    .filter((leg) => leg.exitAt === null && leg.legType === "option" && leg.optionType === "call" && leg.side === "short" && leg.expiryDate === input.todayIso && leg.strikePrice !== null && input.stockPrice >= leg.strikePrice && !beingBoughtBack.has(leg.id))
+    .map((leg) => {
+      const contractsByPosition = { first: contractsOf("first", leg.id), second: contractsOf("second", leg.id) };
+      return { legId: leg.id, expiry: leg.expiryDate!, strike: leg.strikePrice!, contracts: Math.min(leg.quantity, contractsByPosition.first + contractsByPosition.second), contractsByPosition };
+    })
+    .filter((call) => call.contracts > 0);
+}
 
 export async function runVolFarmerV4Round(input: VolFarmerV4RoundInput): Promise<VolFarmerV4RoundSummary> {
   const { settings, now } = input;
@@ -341,6 +391,22 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
     await saveVolFarmerV4Memory(tickerId, memory, adopted);
     return nothingDue;
   }
+  const budgetFree = (settings.capitalBudgetPct / 100) * input.netLiquidationValue - round.bookCommitted;
+  const accountFree = round.accountFreeCash - round.accountInFlightAtStart - round.committedThisRound;
+  // The cash account's settled cash left (Marcelo 2026-10-31): IBKR's settled cash less what the open Puts hold, the
+  // orders in flight and the round's earlier orders. Example: $40,000 settled, a $5,000 purchase working and $10,000
+  // bought earlier this round leave $25,000.
+  const settledFree = round.settledFreeCash === null ? 0 : round.settledFreeCash - round.accountInFlightAtStart - round.committedThisRound;
+  const freeCash = Math.max(0, Math.min(budgetFree, accountFree, settledFree));
+  lastRound.figures = { potDollars, committedDollars: tickerExposure + inFlight.tickerNotional, freeCashDollars: freeCash, leapsCapDollars: (potDollars * settings.volFarmerV4LeapsMaxAllocationPct) / 100, putsDollars: (potDollars * (100 - settings.volFarmerV4FirstPositionPct)) / 100 };
+  // v4's buyback minutes (Marcelo 2026-11-02): only the Calls in the money are bought back, and nothing else is sent.
+  const liveSessions = await loadLiveTradingSessions(now);
+  const nextSessionIso = liveSessions.openDays.find((dateIso) => dateIso > clock.todayIso);
+  if (isVolFarmerV4BuyBackRound({ callsInTheMoneyAtLastLook: settings.volFarmerV4CallsInTheMoneyAtLastLook, nowMs: now.getTime(), windowEndAtMs: input.windowEndAtMs, todayIso: clock.todayIso, nextSessionIso })) {
+    if (pass === "cycles_calls_puts") await buyBackCallsInTheMoney({ input, ticker, memory, openLegs, stockPrice, clock, round, summary, note });
+    await saveVolFarmerV4Memory(tickerId, memory, adopted);
+    return nothingDue;
+  }
   const { quotes, stale } = latestCycleQuotes(bandQuotes, bandCycle, now, settings.maxQuoteAgeMinutes);
   if (stale) {
     note(`the band's latest quotes are older than ${settings.maxQuoteAgeMinutes} minutes, so nothing is planned`);
@@ -350,24 +416,17 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   const memoryLegIds = legIdsOf(memory.state).filter((legId) => !legId.startsWith("action:") && !legId.startsWith("planned:"));
   const openOptionLegs = openLegs.filter((leg) => leg.legType === "option" && leg.expiryDate !== null && leg.strikePrice !== null);
   const legStatusById = await loadVolFarmerV4LegStatuses([...new Set([...memoryLegIds, ...openOptionLegs.map((leg) => leg.id)])]);
-  const budgetFree = (settings.capitalBudgetPct / 100) * input.netLiquidationValue - round.bookCommitted;
-  const accountFree = round.accountFreeCash - round.accountInFlightAtStart - round.committedThisRound;
-  // The cash account's settled cash left (Marcelo 2026-10-31): IBKR's settled cash less what the open Puts hold, the
-  // orders in flight and the round's earlier orders. Example: $40,000 settled, a $5,000 purchase working and $10,000
-  // bought earlier this round leave $25,000.
-  const settledFree = round.settledFreeCash === null ? 0 : round.settledFreeCash - round.accountInFlightAtStart - round.committedThisRound;
   if (round.settledFreeCash === null && pass === "cycles_calls_puts") note("IBKR reports no settled cash, so the free cash is 0: nothing is bought and no Put sold");
   const snapshot = {
     legStatusById,
     openOptionContracts: openOptionLegs.map((leg) => ({ expiry: leg.expiryDate!, strike: leg.strikePrice! })),
     flat: openLegs.length === 0,
-    freeCash: Math.max(0, Math.min(budgetFree, accountFree, settledFree)),
+    freeCash,
     potDollars,
     stockPrice,
     optionCommissionDollars: round.optionCommissionDollars,
     stockCommissionDollars: round.stockCommissionDollars,
   };
-  lastRound.figures = { potDollars, committedDollars: tickerExposure + inFlight.tickerNotional, freeCashDollars: snapshot.freeCash, leapsCapDollars: (potDollars * settings.volFarmerV4LeapsMaxAllocationPct) / 100, putsDollars: (potDollars * (100 - settings.volFarmerV4FirstPositionPct)) / 100 };
   const listedExpiries = chain.expirations
     .map((expiry) => `${expiry.slice(0, 4)}-${expiry.slice(4, 6)}-${expiry.slice(6, 8)}`)
     .filter((expiry) => expiry >= clock.todayIso)
@@ -384,7 +443,6 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   // On an expiry day the steps sell on it even before (or without) a Call of it quoted, as the lab's day does; they word
   // the Calls they find none of, and this says why.
   if (pass === "cycles_calls_puts" && v3.optionsExpiry === "today" && soldExpiry !== null && noCallQuotedReason !== undefined) note(noCallQuotedReason);
-  const liveSessions = await loadLiveTradingSessions(now);
   const marketWith = (leapsQuotesByExpiry: ReadonlyMap<string, SymbolFileQuote[]>, missing: Set<string>): VolFarmerV2Market => ({
     symbol,
     todayIso: clock.todayIso,
@@ -508,6 +566,96 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   }
   await saveVolFarmerV4Memory(tickerId, { state, pending }, adopted);
   return { leapsDue: look.leapsDue && shareOrder === undefined };
+}
+
+/**
+ * v4's buyback (Marcelo 2026-11-02): each Call to buy back, quoted live and bought back at the mid on the cent through the
+ * close route, its shares kept, if the settled cash left pays for it (contracts × 100 × the limit, with commission). One
+ * without a two-sided live quote, or that the settled cash can't pay for, is left to be assigned (tried again at a later
+ * round of the minutes); one sent is pending until it settles. Example: 38 $100 Calls, the stock at $101.00, quoted
+ * 1.05 / 1.15: bought back at 1.10, $4,180 + $25.84 commission, with $40,000 of settled cash left.
+ */
+async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; ticker: PlutoTickerSettings; memory: VolFarmerV4Memory; openLegs: readonly PositionLegFigures[]; stockPrice: number; clock: { todayIso: string }; round: RoundState; summary: VolFarmerV4RoundSummary; note: (text: string) => void }): Promise<void> {
+  const { input, ticker, memory, stockPrice, clock, round, summary, note } = context;
+  const { settings } = input;
+  const minutes = `the window's last ${volFarmerV4BuyBackMinutesBeforeWindowEnd} minutes`;
+  const calls = volFarmerV4CallsToBuyBack({ state: memory.state, openLegs: context.openLegs, pending: memory.pending, stockPrice, todayIso: clock.todayIso });
+  if (calls.length === 0) {
+    const working = memory.pending.filter((order) => order.kind === "buy_back_call").length;
+    note(working > 0 ? `${minutes}: ${working} buyback(s) working, nothing else is sent` : `${minutes}: no Call expiring today is in the money at ${stockPrice.toFixed(2)}, so nothing is bought back and nothing else is sent`);
+    return;
+  }
+  const legRows: { id: string; position_id: string }[] = await db("position_legs").whereIn("id", calls.map((call) => call.legId)).select("id", "position_id");
+  const positionIdByLegId = new Map(legRows.map((row) => [row.id, row.position_id]));
+  const keptThrough = settings.volFarmerV4CallsInTheMoneyAtLastLook === "bought_back_before_weekends" ? "the weekend" : "the night";
+  for (const call of calls) {
+    const contract = { expiry: call.expiry, strike: call.strike, right: "C" as const };
+    const label = describeOptionContract({ strike: call.strike, right: "C", expiry: call.expiry, dte: 0 });
+    const chosenBecause = `a Call expiring today in the money in ${minutes} (the stock at ${stockPrice.toFixed(2)}, the strike ${call.strike}), bought back so its shares stay through ${keptThrough}`;
+    summary.planned += 1;
+    const [live] = await input.marketWatch.burst(ticker.symbol, [contract]);
+    const twoSided = live && live.bid !== null && live.ask !== null && live.bid > 0 && live.ask > live.bid ? { bid: live.bid, ask: live.ask } : null;
+    const limitPrice = twoSided ? optionMidLimitPrice(twoSided.bid, twoSided.ask, "buy") : null;
+    const costDollars = limitPrice === null ? 0 : limitPrice * sharesPerContract * call.contracts + round.commissions.option.perContractDollars("buy", call.contracts) * call.contracts;
+    // The settled cash left, as the look counts it, less the buybacks this round already sent.
+    const settledFree = round.settledFreeCash === null ? 0 : round.settledFreeCash - round.accountInFlightAtStart - round.committedThisRound;
+    const positionId = positionIdByLegId.get(call.legId);
+    const gateResults: PlutoGateResult[] = [
+      { gate: "vol_farmer_v4", ok: true, detail: chosenBecause },
+      { gate: "live_quote", ok: twoSided !== null, detail: twoSided ? `bid ${twoSided.bid.toFixed(2)}, ask ${twoSided.ask.toFixed(2)}` : "no live two-sided quote" },
+      ...(limitPrice !== null ? [{ gate: "settled_cash", ok: costDollars <= settledFree, detail: `the buyback costs ${formatWholeDollars(costDollars)}, the settled cash left is ${formatWholeDollars(Math.max(0, settledFree))}` }] : []),
+      ...(positionId === undefined ? [{ gate: "position", ok: false, detail: "the Call's position was not found" }] : []),
+    ];
+    const ok = gateResults.every((gate) => gate.ok) && limitPrice !== null && positionId !== undefined;
+    const actionId = await recordPlutoAction({
+      passId: input.passId,
+      kind: "close_leg",
+      symbol: ticker.symbol,
+      tickerId: ticker.tickerId,
+      contract: { strategyKey: "covered_call", ...contract },
+      candidateScores: { stockPrice, strike: call.strike, bid: twoSided?.bid ?? null, ask: twoSided?.ask ?? null, intrinsic: stockPrice - call.strike },
+      deterministicTopPick: null,
+      gateResults,
+      sizeTier: null,
+      quantity: call.contracts,
+      limitPrice,
+      outcome: ok ? "validated" : "blocked",
+      blockReason: ok ? null : gateResults.filter((gate) => !gate.ok).map((gate) => `${gate.gate}: ${gate.detail}`).join(" | "),
+      referenceBid: twoSided?.bid ?? null,
+      referenceMid: twoSided ? (twoSided.bid + twoSided.ask) / 2 : null,
+      executionStrategy: "vol_farmer_v4",
+    });
+    if (!ok) {
+      const detail = gateResults.filter((gate) => !gate.ok).map((gate) => gate.detail).join("; ");
+      await recordPlutoEvent("action_blocked", { passId: input.passId, actionId, symbol: ticker.symbol, stage: "vol_farmer_v4", reason: detail });
+      note(`the buyback of ${call.contracts}× ${label} is not sent (${detail}): the Call is left to be assigned unless a later round of ${minutes} buys it back`);
+      continue;
+    }
+    await recordPlutoEvent("action_validated", { passId: input.passId, actionId, symbol: ticker.symbol, quantity: call.contracts, limitPrice, reasons: [chosenBecause] });
+    const result = await executePlutoOrder(input.api, settings, {
+      kind: "call_buy_back",
+      actionId,
+      symbol: ticker.symbol,
+      positionId: positionId!,
+      legId: call.legId,
+      contract: { ...contract, dte: 0 },
+      plan: { quantity: call.contracts, limitPrice: limitPrice!, notional: costDollars, fullSizeQuantity: call.contracts },
+      reasons: [`Vol Farmer v4: ${chosenBecause}.`],
+    });
+    if (result.orderId !== null) round.bookCounts.ordersToday += 1;
+    if (result.outcome !== "confirmed" || result.orderId === null) {
+      note(`the buyback of ${call.contracts}× ${label}: ${result.detail}`);
+      continue;
+    }
+    summary.sent += 1;
+    round.committedThisRound += costDollars;
+    memory.pending.push(pendingVolFarmerV4CallBuyBack(actionId, call));
+    input.trackWatch(
+      watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: "buy", multiplier: 100 }, description: result.detail, cancelByMs: input.cancelByMs }),
+      result.orderId,
+      ticker.symbol,
+    );
+  }
 }
 
 /** Every leg reference the state holds. */

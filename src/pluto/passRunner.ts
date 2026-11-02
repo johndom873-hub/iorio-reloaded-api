@@ -114,7 +114,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   // stress Vol Farmer v4 opens nothing, a sale of LEAPS or shares still going.
   if (request.heldPositionsOnly) return skip("the strategies' orders wait for today's opening look", checks.checks);
   if (checks.context.netLiquidationValue === null) return skip("no net liquidation value for the strategies' pots", checks.checks);
-  const roundInput = { passId, settings, api: context.api, marketWatch: context.marketWatch, trackWatch: context.trackWatch, now, todayIso: checks.context.todayEasternIso, totalCashValue: checks.context.totalCashValue, netLiquidationValue: checks.context.netLiquidationValue, cancelByMs: checks.context.session.cancelByMs, symbols: request.symbols };
+  const roundInput = { passId, settings, api: context.api, marketWatch: context.marketWatch, trackWatch: context.trackWatch, now, todayIso: checks.context.todayEasternIso, totalCashValue: checks.context.totalCashValue, netLiquidationValue: checks.context.netLiquidationValue, cancelByMs: checks.context.session.cancelByMs, windowEndAtMs: checks.context.session.windowEndAtMs, symbols: request.symbols };
   const { sent, planned, looked, notes } = await runVolFarmerV4Round({ ...roundInput, settledCashValue: checks.context.settledCashValue, stressed: marketStress });
   const skippedReason =
     sent > 0

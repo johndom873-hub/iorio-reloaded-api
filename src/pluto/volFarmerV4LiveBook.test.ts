@@ -10,6 +10,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 import {
   adoptVolFarmerV4Holdings,
   createVolFarmerV4LiveBook,
+  pendingVolFarmerV4CallBuyBack,
   pendingVolFarmerV4Order,
   replaceVolFarmerV4LegRef,
   settleVolFarmerV4Order,
@@ -269,5 +270,38 @@ describe("v4's share orders on the live book", () => {
     expect(settleVolFarmerV4Order(sold, order, { ...unfilledVolFarmerV4Outcome, sharesSold: 250 })).toBe("the sale of 400 shares, 250 filled");
     expect(sold).toMatchObject({ first: { shares: 800, premiums: [{ dollars: 800, shares: 800 }] }, second: { shares: 50 }, leapsBought: true, leapsToSell: false });
     expect(settleVolFarmerV4Order(sold, order, { ...unfilledVolFarmerV4Outcome, sharesSold: 400 })).toBeNull();
+  });
+});
+
+describe("v4's buyback on the live book", () => {
+  const stateHolding = (first: VolFarmerV2Position | null, second: VolFarmerV2Position | null = null) => ({ ...newVolFarmerV2SymbolState(), potDollars: 480_000, first, second });
+  const filled = (contracts: number, dollars: number, legId = "c1") => ({ ...unfilledVolFarmerV4Outcome, filledContracts: contracts, optionLegIds: [legId], optionNetDollars: dollars });
+
+  it("puts a filled buyback's cost against the position's premiums over the shares it covered, the Call gone and the shares kept", () => {
+    const state = stateHolding({ shares: 3_800, costPerShare: 100, premiums: [{ legId: "c1", dollars: 2_000, shares: 3_800 }], calls: [{ legId: "c1", shares: 3_800 }], puts: [] });
+    const order = pendingVolFarmerV4CallBuyBack("b1", { legId: "c1", expiry: "2026-11-06", strike: 100, contracts: 38, contractsByPosition: { first: 38, second: 0 } });
+    // 38 × 1.10 × 100 + 38 × $0.68 (the worked example's commission).
+    expect(settleVolFarmerV4Order(state, order, filled(38, 4_205.84))).toBeNull();
+    expect(state.first).toEqual({ shares: 3_800, costPerShare: 100, premiums: [{ legId: "c1", dollars: 2_000, shares: 3_800 }, { legId: "c1", dollars: -4_205.84, shares: 3_800 }], calls: [], puts: [] });
+    // The break-even rises by the cost per share: 100 − (2,000 − 4,205.84) ÷ 3,800.
+    expect(volFarmerV2BreakEven(state.first!)).toBeCloseTo(100.5805, 4);
+  });
+
+  it("splits a part fill over the first position's contracts, then the second's, and leaves the rest of the Call on fewer shares", () => {
+    const state = stateHolding({ shares: 1_900, costPerShare: 100, premiums: [], calls: [{ legId: "c1", shares: 1_900 }], puts: [] }, { shares: 600, costPerShare: 90, premiums: [], calls: [{ legId: "c1", shares: 600 }], puts: [] });
+    const order = pendingVolFarmerV4CallBuyBack("b1", { legId: "c1", expiry: "2026-11-06", strike: 100, contracts: 25, contractsByPosition: { first: 19, second: 6 } });
+    // 22 of 25 filled, $2,435.84 in all ($110.72 a contract): the first's 19, then 3 of the second's 6, whose slice of the leg the fills went to.
+    expect(settleVolFarmerV4Order(state, order, filled(22, 2_435.84, "c1-slice"))).toBe("the buyback of the 100 Call, 22 of 25 filled: the rest is left to be assigned");
+    expect(state.first).toMatchObject({ shares: 1_900, calls: [], premiums: [{ legId: "c1-slice", dollars: expect.closeTo(-2_103.68, 2), shares: 1_900 }] });
+    expect(state.second).toMatchObject({ shares: 600, calls: [{ legId: "c1", shares: 300 }], premiums: [{ legId: "c1-slice", dollars: expect.closeTo(-332.16, 2), shares: 300 }] });
+  });
+
+  it("leaves the Call to be assigned when nothing filled, and counts no buyback among the open contracts", () => {
+    const state = stateHolding({ shares: 3_800, costPerShare: 100, premiums: [], calls: [{ legId: "c1", shares: 3_800 }], puts: [] });
+    const order = pendingVolFarmerV4CallBuyBack("b1", { legId: "c1", expiry: "2026-11-06", strike: 100, contracts: 38, contractsByPosition: { first: 38, second: 0 } });
+    expect(settleVolFarmerV4Order(state, order, unfilledVolFarmerV4Outcome)).toBe("the buyback of the 100 Call did not fill: the Call is left to be assigned");
+    expect(state.first).toEqual({ shares: 3_800, costPerShare: 100, premiums: [], calls: [{ legId: "c1", shares: 3_800 }], puts: [] });
+    const { book } = createVolFarmerV4LiveBook({ state, pending: [order], snapshot: snapshotOf({ flat: false, openOptionContracts: [{ expiry: "2026-11-06", strike: 100 }] }) });
+    expect(book.openOptionContracts()).toEqual([{ expiry: "2026-11-06", strike: 100 }]);
   });
 });

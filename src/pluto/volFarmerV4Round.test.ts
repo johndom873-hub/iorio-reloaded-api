@@ -12,8 +12,8 @@ import type { VolFarmerV4Memory } from "./volFarmerV4LiveBook.js";
 // still working counted as planned until it settles; each ticker's last round saved for the screen, with its figures. The
 // tickers sharing Pluto's budget: the day's turn, a new cycle held to the free cash, and the LEAPS after every ticker's
 // other orders, on the free cash they left. On v4's own values (today's expiry, 80% in shares): the share orders, sent
-// alone and waited for, a trim's part fill, the settled cash, and a Call expiring at today's close. An order sent works
-// (and is in flight) until a test ends it.
+// alone and waited for, a trim's part fill, the settled cash, a Call expiring at today's close, and the buyback in the
+// window's last minutes. An order sent works (and is in flight) until a test ends it.
 
 const harness = vi.hoisted(() => ({
   enabled: [] as { tickerId: string; symbol: string; allocationPct: number | null }[],
@@ -49,7 +49,8 @@ const harness = vi.hoisted(() => ({
 /** The orders sent and still working, with the notional the in-flight order requests count them at. */
 const workingOrders = () => harness.executed.filter((order) => (harness.outcomes.get(order.actionId as string) as { working: boolean } | undefined)?.working === true).map((order) => ({ symbol: order.symbol as string, notional: (order.plan as { notional: number }).notional }));
 
-vi.mock("../db/connection.js", () => ({ db: () => ({}) }));
+// The one read the round makes itself: the position of each Call it buys back.
+vi.mock("../db/connection.js", () => ({ db: () => ({ whereIn: (_column: string, ids: string[]) => ({ select: async () => ids.map((id) => ({ id, position_id: `position-of-${id}` })) }) }) }));
 // Every weekday from the round's day a session: what the premium yields are annualized over.
 vi.mock("../lib/liveTradingSessions.js", async () => {
   const { sessionsHeldAmong } = await import("../lib/tradingSessionsHeld.js");
@@ -127,7 +128,7 @@ vi.mock("./volFarmerV4LookLoader.js", () => ({
   loadVolFarmerV4LeftoverStockLeg: async () => harness.leftoverStockLeg,
 }));
 
-const { runVolFarmerV4Round, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
+const { isVolFarmerV4BuyBackRound, runVolFarmerV4Round, volFarmerV4CallsToBuyBack, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
 
 /** v4 at its defaults: Calls expiring at today's close, 80% of the pot in shares, rebalanced. */
 const v4Settings = { ...plutoSafetyLimitsSettingsFixture, ...plutoVolFarmerV4SettingsFixture, capitalBudgetPct: 50, excessAllowancePct: 0, maxQuoteAgeMinutes: 10, burstLines: 10, telegramVerbosity: "actions" };
@@ -149,8 +150,8 @@ const marketWatch = {
   snapshot: (symbol: string) => ({ symbol, last: 100, previousClose: 100, ...harness.stockQuote }),
 };
 
-function round(stressed = false, todayIso = "2026-10-27") {
-  return runVolFarmerV4Round({ passId: "p1", settings: roundSettings as never, api: {} as never, marketWatch: marketWatch as never, trackWatch: () => {}, now: new Date(`${todayIso}T15:00:00Z`), todayIso, totalCashValue: 500_000, settledCashValue: harness.settledCashValue, netLiquidationValue: 1_000_000, cancelByMs: null, symbols: [], stressed });
+function round(stressed = false, todayIso = "2026-10-27", clock: { now?: Date; windowEndAtMs?: number } = {}) {
+  return runVolFarmerV4Round({ passId: "p1", settings: roundSettings as never, api: {} as never, marketWatch: marketWatch as never, trackWatch: () => {}, now: clock.now ?? new Date(`${todayIso}T15:00:00Z`), todayIso, totalCashValue: 500_000, settledCashValue: harness.settledCashValue, netLiquidationValue: 1_000_000, cancelByMs: null, windowEndAtMs: clock.windowEndAtMs ?? null, symbols: [], stressed });
 }
 
 const v4Ticker = (symbol: string) => ({ tickerId: `t-${symbol}`, symbol, allocationPct: null });
@@ -497,6 +498,134 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("runVolFarmerV4Round: the buyback in the window's last minutes", () => {
+  // Friday 30 Oct 2026 and the Thursday before it, the window ending at 15:30 Eastern (19:30 UTC, daylight time).
+  const at = (todayIso: string, timeUtc: string) => ({ now: new Date(`${todayIso}T${timeUtc}Z`), windowEndAtMs: Date.parse(`${todayIso}T19:30:00Z`) });
+  const callLeg = (id: string, strike: number, expiry: string, quantity = 19) => ({ id, legType: "option", side: "short", quantity, optionType: "call", strikePrice: strike, expiryDate: expiry, multiplier: 100, entryPrice: 0.8, entryAt: new Date(), exitPrice: null, exitAt: null });
+  /** VFT's first position of 1,900 shares at $100 covered by 19 Calls at `strike` expiring `todayIso` (leg c1); the stock is at 100, the Call quoted 1.05 / 1.15. */
+  function holdingTodaysCall(todayIso: string, strike: number, setting: string): void {
+    roundSettings = { ...v4Settings, volFarmerV4CallsInTheMoneyAtLastLook: setting };
+    harness.memory.set("t-VFT", { state: { potDollars: 250_000, first: { ...position(1_900, 100), calls: [{ legId: "c1", shares: 1_900 }] }, second: null, leaps: null, leapsBought: false, leapsToSell: false, leapsTrigger: null, cash: { cycles: 1, firstPositionCashLeft: [], putsCashLeft: [], leapsTriggers: [] } }, pending: [] });
+    harness.positionsByTickerId.set("t-VFT", [{ strategyKey: "covered_call", status: "open", legs: [stockLeg("s1", 1_900), callLeg("c1", strike, todayIso)] }]);
+    harness.chain = { expirations: [todayIso.replaceAll("-", "")], strikesByExpiry: new Map([[todayIso.replaceAll("-", ""), Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
+    harness.quotes = [{ expiry: todayIso, strike, right: "C", bid: 1.05, ask: 1.15, bidSize: null, askSize: null }];
+  }
+  const buyBacks = () => harness.executed.filter((order) => order.kind === "call_buy_back");
+
+  it("on the last session before a weekend, in the last 2 minutes, buys back a Call expiring today in the money at the mid, and sends nothing else", async () => {
+    holdingTodaysCall("2026-10-30", 99, "bought_back_before_weekends");
+    await round(false, "2026-10-30", at("2026-10-30", "19:28:30"));
+    expect(harness.executed).toEqual([
+      expect.objectContaining({ kind: "call_buy_back", legId: "c1", positionId: "position-of-c1", contract: { expiry: "2026-10-30", strike: 99, right: "C", dte: 0 }, plan: expect.objectContaining({ quantity: 19, limitPrice: 1.1 }) }),
+    ]);
+    expect(harness.actions).toEqual([expect.objectContaining({ kind: "close_leg", outcome: "validated", quantity: 19, limitPrice: 1.1, contract: { strategyKey: "covered_call", expiry: "2026-10-30", strike: 99, right: "C" } })]);
+    expect((harness.memory.get("t-VFT") as VolFarmerV4Memory).pending).toEqual([expect.objectContaining({ kind: "buy_back_call", boughtBackLegId: "c1", contracts: 19, contractsByPosition: { first: 19, second: 0 } })]);
+    // The screen keeps the ticker's figures through the weekend.
+    expect(harness.lastRounds.get("t-VFT")!.figures).toMatchObject({ potDollars: 250_000, freeCashDollars: expect.any(Number) });
+  });
+
+  it("does not send a buyback twice while it works; filled, its cost goes against the position's premiums and the Call is gone", async () => {
+    holdingTodaysCall("2026-10-30", 99, "bought_back_before_weekends");
+    await round(false, "2026-10-30", at("2026-10-30", "19:28:30"));
+    await round(false, "2026-10-30", at("2026-10-30", "19:29:10"));
+    expect(buyBacks()).toHaveLength(1);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual(["the window's last 2 minutes: 1 buyback(s) working, nothing else is sent"]);
+
+    // 19 × 1.10 × 100 + 19 × $0.65.
+    harness.outcomes.set(harness.executed[0]!.actionId as string, { working: false, filledContracts: 19, optionLegIds: ["c1"], optionNetDollars: 2_102.35, sharesBought: 0, sharesCostDollars: 0, sharesSold: 0 });
+    await round(false, "2026-10-30", at("2026-10-30", "19:29:50"));
+    expect(buyBacks()).toHaveLength(1);
+    const { state, pending } = harness.memory.get("t-VFT") as VolFarmerV4Memory;
+    expect(pending).toEqual([]);
+    expect(state.first).toMatchObject({ shares: 1_900, calls: [], premiums: [{ legId: "c1", dollars: -2_102.35, shares: 1_900 }] });
+  });
+
+  it("buys back on every day under \"bought back\", and only before a weekend under \"before weekends only\"", async () => {
+    holdingTodaysCall("2026-10-29", 99, "bought_back");
+    await round(false, "2026-10-29", at("2026-10-29", "19:28:30"));
+    expect(buyBacks()).toHaveLength(1);
+
+    harness.executed.length = 0;
+    holdingTodaysCall("2026-10-29", 99, "bought_back_before_weekends");
+    await round(false, "2026-10-29", at("2026-10-29", "19:28:30"));
+    expect(buyBacks()).toEqual([]);
+  });
+
+  it("buys nothing back before the last 2 minutes, nor with the setting at \"assigned\"", async () => {
+    holdingTodaysCall("2026-10-30", 99, "bought_back_before_weekends");
+    await round(false, "2026-10-30", at("2026-10-30", "19:27:59"));
+    expect(buyBacks()).toEqual([]);
+
+    holdingTodaysCall("2026-10-30", 99, "assigned");
+    await round(false, "2026-10-30", at("2026-10-30", "19:28:30"));
+    expect(buyBacks()).toEqual([]);
+  });
+
+  it("leaves a Call out of the money alone in those minutes, and says nothing else is sent", async () => {
+    holdingTodaysCall("2026-10-30", 101, "bought_back_before_weekends");
+    await round(false, "2026-10-30", at("2026-10-30", "19:28:30"));
+    expect(harness.executed).toEqual([]);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual(["the window's last 2 minutes: no Call expiring today is in the money at 100.00, so nothing is bought back and nothing else is sent"]);
+  });
+
+  it("does not send a buyback the settled cash left can't pay for: the Call is left to be assigned", async () => {
+    holdingTodaysCall("2026-10-30", 99, "bought_back_before_weekends");
+    harness.settledFreeCash = 2_000;
+    await round(false, "2026-10-30", at("2026-10-30", "19:28:30"));
+    expect(harness.executed).toEqual([]);
+    expect(harness.actions).toEqual([expect.objectContaining({ kind: "close_leg", outcome: "blocked", blockReason: "settled_cash: the buyback costs $2,102, the settled cash left is $2,000" })]);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringMatching(/^the buyback of 19× \$99 Call · 30 Oct \(0DTE\) is not sent \(the buyback costs \$2,102, the settled cash left is \$2,000\): the Call is left to be assigned/)]);
+  });
+
+  it("goes under SPY's stress: a buyback opens nothing", async () => {
+    holdingTodaysCall("2026-10-30", 99, "bought_back_before_weekends");
+    await round(true, "2026-10-30", at("2026-10-30", "19:28:30"));
+    expect(buyBacks()).toHaveLength(1);
+  });
+});
+
+describe("isVolFarmerV4BuyBackRound", () => {
+  const windowEndAtMs = Date.parse("2026-10-30T19:30:00Z");
+  const check = (callsInTheMoneyAtLastLook: "assigned" | "bought_back" | "bought_back_before_weekends", nowIso: string, todayIso = "2026-10-30", nextSessionIso: string | undefined = "2026-11-02") =>
+    isVolFarmerV4BuyBackRound({ callsInTheMoneyAtLastLook, nowMs: Date.parse(nowIso), windowEndAtMs, todayIso, nextSessionIso });
+
+  it("is one from 2 minutes before the window's end, on the days the setting buys back", () => {
+    expect(check("bought_back_before_weekends", "2026-10-30T19:28:00Z")).toBe(true);
+    expect(check("bought_back_before_weekends", "2026-10-30T19:27:59Z")).toBe(false);
+    expect(check("assigned", "2026-10-30T19:29:00Z")).toBe(false);
+    // A Wednesday, the next session Thursday: every day only.
+    expect(check("bought_back", "2026-10-30T19:29:00Z", "2026-10-28", "2026-10-29")).toBe(true);
+    expect(check("bought_back_before_weekends", "2026-10-30T19:29:00Z", "2026-10-28", "2026-10-29")).toBe(false);
+    // The Thursday before Good Friday 2026.
+    expect(check("bought_back_before_weekends", "2026-10-30T19:29:00Z", "2026-04-02", "2026-04-06")).toBe(true);
+    expect(isVolFarmerV4BuyBackRound({ callsInTheMoneyAtLastLook: "bought_back", nowMs: windowEndAtMs, windowEndAtMs: null, todayIso: "2026-10-30", nextSessionIso: "2026-11-02" })).toBe(false);
+  });
+});
+
+describe("volFarmerV4CallsToBuyBack", () => {
+  const leg = (id: string, strike: number, quantity: number, overrides: Record<string, unknown> = {}) => ({ id, legType: "option" as const, side: "short" as const, quantity, optionType: "call" as const, strikePrice: strike, expiryDate: "2026-10-30", multiplier: 100, entryPrice: 0.8, entryAt: new Date(), exitPrice: null, exitAt: null, ...overrides });
+  const state = (firstCalls: { legId: string; shares: number }[], secondCalls: { legId: string; shares: number }[] = []) =>
+    ({ potDollars: 250_000, first: { shares: 1_900, costPerShare: 100, premiums: [], calls: firstCalls, puts: [] }, second: secondCalls.length > 0 ? { shares: 600, costPerShare: 90, premiums: [], calls: secondCalls, puts: [] } : null, leaps: null, leapsBought: false, leapsToSell: false, leapsTrigger: null, cash: { cycles: 1, firstPositionCashLeft: [], putsCashLeft: [], leapsTriggers: [] } }) as never;
+
+  it("takes v4's Calls expiring today at or below the price, with each position's contracts, and leaves the rest", () => {
+    const calls = volFarmerV4CallsToBuyBack({
+      state: state([{ legId: "c1", shares: 1_900 }, { legId: "c2", shares: 500 }], [{ legId: "c1", shares: 600 }]),
+      openLegs: [leg("c1", 100, 25), leg("c2", 101, 5), leg("c3", 99, 2), leg("c4", 99, 3, { expiryDate: "2026-11-02" }), leg("c5", 98, 4, { side: "long" })],
+      pending: [],
+      stockPrice: 100,
+      todayIso: "2026-10-30",
+    });
+    // c2 is out of the money, c3 is not v4's, c4 expires Monday, c5 is bought.
+    expect(calls).toEqual([{ legId: "c1", expiry: "2026-10-30", strike: 100, contracts: 25, contractsByPosition: { first: 19, second: 6 } }]);
+  });
+
+  it("skips a Call being bought back, and never buys back more contracts than the leg holds", () => {
+    const pending = [{ ref: "action:a1", actionId: "a1", kind: "buy_back_call", expiry: "2026-10-30", strike: 100, contracts: 19, startsCycle: false, contractsByPosition: { first: 19, second: 0 }, plannedPremiumByPosition: { first: 0, second: 0 }, leapsBeforeSale: null, boughtBackLegId: "c1" }] as never;
+    expect(volFarmerV4CallsToBuyBack({ state: state([{ legId: "c1", shares: 1_900 }]), openLegs: [leg("c1", 100, 19)], pending, stockPrice: 100, todayIso: "2026-10-30" })).toEqual([]);
+    expect(volFarmerV4CallsToBuyBack({ state: state([{ legId: "c1", shares: 1_900 }]), openLegs: [leg("c1", 100, 12)], pending: [], stockPrice: 100, todayIso: "2026-10-30" })).toEqual([expect.objectContaining({ contracts: 12 })]);
   });
 });
 

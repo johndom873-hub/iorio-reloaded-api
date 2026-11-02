@@ -1,14 +1,18 @@
 import { baselineMaxVolumeShare, baselineMinimumBid } from "../backtest/engine/baselineSaleSteps.js";
 import { volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap } from "../backtest/engine/volFarmerV2Steps.js";
-import { flatStockCommissionEstimator } from "../lib/commissionEstimate.js";
+import { flatCommissionEstimator, flatStockCommissionEstimator } from "../lib/commissionEstimate.js";
+import { regularCloseEt } from "../lib/marketSessionStatus.js";
+import { roundToCents } from "../lib/positionOrderRules.js";
 import { tradingSessionsPerYear } from "../lib/tradingSessionsHeld.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
-import { closeMarginMinutes } from "./sessionSchedule.js";
+import { cancelMarginMinutes, closeMarginMinutes, hhmmMinutesBefore } from "./sessionSchedule.js";
+import { volFarmerV4BuyBackMinutesBeforeWindowEnd } from "./volFarmerV4LiveBook.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { tickerPotFraction } from "./tickerSettingsStore.js";
 
-// The numbers Pluto's "How it works" tab quotes (approved mockup https://claude.ai/artifact/TYdARe8Sa6RuF5Lb1E1s2b; Vol
-// Farmer v4, the CC + Put Ladder's part retired 2026-11-02): Pluto's live settings and the code's own constants, read from
+// The numbers Pluto's "How it works" tab quotes (approved mockups https://claude.ai/artifact/TYdARe8Sa6RuF5Lb1E1s2b and,
+// for the buyback, https://claude.ai/artifact/HwdnZHFFzJpktyUBJkjBVR; Vol Farmer v4, the CC + Put Ladder's part retired
+// 2026-11-02): Pluto's live settings and the code's own constants, read from
 // where the strategy reads them, so the tab cannot drift from what runs. The worked example is computed by the strategy's
 // own functions on fixed example inputs. Percentages are in percent (5 = 5%), deltas as fractions, money in dollars.
 
@@ -23,6 +27,9 @@ const volFarmerV4ExampleFallPrice = 70;
 const volFarmerV4ExampleRisePrice = 130;
 const volFarmerV4ExampleAccountValue = 2_000_000;
 const volFarmerV4ExampleAllocationPct = 20;
+/** The buyback's example (Marcelo 2026-11-02): a minute before the window's end the stock is at $101, the lots' Calls struck at $100 quoted around a $1.10 mid. */
+const volFarmerV4ExampleBuyBackStockPrice = 101;
+const volFarmerV4ExampleBuyBackMid = 1.1;
 
 export interface PlutoHowItWorks {
   shared: {
@@ -77,6 +84,12 @@ export interface PlutoHowItWorks {
     trimsSell: PlutoSettings["volFarmerV4TrimsSell"];
     /** Top-ups take the money in to at most this % of the pot; 0: no cap. */
     topUpCapPct: number;
+    /** Calls in the money at the window's end: assigned at the close, or bought back every day or before weekends only (Marcelo 2026-11-02). */
+    callsInTheMoneyAtLastLook: PlutoSettings["volFarmerV4CallsInTheMoneyAtLastLook"];
+    /** The buyback's minutes before the window's end, from buyBackStartsEt (HH:MM ET); a buyback still working is cancelled at buyBackCancelledAtEt on a regular day. */
+    buyBackMinutesBeforeWindowEnd: number;
+    buyBackStartsEt: string;
+    buyBackCancelledAtEt: string;
     example: {
       accountValue: number;
       allocationPct: number;
@@ -104,6 +117,12 @@ export interface PlutoHowItWorks {
       /** How far below B-E2 the LEAPS is bought: half the Step, percent (Marcelo 2026-10-28). */
       leapsEntryBelowSecondBreakEvenPct: number;
       leapsCap: number;
+      /** The buyback: at buyBackTimeEt the stock is at buyBackStockPrice, above the lots' Calls struck at stockPrice, bought back at buyBackMid for the lots × 100 × the mid plus the commission. */
+      buyBackTimeEt: string;
+      buyBackStockPrice: number;
+      buyBackMid: number;
+      buyBackCostDollars: number;
+      buyBackCommissionDollars: number;
     };
   };
 }
@@ -176,6 +195,10 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       putStrikeCap: settings.volFarmerV4PutStrikeCap,
       trimsSell: settings.volFarmerV4TrimsSell,
       topUpCapPct: settings.volFarmerV4TopUpCapPct,
+      callsInTheMoneyAtLastLook: settings.volFarmerV4CallsInTheMoneyAtLastLook,
+      buyBackMinutesBeforeWindowEnd: volFarmerV4BuyBackMinutesBeforeWindowEnd,
+      buyBackStartsEt: hhmmMinutesBefore(settings.windowEndEt, volFarmerV4BuyBackMinutesBeforeWindowEnd),
+      buyBackCancelledAtEt: hhmmMinutesBefore(regularCloseEt, cancelMarginMinutes),
       example: {
         accountValue: volFarmerV4ExampleAccountValue,
         allocationPct: volFarmerV4ExampleAllocationPct,
@@ -198,6 +221,11 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
         putStrikeCap: volFarmerV2PutStrikeCap(volFarmerV4ExampleFirstBreakEven, volFarmerV4Step),
         leapsEntryBelowSecondBreakEvenPct: volFarmerV4Step / 2,
         leapsCap: volFarmerV2LeapsBudget(Number.POSITIVE_INFINITY, pot, settings.volFarmerV4LeapsMaxAllocationPct),
+        buyBackTimeEt: hhmmMinutesBefore(settings.windowEndEt, 1),
+        buyBackStockPrice: volFarmerV4ExampleBuyBackStockPrice,
+        buyBackMid: volFarmerV4ExampleBuyBackMid,
+        buyBackCostDollars: roundToCents(volFarmerV4ExampleBuyBackMid * 100 * lots),
+        buyBackCommissionDollars: roundToCents(flatCommissionEstimator.perContractDollars("buy", lots) * lots),
       },
     },
   };

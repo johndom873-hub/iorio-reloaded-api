@@ -12,7 +12,7 @@ export const plutoSafetyLimitsSettingsFixture = {
   safetyMaxOrdersPerDay: 100,
 } as const satisfies Partial<PlutoSettings>;
 
-// Vol Farmer v4's settings at their migration defaults (20261101100001, the lab's best run of 2026-10-30).
+// Vol Farmer v4's settings at their migration defaults (20261101100001, the lab's best run of 2026-10-30; the buyback 20261102500001).
 export const plutoVolFarmerV4SettingsFixture = {
   volFarmerV4FirstPositionPct: 80,
   volFarmerV4PutsStartCallYieldPct: 5,
@@ -35,4 +35,5 @@ export const plutoVolFarmerV4SettingsFixture = {
   volFarmerV4PutStrikeCap: "first_break_even_less_step",
   volFarmerV4TrimsSell: "higher_break_even_first",
   volFarmerV4TopUpCapPct: 0,
+  volFarmerV4CallsInTheMoneyAtLastLook: "assigned",
 } as const satisfies Partial<PlutoSettings>;

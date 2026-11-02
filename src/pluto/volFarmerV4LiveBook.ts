@@ -34,6 +34,12 @@ import type { PlutoSettings } from "./settingsStore.js";
 //             position's, its break-even the open cycle's (the Wheel cycles' B-E, its premiums counted there), its open
 //             Calls the first position's and its open Puts the second's; a ticker holding only Puts waits for them.
 //   fills     orders at the mid (spread share 0); a LEAPS is not held to its ask's size, a partial fill is topped up.
+//   buyback   a Call bought back in the window's last minutes (Marcelo 2026-11-02; volFarmerV4Round.ts sends it): its cost
+//             goes against the position's premiums once it fills, and the Call leaves the position at the next look,
+//             closed and not assigned, its shares kept.
+
+/** v4's buyback runs in the trading window's last minutes (Marcelo 2026-11-02): 15:28–15:30 ET on a 15:30 end. */
+export const volFarmerV4BuyBackMinutesBeforeWindowEnd = 2;
 
 /** The steps' rules from Pluto's live settings (the Vol Farmer's Calls, v2's and v3's, every look). */
 export function volFarmerV4RulesOf(settings: PlutoSettings): { farmer: Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid">; v2: BacktestVolFarmerV2Settings; v3: BacktestVolFarmerV3Settings } {
@@ -66,13 +72,13 @@ export function volFarmerV4RulesOf(settings: PlutoSettings): { farmer: Pick<Back
       putStrikeCap: settings.volFarmerV4PutStrikeCap,
       trimsSell: settings.volFarmerV4TrimsSell,
       topUpCapPctOfPot: settings.volFarmerV4TopUpCapPct,
-      // The buyback at the last look is the lab's (2026-11-02): Pluto leaves a Call in the money to be assigned at the close.
-      callsInTheMoneyAtLastLook: "assigned",
+      // The steps never read it: the round buys back in the window's last minutes (volFarmerV4Round.ts), as the lab does after its last look.
+      callsInTheMoneyAtLastLook: settings.volFarmerV4CallsInTheMoneyAtLastLook,
     },
   };
 }
 
-export type VolFarmerV4OrderKind = "covered_call" | "cash_secured_put" | "buy_leaps" | "sell_leaps" | "buy_shares" | "sell_shares";
+export type VolFarmerV4OrderKind = "covered_call" | "cash_secured_put" | "buy_leaps" | "sell_leaps" | "buy_shares" | "sell_shares" | "buy_back_call";
 
 /** What a share sale may restore: the positions, and the LEAPS flags a second position sold out sets. */
 export type VolFarmerV4PositionsBeforeSale = Pick<VolFarmerV2SymbolState, "first" | "second" | "leapsBought" | "leapsToSell" | "leapsTrigger">;
@@ -102,6 +108,8 @@ export interface VolFarmerV4PendingOrder {
   /** A share sale: each position's shares in the order the steps sold them, and the positions before it. */
   saleParts?: { position: "first" | "second"; shares: number }[];
   positionsBeforeSale?: VolFarmerV4PositionsBeforeSale;
+  /** A Call buyback: the Call's leg (one leg can hold both positions' Calls: its contracts per position are contractsByPosition). */
+  boughtBackLegId?: string;
 }
 
 export interface VolFarmerV4Memory {
@@ -148,6 +156,7 @@ function settleVolFarmerV4Premium(position: VolFarmerV2Position, order: VolFarme
 /** Replaces the plan of a settled order with its fills, in place; a still-working order is left as planned. Answers a note, or null. */
 export function settleVolFarmerV4Order(state: VolFarmerV2SymbolState, order: VolFarmerV4PendingOrder, outcome: VolFarmerV4OrderOutcome): string | null {
   if (outcome.working) return null;
+  if (order.kind === "buy_back_call") return settleVolFarmerV4CallBuyBack(state, order, outcome);
   if (order.kind === "buy_shares") return settleVolFarmerV4SharePurchase(state, order, outcome);
   if (order.kind === "sell_shares") return settleVolFarmerV4ShareSale(state, order, outcome);
   const filled = outcome.filledContracts;
@@ -212,6 +221,34 @@ export function settleVolFarmerV4Order(state: VolFarmerV2SymbolState, order: Vol
     state.leapsToSell = true;
   }
   return filled === order.contracts ? null : `the LEAPS sale${shortBy}: the rest is sold at the next look`;
+}
+
+/**
+ * A Call buyback's fills (Marcelo 2026-11-02): what the contracts that filled cost, commission included, goes against each
+ * position's premiums, under the fill's leg and over the shares they covered, as the lab books it (the break-even takes
+ * it); the fills go to the first position's contracts, then the second's, as a Call sale's do. A position whose contracts
+ * all filled has its Call no more, its shares kept; one with a part left keeps the Call on fewer shares, and only those are
+ * called away if it is assigned at the close. Nothing filled: the Call is left to be assigned. Example: 38 Calls bought back
+ * at $1.10 put −$4,205.84 ($4,180 + $25.84 commission) against the first position's premiums over 3,800 shares; 20 of the
+ * 38 filled put −$2,213.60 over 2,000 and leave the Call on 1,800.
+ */
+function settleVolFarmerV4CallBuyBack(state: VolFarmerV2SymbolState, order: VolFarmerV4PendingOrder, outcome: VolFarmerV4OrderOutcome): string | null {
+  const filled = outcome.filledContracts;
+  let left = filled;
+  for (const name of ["first", "second"] as const) {
+    const position = state[name];
+    const held = order.contractsByPosition[name];
+    if (position === null || held === 0 || left === 0) continue;
+    const got = Math.min(left, held);
+    left -= got;
+    position.premiums.push({ legId: outcome.optionLegIds[0] ?? order.boughtBackLegId ?? order.ref, dollars: -(outcome.optionNetDollars * got) / filled, shares: got * 100 });
+    const call = position.calls.find((entry) => entry.legId === order.boughtBackLegId);
+    if (call === undefined) continue;
+    call.shares -= got * 100;
+    if (call.shares <= 0) position.calls.splice(position.calls.indexOf(call), 1);
+  }
+  if (filled >= order.contracts) return null;
+  return filled === 0 ? `the buyback of the ${order.strike} Call did not fill: the Call is left to be assigned` : `the buyback of the ${order.strike} Call, ${filled} of ${order.contracts} filled: the rest is left to be assigned`;
 }
 
 /**
@@ -359,7 +396,7 @@ export function createVolFarmerV4LiveBook(input: { state: VolFarmerV2SymbolState
     leapsCapBaseDollars: () => snapshot.potDollars,
     openOptionContracts: () => [
       ...snapshot.openOptionContracts,
-      ...pending.filter((order) => order.kind !== "sell_leaps" && order.kind !== "buy_shares" && order.kind !== "sell_shares").map((order) => ({ expiry: order.expiry, strike: order.strike })),
+      ...pending.filter((order) => order.kind !== "sell_leaps" && order.kind !== "buy_shares" && order.kind !== "sell_shares" && order.kind !== "buy_back_call").map((order) => ({ expiry: order.expiry, strike: order.strike })),
       ...plannedContracts(),
     ],
     leg(legId) {
@@ -432,4 +469,21 @@ export function pendingVolFarmerV4Order(state: VolFarmerV2SymbolState, order: Vo
     return { ...base, kind: "sell_shares", expiry: "", strike: 0, contracts: 0, shares: sharesOfPlannedOrder(order), saleParts: order.orders.map((part) => ({ position: part.position, shares: part.shares })), positionsBeforeSale: order.positionsBeforeSale };
   }
   return { ...base, kind: "sell_leaps", expiry: order.sale.expiry, strike: order.sale.strike, contracts: order.sale.contracts, leapsBeforeSale: order.leapsBeforeSale };
+}
+
+/** A Call buyback sent (volFarmerV4Round.ts), counted as pending until it settles: the Call stays as it is until then. */
+export function pendingVolFarmerV4CallBuyBack(actionId: string, call: { legId: string; expiry: string; strike: number; contracts: number; contractsByPosition: { first: number; second: number } }): VolFarmerV4PendingOrder {
+  return {
+    ref: `action:${actionId}`,
+    actionId,
+    kind: "buy_back_call",
+    expiry: call.expiry,
+    strike: call.strike,
+    contracts: call.contracts,
+    startsCycle: false,
+    contractsByPosition: call.contractsByPosition,
+    plannedPremiumByPosition: { first: 0, second: 0 },
+    leapsBeforeSale: null,
+    boughtBackLegId: call.legId,
+  };
 }

@@ -2,6 +2,7 @@ import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import {
   volFarmerV2StepRules,
+  volFarmerV3CallsInTheMoneyAtLastLookChoices,
   volFarmerV3CallStrikeFloorChoices,
   volFarmerV3FirstPositionAfterCalledAwayChoices,
   volFarmerV3OptionsExpiryChoices,
@@ -9,6 +10,7 @@ import {
   volFarmerV3PutStrikeCapChoices,
   volFarmerV3RebalancesChoices,
   volFarmerV3TrimsSellChoices,
+  type VolFarmerV3CallsInTheMoneyAtLastLook,
   type VolFarmerV3CallStrikeFloor,
   type VolFarmerV3FirstPositionAfterCalledAway,
   type VolFarmerV3OptionsExpiry,
@@ -89,6 +91,8 @@ export interface PlutoSettings {
   volFarmerV4TrimsSell: VolFarmerV3TrimsSell;
   /** Top-ups take a ticker's money in (held shares' cost, open Puts' cash) to at most this % of its pot; 0: no cap. */
   volFarmerV4TopUpCapPct: number;
+  /** A Call expiring today still in the money in the window's last minutes: assigned at the close, or bought back (every day, or before weekends only). */
+  volFarmerV4CallsInTheMoneyAtLastLook: VolFarmerV3CallsInTheMoneyAtLastLook;
   updatedAt: string;
   updatedByUserId: string | null;
 }
@@ -139,6 +143,7 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   volFarmerV4PutStrikeCap: { column: "vol_farmer_v4_put_strike_cap", kind: "text", oneOf: volFarmerV3PutStrikeCapChoices },
   volFarmerV4TrimsSell: { column: "vol_farmer_v4_trims_sell", kind: "text", oneOf: volFarmerV3TrimsSellChoices },
   volFarmerV4TopUpCapPct: { column: "vol_farmer_v4_top_up_cap_pct", kind: "number", min: 0, max: 1000 },
+  volFarmerV4CallsInTheMoneyAtLastLook: { column: "vol_farmer_v4_calls_in_the_money_at_last_look", kind: "text", oneOf: volFarmerV3CallsInTheMoneyAtLastLookChoices },
 };
 
 export type PlutoSettingsField = keyof typeof plutoSettingsColumns;

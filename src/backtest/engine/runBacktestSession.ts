@@ -33,6 +33,7 @@ import { BacktestDayDataReader, type IntradayLookCheck, type PrefetchedSymbolDay
 import { loadTreasuryBillRates } from "./treasuryBillRates.js";
 import { runSteadyStakeLook } from "./backtestSteadyStakeLook.js";
 import { buyBackVolFarmerV3CallsInTheMoney, describeVolFarmerV2Run, lowerVolFarmerV2CostForSpinOff, runVolFarmerV2Look } from "./backtestVolFarmerV2Look.js";
+import { isLastSessionBeforeWeekend } from "../../lib/tradingWeek.js";
 import type { LeapsCallQuoteSource } from "./volFarmerV2Steps.js";
 
 // The backtest engine's entry point (docs/backtesting/FORMULAS.md, FULL-FIDELITY-DESIGN.md, DATA-FILES.md). Called by the
@@ -402,7 +403,9 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
   // The Steady Stake decides at 10:00 only, Vol Farmer v4 at every look unless its looks say the first only.
   const decidesAtCaptureLookOnly = volFarmerSteps !== null ? volFarmerSteps.v2.looks === "first_look" : true;
   // Vol Farmer v4's Calls expiring today in the money at the day's last look, bought back there (v3's rule).
-  const buysBackCallsAtLastLook = volFarmerSteps?.v3.callsInTheMoneyAtLastLook === "bought_back";
+  const buysBackCallsAtLastLook = volFarmerSteps?.v3.callsInTheMoneyAtLastLook === "bought_back" || volFarmerSteps?.v3.callsInTheMoneyAtLastLook === "bought_back_before_weekends";
+  // Or only at the last session before a weekend (Marcelo 2026-11-02).
+  const buysBackOnlyBeforeWeekends = volFarmerSteps?.v3.callsInTheMoneyAtLastLook === "bought_back_before_weekends";
   const severalSymbols = symbolNames.length > 1;
   const startingValue = Number(session.startingValue);
   const dataDirectory = requireBacktestDataDirectory();
@@ -1109,7 +1112,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       }
       // Vol Farmer v4's buyback (v3's rule), once the day's looks are done: at the last one's price and quotes, before its marks.
       const lastLookTimeEt = laterLookTimes.at(-1);
-      if (buysBackCallsAtLastLook && lastLookTimeEt !== undefined) {
+      if (buysBackCallsAtLastLook && lastLookTimeEt !== undefined && (!buysBackOnlyBeforeWeekends || isLastSessionBeforeWeekend(todayIso, sessionDays[dayIndex + 1]))) {
         const summaries: string[] = [];
         let boughtBack = 0;
         for (const { entry, splitFactor } of daySymbols) {

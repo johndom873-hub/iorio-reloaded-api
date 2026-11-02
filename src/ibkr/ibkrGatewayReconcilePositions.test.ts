@@ -475,6 +475,51 @@ describe("reconcileHeldPositions — every structure change is its own position"
     expect(stockLeg.exit_at).toBeNull();
   });
 
+  /** A close order of the covered call (Vol Farmer v4's buyback, keepShares) that filled, its Call's fill 11 minutes ago: past the roll grace. */
+  async function buyBackCallLeg(symbol: string, coveredCallId: string, callLegId: string): Promise<void> {
+    const [buyBack] = await testDb("order_requests")
+      .insert({ requested_by_user_id: await plutoTestUser(), request_type: "close_position", payload: JSON.stringify({ symbol, strategyKey: "covered_call", legs: [] }), status: "filled", related_position_id: coveredCallId })
+      .returning(["id"]);
+    const filledAt = new Date(Date.now() - 11 * 60_000);
+    await insertClosingTrade(callLegId, 1.1, filledAt, buyBack.id);
+    await testDb("position_legs").where({ id: callLegId }).update({ exit_at: filledAt, exit_price: 1.1 });
+  }
+
+  it("a Call bought back alone, no new Call after the roll grace: its shares go to a leftover-stock position that says why, with no anomaly", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    await insertStockLeg(coveredCallId, stockConId, 100, 50);
+    const callLegId = await insertShortOptionLeg(coveredCallId, (nextConId += 1), "call", 55, isoDateDaysFromToday(0), 1.2);
+    await buyBackCallLeg(ticker.symbol, coveredCallId, callLegId);
+
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 50)]);
+
+    const positions = await positionsFor(ticker.id);
+    expect(positions.find((position) => position.id === coveredCallId)).toMatchObject({ status: "closed", close_reason: "closed_via_app" });
+    const leftover = positions.find((position) => position.strategy_key === "unstructured")!;
+    expect(leftover).toMatchObject({ status: "open", unstructured_reason: "cc_call_bought_back_stock" });
+    expect((await legsFor(leftover.id)).map((leg) => [leg.leg_type, leg.quantity, Number(leg.entry_price)])).toEqual([["stock", 100, 50]]);
+    expect(await anomaliesFor(leftover.id)).toHaveLength(0);
+  });
+
+  it("one of a covered call's two Calls bought back: the shares it covered go to a leftover-stock position that says why", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const keptCallConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    await insertStockLeg(coveredCallId, stockConId, 200, 50);
+    const boughtBackLegId = await insertShortOptionLeg(coveredCallId, (nextConId += 1), "call", 55, isoDateDaysFromToday(0), 1.2);
+    await insertShortOptionLeg(coveredCallId, keptCallConId, "call", 60, isoDateDaysFromToday(0), 0.4);
+    await buyBackCallLeg(ticker.symbol, coveredCallId, boughtBackLegId);
+
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 50), heldShortOption(ticker.symbol, keptCallConId, OptionType.Call, 60, isoDateDaysFromToday(0), 40)]);
+
+    const leftover = (await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!;
+    expect(leftover).toMatchObject({ status: "open", unstructured_reason: "cc_call_bought_back_stock" });
+    expect((await legsFor(leftover.id)).filter((leg) => leg.exit_at === null).map((leg) => [leg.leg_type, leg.quantity])).toEqual([["stock", 100]]);
+  });
+
   it("covered call rolled to a new strike: the old position closes with its stock handed off, the new one owns the shares at the carried cost", async () => {
     const ticker = await createTicker();
     const stockConId = (nextConId += 1);

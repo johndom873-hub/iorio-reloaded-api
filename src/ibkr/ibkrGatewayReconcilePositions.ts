@@ -86,16 +86,34 @@ async function logPlatformAnomaly(
 }
 
 // Stock-only leftover (no calls sold against it at all) traces back to
-// one of three known causes: a covered call's short call expired
+// one of four known causes: a covered call's short call expired
 // worthless (its own close_reason already recorded that), a
-// cash-secured put got assigned (same), or Pluto bought the shares on their
-// own (Vol Farmer v4's share purchase, 2026-10-31). The first two are looked up by the most recently
+// cash-secured put got assigned (same), Pluto bought the shares on their
+// own (Vol Farmer v4's share purchase, 2026-10-31), or a covered call's Call was bought back alone, its shares kept (Vol
+// Farmer v4's buyback, 2026-11-02). The first two are looked up by the most recently
 // closed covered_call/cash_secured_put position on this ticker, but only one
 // closed within leftoverStockCauseWindowMinutes (positions close in the same
 // pass, or the one before, that the shares appear), the third by a share purchase sent in that window that filled or
-// may have — if none matches, this is a genuinely unexplained appearance of stock and gets logged as a
-// platform anomaly rather than silently labeled.
+// may have, the fourth by the buyback's fill in that window — if none matches, this is a genuinely unexplained appearance
+// of stock and gets logged as a platform anomaly rather than silently labeled.
 const leftoverStockCauseWindowMinutes = 30;
+
+/**
+ * Whether a covered call of the ticker, still open, had its short Call bought back within the cause window by a close
+ * order (POST /positions/:id/close with keepShares), its shares kept: the Call's closing fill, on its leg or on the slice
+ * a partial fill carved from it.
+ */
+async function hasRecentCallBoughtBackKeepingShares(tickerId: string): Promise<boolean> {
+  const boughtBackLeg = await db("position_legs as pl")
+    .join("positions as p", "p.id", "pl.position_id")
+    .join("trades as t", "t.position_leg_id", "pl.id")
+    .join("order_requests as orq", "orq.id", "t.source_order_request_id")
+    .where({ "p.ticker_id": tickerId, "p.status": "open", "p.strategy_key": "covered_call", "pl.leg_type": "option", "pl.option_type": "call", "pl.side": "short", "orq.request_type": "close_position" })
+    .whereRaw(closingTradeOtherThanSettlementSql("t"))
+    .whereRaw(`t.executed_at >= now() - interval '${leftoverStockCauseWindowMinutes} minutes'`)
+    .first("pl.id");
+  return boughtBackLeg !== undefined;
+}
 
 /** Whether Pluto sent a share purchase (open_shares) for the symbol within the cause window that filled, or may have. */
 async function hasRecentPlutoSharePurchase(symbol: string): Promise<boolean> {
@@ -127,6 +145,8 @@ async function determineLeftoverStockReason(symbol: string): Promise<string> {
     .whereNotExists(db("trades as t").whereRaw("t.position_leg_id = pl.id").whereRaw(closingTradeOtherThanSettlementSql("t")))
     .first("pl.id");
   if (expiredCallLeg) return "cc_expired_leftover_stock";
+  // The covered call whose Call was bought back is still open here too: it hands its shares over once the Call has gone.
+  if (await hasRecentCallBoughtBackKeepingShares(ticker.id)) return "cc_call_bought_back_stock";
 
   const recentClosed = await db("positions")
     .where({ ticker_id: ticker.id })
@@ -1587,8 +1607,9 @@ async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPos
 
   let positionId = existingLeftoverLeg?.position_id as string | undefined;
   if (!positionId) {
-    // Shares beyond the calls' that Pluto just bought on their own are explained; any other cause is left to review.
-    const unstructuredReason = (await hasRecentPlutoSharePurchase(symbol)) ? "pluto_share_buy" : "unknown";
+    // Shares beyond the calls' that Pluto just bought on their own, or that a Call bought back in part left uncovered, are
+    // explained; any other cause is left to review.
+    const unstructuredReason = (await hasRecentPlutoSharePurchase(symbol)) ? "pluto_share_buy" : (await hasRecentCallBoughtBackKeepingShares(ticker.id)) ? "cc_call_bought_back_stock" : "unknown";
     const [newPosition] = await db("positions")
       .insert({ strategy_key: "unstructured", ticker_id: ticker.id, status: "open", unstructured_reason: unstructuredReason })
       .returning(["id"]);

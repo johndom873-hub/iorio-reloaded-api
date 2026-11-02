@@ -13,6 +13,7 @@ import { describeTradeContract, describeTradeLine, formatTradePrice, labelStrate
 const unstructuredReasonLabels: Record<string, string> = {
   csp_assigned_stock: "left over from a put assignment",
   cc_expired_leftover_stock: "left over after a covered call expired",
+  cc_call_bought_back_stock: "kept after a covered call's Call was bought back",
   manual_stock_buy: "bought outside a strategy",
   pluto_share_buy: "shares Pluto bought on their own",
   other: "other",

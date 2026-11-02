@@ -347,9 +347,10 @@ async function buildPositionEvents(positions: PositionRow[], options: { includeC
 
     const isUnstructured = position.strategyKey === "unstructured";
     // A leftover-stock position that exists only because another event
-    // happened is not its own transaction: the shares a CSP assignment or an
-    // expired covered call leaves behind are already told by that position's
-    // "Assigned"/"Expired" event, and the same shares being absorbed into a
+    // happened is not its own transaction: the shares a CSP assignment, an
+    // expired covered call or a covered call's Call bought back (its shares
+    // kept) leaves behind are already told by that position's
+    // "Assigned"/"Expired"/"Closed" event, and the same shares being absorbed into a
     // new covered call is told by that covered call's "Opened" event. Showing
     // the leftover position's own open/close alongside those would read as a
     // duplicate ("No strategy" next to "Assigned" for one real-world event).
@@ -358,7 +359,7 @@ async function buildPositionEvents(positions: PositionRow[], options: { includeC
     const openIsConsequenceOfAnotherEvent =
       !options.includeConsequenceEvents &&
       isUnstructured &&
-      (position.unstructuredReason === "csp_assigned_stock" || position.unstructuredReason === "cc_expired_leftover_stock");
+      (position.unstructuredReason === "csp_assigned_stock" || position.unstructuredReason === "cc_expired_leftover_stock" || position.unstructuredReason === "cc_call_bought_back_stock");
     const closeIsConsequenceOfAnotherEvent = !options.includeConsequenceEvents && isUnstructured && position.closeReason === "stock_rolled_into_covered_call";
     if (!openIsConsequenceOfAnotherEvent) {
       events.push({

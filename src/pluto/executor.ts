@@ -92,7 +92,19 @@ export interface ExecuteSharesSaleInput {
   reasons: string[];
 }
 
-export type ExecuteInput = ExecuteStrategyOpenInput | ExecuteLeapsPurchaseInput | ExecuteLeapsSaleInput | ExecuteSharesPurchaseInput | ExecuteSharesSaleInput;
+/** Vol Farmer v4's buyback (Marcelo 2026-11-02): a Covered Call's Call bought back alone through the close route, its shares kept. */
+export interface ExecuteCallBuyBackInput {
+  kind: "call_buy_back";
+  actionId: string;
+  symbol: string;
+  positionId: string;
+  legId: string;
+  contract: { expiry: string; strike: number; right: "C"; dte: number };
+  plan: PlutoOrderPlan;
+  reasons: string[];
+}
+
+export type ExecuteInput = ExecuteStrategyOpenInput | ExecuteLeapsPurchaseInput | ExecuteLeapsSaleInput | ExecuteSharesPurchaseInput | ExecuteSharesSaleInput | ExecuteCallBuyBackInput;
 
 export interface ExecuteResult {
   outcome: PlutoActionOutcome;
@@ -125,16 +137,17 @@ function isoToIbkrExpiry(expiryIso: string): string {
   return expiryIso.replace(/-/g, "");
 }
 
-/** "SMCI Sell $46 Call · 9 Oct (2DTE) · 11× @ 0.39"; a LEAPS purchase "Buy"; shares "AMD Buy 200 shares @ 254.10". */
+/** "SMCI Sell $46 Call · 9 Oct (2DTE) · 11× @ 0.39"; a LEAPS purchase "Buy", a buyback "Buy back"; shares "AMD Buy 200 shares @ 254.10". */
 export function describeOrder(input: ExecuteInput): string {
   if (input.kind === "shares_buy" || input.kind === "shares_sell") return `${input.symbol} ${input.kind === "shares_buy" ? "Buy" : "Sell"} ${input.plan.quantity} shares @ ${input.plan.limitPrice.toFixed(2)}`;
-  return `${input.symbol} ${input.kind === "leaps_buy" ? "Buy" : "Sell"} ${describeOptionContract(input.contract)}${describeOrderSize(input.plan.quantity, input.plan.limitPrice)}`;
+  return `${input.symbol} ${input.kind === "leaps_buy" ? "Buy" : input.kind === "call_buy_back" ? "Buy back" : "Sell"} ${describeOptionContract(input.contract)}${describeOrderSize(input.plan.quantity, input.plan.limitPrice)}`;
 }
 
-/** Builds the order through the route the screens use: a sale of a held leg through the close route, everything else through POST /positions/orders. */
+/** Builds the order through the route the screens use: a sale of a held leg or a buyback through the close route, everything else through POST /positions/orders. */
 function buildOrder(api: InternalApiClient, input: ExecuteInput): Promise<OrderRequestResponse> {
   if (input.kind === "leaps_sell") return api.post<OrderRequestResponse>(`/positions/${input.positionId}/close`, { legs: [{ legId: input.legId, limitPrice: input.plan.limitPrice }], plutoActionId: input.actionId });
   if (input.kind === "shares_sell") return api.post<OrderRequestResponse>(`/positions/${input.positionId}/close`, { legs: [{ legId: input.legId, limitPrice: input.plan.limitPrice, quantity: input.plan.quantity }], plutoActionId: input.actionId });
+  if (input.kind === "call_buy_back") return api.post<OrderRequestResponse>(`/positions/${input.positionId}/close`, { legs: [{ legId: input.legId, limitPrice: input.plan.limitPrice, quantity: input.plan.quantity }], keepShares: true, plutoActionId: input.actionId });
   if (input.kind === "shares_buy") return api.post<OrderRequestResponse>("/positions/orders", { symbol: input.symbol, strategyKey: "shares", stock: { quantity: input.plan.quantity, limitPrice: input.plan.limitPrice }, signalSnapshot: input.scoresSnapshot, plutoActionId: input.actionId });
   const option = { quantity: input.plan.quantity, limitPrice: input.plan.limitPrice, strikePrice: input.contract.strike, expiryDate: isoToIbkrExpiry(input.contract.expiry) };
   if (input.kind === "leaps_buy") return api.post<OrderRequestResponse>("/positions/orders", { symbol: input.symbol, strategyKey: "leaps", option, signalSnapshot: input.scoresSnapshot, plutoActionId: input.actionId });

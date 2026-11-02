@@ -1038,6 +1038,40 @@ describe("POST /positions/:id/close", () => {
     expect(response.json.error).toBe("All open legs of this position must be included when closing it.");
   });
 
+  it("buys back a covered call's Call alone with keepShares, whole or by its own quantity, its shares left open", async () => {
+    const { positionId, legIds, symbol } = await createPosition("covered_call", [longStock(300), shortCall(3, { ibkrContractId: "555123" })]);
+    const optionLegId = legIds[1];
+    const whole = await call("POST", `/positions/${positionId}/close`, { legs: [{ legId: optionLegId, limitPrice: 1.104 }], keepShares: true });
+    expect(whole.status).toBe(201);
+    expect(whole.json.requestType).toBe("close_position");
+    expect(whole.json.payload.legs).toEqual([{ role: "option", action: "BUY", symbol, quantity: 3, unitPrice: 1.1, strike: 55, expiry: "20300118", right: "C", ibkrContractId: "555123", positionLegId: optionLegId }]);
+    expect(evaluateCloseGateForPositionMock).toHaveBeenCalledWith(positionId);
+    await call("POST", `/positions/orders/${whole.json.id}/cancel`, {});
+
+    const part = await call("POST", `/positions/${positionId}/close`, { legs: [{ legId: optionLegId, limitPrice: 1.1, quantity: 2 }], keepShares: true });
+    expect(part.status).toBe(201);
+    expect(part.json.payload.legs).toEqual([expect.objectContaining({ role: "option", action: "BUY", quantity: 2, positionLegId: optionLegId })]);
+  });
+
+  it("refuses keepShares on anything but a covered call's short Call, past what is held, with contractsToClose, or not true or false", async () => {
+    const coveredCall = await createPosition("covered_call", [longStock(300), shortCall(3)]);
+    const [stockLegId, optionLegId] = coveredCall.legIds;
+    const refused = async (positionId: string, body: Record<string, unknown>, message: string) => {
+      const response = await call("POST", `/positions/${positionId}/close`, body);
+      expect(response.status, JSON.stringify(body)).toBe(400);
+      expect(response.json.error).toBe(message);
+    };
+    await refused(coveredCall.positionId, { legs: [{ legId: stockLegId, limitPrice: 55 }], keepShares: true }, "keepShares buys back the position's short Call legs only: its shares stay open.");
+    await refused(coveredCall.positionId, { legs: [{ legId: optionLegId, limitPrice: 1, quantity: 4 }], keepShares: true }, `Cannot close 4 units of leg ${optionLegId} — only 3 held.`);
+    await refused(coveredCall.positionId, { legs: [{ legId: optionLegId, limitPrice: 1 }], keepShares: true, contractsToClose: 1 }, "contractsToClose is not supported with keepShares — provide a quantity per Call leg instead.");
+    await refused(coveredCall.positionId, { legs: [{ legId: optionLegId, limitPrice: 1 }], keepShares: "yes" }, "keepShares must be true or false.");
+    // Without it, the Call alone is still refused.
+    await refused(coveredCall.positionId, { legs: [{ legId: optionLegId, limitPrice: 1 }], keepShares: false }, "All open legs of this position must be included when closing it.");
+    const put = await createPosition("cash_secured_put", [shortPut(1)]);
+    await refused(put.positionId, { legs: [{ legId: put.legIds[0], limitPrice: 1 }], keepShares: true }, "keepShares only buys back a covered call's Call.");
+    expect(await orderCount()).toBe(0);
+  });
+
   it("refuses a leg that was already closed or belongs to another position", async () => {
     const { positionId, legIds } = await createPosition("covered_call", [longStock(100), shortCall(1), shortCall(1, { strikePrice: 50, exitPrice: 0.1, exitAt: new Date() })]);
     const closedLegId = legIds[2];

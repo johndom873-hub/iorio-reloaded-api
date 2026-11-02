@@ -41,6 +41,11 @@ function hhmmFromMinutes(minutes: number): string {
   return `${String(Math.floor(clamped / 60)).padStart(2, "0")}:${String(clamped % 60).padStart(2, "0")}`;
 }
 
+/** Pure: the time `minutes` before an HH:MM time, HH:MM (15:30 less 2 minutes is 15:28). */
+export function hhmmMinutesBefore(hhmm: string, minutes: number): string {
+  return hhmmFromMinutes(minutesOfDay(hhmm) - minutes);
+}
+
 /** Pure: the earlier of the configured window end and (close − margin). */
 export function effectiveWindowEndEt(windowEndEt: string, closeTimeEt: string, marginMinutes = closeMarginMinutes): string {
   return hhmmFromMinutes(Math.min(minutesOfDay(windowEndEt), minutesOfDay(closeTimeEt) - marginMinutes));
