@@ -1072,6 +1072,27 @@ describe("reconcileHeldPositions — covered calls sharing one stock contract ea
 });
 
 describe("reconcileHeldPositions — fixes from the 2026-10-16 P&L review", () => {
+  it("two sibling Covered Calls expiring in one pass: the new leftover leg takes their share-weighted cost, not the last one's (NBIS: 100 at $173.420903 + 100 at $178.360903 = $175.890903)", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const firstCallConId = (nextConId += 1);
+    const secondCallConId = (nextConId += 1);
+    const firstId = await insertPosition(ticker.id, "covered_call");
+    const firstStockLegId = await insertStockLeg(firstId, stockConId, 100, 173.420903);
+    await insertShortOptionLeg(firstId, firstCallConId, "call", 180, isoDateDaysFromToday(-1), 2.5);
+    const secondId = await insertPosition(ticker.id, "covered_call");
+    const secondStockLegId = await insertStockLeg(secondId, stockConId, 100, 178.360903);
+    await insertShortOptionLeg(secondId, secondCallConId, "call", 185, isoDateDaysFromToday(-1), 2.5);
+    await testDb("position_legs").whereIn("id", [firstStockLegId, secondStockLegId]).update({ entry_price_from_position_split: true });
+
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 175.8905)]);
+
+    const leftover = (await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!;
+    const [leftoverLeg] = await legsFor(leftover.id);
+    expect([leftoverLeg.exit_at, leftoverLeg.quantity, Number(leftoverLeg.entry_price), leftoverLeg.entry_price_from_position_split]).toEqual([null, 200, 175.890903, true]);
+    expect((await shareSourcesOf(leftover.id)).sort()).toEqual([firstId, secondId].sort());
+  });
+
   it("a leftover-stock leg taking over a Covered Call's shares blends both costs (100 at $50.00 + 100 at $40.01 = $45.005)", async () => {
     const ticker = await createTicker();
     const stockConId = (nextConId += 1);
@@ -1143,6 +1164,30 @@ describe("reconcileHeldPositions — fixes from the 2026-10-16 P&L review", () =
     expect(csp.close_reason).toBe("assigned");
     const leftover = (await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!;
     expect(await testDb("position_share_sources").where({ position_id: leftover.id }).select("source_position_id", "shares_received")).toEqual([{ source_position_id: cspId, shares_received: 100 }]);
+  });
+
+  it("NBIS: a Covered Call expiring in the same pass as a put's assignment: the leftover records both, the call's 200 shares and the put's 100", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const putConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    await insertStockLeg(coveredCallId, stockConId, 200, 175.89);
+    await insertShortOptionLeg(coveredCallId, callConId, "call", 190, isoDateDaysFromToday(-1), 3.1);
+    const cspId = await insertPosition(ticker.id, "cash_secured_put");
+    await insertShortOptionLeg(cspId, putConId, "put", 175, isoDateDaysFromToday(-1), 1.9716);
+
+    await runPass([heldStock(ticker.symbol, stockConId, 300, 175.59)]);
+
+    const positions = await positionsFor(ticker.id);
+    expect(positions.find((position) => position.id === cspId)!.close_reason).toBe("assigned");
+    const leftover = positions.find((position) => position.strategy_key === "unstructured")!;
+    expect(leftover.unstructured_reason).toBe("cc_expired_leftover_stock");
+    const links = await testDb("position_share_sources").where({ position_id: leftover.id }).select("source_position_id", "shares_received");
+    expect(links.sort((a, b) => b.shares_received - a.shares_received)).toEqual([
+      { source_position_id: coveredCallId, shares_received: 200 },
+      { source_position_id: cspId, shares_received: 100 },
+    ]);
   });
 });
 

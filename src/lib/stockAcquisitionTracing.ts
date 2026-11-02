@@ -44,11 +44,20 @@ export function stockAcquisitionByPositionIdFromRecords(positionIds: string[], r
   const assignedPutByPositionId = new Map<string, { strike: number; shares: number }>();
   for (const put of records.assignedPuts) assignedPutByPositionId.set(put.positionId, { strike: put.strike, shares: put.quantity * put.multiplier });
 
+  // An assigned put's link supplies no shares to a position already holding that assignment's fill (the put's share count
+  // at its strike, no commission, as IBKR books an assignment): the link stays for the share history, the shares are
+  // counted once (Marcelo 2026-11-02).
+  const holdsAssignmentFillOf = (positionId: string, put: { strike: number; shares: number }) =>
+    records.buyFills.some((fill) => fill.positionId === positionId && fill.commission === null && fill.quantity === put.shares && Math.abs(fill.price - put.strike) < 1e-9);
+
   // A position's shares: its own buy fills, else what its sources handed it (each at its own acquisition), else the
   // strike of the put whose assignment delivered them.
   const acquisitionOf = (positionId: string, depth: number, visiting: Set<string>): PositionStockFills | null => {
     const ownFills = ownFillsByPositionId.get(positionId);
-    const sources = sourcesByPositionId.get(positionId) ?? [];
+    const sources = (sourcesByPositionId.get(positionId) ?? []).filter(({ sourcePositionId }) => {
+      const put = assignedPutByPositionId.get(sourcePositionId);
+      return !put || !holdsAssignmentFillOf(positionId, put);
+    });
     if (ownFills && ownFills.shares > 0 && sources.length === 0) return ownFills;
     const assignedPut = assignedPutByPositionId.get(positionId);
     if (assignedPut && sources.length === 0) return { shares: assignedPut.shares, value: assignedPut.shares * assignedPut.strike, commission: 0 };

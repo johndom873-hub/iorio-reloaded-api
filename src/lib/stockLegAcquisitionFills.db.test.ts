@@ -83,4 +83,36 @@ describe("fetchStockAcquisitionByPositionId", () => {
     expect(acquisition.fillPrice).toBeCloseTo(45, 10);
     expect(acquisition.commissionPerShare).toBeCloseTo(0.005, 10);
   });
+
+  it("INTC on prod: the assigned put's 200 shares count once though the leftover holds the assignment fill and links the put; 500 shares from three Covered Calls show $95.836, not $97.03", async () => {
+    const tickerId = await createTicker();
+    const cspId = await position(tickerId, "cash_secured_put", "closed", "assigned");
+    await testDb("position_legs").insert({ position_id: cspId, leg_type: "option", side: "short", quantity: 2, multiplier: 100, option_type: "put", strike_price: 100, expiry_date: "2026-10-14", entry_price: 1.3358, entry_at: new Date(), exit_at: new Date(), exit_price: 0, ibkr_contract_id: "2" });
+    const leftoverId = await position(tickerId, "unstructured", "closed");
+    await buyFill(await stockLeg(leftoverId, 200, 100, true), 200, 100, null);
+    const fromLeftoverId = await position(tickerId, "covered_call", "closed");
+    await stockLeg(fromLeftoverId, 200, 99.9995955, true);
+    const ownBuyId = await position(tickerId, "covered_call", "closed");
+    await buyFill(await stockLeg(ownBuyId, 100, 92.440903, true), 100, 92.43, 1.0903);
+    const twoBuysId = await position(tickerId, "covered_call", "closed");
+    const twoBuysLegId = await stockLeg(twoBuysId, 200, 93.380453, true);
+    await buyFill(twoBuysLegId, 100, 93.38, 1.0903);
+    await buyFill(twoBuysLegId, 100, 93.37, 0.0003);
+    const heldNowId = await position(tickerId, "unstructured");
+    await stockLeg(heldNowId, 500, 95.8400018);
+    // shares_received as prod stores it on links made before the column existed.
+    await testDb("position_share_sources").insert([
+      { position_id: leftoverId, source_position_id: cspId, shares_received: null },
+      { position_id: fromLeftoverId, source_position_id: leftoverId, shares_received: null },
+      { position_id: heldNowId, source_position_id: fromLeftoverId, shares_received: null },
+      { position_id: heldNowId, source_position_id: ownBuyId, shares_received: null },
+      { position_id: heldNowId, source_position_id: twoBuysId, shares_received: null },
+    ]);
+
+    const acquisitions = await fetchStockAcquisitionByPositionId([leftoverId, heldNowId]);
+    expect(acquisitions.get(leftoverId)).toEqual({ fillPrice: 100, commissionPerShare: 0 });
+    // (200 × 100 + 100 × 92.43 + 100 × 93.38 + 100 × 93.37) / 500; commission (1.0903 + 1.0903 + 0.0003) / 500.
+    expect(acquisitions.get(heldNowId)!.fillPrice).toBeCloseTo(95.836, 10);
+    expect(acquisitions.get(heldNowId)!.commissionPerShare).toBeCloseTo(0.0043618, 10);
+  });
 });

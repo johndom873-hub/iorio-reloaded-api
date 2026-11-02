@@ -5,14 +5,14 @@ import { legRealizedPnlSql } from "./legRealizedPnlSql.js";
 // (cyclePeriodPnl.ts, 2026-09-21). What remains here is the daily series behind the P&L Over Time chart, still on
 // the older per-position strategy_key attribution.
 //
-// Daily per-strategy P&L series for the multi-series chart, derived live
-// per calendar day: each day's realized delta (a closing position's
-// full lifetime realized P&L minus whatever it had already accrued as of
-// the prior day's snapshot — not the raw lifetime P&L on the day it
-// happens to close) plus
-// each day's unrealized delta (that day's snapshot minus the prior day's,
-// per position, via LAG). A day/strategy cell with no activity and no open
-// position that day is legitimately 0, not missing.
+// Daily per-strategy P&L series for the multi-series chart (formula approved by Marcelo 2026-11-02). Per position, a day's
+// P&L is the change in its total P&L since its previous point, counted from 0 before its first:
+//   total P&L(d) = realized P&L of its legs closed on or before d + its unrealized snapshot of d   (a snapshot date)
+//   total P&L(d) = its lifetime realized P&L                                                      (the day it closed)
+// The points are a position's snapshot dates and the day it closed, so over its life the days add up to exactly its P&L:
+// the opening day counts (from entry to that close), and a partial close's realized P&L is not netted against the whole
+// position's unrealized. Closes are dated in New York time, like the snapshots (lastCompletedSessionDate). A day/strategy
+// cell with no activity and no open position that day is legitimately 0, not missing.
 export interface StrategyDailyPnl {
   snapshotDate: string;
   strategyKey: string;
@@ -28,52 +28,44 @@ export async function computeStrategyDailyPnlSeries(days: number): Promise<Strat
     strategies AS (
       SELECT DISTINCT strategy_key FROM positions
     ),
-    closed_positions_pnl AS (
-      SELECT
-        p.id AS position_id,
-        p.strategy_key,
-        MAX(pl.exit_at)::date AS exit_date,
-        SUM(${legRealizedPnlSql("pl")}) AS lifetime_realized_pnl
+    leg_realized AS (
+      SELECT pl.position_id, (pl.exit_at AT TIME ZONE 'America/New_York')::date AS exit_date, ${legRealizedPnlSql("pl")} AS realized
       FROM position_legs pl
-      JOIN positions p ON p.id = pl.position_id
       WHERE pl.exit_price IS NOT NULL
-      GROUP BY p.id, p.strategy_key
     ),
-    prior_snapshot AS (
-      SELECT DISTINCT ON (s.position_id) s.position_id, s.unrealized_pnl
+    closed_positions AS (
+      SELECT lr.position_id, MAX(lr.exit_date) AS close_date, SUM(lr.realized) AS lifetime_realized
+      FROM leg_realized lr
+      JOIN positions p ON p.id = lr.position_id
+      WHERE p.status = 'closed'
+      GROUP BY lr.position_id
+    ),
+    points AS (
+      SELECT s.position_id, s.snapshot_date AS d,
+        s.unrealized_pnl + COALESCE((SELECT SUM(lr.realized) FROM leg_realized lr WHERE lr.position_id = s.position_id AND lr.exit_date <= s.snapshot_date), 0) AS total_pnl
       FROM position_pnl_snapshots s
-      JOIN closed_positions_pnl cp ON cp.position_id = s.position_id AND s.snapshot_date < cp.exit_date
-      ORDER BY s.position_id, s.snapshot_date DESC
+      LEFT JOIN closed_positions cp ON cp.position_id = s.position_id
+      WHERE cp.close_date IS NULL OR s.snapshot_date < cp.close_date
+      UNION ALL
+      SELECT position_id, close_date, lifetime_realized FROM closed_positions
     ),
-    daily_realized AS (
-      SELECT cp.strategy_key, cp.exit_date AS d,
-        SUM(cp.lifetime_realized_pnl - COALESCE(ps.unrealized_pnl, 0)) AS realized
-      FROM closed_positions_pnl cp
-      LEFT JOIN prior_snapshot ps ON ps.position_id = cp.position_id
-      GROUP BY cp.strategy_key, cp.exit_date
+    position_daily AS (
+      SELECT position_id, d, total_pnl - COALESCE(LAG(total_pnl) OVER (PARTITION BY position_id ORDER BY d), 0) AS daily_pnl
+      FROM points
     ),
-    snapshot_with_prev AS (
-      SELECT
-        p.strategy_key,
-        s.snapshot_date AS d,
-        s.unrealized_pnl - LAG(s.unrealized_pnl) OVER (PARTITION BY s.position_id ORDER BY s.snapshot_date) AS delta
-      FROM position_pnl_snapshots s
-      JOIN positions p ON p.id = s.position_id
-    ),
-    daily_unrealized AS (
-      SELECT strategy_key, d, SUM(delta) AS unrealized
-      FROM snapshot_with_prev
-      WHERE delta IS NOT NULL
-      GROUP BY strategy_key, d
+    strategy_daily AS (
+      SELECT p.strategy_key, pd.d, SUM(pd.daily_pnl) AS daily_pnl
+      FROM position_daily pd
+      JOIN positions p ON p.id = pd.position_id
+      GROUP BY p.strategy_key, pd.d
     )
     SELECT
       days.d AS "snapshotDate",
       strategies.strategy_key AS "strategyKey",
-      COALESCE(dr.realized, 0) + COALESCE(du.unrealized, 0) AS "dailyPnl"
+      COALESCE(sd.daily_pnl, 0) AS "dailyPnl"
     FROM days
     CROSS JOIN strategies
-    LEFT JOIN daily_realized dr ON dr.strategy_key = strategies.strategy_key AND dr.d = days.d
-    LEFT JOIN daily_unrealized du ON du.strategy_key = strategies.strategy_key AND du.d = days.d
+    LEFT JOIN strategy_daily sd ON sd.strategy_key = strategies.strategy_key AND sd.d = days.d
     ORDER BY days.d, strategies.strategy_key
     `,
     [days],
