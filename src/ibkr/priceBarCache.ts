@@ -322,6 +322,17 @@ export async function hasSufficientTickerHistory(tickerId: string): Promise<bool
   return totalBars >= minDailyBarsForIndicators && ivBars >= minDaysForIvPercentile;
 }
 
+/**
+ * The nightly market data job's catch for tickers without history (Marcelo 2026-11-02): only the Shortlist add backfills, so
+ * a ticker that arrives by being held (TLT, a LEAPS never shortlisted) had 19 bars and a blank Volatility row. Below the
+ * Shortlist add's thresholds it gets the same 1 Y backfill. The bars stored, or null when the history already sufficed.
+ * Uses reqId and reqId + 1000 (fetchDailyHistoryFromIbkr).
+ */
+export async function backfillTickerHistoryWhenShort(connection: IbkrConnection, tickerId: string, symbol: string, reqId: number): Promise<number | null> {
+  if (await hasSufficientTickerHistory(tickerId)) return null;
+  return backfillOneYearOfTickerHistory(connection, tickerId, symbol, reqId);
+}
+
 export function ivBarsToDateMap(ivBars: PriceBar[]): Map<string, number> {
   return new Map(ivBars.map((bar) => [new Date(bar.time * 1000).toISOString().slice(0, 10), bar.close]));
 }

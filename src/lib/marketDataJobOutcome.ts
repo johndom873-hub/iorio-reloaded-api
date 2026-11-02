@@ -21,7 +21,15 @@ export function assessDailyBar(barTradingDate: string | null, expectedSessionDat
  * completed with errors when some tickers are complete and others are not, neither when every ticker is complete.
  * Messages are kept free of "): " because telegramFailureSummary truncates the Telegram alert at the first one.
  */
-export function buildMarketDataJobOutcome(input: { tickerCount: number; failed: TickerProblem[]; missingIv: TickerProblem[]; attempts: number; bailedOnBudget: boolean }): Pick<JobResult, "failureMessage" | "completedWithErrors"> {
+export function buildMarketDataJobOutcome(input: {
+  tickerCount: number;
+  failed: TickerProblem[];
+  missingIv: TickerProblem[];
+  /** Tickers whose 1 Y history backfill failed: an error to report, though the day's capture itself is complete. */
+  historyBackfillFailed?: TickerProblem[];
+  attempts: number;
+  bailedOnBudget: boolean;
+}): Pick<JobResult, "failureMessage" | "completedWithErrors"> {
   if (input.tickerCount === 0) return { failureMessage: "no tickers to capture (shortlist and open positions are both empty)" };
   const problems: string[] = [];
   if (input.failed.length > 0) {
@@ -29,8 +37,10 @@ export function buildMarketDataJobOutcome(input: { tickerCount: number; failed: 
     problems.push(`${input.failed.length} of ${input.tickerCount} tickers not captured after ${input.attempts} attempt(s)${input.bailedOnBudget ? " (retries stopped on the time budget)" : ""}, ${detail}`);
   }
   if (input.missingIv.length > 0) problems.push(`no implied volatility for ${input.missingIv.map((entry) => `${entry.symbol} - ${entry.problem}`).join(", ")}`);
+  const historyBackfillFailed = input.historyBackfillFailed ?? [];
+  if (historyBackfillFailed.length > 0) problems.push(`history backfill failed for ${historyBackfillFailed.map((entry) => `${entry.symbol} - ${entry.problem}`).join(", ")}`);
   if (problems.length === 0) return {};
   const completeTickerCount = input.tickerCount - input.failed.length - input.missingIv.length;
   if (completeTickerCount === 0) return { failureMessage: problems.join("; ") };
-  return { completedWithErrors: { errorCount: input.failed.length + input.missingIv.length, message: `${problems.join("; ")}; ${completeTickerCount} of ${input.tickerCount} tickers complete` } };
+  return { completedWithErrors: { errorCount: input.failed.length + input.missingIv.length + historyBackfillFailed.length, message: `${problems.join("; ")}; ${completeTickerCount} of ${input.tickerCount} tickers complete` } };
 }

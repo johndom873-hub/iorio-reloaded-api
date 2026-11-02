@@ -41,6 +41,11 @@ describe("buildMarketDataJobOutcome", () => {
     expect(outcome).toEqual({ failureMessage: "1 of 2 tickers not captured after 1 attempt(s), AAA - no daily bar returned; no implied volatility for BBB - no IV history bar" });
   });
 
+  it("a failed history backfill is an error to report, though the ticker's day is complete (TLT of 26)", () => {
+    const outcome = buildMarketDataJobOutcome({ tickerCount: 26, failed: [], missingIv: [], historyBackfillFailed: [{ symbol: "TLT", problem: "pacing violation" }], attempts: 1, bailedOnBudget: false });
+    expect(outcome).toEqual({ completedWithErrors: { errorCount: 1, message: "history backfill failed for TLT - pacing violation; 26 of 26 tickers complete" } });
+  });
+
   it("never contains the '): ' sequence that truncates the Telegram alert", () => {
     const outcome = buildMarketDataJobOutcome({ ...clean, failed: [{ symbol: "AAA", problem: "x" }], missingIv: [{ symbol: "B", problem: "y" }] });
     expect(outcome.completedWithErrors?.message).not.toContain("): ");

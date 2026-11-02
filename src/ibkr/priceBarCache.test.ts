@@ -85,6 +85,7 @@ const {
   toDateOnlyString,
   topUpDailyBars,
   upsertDailyBars,
+  backfillTickerHistoryWhenShort,
 } = await import("./priceBarCache.js");
 const { minDaysForIvPercentile } = await import("../lib/ivMetrics.js");
 
@@ -517,6 +518,23 @@ describe("hasSufficientTickerHistory", () => {
   it("is false when the count query returns no row", async () => {
     canned.countRow = undefined as never;
     expect(await hasSufficientTickerHistory(tickerId)).toBe(false);
+  });
+});
+
+describe("backfillTickerHistoryWhenShort", () => {
+  it("leaves a ticker past the Shortlist add's thresholds alone: no IBKR request", async () => {
+    canned.countRow = { totalBars: "251", ivBars: "251" };
+    expect(await backfillTickerHistoryWhenShort(connection, tickerId, "TLT", 7)).toBeNull();
+    expect(mocks.fetchHistoricalBarsRaw).not.toHaveBeenCalled();
+  });
+
+  it("backfills 1 Y of prices and IV for a held ticker with 19 bars (TLT on prod, 2026-11-02)", async () => {
+    canned.countRow = { totalBars: "19", ivBars: "19" };
+    mocks.fetchHistoricalBarsRaw.mockImplementation(async (_connection, _symbol, _barSize, _duration, _reqId, whatToShow) => (whatToShow ? [] : [dailyBar("2026-10-02", 81.5), dailyBar("2026-10-05", 81.7)]));
+    expect(await backfillTickerHistoryWhenShort(connection, tickerId, "TLT", 7)).toBe(2);
+    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, "TLT", BarSizeSetting.DAYS_ONE, "1 Y", 7]);
+    expect(mocks.fetchHistoricalBarsRaw.mock.calls[1]![3]).toBe("1 Y");
+    expect(mocks.fetchHistoricalBarsRaw.mock.calls[1]![5]).toBe(WhatToShow.OPTION_IMPLIED_VOLATILITY);
   });
 });
 

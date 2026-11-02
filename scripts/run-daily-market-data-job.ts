@@ -23,7 +23,7 @@ import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "../src/ibkr/requestMarketData.js";
 import { captureMarketDataSnapshot } from "../src/ibkr/captureMarketDataSnapshot.js";
 import { lookupRecentDailyBars } from "../src/ibkr/fetchTickerOverview.js";
-import { storeFreshDailyBars } from "../src/ibkr/priceBarCache.js";
+import { backfillTickerHistoryWhenShort, storeFreshDailyBars } from "../src/ibkr/priceBarCache.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { assessDailyBar, buildMarketDataJobOutcome, type TickerProblem } from "../src/lib/marketDataJobOutcome.js";
 import { lastCompletedSessionDate } from "../src/lib/marketSessionStatus.js";
@@ -62,7 +62,7 @@ function sleep(ms: number): Promise<void> {
 // caller can track and retry failures. A "failed" outcome is worth a retry (no bar, or the wrong
 // session's bar); softProblems (no IV) are reported but not retried, since a brand-new ticker
 // with no IV history would otherwise burn all five attempts every night.
-type TickerCaptureOutcome = { kind: "ok"; softProblems: string[] } | { kind: "failed"; problem: string };
+type TickerCaptureOutcome = { kind: "ok"; softProblems: string[]; historyBackfillProblem: string | null } | { kind: "failed"; problem: string };
 
 async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snapshotDate: string, expectedSessionDate: string): Promise<TickerCaptureOutcome> {
   try {
@@ -100,11 +100,23 @@ async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snap
       const stored = await storeFreshDailyBars(connection, ticker.id, ticker.symbol, { bars: recentBars, ivByDate }, nextReqId++);
       if (stored.adjustment) console.log(`${ticker.symbol}: price history replaced after a split (${stored.replacedDays} days)`);
     }
+    // A ticker held without ever being shortlisted has no history (the Shortlist add backfills it): a 1 Y backfill, once.
+    // Reported, never failing the ticker: the day's bar is already stored.
+    const backfillReqId = nextReqId;
+    nextReqId += 2;
+    let historyBackfillProblem: string | null = null;
+    try {
+      const backfilledBars = await backfillTickerHistoryWhenShort(connection, ticker.id, ticker.symbol, backfillReqId);
+      if (backfilledBars !== null) console.log(`${ticker.symbol}: history was short — backfilled ${backfilledBars} daily bar(s) (1 Y).`);
+    } catch (error) {
+      historyBackfillProblem = error instanceof Error ? error.message : String(error);
+      console.warn(`${ticker.symbol}: history backfill failed — ${historyBackfillProblem}`);
+    }
 
     console.log(
       `${ticker.symbol}: IV=${snapshot.impliedVolatility ?? "n/a"} avgOptVolume=${snapshot.avgOptionVolume ?? "n/a"} bar=${bar ? `${bar.close}` : "n/a"}${barProblem ? ` (${barProblem})` : ""}`,
     );
-    return barProblem ? { kind: "failed", problem: barProblem } : { kind: "ok", softProblems };
+    return barProblem ? { kind: "failed", problem: barProblem } : { kind: "ok", softProblems, historyBackfillProblem };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`${ticker.symbol}: capture failed — ${message}`);
@@ -157,6 +169,7 @@ async function main(): Promise<void> {
     const snapshotDate = expectedSessionDate;
     const failureByTickerId = new Map<string, TickerProblem>();
     const missingIvBySymbol = new Map<string, TickerProblem>();
+    const historyBackfillFailedBySymbol = new Map<string, TickerProblem>();
     const jobStart = Date.now();
     let succeeded = 0;
     let remaining = tickers;
@@ -186,6 +199,8 @@ async function main(): Promise<void> {
             failureByTickerId.delete(ticker.id);
             if (outcome.softProblems.length > 0) missingIvBySymbol.set(ticker.symbol, { symbol: ticker.symbol, problem: outcome.softProblems.join(" and ") });
             else missingIvBySymbol.delete(ticker.symbol);
+            if (outcome.historyBackfillProblem !== null) historyBackfillFailedBySymbol.set(ticker.symbol, { symbol: ticker.symbol, problem: outcome.historyBackfillProblem });
+            else historyBackfillFailedBySymbol.delete(ticker.symbol);
           } else {
             failureByTickerId.set(ticker.id, { symbol: ticker.symbol, problem: outcome.problem });
             stillFailed.push(ticker);
@@ -203,12 +218,13 @@ async function main(): Promise<void> {
       `Captured ${succeeded}/${tickers.length} ticker(s) for ${snapshotDate} after ${attempt} attempt(s) (${failed} still failed${bailedOnBudget ? ", retries stopped early on time budget" : ""}).`,
     );
     return {
-      details: { tickerCount: tickers.length, succeeded, failed, attempts: attempt, bailedOnBudget, failedSymbols: remaining.map((t) => t.symbol), missingIvSymbols: [...missingIvBySymbol.keys()] },
+      details: { tickerCount: tickers.length, succeeded, failed, attempts: attempt, bailedOnBudget, failedSymbols: remaining.map((t) => t.symbol), missingIvSymbols: [...missingIvBySymbol.keys()], historyBackfillFailedSymbols: [...historyBackfillFailedBySymbol.keys()] },
       // Recorded as a failure or as completed with errors (runJob alerts either way), not a success with a notify: the bars feed Signals.
       ...buildMarketDataJobOutcome({
         tickerCount: tickers.length,
         failed: remaining.map((ticker) => failureByTickerId.get(ticker.id) ?? { symbol: ticker.symbol, problem: "unknown" }),
         missingIv: [...missingIvBySymbol.values()],
+        historyBackfillFailed: [...historyBackfillFailedBySymbol.values()],
         attempts: attempt,
         bailedOnBudget,
       }),
