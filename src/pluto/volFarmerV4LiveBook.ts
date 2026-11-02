@@ -66,6 +66,8 @@ export function volFarmerV4RulesOf(settings: PlutoSettings): { farmer: Pick<Back
       putStrikeCap: settings.volFarmerV4PutStrikeCap,
       trimsSell: settings.volFarmerV4TrimsSell,
       topUpCapPctOfPot: settings.volFarmerV4TopUpCapPct,
+      // The buyback at the last look is the lab's (2026-11-02): Pluto leaves a Call in the money to be assigned at the close.
+      callsInTheMoneyAtLastLook: "assigned",
     },
   };
 }

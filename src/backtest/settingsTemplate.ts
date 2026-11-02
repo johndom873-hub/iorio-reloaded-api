@@ -292,6 +292,17 @@ const rowDefinitionsBeforeVolFarmerV4: readonly RowDefinition[] = [
   },
   { path: "volFarmerV3.topUpCapPctOfPot", label: "Top-ups up to", unit: "percent", editable: true, note: "% of the ticker's pot: the most money its top-ups may take it to, counting what its held shares cost (the first position's fills, the second's assigned strikes) and the cash its open Puts hold; a top-up buys only the lots the room left pays for. A cycle's first purchase, Calls, Puts, trims and LEAPS are not capped. Pot $264,052 at 100% with $211,240 in: $52,812 of room, 3 lots at $150 ($15,000.50 each) of the 4 rebalancing wants. 0: no cap" },
   {
+    path: "volFarmerV3.callsInTheMoneyAtLastLook",
+    label: "Calls in the money at the last look",
+    unit: "choice",
+    editable: true,
+    note: "a Call expiring at today's close still open at the day's last look (15:30 on a full day) with the price at or above its strike: left to be assigned at the close, or bought back on that look's quotes as any buyback fills (the Spread cost share applies), the shares kept through the night (a Call quoted on one side only is left to the close). NVDA 220 Call, NVDA 223.99 at 15:30, mid 4.025 on 2,500 shares, no spread cost: $10,062.50 paid, the shares kept",
+    choices: [
+      { value: "assigned", label: "Left to be assigned" },
+      { value: "bought_back", label: "Bought back, the shares kept" },
+    ],
+  },
+  {
     path: "volFarmerV2.looks",
     label: "Decides",
     unit: "choice",
@@ -697,6 +708,7 @@ const volFarmerV4SourcePaths: readonly string[] = [
   "volFarmerV3.rebalances",
   "volFarmerV3.trimsSell",
   "volFarmerV3.topUpCapPctOfPot",
+  "volFarmerV3.callsInTheMoneyAtLastLook",
   "volFarmerV3.firstPositionAfterCalledAway",
   "volFarmerV3.optionsExpiry",
   "volFarmerV3.optionsMaxDaysToExpiry",
@@ -886,7 +898,7 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
   {
     group: "Vol Farmer v3",
     section: "vol_farmer_v3",
-    rows: ["volFarmerV3.rebalanceBandPct", "volFarmerV3.rebalances", "volFarmerV3.firstPositionAfterCalledAway", "volFarmerV3.optionsExpiry", "volFarmerV3.optionsMaxDaysToExpiry", "volFarmerV3.callStrikeFloor", "volFarmerV3.putsSold", "volFarmerV3.putStrikeCap", "volFarmerV3.trimsSell", "volFarmerV3.topUpCapPctOfPot"].map((path) => ({
+    rows: ["volFarmerV3.rebalanceBandPct", "volFarmerV3.rebalances", "volFarmerV3.firstPositionAfterCalledAway", "volFarmerV3.optionsExpiry", "volFarmerV3.optionsMaxDaysToExpiry", "volFarmerV3.callStrikeFloor", "volFarmerV3.putsSold", "volFarmerV3.putStrikeCap", "volFarmerV3.trimsSell", "volFarmerV3.topUpCapPctOfPot", "volFarmerV3.callsInTheMoneyAtLastLook"].map((path) => ({
       path,
       appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v3"] }], explanation: "Applies only with Vol Farmer v3 as decision maker." },
     })),

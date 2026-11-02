@@ -483,6 +483,15 @@ export interface BacktestVolFarmerV3Settings {
    * may spend $52,812, floor(52,812 ÷ 15,000.50) = 3 lots at $150.
    */
   topUpCapPctOfPot: number;
+  /**
+   * A Call expiring at today's close still open at the day's last look (15:30 on a full day) with the price at or above its
+   * strike (Marcelo 2026-11-02): "assigned", left to the close; "bought_back", bought back on that look's quotes as any
+   * buyback fills (trading.spreadCostChargedPct applies) with its commission, the shares kept through the night instead of
+   * called away and bought again at the next look. A Call without a two-sided quote then is left to the close. NVDA 220
+   * Call, NVDA 223.99 at 15:30, mid 4.025 on 2,500 shares, no spread cost: $10,062.50 paid, the shares kept. Older
+   * snapshots have none: assigned.
+   */
+  callsInTheMoneyAtLastLook: VolFarmerV3CallsInTheMoneyAtLastLook;
 }
 
 export const volFarmerV3OptionsExpiryChoices = ["next", "today"] as const;
@@ -499,8 +508,10 @@ export const volFarmerV3RebalancesChoices = ["first_position", "both_positions"]
 export type VolFarmerV3Rebalances = (typeof volFarmerV3RebalancesChoices)[number];
 export const volFarmerV3FirstPositionAfterCalledAwayChoices = ["wait", "rebuild"] as const;
 export type VolFarmerV3FirstPositionAfterCalledAway = (typeof volFarmerV3FirstPositionAfterCalledAwayChoices)[number];
+export const volFarmerV3CallsInTheMoneyAtLastLookChoices = ["assigned", "bought_back"] as const;
+export type VolFarmerV3CallsInTheMoneyAtLastLook = (typeof volFarmerV3CallsInTheMoneyAtLastLookChoices)[number];
 
-export const defaultBacktestVolFarmerV3Settings: BacktestVolFarmerV3Settings = { rebalanceBandPct: 5, rebalances: "first_position", firstPositionAfterCalledAway: "wait", optionsExpiry: "next", optionsMaxDaysToExpiry: 45, callStrikeFloor: "break_even", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0 };
+export const defaultBacktestVolFarmerV3Settings: BacktestVolFarmerV3Settings = { rebalanceBandPct: 5, rebalances: "first_position", firstPositionAfterCalledAway: "wait", optionsExpiry: "next", optionsMaxDaysToExpiry: 45, callStrikeFloor: "break_even", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned" };
 
 /**
  * Vol Farmer v4 (decision maker "vol_farmer_v4", Marcelo 2026-10-31; the lab's default): Vol Farmer v3 on values of its own,
@@ -511,13 +522,13 @@ export const defaultBacktestVolFarmerV3Settings: BacktestVolFarmerV3Settings = {
  */
 export type BacktestVolFarmerV4Settings = Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid"> & BacktestVolFarmerV2Settings & BacktestVolFarmerV3Settings;
 
-export const defaultBacktestVolFarmerV4Settings: BacktestVolFarmerV4Settings = { callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, firstPositionPct: 80, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 20, rebalanceBandPct: 5, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0 };
+export const defaultBacktestVolFarmerV4Settings: BacktestVolFarmerV4Settings = { callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, firstPositionPct: 80, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 20, rebalanceBandPct: 5, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned" };
 
 /** The shared steps' values (volFarmerV2Steps.ts) for a Vol Farmer v2, v3 or v4 session: v4's own, else the Vol Farmer's Calls with v2's values (and v3's). */
 export function volFarmerStepSettingsOf(settings: Pick<EffectiveBacktestSettings, "decisionMaker" | "volFarmer" | "volFarmerV2" | "volFarmerV3" | "volFarmerV4">): { farmer: Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid">; v2: BacktestVolFarmerV2Settings; v3: BacktestVolFarmerV3Settings | undefined } {
   if (settings.decisionMaker === "vol_farmer_v4") {
-    const { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid, rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, ...v2 } = settings.volFarmerV4;
-    return { farmer: { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid }, v2, v3: { rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot } };
+    const { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid, rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, callsInTheMoneyAtLastLook, ...v2 } = settings.volFarmerV4;
+    return { farmer: { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid }, v2, v3: { rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, callsInTheMoneyAtLastLook } };
   }
   return { farmer: settings.volFarmer, v2: settings.volFarmerV2, v3: settings.decisionMaker === "vol_farmer_v3" ? settings.volFarmerV3 : undefined };
 }

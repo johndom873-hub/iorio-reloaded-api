@@ -228,13 +228,13 @@ describe("backtest routes", () => {
       ...Array(8).fill("steady_stake · Steady Stake"),
       ...Array(22).fill("vol_farmer · Original Vol Farmer (retired)"),
       ...Array(14).fill("vol_farmer_v2 · Vol Farmer v2"),
-      ...Array(10).fill("vol_farmer_v3 · Vol Farmer v3"),
-      ...Array(24).fill("vol_farmer_v4 · Vol Farmer v4"),
+      ...Array(11).fill("vol_farmer_v3 · Vol Farmer v3"),
+      ...Array(25).fill("vol_farmer_v4 · Vol Farmer v4"),
     ]);
     // Every row once, and every condition on a row that is there.
     const paths = template.rows.map((row) => row.path);
-    expect(new Set(paths).size).toBe(145);
-    expect(paths.length).toBe(145);
+    expect(new Set(paths).size).toBe(147);
+    expect(paths.length).toBe(147);
     expect(paths.filter((path) => path.startsWith("pluto.") || path.startsWith("policy.") || path === "kellyFraction")).toEqual(["pluto.windowStartEt", "pluto.windowEndEt"]);
     const conditionPaths = template.rows.flatMap((row) => [...(row.appliesWhen?.allOf ?? []), ...(row.appliesWhen?.anyOf ?? [])].map((condition) => condition.path));
     expect(conditionPaths.filter((path) => !paths.includes(path))).toEqual([]);
@@ -243,13 +243,13 @@ describe("backtest routes", () => {
     // Vol Farmer v2 reads the Vol Farmer's Calls' |delta| range and spread limit; its own rows apply to it and to v3, which
     // has its band too.
     expect(template.settings.volFarmerV2).toEqual({ firstPositionPct: 50, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 0 });
-    expect(template.settings.volFarmerV3).toEqual({ rebalanceBandPct: 5, rebalances: "first_position", firstPositionAfterCalledAway: "wait", optionsExpiry: "next", optionsMaxDaysToExpiry: 45, callStrikeFloor: "break_even", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0 });
+    expect(template.settings.volFarmerV3).toEqual({ rebalanceBandPct: 5, rebalances: "first_position", firstPositionAfterCalledAway: "wait", optionsExpiry: "next", optionsMaxDaysToExpiry: 45, callStrikeFloor: "break_even", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned" });
     expect(template.rows.find((row) => row.path === "volFarmer.callMaxAbsDelta")?.appliesWhen?.allOf).toEqual([{ path: "decisionMaker", oneOf: ["vol_farmer", "vol_farmer_v2", "vol_farmer_v3"] }]);
     expect(template.rows.find((row) => row.path === "volFarmer.hedge")?.appliesWhen?.allOf).toEqual([{ path: "decisionMaker", oneOf: ["vol_farmer"] }]);
     expect(template.rows.find((row) => row.path === "volFarmerV2.leapsAbsDelta")?.appliesWhen?.allOf).toEqual([{ path: "decisionMaker", oneOf: ["vol_farmer_v2", "vol_farmer_v3"] }]);
     expect(template.rows.find((row) => row.path === "volFarmerV3.rebalanceBandPct")?.appliesWhen?.allOf).toEqual([{ path: "decisionMaker", oneOf: ["vol_farmer_v3"] }]);
     // Vol Farmer v4 reads its own copy of every value, defaulting to the research's best run, its rows applying to it alone.
-    expect(template.settings.volFarmerV4).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, firstPositionPct: 80, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 20, rebalanceBandPct: 5, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0 });
+    expect(template.settings.volFarmerV4).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, firstPositionPct: 80, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 20, rebalanceBandPct: 5, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned" });
     expect(template.rows.filter((row) => row.section === "vol_farmer_v4").every((row) => JSON.stringify(row.appliesWhen?.allOf) === JSON.stringify([{ path: "decisionMaker", oneOf: ["vol_farmer_v4"] }]))).toBe(true);
     expect(template.rows.find((row) => row.path === "volFarmerV4.callMaxAbsDelta")).toMatchObject({ label: "Calls' |delta| to", now: 0.5, editable: true });
     expect(template.rows.find((row) => row.path === "volFarmerV4.optionsExpiry")).toMatchObject({ label: "Calls and Puts expire", now: "today", choices: [{ value: "next" }, { value: "today" }] });

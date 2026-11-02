@@ -72,7 +72,7 @@ describe("Vol Farmer v4's live rules", () => {
     const { farmer, v2, v3 } = volFarmerV4RulesOf({ ...settings, excessAllowancePct: 20 });
     expect(farmer).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50 });
     expect(v2).toEqual({ firstPositionPct: 80, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 0, looks: "every_look", tickerAllocationPct: {}, excessAllowancePct: 20 });
-    expect(v3).toEqual({ rebalanceBandPct: 5, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0 });
+    expect(v3).toEqual({ rebalanceBandPct: 5, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned" });
   });
 });
 

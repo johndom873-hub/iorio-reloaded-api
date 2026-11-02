@@ -22,6 +22,7 @@ import {
   volFarmerV3PutsSoldChoices,
   volFarmerV3PutStrikeCapChoices,
   volFarmerV3TrimsSellChoices,
+  volFarmerV3CallsInTheMoneyAtLastLookChoices,
   volFarmerV3FirstPositionAfterCalledAwayChoices,
   volFarmerV3OptionsExpiryChoices,
   volFarmerV3RebalancesChoices,
@@ -367,6 +368,7 @@ export function validateVolFarmerV3Settings(values: Record<string, unknown>, sec
   if (!(volFarmerV3TrimsSellChoices as readonly unknown[]).includes(values.trimsSell)) return `${section}.trimsSell must be one of ${volFarmerV3TrimsSellChoices.join(", ")}.`;
   const topUpCapPctOfPot = values.topUpCapPctOfPot;
   if (typeof topUpCapPctOfPot !== "number" || !Number.isFinite(topUpCapPctOfPot) || topUpCapPctOfPot < 0 || topUpCapPctOfPot > 1000) return `${section}.topUpCapPctOfPot must be a number from 0 to 1000.`;
+  if (!(volFarmerV3CallsInTheMoneyAtLastLookChoices as readonly unknown[]).includes(values.callsInTheMoneyAtLastLook)) return `${section}.callsInTheMoneyAtLastLook must be one of ${volFarmerV3CallsInTheMoneyAtLastLookChoices.join(", ")}.`;
   return null;
 }
 

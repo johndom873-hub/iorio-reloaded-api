@@ -36,7 +36,7 @@ import { prepareModelTablesForSession } from "./walkForwardModelTables.js";
 import { runBaselineLook } from "./backtestBaselineLook.js";
 import { runSteadyStakeLook } from "./backtestSteadyStakeLook.js";
 import { describeVolFarmerCash, runVolFarmerLook, scanVolFarmerCrossing } from "./backtestVolFarmerLook.js";
-import { describeVolFarmerV2Run, lowerVolFarmerV2CostForSpinOff, runVolFarmerV2Look } from "./backtestVolFarmerV2Look.js";
+import { buyBackVolFarmerV3CallsInTheMoney, describeVolFarmerV2Run, lowerVolFarmerV2CostForSpinOff, runVolFarmerV2Look } from "./backtestVolFarmerV2Look.js";
 
 // The backtest engine's entry point (docs/backtesting/FORMULAS.md, FULL-FIDELITY-DESIGN.md, DATA-FILES.md). Called by the
 // job process (scripts/run-backtest-job.ts) for a backtest job. One session = one or several symbols from its start to
@@ -418,6 +418,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
   // priced on), the baseline and Vol Farmer v2 (v3, v4) at every look unless their looks say the first only.
   const decidesAtCaptureLookOnly =
     settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" : volFarmerSteps !== null ? volFarmerSteps.v2.looks === "first_look" : settings.decisionMaker === "steady_stake";
+  // Vol Farmer v3's (v4's) Calls expiring today in the money at the day's last look, bought back there.
+  const buysBackCallsAtLastLook = volFarmerSteps?.v3?.callsInTheMoneyAtLastLook === "bought_back";
   const severalSymbols = symbolNames.length > 1;
   const startingValue = Number(session.startingValue);
   const dataDirectory = requireBacktestDataDirectory();
@@ -1216,6 +1218,34 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         filledActionsToday += filledAtLook;
         looksOfDay.push({ lookTimeEt, summary: look.summaryOfActions, filledCount: filledAtLook, refusedCount: look.actions.length - filledAtLook, opensStopped: look.opensStopped });
         if (!isCaptureLook) lookedAfterCapture = true;
+      }
+      // Vol Farmer v3's buyback, once the day's looks are done: at the last one's price and quotes, before its marks.
+      const lastLookTimeEt = laterLookTimes.at(-1);
+      if (buysBackCallsAtLastLook && lastLookTimeEt !== undefined) {
+        const summaries: string[] = [];
+        let boughtBack = 0;
+        for (const { entry, splitFactor } of daySymbols) {
+          if (!entry.intradayDays.has(todayIso)) continue;
+          const adjustedPrice = entry.intradayPrices.priceAt(todayIso, lastLookTimeEt);
+          const range = intradayStrikeRangeBySymbol.get(entry.symbol);
+          if (adjustedPrice === null || range === undefined) continue;
+          const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
+          const heldCalls = openLegsOf(ledger)
+            .filter((leg) => symbolOfLeg(leg) === entry && leg.legType === "option" && leg.optionType === "call" && leg.side === "short" && leg.expiryDate === todayIso)
+            .map((leg) => ({ expiry: todayIso, strike: leg.strikePrice! / priceToCycleScale, right: "C" as const }));
+          if (heldCalls.length === 0) continue;
+          const quoteByContract = twoSidedQuoteByContract(intradayQuotesOfContracts(entry, lastLookTimeEt, heldCalls, range), new Set(heldCalls.map((contract) => roundedStrike(contract.strike))));
+          const bought = buyBackVolFarmerV3CallsInTheMoney({ ledger, todayIso, lookTimeEt: lastLookTimeEt, symbol: entry.symbol, stockPrice: adjustedPrice * splitFactorToday(entry), splitFactorToday: splitFactor, spreadShareCharged: settings.trading.spreadCostChargedPct / 100, quoteOf: (strike) => quoteByContract.get(markKey(todayIso, strike, "C")), priceByLegId, nextActionId, gate: settings.decisionMaker });
+          actions.push(...bought.actions);
+          notes.push(...bought.notes);
+          boughtBack += bought.actions.length;
+          for (const action of bought.actions) summaries.push(action.description);
+        }
+        if (boughtBack > 0) {
+          filledActionsToday += boughtBack;
+          looksOfDay.push({ lookTimeEt: lastLookTimeEt, summary: summaries.join(" · "), filledCount: boughtBack, refusedCount: 0, opensStopped: [] });
+          lookedAfterCapture = true;
+        }
       }
       applyMarksOnlyLooks();
       for (const { entry } of daySymbols) if (symbolsWaitingForQuotes.has(entry.symbol)) notes.push(noteFor(entry, "no look today had a quote with an ask above 0: no decision"));

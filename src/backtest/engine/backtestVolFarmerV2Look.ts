@@ -1,5 +1,6 @@
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib/commissionEstimate.js";
 import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
+import { describeOptionContract } from "../../lib/optionContractLabel.js";
 import { effectiveAllocationPctBySymbol, tickerPotShare } from "../../lib/tickerAllocation.js";
 import { openCandidateId } from "./candidateIds.js";
 import type { BacktestBarHistory } from "./backtestBarHistory.js";
@@ -9,8 +10,8 @@ import type { BacktestLookContext, BacktestLookResult, BacktestLookSymbol, Backt
 import { markOfTwoSidedQuote } from "./backtestOptionMarks.js";
 import { captureLookTimeEt, lookInstantMs } from "./backtestTickerInputs.js";
 import { noteBaselineForwardAnchors, roundedStrike, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
-import { buyLeapsCall, buyShares, expirySettlementInstant, openCashSecuredPut, openCoveredCall, sellLeapsCall, sellShares } from "./ledger/ledgerEvents.js";
-import { optionCommissionDollars, stockCommissionDollars } from "./ledger/ledgerFills.js";
+import { buyBackCoveredCallKeepingShares, buyLeapsCall, buyShares, expirySettlementInstant, openCashSecuredPut, openCoveredCall, sellLeapsCall, sellShares } from "./ledger/ledgerEvents.js";
+import { optionCommissionDollars, optionPurchaseFillPrice, stockCommissionDollars } from "./ledger/ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
 import { cycleSplitFactorFor, cycleStartSplitFactor, isSymbolFlat, legsOfPosition, positionsOfSymbol, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { newVolFarmerV2SymbolState, runVolFarmerV2Turn, volFarmerV2BreakEven, volFarmerV2TurnOrder, type VolFarmerV2Book, type VolFarmerV2CashCut, type VolFarmerV2Market, type VolFarmerV2Position, type VolFarmerV2PositionCashFlow, type VolFarmerV2SymbolState, type VolFarmerV3SharesOrder } from "./volFarmerV2Steps.js";
@@ -137,6 +138,90 @@ function marketOf(context: BacktestLookContext, lookSymbol: BacktestLookSymbol, 
     leapsCapBaseLabel: share === 1 ? "the account" : "its share of the account",
     capsLeapsAtAskSize: true,
   };
+}
+
+/**
+ * Vol Farmer v3's buyback at the day's last look (Marcelo 2026-11-02; callsInTheMoneyAtLastLook "bought_back"): each Call
+ * of the symbol's positions expiring today, still open with the look's price at or above its strike, is bought back on the
+ * look's quotes as any buyback fills (mid + spread cost share × half-spread) with its commission, its shares kept through
+ * the night as when it expires worthless; the position's P&L and break-even take the cost. A Call without a two-sided quote
+ * at the look is left to the close. NVDA 220 Call, NVDA 223.99 at 15:30, quoted 3.95 / 4.10, spread cost share 0: 25
+ * contracts bought back at 4.025, $10,062.50 + $17.00.
+ */
+export function buyBackVolFarmerV3CallsInTheMoney(input: {
+  ledger: SimulatedLedger;
+  todayIso: string;
+  lookTimeEt: string;
+  symbol: string;
+  /** The look's price as traded today. */
+  stockPrice: number;
+  splitFactorToday: number;
+  /** The share of the half-spread a fill gives up (trading.spreadCostChargedPct ÷ 100): 0 buys back at the mid. */
+  spreadShareCharged: number;
+  /** The look's two-sided quote of a Call of today's expiry (strike as traded), when it has one. */
+  quoteOf: (strike: number) => { bid: number; ask: number } | undefined;
+  priceByLegId: Map<string, number>;
+  nextActionId: () => string;
+  gate: string;
+}): { actions: BacktestAction[]; notes: string[] } {
+  const { ledger, todayIso, lookTimeEt, symbol, stockPrice } = input;
+  const actions: BacktestAction[] = [];
+  const notes: string[] = [];
+  const state = stateByLedger.get(ledger)?.get(symbol);
+  if (!state) return { actions, notes };
+  const at = new Date(lookInstantMs(todayIso, lookTimeEt));
+  const priceToCycleScale = cycleSplitFactorFor(ledger, symbol, input.splitFactorToday, at) / input.splitFactorToday;
+  for (const [name, position] of [["first", state.first], ["second", state.second]] as const) {
+    if (position === null) continue;
+    for (const call of position.calls) {
+      const leg = ledger.legs.find((candidate) => candidate.id === call.legId);
+      if (leg === undefined || leg.exitAt !== null || leg.expiryDate !== todayIso || leg.strikePrice === null) continue;
+      const strike = leg.strikePrice / priceToCycleScale;
+      if (stockPrice < strike) continue;
+      const contractLabel = describeOptionContract({ strike: roundedStrike(strike), right: "C", expiry: todayIso, dte: 0 });
+      const quote = input.quoteOf(strike);
+      if (quote === undefined) {
+        notes.push(`${symbol}: ${contractLabel} in the money at ${lookTimeEt} (${stockPrice.toFixed(2)}) but quoted on one side only: left to the close`);
+        continue;
+      }
+      const fillPrice = optionPurchaseFillPrice(quote.bid, quote.ask, input.spreadShareCharged);
+      const contracts = leg.quantity;
+      const cost = fillPrice * sharesPerContract * contracts + optionCommissionDollars(contracts);
+      const actionId = input.nextActionId();
+      buyBackCoveredCallKeepingShares(ledger, { positionId: leg.positionId, callFillPrice: fillPrice * priceToCycleScale, at, actionId });
+      input.priceByLegId.delete(leg.id);
+      // Against the Call's premium, for the break-even and the run's P&L by position.
+      position.premiums.push({ legId: leg.id, dollars: -cost, shares: call.shares });
+      let bySymbol = positionCashFlowsByLedger.get(ledger);
+      if (!bySymbol) positionCashFlowsByLedger.set(ledger, (bySymbol = new Map()));
+      let flows = bySymbol.get(symbol);
+      if (!flows) bySymbol.set(symbol, (flows = { first: { shares: 0, calls: 0, puts: 0 }, second: { shares: 0, calls: 0, puts: 0 } }));
+      flows[name].calls -= cost;
+      actions.push({
+        actionId,
+        tradingDate: todayIso,
+        at: at.toISOString(),
+        lookTimeEt,
+        passNumber: 1,
+        symbol,
+        kind: "close_leg",
+        candidateId: `${symbol}:close_leg:${leg.id}`,
+        description: `${symbol} Buy back ${contractLabel} · ${contracts}× @ ${fillPrice.toFixed(2)} (${name} position: ${stockPrice.toFixed(2)} at ${lookTimeEt}, at or above the strike; the shares kept)`,
+        automatic: false,
+        chosenBecause: "vol farmer v3: a Call expiring today in the money at the day's last look, bought back so its shares stay through the night",
+        outcome: "filled",
+        blockReason: null,
+        gateResults: [{ gate: input.gate, ok: true, detail: `${contracts} contract(s), quoted ${quote.bid} / ${quote.ask}` }],
+        contract: { strategyKey: "covered_call", expiry: todayIso, strike: roundedStrike(strike), right: "C" },
+        candidateScores: { stockPrice, strike, bid: quote.bid, ask: quote.ask, intrinsic: stockPrice - strike },
+        quantity: contracts,
+        limitPrice: fillPrice,
+        fillPrice,
+        positionIds: [leg.positionId],
+      });
+    }
+  }
+  return { actions, notes };
 }
 
 /** Both positions' break-evens as traded once the look is done (the price chart's B-E and B-E2); null when neither holds shares. */
