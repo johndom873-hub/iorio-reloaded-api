@@ -38,6 +38,7 @@ import {
   lookupExpiryStrikes,
   lookupOptionParams,
   parseExpiry,
+  pickStandardTradingClass,
   prepareOptionChainStrikes,
   refreshStoredOptionChain,
 } from "./fetchOptionChain.js";
@@ -119,37 +120,96 @@ describe("canReuseStoredGrid", () => {
   });
 });
 
+describe("pickStandardTradingClass", () => {
+  it("picks the class named after the symbol, however few entries it has", () => {
+    expect(pickStandardTradingClass("GOOGL", new Map([["2GOOGL", 30], ["GOOGL", 24]]))).toBe("GOOGL");
+  });
+
+  it("ignores spaces when matching the symbol", () => {
+    expect(pickStandardTradingClass("BRK B", new Map([["BRKB", 20], ["2BRKB", 1]]))).toBe("BRKB");
+  });
+
+  it("falls back to the class with the most entries, the first one on a tie", () => {
+    expect(pickStandardTradingClass("XYZ", new Map([["2XYZ", 1], ["XYZ1", 12], ["XYZ2", 12]]))).toBe("XYZ1");
+  });
+
+  it("is null without any class", () => {
+    expect(pickStandardTradingClass("XYZ", new Map())).toBeNull();
+  });
+});
+
 describe("lookupOptionParams", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
   const requestedId = (ib: FakeIbApi) => ib.reqSecDefOptParams.mock.calls[0]![0] as number;
+  const emitParams = (ib: FakeIbApi, reqId: number, exchange: string, tradingClass: string, expirations: string[] | Set<string>) =>
+    ib.emit(EventName.securityDefinitionOptionParameter, reqId, exchange, 1, tradingClass, "100", expirations, [100]);
+  const emitEnd = (ib: FakeIbApi, reqId: number) => ib.emit(EventName.securityDefinitionOptionParameterEnd, reqId);
 
-  it("requests the stock's option parameters and resolves with the SMART exchange's expirations", async () => {
+  it("requests the stock's option parameters and resolves with the SMART exchange's expirations once IBKR's end marker arrives", async () => {
     const ib = new FakeIbApi();
-    const result = lookupOptionParams(asIb(ib), "AAPL", 265598);
+    let settled = false;
+    const result = lookupOptionParams(asIb(ib), "AAPL", 265598).then((value) => ((settled = true), value));
     const reqId = requestedId(ib);
     expect(ib.reqSecDefOptParams).toHaveBeenCalledWith(reqId, "AAPL", "", "STK", 265598);
-    ib.emit(EventName.securityDefinitionOptionParameter, reqId, "CBOE", 265598, "AAPL", "100", ["20261009"], [100]);
-    ib.emit(EventName.securityDefinitionOptionParameter, reqId + 1, "SMART", 265598, "AAPL", "100", ["20269999"], [100]);
-    ib.emit(EventName.securityDefinitionOptionParameter, reqId, "SMART", 265598, "AAPL", "100", ["20261016", "20261023"], [100]);
+    emitParams(ib, reqId, "CBOE", "AAPL", ["20261009"]);
+    emitParams(ib, reqId + 1, "SMART", "AAPL", ["20269999"]);
+    emitParams(ib, reqId, "SMART", "AAPL", ["20261016", "20261023"]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+    emitEnd(ib, reqId + 1);
+    emitEnd(ib, reqId);
     expect(await result).toEqual({ expirations: ["20261016", "20261023"] });
+  });
+
+  it("keeps the standard class's expirations when a non-standard class answers first on SMART", async () => {
+    const ib = new FakeIbApi();
+    const result = lookupOptionParams(asIb(ib), "GOOGL", 1);
+    const reqId = requestedId(ib);
+    emitParams(ib, reqId, "SMART", "2GOOGL", ["20261120"]);
+    emitParams(ib, reqId, "CBOE", "GOOGL", ["20261106"]);
+    emitParams(ib, reqId, "SMART", "GOOGL", ["20261106", "20261120", "20290119"]);
+    emitEnd(ib, reqId);
+    expect(await result).toEqual({ expirations: ["20261106", "20261120", "20290119"] });
   });
 
   it("copies a Set of expirations into an array", async () => {
     const ib = new FakeIbApi();
     const result = lookupOptionParams(asIb(ib), "AAPL", 1);
-    ib.emit(EventName.securityDefinitionOptionParameter, requestedId(ib), "SMART", 1, "AAPL", "100", new Set(["20261016"]), []);
+    emitParams(ib, requestedId(ib), "SMART", "AAPL", new Set(["20261016"]));
+    emitEnd(ib, requestedId(ib));
     expect(await result).toEqual({ expirations: ["20261016"] });
   });
 
   it("removes its listeners once answered", async () => {
     const ib = new FakeIbApi();
     const result = lookupOptionParams(asIb(ib), "AAPL", 1);
-    ib.emit(EventName.securityDefinitionOptionParameter, requestedId(ib), "SMART", 1, "AAPL", "100", [], []);
+    emitParams(ib, requestedId(ib), "SMART", "AAPL", []);
+    emitEnd(ib, requestedId(ib));
     await result;
-    expect(ib.listenerCount(EventName.securityDefinitionOptionParameter)).toBe(0);
-    expect(ib.listenerCount(EventName.error)).toBe(0);
+    for (const eventName of [EventName.securityDefinitionOptionParameter, EventName.securityDefinitionOptionParameterEnd, EventName.error]) expect(ib.listenerCount(eventName)).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("answers at the timeout with the SMART replies it has when the end marker never comes", async () => {
+    const ib = new FakeIbApi();
+    const result = lookupOptionParams(asIb(ib), "GOOGL", 1);
+    emitParams(ib, requestedId(ib), "SMART", "2GOOGL", ["20261120"]);
+    emitParams(ib, requestedId(ib), "SMART", "GOOGL", ["20261106", "20261120"]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toEqual({ expirations: ["20261106", "20261120"] });
+    expect(ib.listenerCount(EventName.securityDefinitionOptionParameterEnd)).toBe(0);
+  });
+
+  it("rejects with a plain error, not a timeout, when IBKR ends without a SMART reply", async () => {
+    const ib = new FakeIbApi();
+    const captured = lookupOptionParams(asIb(ib), "AAPL", 1).catch((error: Error) => error);
+    emitParams(ib, requestedId(ib), "CBOE", "AAPL", ["20261016"]);
+    emitEnd(ib, requestedId(ib));
+    const error = (await captured) as Error;
+    expect(error).not.toBeInstanceOf(IbkrLookupTimeoutError);
+    expect(error.message).toBe("secDefOptParams for AAPL returned no SMART option parameters");
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -183,7 +243,8 @@ describe("lookupOptionParams", () => {
     const result = lookupOptionParams(asIb(ib), "AAPL", 1);
     const reqId = requestedId(ib);
     ib.emit(EventName.error, new Error("notice"), 2104, reqId);
-    ib.emit(EventName.securityDefinitionOptionParameter, reqId, "SMART", 1, "AAPL", "100", ["20261016"], []);
+    emitParams(ib, reqId, "SMART", "AAPL", ["20261016"]);
+    emitEnd(ib, reqId);
     expect(await result).toEqual({ expirations: ["20261016"] });
   });
 
@@ -227,6 +288,17 @@ describe("lookupExpiryStrikes", () => {
     await vi.advanceTimersByTimeAsync(1_500);
     ib.emit(EventName.contractDetailsEnd, reqId);
     expect(await result).toEqual({ strikes: [100, 105, 110], contractCount: 5, elapsedMs: 1_500 });
+  });
+
+  it("keeps the standard class's strikes and contracts when the wildcard also matches a non-standard class", async () => {
+    const ib = new FakeIbApi();
+    const result = lookupExpiryStrikes(asIb(ib), "GOOGL", "20261120");
+    await vi.advanceTimersByTimeAsync(0);
+    const reqId = requestedReqId(ib);
+    ib.emit(EventName.contractDetails, reqId, { contract: { strike: 306, tradingClass: "2GOOGL" } });
+    for (const strike of [280, 285, 290]) ib.emit(EventName.contractDetails, reqId, { contract: { strike, tradingClass: "GOOGL" } });
+    ib.emit(EventName.contractDetailsEnd, reqId);
+    expect(await result).toEqual({ strikes: [280, 285, 290], contractCount: 3, elapsedMs: 0 });
   });
 
   it("resolves an empty grid on error 200 (no security definition), not a failure", async () => {
@@ -407,7 +479,10 @@ describe("refreshStoredOptionChain", () => {
   function connectedIb(expirations: string[], strikesByExpiry: Record<string, number[] | "error200">): FakeIbApi {
     const ib = new FakeIbApi();
     ib.reqSecDefOptParams.mockImplementation((reqId: number) => {
-      queueMicrotask(() => ib.emit(EventName.securityDefinitionOptionParameter, reqId, "SMART", 265598, "AAPL", "100", expirations, [100]));
+      queueMicrotask(() => {
+        ib.emit(EventName.securityDefinitionOptionParameter, reqId, "SMART", 265598, "AAPL", "100", expirations, [100]);
+        ib.emit(EventName.securityDefinitionOptionParameterEnd, reqId);
+      });
     });
     ib.reqContractDetails.mockImplementation((reqId: number, contract: { lastTradeDateOrContractMonth: string }) => {
       const answer = strikesByExpiry[contract.lastTradeDateOrContractMonth];

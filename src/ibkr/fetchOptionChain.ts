@@ -75,6 +75,26 @@ let nextLookupReqId = 5_000;
  */
 export class IbkrLookupTimeoutError extends Error {}
 
+/**
+ * The ticker's standard option class among the trading classes IBKR answered with: the one named after the symbol
+ * (spaces ignored, so "BRK B" matches "BRKB"), else the one with the most entries. A ticker can carry a second,
+ * non-standard class beside it (2GOOGL and 2AMD: one contract each) whose expiries and strikes are not the chain's.
+ */
+export function pickStandardTradingClass(symbol: string, entryCountByTradingClass: Map<string, number>): string | null {
+  const compactSymbol = symbol.replaceAll(" ", "");
+  let largest: { tradingClass: string; count: number } | null = null;
+  for (const [tradingClass, count] of entryCountByTradingClass) {
+    if (tradingClass.replaceAll(" ", "") === compactSymbol) return tradingClass;
+    if (largest === null || count > largest.count) largest = { tradingClass, count };
+  }
+  return largest?.tradingClass ?? null;
+}
+
+/**
+ * The listed expiries of the ticker's standard option class on SMART. IBKR answers with one reply per exchange and
+ * trading class, in no fixed order, then an end marker; the lookup waits for the marker and keeps the standard class
+ * (pickStandardTradingClass). If the marker never comes but SMART replies did, it answers with those at the timeout.
+ */
 export async function lookupOptionParams(
   ib: IBApi,
   symbol: string,
@@ -83,26 +103,39 @@ export async function lookupOptionParams(
   return new Promise((resolve, reject) => {
     const reqId = nextReqIdFor(ib, () => nextLookupReqId++);
     let lastError: string | null = null;
+    const smartExpirationsByTradingClass = new Map<string, string[]>();
     const timer = setTimeout(() => {
       cleanup();
-      reject(new IbkrLookupTimeoutError(lastError ?? `secDefOptParams timeout for ${symbol}`));
+      if (smartExpirationsByTradingClass.size > 0) resolveWithStandardClass();
+      else reject(new IbkrLookupTimeoutError(lastError ?? `secDefOptParams timeout for ${symbol}`));
     }, 10_000);
     function cleanup() {
       clearTimeout(timer);
       ib.removeListener(EventName.securityDefinitionOptionParameter, onParams);
+      ib.removeListener(EventName.securityDefinitionOptionParameterEnd, onEnd);
       ib.removeListener(EventName.error, onError);
+    }
+    function resolveWithStandardClass() {
+      const counts = new Map([...smartExpirationsByTradingClass].map(([tradingClass, expirations]) => [tradingClass, expirations.length]));
+      const standardClass = pickStandardTradingClass(symbol, counts);
+      resolve({ expirations: standardClass === null ? [] : smartExpirationsByTradingClass.get(standardClass)! });
     }
     function onParams(
       id: number,
       exchange: string,
       _underlyingConId: number,
-      _tradingClass: string,
+      tradingClass: string,
       _multiplier: string,
       expirations: string[],
     ) {
       if (id !== reqId || exchange !== "SMART") return;
+      smartExpirationsByTradingClass.set(tradingClass, Array.from(expirations));
+    }
+    function onEnd(id: number) {
+      if (id !== reqId) return;
       cleanup();
-      resolve({ expirations: Array.from(expirations) });
+      if (smartExpirationsByTradingClass.size > 0) resolveWithStandardClass();
+      else reject(new Error(lastError ?? `secDefOptParams for ${symbol} returned no SMART option parameters`));
     }
     // Captured, not rejected on immediately — IBKR sends routine informational
     // notices through this same event for reqIds that still go on to succeed
@@ -114,6 +147,7 @@ export async function lookupOptionParams(
       lastError = `secDefOptParams error for ${symbol} (code ${code}): ${error.message}`;
     }
     ib.on(EventName.securityDefinitionOptionParameter, onParams);
+    ib.on(EventName.securityDefinitionOptionParameterEnd, onEnd);
     ib.on(EventName.error, onError);
     ib.reqSecDefOptParams(reqId, symbol, "", "STK", conId);
   });
@@ -131,7 +165,7 @@ async function resolveTickerId(symbol: string): Promise<string | null> {
 // and never goes to IBKR for chain structure. A ticker with nothing stored is
 // "not prepared yet", not a reason to fetch.
 export interface StoredOptionChain {
-  /** Every listed expiry, from reqSecDefOptParams. */
+  /** Every listed expiry of the standard option class, from reqSecDefOptParams. */
   expirations: string[];
   /** The real strike grid per expiry, stored for expiries inside the 0-90 DTE capture window only. */
   strikesByExpiry: Map<string, number[]>;
@@ -210,8 +244,8 @@ export function lookupExpiryStrikes(ib: IBApi, symbol: string, expiry: string): 
       new Promise((resolve, reject) => {
         const reqId = nextReqIdFor(ib, () => nextLookupReqId++);
         const startedAt = Date.now();
-        const strikes = new Set<number>();
-        let contractCount = 0;
+        // The wildcard matches every trading class listing this expiry; only the standard class's strikes are the grid.
+        const contractsByTradingClass = new Map<string, { strikes: Set<number>; contractCount: number }>();
         const timer = setTimeout(() => {
           cleanup();
           reject(new IbkrLookupTimeoutError(`strike grid lookup for ${symbol} ${expiry} timed out after ${expiryStrikesTimeoutMs / 1000}s`));
@@ -219,13 +253,18 @@ export function lookupExpiryStrikes(ib: IBApi, symbol: string, expiry: string): 
 
         function onDetails(id: number, details: ContractDetails) {
           if (id !== reqId) return;
-          contractCount++;
-          if (details.contract.strike) strikes.add(details.contract.strike);
+          const tradingClass = details.contract.tradingClass ?? "";
+          const contracts = contractsByTradingClass.get(tradingClass) ?? { strikes: new Set<number>(), contractCount: 0 };
+          contracts.contractCount++;
+          if (details.contract.strike) contracts.strikes.add(details.contract.strike);
+          contractsByTradingClass.set(tradingClass, contracts);
         }
         function onEnd(id: number) {
           if (id !== reqId) return;
           cleanup();
-          resolve({ strikes: [...strikes].sort((a, b) => a - b), contractCount, elapsedMs: Date.now() - startedAt });
+          const standardClass = pickStandardTradingClass(symbol, new Map([...contractsByTradingClass].map(([tradingClass, contracts]) => [tradingClass, contracts.contractCount])));
+          const contracts = standardClass === null ? null : contractsByTradingClass.get(standardClass)!;
+          resolve({ strikes: contracts ? [...contracts.strikes].sort((a, b) => a - b) : [], contractCount: contracts?.contractCount ?? 0, elapsedMs: Date.now() - startedAt });
         }
         function onError(error: Error, code: number, id: number) {
           if (id !== reqId) return;
