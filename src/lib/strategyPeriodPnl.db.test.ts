@@ -14,6 +14,7 @@ const { db } = await import("../db/connection.js");
 const { computeStrategyDailyPnlSeries } = await import("./strategyPeriodPnl.js");
 const testDb: Knex = db;
 const createdTickerIds: string[] = [];
+const insertedCalendarDates: string[] = [];
 
 const isoDateDaysAgo = async (days: number): Promise<string> => (await testDb.raw("SELECT (CURRENT_DATE - ?::int)::text AS d", [days])).rows[0].d;
 
@@ -39,6 +40,7 @@ afterAll(async () => {
   await testDb("position_share_sources").whereIn("position_id", positionIds).del();
   await testDb("position_pnl_snapshots").whereIn("position_id", positionIds).del();
   await testDb("daily_price_bars").whereIn("ticker_id", createdTickerIds).del();
+  if (insertedCalendarDates.length > 0) await testDb("market_calendar").whereIn("calendar_date", insertedCalendarDates).del();
   await testDb("trades").whereIn("position_leg_id", testDb("position_legs").whereIn("position_id", positionIds).select("id")).del();
   await testDb("position_legs").whereIn("position_id", positionIds).del();
   await testDb("positions").whereIn("id", positionIds).del();
@@ -138,5 +140,25 @@ describe("computeStrategyDailyPnlSeries", () => {
     expect(putAfter[1]! - putBefore[1]!).toBeCloseTo(-900, 6);
     // Day 3: the stock from $90 to $92: (92 − 90) × 100.
     expect(leftoverAfter[0]! - leftoverBefore[0]!).toBeCloseTo(200, 6);
+  });
+
+  it("a Friday expiry IBKR settles at 01:15 ET on Saturday lands on Friday's session, not Saturday", async () => {
+    // The Friday at least two weeks back, and its Saturday; the shared test database's calendar holds no rows of its own.
+    const friday: string = (await testDb.raw("SELECT (CURRENT_DATE - 14 - ((EXTRACT(DOW FROM CURRENT_DATE - 14)::int + 2) % 7))::text AS d")).rows[0].d;
+    const saturday: string = (await testDb.raw("SELECT (?::date + 1)::text AS d", [friday])).rows[0].d;
+    for (const [calendarDate, isOpen] of [[friday, true], [saturday, false]] as const) {
+      const inserted = await testDb("market_calendar").insert({ calendar_date: calendarDate, is_open: isOpen }).onConflict("calendar_date").ignore().returning("calendar_date");
+      if (inserted.length > 0) insertedCalendarDates.push(calendarDate);
+    }
+    const before = await seriesFor("covered_call", [friday, saturday]);
+    const tickerId = await createTicker();
+    const [position] = await testDb("positions").insert({ strategy_key: "covered_call", ticker_id: tickerId, status: "closed" }).returning(["id"]);
+    // 01:15 ET on Saturday: 05:15 UTC in winter, 06:15 in summer; either way Saturday in New York.
+    const settledAt = (await testDb.raw("SELECT ((?::date + time '01:15') AT TIME ZONE 'America/New_York') AS t", [saturday])).rows[0].t;
+    await testDb("position_legs").insert({ position_id: position.id, leg_type: "option", side: "short", option_type: "call", strike_price: 50, expiry_date: friday, quantity: 1, multiplier: 100, entry_price: 1, entry_at: `${friday}T15:00:00Z`, exit_price: 0, exit_at: settledAt, ibkr_contract_id: "5" });
+
+    const after = await seriesFor("covered_call", [friday, saturday]);
+    expect(after[0]! - before[0]!).toBeCloseTo(100, 6);
+    expect(after[1]! - before[1]!).toBeCloseTo(0, 6);
   });
 });

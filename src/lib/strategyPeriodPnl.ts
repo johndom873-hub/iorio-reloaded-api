@@ -11,11 +11,13 @@ import { legRealizedPnlSql } from "./legRealizedPnlSql.js";
 //   total P&L(d) = its lifetime realized P&L                                                      (the day it closed)
 // The points are a position's snapshot dates and the day it closed, so over its life the days add up to exactly its P&L:
 // the opening day counts (from entry to that close), and a partial close's realized P&L is not netted against the whole
-// position's unrealized. Closes are dated in New York time, like the snapshots (lastCompletedSessionDate). A day/strategy
-// cell with no activity and no open position that day is legitimately 0, not missing.
+// position's unrealized. A close is dated by its trading session, like the snapshots (lastCompletedSessionDate): the latest open
+// market_calendar day whose 09:30 ET open came at or before it, so Friday's expiries that IBKR settles after midnight land on
+// Friday (Marcelo 2026-11-02); without a calendar day in the ten days before it, its New York date. A day/strategy cell with
+// no activity and no open position that day is legitimately 0, not missing.
 //
 // Shares handed from one position to another (position_share_sources; Marcelo 2026-11-02) move at their market value, not
-// at cost: the position handing them over is credited with value = (close of the hand-over's New York day − the cost they
+// at cost: the position handing them over is credited with value = (close of the hand-over's trading session − the cost they
 // are handed at) × shares received, and the receiving position counts from −value. The cost is the source's handed-over
 // stock legs' exit price (the carried cost) or, for an assigned cash-secured put, its strike. Each value is added to the
 // source's total and taken from the receiver's from the moment of the hand-over (snapshots captured after it, and their
@@ -25,6 +27,14 @@ export interface StrategyDailyPnl {
   snapshotDate: string;
   strategyKey: string;
   dailyPnl: number;
+}
+
+/** SQL for the trading session a timestamptz belongs to (see the header). */
+function sessionDateSql(timestamp: string): string {
+  const newYorkDate = `(${timestamp} AT TIME ZONE 'America/New_York')::date`;
+  return `COALESCE((SELECT MAX(mc.calendar_date) FROM market_calendar mc
+    WHERE mc.is_open AND mc.calendar_date BETWEEN ${newYorkDate} - 10 AND ${newYorkDate}
+      AND (mc.calendar_date + time '09:30') AT TIME ZONE 'America/New_York' <= ${timestamp}), ${newYorkDate})`;
 }
 
 export async function computeStrategyDailyPnlSeries(days: number): Promise<StrategyDailyPnl[]> {
@@ -37,7 +47,7 @@ export async function computeStrategyDailyPnlSeries(days: number): Promise<Strat
       SELECT DISTINCT strategy_key FROM positions
     ),
     leg_realized AS (
-      SELECT pl.position_id, (pl.exit_at AT TIME ZONE 'America/New_York')::date AS exit_date, ${legRealizedPnlSql("pl")} AS realized
+      SELECT pl.position_id, ${sessionDateSql("pl.exit_at")} AS exit_date, ${legRealizedPnlSql("pl")} AS realized
       FROM position_legs pl
       WHERE pl.exit_price IS NOT NULL
     ),
@@ -55,7 +65,7 @@ export async function computeStrategyDailyPnlSeries(days: number): Promise<Strat
       JOIN positions source ON source.id = pss.source_position_id
       LEFT JOIN LATERAL (
         SELECT b.close_price FROM daily_price_bars b
-        WHERE b.ticker_id = source.ticker_id AND b.close_price IS NOT NULL AND b.trading_date <= (pss.created_at AT TIME ZONE 'America/New_York')::date
+        WHERE b.ticker_id = source.ticker_id AND b.close_price IS NOT NULL AND b.trading_date <= ${sessionDateSql("pss.created_at")}
         ORDER BY b.trading_date DESC LIMIT 1
       ) mark ON true
       LEFT JOIN LATERAL (
