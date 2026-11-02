@@ -1,15 +1,14 @@
-import type { BacktestAction, BacktestBaselineSettings, BacktestBreakEvenLevel, BacktestLadderLevel, BacktestOrderShortfall, EffectiveBacktestSettings } from "../backtestTypes.js";
+import type { BacktestAction, BacktestBreakEvenLevel, BacktestOrderShortfall, EffectiveBacktestSettings } from "../backtestTypes.js";
 import type { BaselineNoCandidate, BaselineNoSaleReason } from "./baselineSaleSteps.js";
 import type { BacktestBarHistory } from "./backtestBarHistory.js";
-import type { HedgePutQuoteSource } from "./backtestBaselineHedge.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import type { BacktestDayMarket, BacktestTickerProfile } from "./backtestTickerInputs.js";
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
-import type { VolatilityModelTables } from "../../lib/volatilityModelTables.js";
 import type { SimulatedLedger } from "./ledger/simulatedLedger.js";
+import type { LeapsCallQuoteSource } from "./volFarmerV2Steps.js";
 
-// What one look of a backtest day hands a decision maker (the baseline wheel, the Steady Stake, the Vol Farmer, Vol Farmer
-// v2) and what it answers. runBacktestSession.ts builds the look; each decision maker's own module decides it.
+// What one look of a backtest day hands a decision maker (the Steady Stake, Vol Farmer v4) and what it answers.
+// runBacktestSession.ts builds the look; each decision maker's own module decides it.
 //
 // Scales: a look's quotes are today's chain (prices, strikes and 100-share contracts as traded today); the ledger holds a
 // symbol's open cycle on the scale of its first day. With r = F(cycle) ÷ F(today), a price goes to the ledger × r and a
@@ -35,16 +34,8 @@ export interface BacktestLookSymbol {
   optionContractsRepresentable: boolean;
   /** IBKR's split-adjusted daily closes before today, ascending. */
   adjustedDailyClosesBeforeToday: readonly { date: string; close: number }[];
-  /** The look's long-dated Puts, for the baseline wheel's hedge and the Vol Farmer's; absent when the hedge is off. */
-  hedgePutQuotes?: HedgePutQuoteSource;
-  /** The 10:00 look's Calls of every listed expiry, for Vol Farmer v2's LEAPS; absent for every other decision maker. */
-  leapsCallQuotes?: HedgePutQuoteSource;
-}
-
-/** One ticker of a session of per-ticker pots: its baseline settings (the session's with its own values) and its weight, its pot ÷ every pot. */
-export interface BacktestTickerSetup {
-  baseline: BacktestBaselineSettings;
-  weight: number;
+  /** The look's Calls of every listed expiry, for Vol Farmer v4's LEAPS; absent for the Steady Stake. */
+  leapsCallQuotes?: LeapsCallQuoteSource;
 }
 
 export interface BacktestLookContext {
@@ -57,17 +48,13 @@ export interface BacktestLookContext {
   sectorBySymbol: ReadonlyMap<string, string | null>;
   calendar: BacktestTradingCalendar;
   settings: EffectiveBacktestSettings;
-  /** A session of per-ticker pots: each ticker's own baseline settings and its weight. Absent when the tickers share one account and the session's settings. */
-  tickerSetupBySymbol?: ReadonlyMap<string, BacktestTickerSetup>;
-  /** The volatility model's tables of the day (walk-forward or current): the baseline's Edge Yield ranking and volatility edge filter read them. Null for the other decision makers, which do not. */
-  modelTables: VolatilityModelTables | null;
   ledger: SimulatedLedger;
   /** The session day before today; null on the first. */
   previousSessionDateIso: string | null;
   /** The 10:00 mark per share of every open leg, on its cycle's scale. The look adds the legs it opens. */
   priceByLegId: Map<string, number>;
   nextActionId(): string;
-  /** Today's place among the session's days, 0 on its first: Vol Farmer v2's tickers take turns by it. */
+  /** Today's place among the session's days, 0 on its first: Vol Farmer v4's tickers take turns by it. */
   sessionDayIndex?: number;
 }
 
@@ -113,16 +100,10 @@ export interface BacktestLookResult {
   /** The same without where opens were stopped, and those apart: a day of several looks says each once. */
   summaryOfActions: string;
   opensStopped: string[];
-  /** The baseline: its orders that left contracts unsold. */
+  /** Vol Farmer v4: its orders the free cash cut. */
   shortfalls?: BacktestOrderShortfall[];
-  /** The baseline: the put ladder's levels at this look, per symbol whose cycle holds shares. */
-  ladderLevels?: BacktestLadderLevel[];
-  /** Vol Farmer v2: both positions' break-evens after the look, per symbol whose cycle holds shares. */
+  /** Vol Farmer v4: both positions' break-evens after the look, per symbol whose cycle holds shares. */
   breakEvenLevels?: BacktestBreakEvenLevel[];
-  /** The baseline: sales that were due and not made for a reason the shortfalls do not hold. */
-  noSaleNotes?: BacktestNoSaleNote[];
-  /** The baseline: orders that found no contract within the rules, with what each check left out. */
-  noCandidateNotes?: BacktestNoCandidateNote[];
 }
 
 /** An order of a look that found no contract within the rules (BaselineNoCandidate), recorded only: the Wheel cycles' explanation. */

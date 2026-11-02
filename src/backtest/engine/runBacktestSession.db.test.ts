@@ -13,8 +13,8 @@ if (!environment.testDatabaseUrl) {
 }
 
 // One session end to end against the test database: a synthetic symbol file (17 days, three weekly expiries), synthetic
-// IBKR bars, a cached DTB3 series at 4% and the current model tables, the baseline wheel deciding: cash-secured puts held
-// to their expiry, calls on any shares they bring. The stock falls from 100 to 94 into 13 March and recovers after.
+// IBKR bars and a cached DTB3 series at 4%, Vol Farmer v4 deciding on the next expiry's options: shares with a Covered
+// Call held to its expiry, Puts once the Calls yield little. The stock falls from 100 to 94 into 13 March and recovers after.
 
 const db: Knex = knexLibrary({ client: "pg", connection: environment.testDatabaseUrl });
 const symbol = `BTE${Date.now() % 100000}`;
@@ -27,6 +27,8 @@ let dataDirectory: string;
 let previousDataDirectory: string | undefined;
 let tickerId: string;
 let sessionId: string;
+/** Vol Farmer v4 selling the next expiry's options (its default sells those expiring today, which the synthetic quotes price at their intrinsic value only). */
+const volFarmerV4Overrides = { decisionMaker: "vol_farmer_v4", volFarmerV4: { optionsExpiry: "next" } };
 
 const progressCalls: { done: number; total: number; label: string }[] = [];
 const hooks: BacktestRunHooks = {
@@ -66,7 +68,7 @@ beforeAll(async () => {
   writeSyntheticIbkrBarsFromQuotes(path.join(dataDirectory, `${symbol}.sqlite`), [...history, ...sessionBars], ratePercent);
 
   const [session] = await db("backtest_sessions")
-    .insert({ name: "engine test", symbol, start_date: sessionDates[0], end_date: sessionDates.at(-1), starting_value: 1_000_000, tables_mode: "current", settings_snapshot: JSON.stringify(fixtureBacktestSettings()), overrides: JSON.stringify({ decisionMaker: "baseline" }) })
+    .insert({ name: "engine test", symbol, start_date: sessionDates[0], end_date: sessionDates.at(-1), starting_value: 1_000_000, tables_mode: "current", settings_snapshot: JSON.stringify(fixtureBacktestSettings()), overrides: JSON.stringify(volFarmerV4Overrides) })
     .returning("id");
   sessionId = session.id;
 });
@@ -112,7 +114,7 @@ describe("runBacktestSession", () => {
       expect(Number(trade.fill_price)).toBeCloseTo((Number(trade.bid) + Number(trade.ask)) / 2 - (0.5 * (Number(trade.ask) - Number(trade.bid))) / 2, 4);
       expect(Number(trade.commission_dollars)).toBeCloseTo(0.68 * contracts, 2);
       expect(trade.leg_id).toMatch(/^leg-\d+$/);
-      // The baseline has no Signals model: no grade or Edge figures.
+      // No Signals model: no grade or Edge figures.
       expect(trade).toMatchObject({ grade: null, edge_margin: null, expected_pnl_dollars: null, edge_yield: null });
       if (trade.expiryIso > "2026-03-23") {
         // Still open at the session's end.
@@ -177,10 +179,10 @@ describe("runBacktestSession", () => {
     expect(Number((await db("backtest_session_days").where({ session_id: sessionId }).count("* as count"))[0]!.count)).toBe(sessionDates.length);
   }, 60_000);
 
-  it("never runs a past rules or AI model session again: it refuses, and the stored results stay as they are", async () => {
+  it("never runs a past session of a retired decision maker again: it refuses, and the stored results stay as they are", async () => {
     const storedDays = Number((await db("backtest_session_days").where({ session_id: sessionId }).count("* as count"))[0]!.count);
     expect(storedDays).toBe(sessionDates.length);
-    for (const overrides of [{ decisionMaker: "rules" }, { decisionMaker: "llm" }, {}]) {
+    for (const overrides of [{ decisionMaker: "rules" }, { decisionMaker: "llm" }, {}, { decisionMaker: "baseline" }, { decisionMaker: "vol_farmer" }, { decisionMaker: "vol_farmer_v2" }, { decisionMaker: "vol_farmer_v3" }]) {
       // An empty overrides on a snapshot without a decision maker is a session from before the choice: the rules'.
       await db("backtest_sessions").where({ id: sessionId }).update({ overrides: JSON.stringify(overrides) });
       await expect(runBacktestSession(sessionId, hooks, db)).rejects.toThrow(retiredBacktestDecisionMakerMessage);

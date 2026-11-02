@@ -16,12 +16,13 @@ import { ledgerCapitalAtRisk, ledgerFreeCash, ledgerNetLiquidationValue } from "
 import { cycleSplitFactorFor, cycleStartSplitFactor, isSymbolFlat, legsOfPosition, positionsOfSymbol, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { newVolFarmerV2SymbolState, runVolFarmerV2Turn, volFarmerV2BreakEven, volFarmerV2TurnOrder, type VolFarmerV2Book, type VolFarmerV2CashCut, type VolFarmerV2Market, type VolFarmerV2Position, type VolFarmerV2PositionCashFlow, type VolFarmerV2SymbolState, type VolFarmerV3SharesOrder } from "./volFarmerV2Steps.js";
 
-// Vol Farmer v2 in the backtest: the shared steps (volFarmerV2Steps.ts, where the rules are) on the simulated ledger, at
-// the 10:00 look only or at every look (volFarmerV2.looks; a later look reads its own quotes and price). Each order the
-// steps place is filled on the ledger at once and recorded as the session's action and, for an option sold, its trade row.
+// Vol Farmer v4 in the backtest: Vol Farmer v2's shared steps (volFarmerV2Steps.ts, where the rules are) with v3's
+// rebalancing, on the simulated ledger, at the 10:00 look only or at every look (looks; a later look reads its own quotes
+// and price). Each order the steps place is filled on the ledger at once and recorded as the session's action and, for
+// an option sold, its trade row.
 //
 // The session's tickers share the account (Marcelo 2026-10-28) as Pluto's share its budget. A ticker's share w = its
-// allocation (volFarmerV2.tickerAllocationPct, else an equal share of what the set ones leave; one ticker: 100%) × (1 +
+// allocation (tickerAllocationPct, else an equal share of what the set ones leave; one ticker: 100%) × (1 +
 // the excess allowance). A new cycle's pot, and the base the LEAPS cap is a share of, are the account's value at the look
 // (positions marked) × w; a new cycle buys no more lots than the free cash pays for. At a look the tickers take their turn
 // alphabetically, moved one place each session day (day k starts with the (k mod n)-th of n), each doing steps 1 to 3;
@@ -68,8 +69,8 @@ export function volFarmerV2TickerShares(sessionSymbols: readonly string[], v2: P
 }
 
 /**
- * The Vol Farmer v2 look, Vol Farmer v3's and v4's too: v2's steps with v3's rebalancing of the first position (runBacktestSession.ts
- * skips the looks after 10:00 when its looks are the first only).
+ * The Vol Farmer v4 look: v2's steps with v3's rebalancing (runBacktestSession.ts skips the looks after 10:00 when its
+ * looks are the first only). The values come from volFarmerStepSettingsOf, which reads a v2 or v3 section as well.
  */
 export async function runVolFarmerV2Look(context: BacktestLookContext): Promise<BacktestLookResult> {
   const { settings, ledger, todayIso } = context;

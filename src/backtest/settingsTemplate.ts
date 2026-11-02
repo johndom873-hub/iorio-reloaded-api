@@ -748,8 +748,8 @@ const onlyWithLadder: BacktestSettingApplicability = { allOf: [ladderOn], explan
 const onlyWithHistoryShock: BacktestSettingApplicability = { allOf: [ladderOn, { path: "baseline.ladderShock", oneOf: ["history"] }], explanation: "Applies only with the ladder's Stock shock set to the stock's Max drawdown." };
 
 /**
- * The groups in order, each row's place in them, and when a CC + Put Ladder row is read at all (as the engine reads them:
- * backtestBaselineLook, baselineSaleSteps, backtestBaselineLadder). The New session table and the lab's settings show this.
+ * The groups in order, each row's place in them, and when a CC + Put Ladder row is read at all (as the retired engine
+ * read them). The New session table and the lab's settings show this.
  */
 /** The original Vol Farmer's rows Vol Farmer v2 reads (its Calls' |delta| range and the spread limit): shown in v2's group, their paths kept. */
 const volFarmerV2ReadsIt: ReadonlySet<string> = new Set<string>(["volFarmer.callMinAbsDelta", "volFarmer.callMaxAbsDelta", "volFarmer.maxSpreadPctOfMid"]);

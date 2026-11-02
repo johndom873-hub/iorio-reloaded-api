@@ -6,16 +6,15 @@ import type { Knex } from "knex";
 import { easternInstant } from "../../lib/easternIsoDate.js";
 import { maximumSpreadFractionOfMid } from "../../lib/impliedVolatilitySurface.js";
 import type { PlutoSettings } from "../../pluto/settingsStore.js";
-import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, type BacktestAction, type BacktestBaselineSettings, type BacktestFill, type BacktestSessionDetail, type BacktestSettingsOverrides, type BacktestSymbolSettings } from "../backtestTypes.js";
-import { loadSessionLadder } from "../analysis/sessionLadderFigures.js";
+import { defaultBacktestVolFarmerV4Settings, type BacktestAction, type BacktestFill, type BacktestSessionDetail, type BacktestSettingsOverrides } from "../backtestTypes.js";
 import { computeParityStockPrice } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile } from "./testSupport/syntheticBacktestData.js";
 import { dollarsAfter } from "./testSupport/gateTextDollars.js";
 
 // Whole sessions through the wheel, in a private copy of the test tables: each on its own synthetic symbol (a file of
-// 10:00 quotes priced at a chosen implied volatility per day, IBKR bars with chosen closes, DTB3 at 4%, the current model
-// tables), run by runBacktestSession and read back by the session detail the screens use.
+// 10:00 quotes priced at a chosen implied volatility per day, IBKR bars with chosen closes, DTB3 at 4%), run by
+// runBacktestSession with Vol Farmer v4 deciding and read back by the session detail the screens use.
 vi.mock("../../db/connection.js", async () => {
   const { createIsolatedTestDatabase } = await import("../../lib/testSupport/isolatedTestSchema.js");
   return { db: await createIsolatedTestDatabase() };
@@ -63,8 +62,6 @@ interface WheelSessionSpec extends WheelSymbolSpec {
   moreSymbols?: WheelSymbolSpec[];
   plutoOverrides?: Partial<PlutoSettings>;
   overrides?: BacktestSettingsOverrides;
-  /** A session of per-ticker pots: each symbol's pot, weight and values. */
-  pots?: Record<string, BacktestSymbolSettings>;
 }
 
 interface WheelSession {
@@ -130,7 +127,7 @@ async function runWheelSession(spec: WheelSessionSpec): Promise<WheelSession> {
   const symbols = symbolSpecs.map((symbolSpec) => symbolSpec.symbol);
 
   const [session] = await testDb("backtest_sessions")
-    .insert({ name: `wheel ${symbols.join(" ")}`, symbol: symbols.join(", "), symbols: JSON.stringify(symbols), start_date: spec.fileDates[0], end_date: spec.lastSessionDate, starting_value: startingValue, tables_mode: "current", settings_snapshot: JSON.stringify(fixtureBacktestSettings(spec.plutoOverrides)), overrides: JSON.stringify(spec.overrides ?? {}), ...(spec.pots ? { book_mode: "pots", symbol_settings: JSON.stringify(spec.pots) } : {}) })
+    .insert({ name: `wheel ${symbols.join(" ")}`, symbol: symbols.join(", "), symbols: JSON.stringify(symbols), start_date: spec.fileDates[0], end_date: spec.lastSessionDate, starting_value: startingValue, tables_mode: "current", settings_snapshot: JSON.stringify(fixtureBacktestSettings(spec.plutoOverrides)), overrides: JSON.stringify(spec.overrides ?? {}) })
     .returning("id");
   await runBacktestSession(session.id, hooks);
   const detail = await loadBacktestSessionDetail(session.id);
@@ -218,6 +215,9 @@ function expectAccountToReconcile(session: WheelSession): void {
 
 const commissionPerContract = 0.68;
 
+/** Vol Farmer v4 selling the next expiry's options (its default sells those expiring today, which the synthetic quotes price at their intrinsic value only). */
+const volFarmerV4Overrides: BacktestSettingsOverrides = { decisionMaker: "vol_farmer_v4", volFarmerV4: { optionsExpiry: "next" } };
+
 /** The day's quote of a contract in the session's file. */
 function quoteOf(session: WheelSession, dateIso: string, expiry: string, strike: number, right: "C" | "P", symbol?: string) {
   const quote = session.quotesOn(dateIso, symbol).find((entry) => entry.expiry === expiry && entry.strike === strike && entry.right === right)!;
@@ -263,7 +263,7 @@ describe("a session through the wheel", () => {
       expiriesOn: () => ["2026-04-24"],
       unavailableDates: ["2026-04-08"],
       datesWithoutEndOfDay: ["2026-04-09"],
-      overrides: { decisionMaker: "baseline" },
+      overrides: volFarmerV4Overrides,
     });
     const { detail } = session;
     expect(detail.session.status).toBe("succeeded");
@@ -288,19 +288,19 @@ describe("a session through the wheel", () => {
     //                        6     7      8      9     10    13    14    15    16    17    20    21
     const tenOClockPrices = [100, 100.2, 100.6, 100.4, 99.6, 98.8, 98.2, 97.8, 97.4, 97.2, 97.6, 99.0];
     const closes = /*     */ [100.1, 100.4, 100.5, 100, 99.2, 98.5, 98.0, 97.6, 97.3, 97.0, 98.4, 99.1];
-    const spec = { fileDates, lastSessionDate: "2026-04-21", tenOClockPrices, closes, expiriesOn: (dateIso: string) => (dateIso < "2026-04-17" ? ["2026-04-17"] : ["2026-04-17", "2026-04-24"]), overrides: { decisionMaker: "baseline" as const } };
+    const spec = { fileDates, lastSessionDate: "2026-04-21", tenOClockPrices, closes, expiriesOn: (dateIso: string) => (dateIso < "2026-04-17" ? ["2026-04-17"] : ["2026-04-17", "2026-04-24"]), overrides: volFarmerV4Overrides };
 
-    // No daily bar for Friday 17 April, but 30-minute bars: the stock settles at the last one's close (≈ 97.2), under the $100 and $98 strikes.
+    // No daily bar for Friday 17 April, but 30-minute bars: the stock settles at the last one's close (≈ 97.2), under the
+    // $101 strike of the Call sold on Monday 6 April with 9,500 shares.
     const settled = await runWheelSession({ ...spec, symbol: "WHLE", datesWithoutBar: ["2026-04-17"] });
     const monday = dayOf(settled, "2026-04-20").decisionSummary!;
-    expect(monday).toContain("WHLE $100 Put · 17 Apr assigned at the 97.20 close: 10300 shares bought at the strike");
-    expect(monday).toContain("WHLE $98 Put · 17 Apr assigned at the 97.20 close: 100 shares bought at the strike");
+    expect(monday).toContain("WHLE $101 Call · 17 Apr expired worthless at the 97.20 close, 9500 shares kept");
     expect(monday).toContain("settled 2026-04-17 at the close of IBKR's last 30-minute bar (no daily bar)");
     expectAccountToReconcile(settled);
 
-    // Neither a daily nor a 30-minute bar: the session stops rather than guess a price or leave the put open.
+    // Neither a daily nor a 30-minute bar: the session stops rather than guess a price or leave the Call open.
     await expect(runWheelSession({ ...spec, symbol: "WHLF", datesWithoutBar: ["2026-04-17"], unavailableDates: ["2026-04-17"] })).rejects.toThrow(
-      /^Cannot settle WHLF \$\d+ Put · 17 Apr: the WHLF data file has no IBKR daily or 30-minute bar for 2026-04-17\. Press Update on its row in Data files and run the session again\.$/,
+      /^Cannot settle WHLF \$\d+ Call · 17 Apr: the WHLF data file has no IBKR daily or 30-minute bar for 2026-04-17\. Press Update on its row in Data files and run the session again\.$/,
     );
   }, 60_000);
 });
@@ -312,58 +312,33 @@ describe("a session of several symbols on one book", () => {
   const pricesB = /*    */ [100, 99.8, 99.9, 100.2, 100.1, 100.3, 100.5, 100.4];
   const symbolSpec = (symbol: string, prices: number[], change: Partial<WheelSymbolSpec> = {}): WheelSymbolSpec => ({ symbol, fileDates: dates, tenOClockPrices: prices, closes: prices.map((price) => price + 0.1), expiriesOn: () => ["2026-04-24"], ...change });
 
-  it("gives each ticker of a pots session its pot: turns in alphabetical order, its share level and weight, buy and hold per pot", async () => {
-    const ladder = { ...defaultBacktestBaselineSettings, entry: "covered_call", putsWhenNoCall: "reserve_ladder", entryWhenSharesUncovered: "buy", callStrike: "above_break_even", minAbsDelta: 0.01, maxAbsDelta: 1, maxSpreadPctOfMid: 50 } as BacktestBaselineSettings;
-    const tickerValues = (ladderSharesPct: number) => ({ ...Object.fromEntries(backtestTickerBaselineKeys.map((key) => [key, ladder[key]])), ladderSharesPct }) as BacktestSymbolSettings["baseline"];
-    const source = Object.fromEntries([...backtestTickerBaselineKeys, "potDollars"].map((key) => [key, "request"])) as BacktestSymbolSettings["source"];
-    // Given WTB first: the pots session still lets WTA take its turn first at every look.
-    const pots: Record<string, BacktestSymbolSettings> = {
-      WTB: { potDollars: 750_000, weight: 0.75, baseline: tickerValues(40), source },
-      WTA: { potDollars: 250_000, weight: 0.25, baseline: tickerValues(60), source },
-    };
-    const session = await runWheelSession({ ...symbolSpec("WTB", pricesB), lastSessionDate: "2026-04-10", moreSymbols: [symbolSpec("WTA", pricesA)], overrides: { decisionMaker: "baseline", baseline: ladder }, pots });
+  it("shares one account between the tickers: each sized from its share of it, the turn moving each day, buy and hold in equal parts", async () => {
+    const session = await runWheelSession({ ...symbolSpec("WTB", pricesB), lastSessionDate: "2026-04-10", moreSymbols: [symbolSpec("WTA", pricesA)], overrides: volFarmerV4Overrides });
     const { detail } = session;
-    expect(detail.session).toMatchObject({ status: "succeeded", symbols: ["WTB", "WTA"], bookMode: "pots", symbolSettings: pots });
-    // The cash-bound report lists every ticker in its turn order; the orders' shortfalls are stored with the session.
-    expect(detail.session.cashBoundBySymbol!.map((entry) => entry.symbol)).toEqual(["WTA", "WTB"]);
-    const storedShortfalls: { symbol: string; look_count: number }[] = await testDb("backtest_look_shortfalls").where({ session_id: session.sessionId }).select("symbol", "look_count");
-    expect(storedShortfalls.length).toBeGreaterThan(0);
-    expect(storedShortfalls.every((row) => row.look_count >= 1)).toBe(true);
+    expect(detail.session).toMatchObject({ status: "succeeded", symbols: ["WTB", "WTA"] });
+    expectAccountToReconcile(session);
 
-    // Each look's actions: every WTA one before any WTB one.
+    // Tuesday 7 April, the session's second day: the tickers take their turn alphabetically moved one place, WTB first.
     const filled = filledActionsOf(session);
-    expect(filled.length).toBeGreaterThan(0);
-    // The ladder's levels: one row per ticker and day its cycle held shares, which the analysis reads with the rungs sold.
-    const storedLevels: { symbol: string; trading_date: string }[] = await testDb("backtest_ladder_levels").where({ session_id: session.sessionId }).select("symbol", testDb.raw("trading_date::text as trading_date"));
-    expect(storedLevels.length).toBeGreaterThan(0);
-    expect(new Set(storedLevels.map((row) => `${row.symbol}|${row.trading_date}`)).size).toBe(storedLevels.length);
-    const ladderOfB = await loadSessionLadder(session.sessionId, "WTB", testDb);
-    expect(ladderOfB.ladderLevels.map(([date]) => date)).toEqual(storedLevels.filter((row) => row.symbol === "WTB").map((row) => row.trading_date).sort());
-    const ladderPutsOfB = filled.filter((action) => action.symbol === "WTB" && action.kind === "open_cash_secured_put" && "ladderCap" in (action.candidateScores ?? {}));
-    expect(ladderOfB.ladderRungsSold.flatMap(([, , fills]) => fills).length).toBe(ladderPutsOfB.length);
-    // The shares held each day at the account value's marks: none before the first purchase, then part of the account.
-    const storedDays: { shares_value_dollars: string | null; account_value: string }[] = await testDb("backtest_session_days").where({ session_id: session.sessionId }).orderBy("trading_date").select("shares_value_dollars", "account_value");
-    expect(storedDays.every((day) => day.shares_value_dollars !== null && Number(day.shares_value_dollars) >= 0 && Number(day.shares_value_dollars) <= Number(day.account_value))).toBe(true);
-    expect(Number(storedDays[0]!.shares_value_dollars)).toBe(0);
-    expect(storedDays.some((day) => Number(day.shares_value_dollars) > 0)).toBe(true);
-    for (const at of new Set(filled.map((action) => action.at))) {
-      const symbolsAtLook = filled.filter((action) => action.at === at).map((action) => action.symbol);
-      expect(symbolsAtLook).toEqual([...symbolsAtLook].sort());
+    expect(filled.filter((action) => action.tradingDate === "2026-04-07").map((action) => [action.symbol, action.kind])).toEqual([
+      ["WTB", "open_covered_call"],
+      ["WTA", "open_covered_call"],
+    ]);
+    // Each ticker's first position: First position % of its pot, its share of the account (half, raised by the excess
+    // allowance) at the look, in whole lots, short of it by less than one lot.
+    const { firstPositionPct, excessAllowancePct } = defaultBacktestVolFarmerV4Settings;
+    const firstPositionBudget = dayOf(session, "2026-04-07").accountValue * 0.5 * (1 + excessAllowancePct / 100) * (firstPositionPct / 100);
+    for (const symbol of ["WTA", "WTB"]) {
+      const shareFills = session.fills.filter((fill) => fill.symbol === symbol && fill.instrument === "stock" && fill.side === "buy");
+      expect(shareFills.map((fill) => fill.tradingDate)).toEqual(["2026-04-07"]);
+      const cost = shareFills.reduce((sum, fill) => sum + fill.quantity * fill.price + fill.commissionDollars, 0);
+      expect(cost).toBeLessThanOrEqual(firstPositionBudget);
+      expect(cost).toBeGreaterThan(firstPositionBudget - 100 * shareFills[0]!.price);
     }
 
-    // Shares bought on the first day with sales: within each ticker's budget, its weight × the $1,000,000 account × its
-    // share level (WTA 0.25 × 60% = $150,000; WTB 0.75 × 40% = $300,000), and short of it by less than one lot.
-    const firstSaleDay = filled[0]!.tradingDate;
-    for (const [symbol, budget] of [["WTA", 150_000], ["WTB", 300_000]] as const) {
-      const shareFills = session.fills.filter((fill) => fill.symbol === symbol && fill.instrument === "stock" && fill.side === "buy" && fill.tradingDate === firstSaleDay);
-      const cost = shareFills.reduce((sum, fill) => sum + fill.quantity * fill.price, 0);
-      expect(cost).toBeLessThanOrEqual(budget);
-      expect(cost).toBeGreaterThan(budget - 100 * shareFills[0]!.price);
-    }
-
-    // Buy and hold: each symbol's pot in whole shares at the first 10:00 price, the rest in cash.
+    // Buy and hold: half the starting value in each symbol's whole shares at its first 10:00 price, the rest in cash.
     const priceOn = (symbol: string, dateIso: string) => computeParityStockPrice(session.quotesOn(dateIso, symbol), dateIso, ratePercent / 100, maximumSpreadFractionOfMid)?.price ?? session.previousCloseOf(symbol, dateIso);
-    const sharesOf = (symbol: string) => Math.floor(pots[symbol]!.potDollars / priceOn(symbol, "2026-04-06"));
+    const sharesOf = (symbol: string) => Math.floor(startingValue / 2 / priceOn(symbol, "2026-04-06"));
     const baselineCash = startingValue - sharesOf("WTA") * priceOn("WTA", "2026-04-06") - sharesOf("WTB") * priceOn("WTB", "2026-04-06");
     expect(dayOf(session, "2026-04-10").baselineValue).toBeCloseTo(baselineCash + sharesOf("WTA") * priceOn("WTA", "2026-04-10") + sharesOf("WTB") * priceOn("WTB", "2026-04-10"), 0);
   }, 60_000);

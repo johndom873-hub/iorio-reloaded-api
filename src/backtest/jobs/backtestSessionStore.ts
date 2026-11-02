@@ -799,7 +799,7 @@ type RecordedSale = { premiumYield: number | null; delta: number | null; ladderR
 
 const ladderScoreKeys = ["ladderCap", "ladderTop", "ladderBreakEven", "ladderFloor", "ladderAverageCost", "ladderShock", "ladderCommitted", "ladderRungCollateral", "ladderReserve", "ladderBase", "premiumYield", "rank", "eligibleCount", "bestCandidateStrike", "bestCandidatePremiumYield"] as const;
 
-/** A rung sale's reason (baselineSaleSteps.ts sellLadderPuts): the call it was preferred to, and whether the volume limit of the puts before it led to it. */
+/** A rung sale's reason, as the CC + Put Ladder wrote it: the call it was preferred to, and whether the volume limit of the puts before it led to it. */
 function ladderSaleReasonOf(chosenBecause: string | null): Pick<BacktestLadderRungRecord, "callComparison" | "afterVolumeLimit"> {
   const beat = chosenBecause ? /its yield ([\d.]+)% beats the best call's ([\d.]+)% by more than ([\d.]+)%/.exec(chosenBecause) : null;
   return {
@@ -838,7 +838,7 @@ function ladderRungOf(scores: Partial<Record<(typeof ladderScoreKeys)[number], n
 
 /** The options sold in the cycle's days, as their sales recorded them, read by day, right, strike and expiry. */
 /**
- * The instants of a symbol's Vol Farmer crossings over a cycle's days (backtestVolFarmerLook.ts): the automatic unwind
+ * The instants of a symbol's original Vol Farmer crossings over a cycle's days: the automatic unwind
  * actions, each stamped with the moment the stock reached the Call's strike, which is also when its rows were written.
  */
 async function loadVolFarmerCrossingInstants(sessionId: string, symbol: string, timeline: readonly BacktestCycleTimelineRow[]): Promise<Set<number>> {

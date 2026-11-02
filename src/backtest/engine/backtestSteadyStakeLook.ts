@@ -17,10 +17,9 @@ const steadyStakeCommissions: BaselineCommissions = { option: flatCommissionEsti
 
 // The Steady Stake's look (decision maker "steady_stake"; research of 2026-10-21 in tmp/new-strategy-research/). At the
 // 10:00 look only, for every symbol:
-//   1. the stake: the ticker's pot P = the account value × its weight (its pot ÷ every pot; in a shared account, 1 ÷ the
-//      session's symbols) and its shares' value V = shares held × the look's price. When |V − s × P| > b × P (s the stake,
-//      b the rebalancing band), whole shares are bought with the free cash, or uncovered ones sold, back to s × P at the
-//      look's price;
+//   1. the stake: the ticker's pot P = the account value × its weight (1 ÷ the session's symbols) and its shares' value
+//      V = shares held × the look's price. When |V − s × P| > b × P (s the stake, b the rebalancing band), whole shares
+//      are bought with the free cash, or uncovered ones sold, back to s × P at the look's price;
 //   2. on an expiry day (the look quotes an expiry today), Calls expiring today on c × the free round lots: the contract
 //      whose |delta| is nearest the Calls' target first, then the next nearest within the tolerance while the volume
 //      limit leaves lots uncovered;
@@ -29,7 +28,7 @@ const steadyStakeCommissions: BaselineCommissions = { option: flatCommissionEsti
 // Each sale fills at the session's fill rule and is held to that day's close, where the session settles it (assigned
 // or called away when in the money by $0.01). A cycle that spans a split whose contracts do not fit its share scale
 // sells no options until it ends; its shares are still rebalanced.
-// Realism limits as the baseline's (baselineSaleSteps.ts): bid at least $0.05, ask above bid, at most 20% of the
+// Realism limits as baselineSaleSteps.ts sets them: bid at least $0.05, ask above bid, at most 20% of the
 // contract's previous-session volume, spread at most maxSpreadPctOfMid of the mid; delta on the expiry's parity forward,
 // T = the hours from the look to that day's close ÷ 8,760.
 
@@ -51,7 +50,7 @@ export async function runSteadyStakeLook(context: BacktestLookContext): Promise<
 
   for (const lookSymbol of context.symbols) {
     const symbol = lookSymbol.profile.symbol;
-    const weight = context.tickerSetupBySymbol?.get(symbol)?.weight ?? 1 / sessionSymbolCount;
+    const weight = 1 / sessionSymbolCount;
     const quotes = lookSymbol.intraday?.quotes ?? lookSymbol.market.quotes;
     const stockPrice = lookSymbol.intraday?.stockPrice ?? lookSymbol.market.stockPrice;
     const riskFreeRate = (lookSymbol.market.riskFreeRatePercent ?? 0) / 100;

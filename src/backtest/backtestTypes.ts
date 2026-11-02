@@ -20,7 +20,7 @@ export type BacktestTablesMode = "walk_forward" | "current";
  * "rules" (Pluto's stand-in rules on the Signals model, BacktestPolicySettings) and "llm" (the AI model through the
  * subscription) with Signals (Marcelo 2026-10-27), "vol_farmer", the original Vol Farmer of
  * BacktestVolFarmerSettings (Marcelo 2026-10-30; v2 still reads three of its values), and "baseline", "vol_farmer_v2"
- * and "vol_farmer_v3" (Marcelo 2026-11-02; the engine still runs them, v4 on v2's and v3's steps).
+ * and "vol_farmer_v3" (Marcelo 2026-11-02; v4 still runs on v2's steps with v3's rebalancing).
  */
 export type BacktestDecisionMaker = "rules" | "llm" | "baseline" | "steady_stake" | "vol_farmer" | "vol_farmer_v2" | "vol_farmer_v3" | "vol_farmer_v4";
 
@@ -30,10 +30,7 @@ export const activeBacktestDecisionMakers = ["steady_stake", "vol_farmer_v4"] as
 /** The retired ones: their past sessions stay readable. */
 export const retiredBacktestDecisionMakers = ["rules", "llm", "vol_farmer", "baseline", "vol_farmer_v2", "vol_farmer_v3"] as const satisfies readonly BacktestDecisionMaker[];
 
-/** The decision makers the engine has no code for any more. */
-const decisionMakersWithoutEngine: readonly BacktestDecisionMaker[] = ["rules", "llm", "vol_farmer"];
-
-/** Vol Farmer v2, v3 and v4: all run v2's steps (volFarmerV2Steps.ts), v3 and v4 with v3's rebalancing (volFarmerStepSettingsOf). */
+/** Vol Farmer v2, v3 and v4: all ran v2's steps (volFarmerV2Steps.ts), v3 and v4 with v3's rebalancing (volFarmerStepSettingsOf); their stored sessions read alike. */
 export function runsVolFarmerV2Steps(decisionMaker: BacktestDecisionMaker): boolean {
   return decisionMaker === "vol_farmer_v2" || decisionMaker === "vol_farmer_v3" || decisionMaker === "vol_farmer_v4";
 }
@@ -41,13 +38,9 @@ export function runsVolFarmerV2Steps(decisionMaker: BacktestDecisionMaker): bool
 export const retiredBacktestDecisionMakerMessage =
   "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026, the CC + Put Ladder and Vol Farmer v2 and v3 on 2 Nov 2026); its past sessions stay readable.";
 
+/** The requests, the jobs and the engine refuse every decision maker that is not active. */
 export function isRetiredBacktestDecisionMaker(decisionMaker: BacktestDecisionMaker): boolean {
   return !(activeBacktestDecisionMakers as readonly BacktestDecisionMaker[]).includes(decisionMaker);
-}
-
-/** The engine refuses only the decision makers whose code is gone; the requests and jobs refuse every retired one. */
-export function engineCannotRun(decisionMaker: BacktestDecisionMaker): boolean {
-  return decisionMakersWithoutEngine.includes(decisionMaker);
 }
 
 /**
@@ -166,7 +159,7 @@ export interface BacktestBaselineSettings {
    * The drop-risk filters on new entries (approved by Marcelo 2026-10-19; research: Ladder Drop-Risk Filters): no Cash-Secured
    * Put entry and no Covered Call entry (within the ladder's shares budget too) while the stock is stretched or its implied
    * volatility is near the top of its year; Calls on held shares and ladder Puts are never filtered. Each is on or off with
-   * its own limit, and with both on either one blocks (entryDropRiskFilters.ts):
+   * its own limit, and with both on either one blocks:
    *   extension z = (C ÷ A200 − 1) ÷ σ63: C the previous session's close, A200 the average of the last 200 daily closes, σ63
    *                 the standard deviation of the last 63 daily log returns × √252 (IBKR's split-adjusted closes before the day)
    *   IV Rank     = (IV − IV_min) ÷ (IV_max − IV_min) × 100 over the last 252 days with an implied volatility, IV the latest
@@ -192,7 +185,7 @@ export interface BacktestBaselineSettings {
    */
   coverage: "best_contract" | "fill_down_ranking";
   /**
-   * The hedge (Marcelo 2026-10-22, backtestBaselineHedge.ts): long Puts bought on the shares an entry brings in (a Covered
+   * The hedge (Marcelo 2026-10-22): long Puts bought on the shares an entry brings in (a Covered
    * Call entry's, a Cash-Secured Put entry's once assigned), sold as the ladder's rungs are assigned (as many contracts as
    * the rung's), when shares leave, and near expiry (then replaced while shares are held). The Puts' target days to
    * expiry; 0 = no hedge.
@@ -296,7 +289,7 @@ export const defaultBacktestSteadyStakeSettings: BacktestSteadyStakeSettings = {
  * them. A cycle buys the shares, sells the Call and buys the Put at a 10:00 look; when the stock reaches the Call's
  * strike the whole position is unwound (the shares sold, the Call bought back, the Put sold) and the next cycle starts at
  * the next day's 10:00 look. A Call that expires below its strike is followed by the next one at the next day's 10:00
- * look, the Put kept. It decides at the 10:00 look only; no Pluto rules and no Signals (backtestVolFarmerLook.ts).
+ * look, the Put kept. It decided at the 10:00 look only; no Pluto rules and no Signals.
  */
 export interface BacktestVolFarmerSettings {
   /** The Calls' |delta| range, from each quote's own implied volatility. */
@@ -1241,7 +1234,7 @@ export interface BacktestRunStatistics {
   hedge?: BacktestHedgeTotals;
 }
 
-/** The hedge's long Puts over a session (backtestBaselineHedge.ts summarizeHedge). */
+/** The hedge's long Puts over a session, as a past CC + Put Ladder or original Vol Farmer session stored them. */
 export interface BacktestHedgeTotals {
   purchases: number;
   contractsBought: number;

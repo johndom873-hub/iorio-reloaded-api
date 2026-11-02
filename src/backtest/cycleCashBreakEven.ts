@@ -117,7 +117,7 @@ function momentIndexes(timeline: readonly BacktestCycleTimelineRow[]): number[] 
 export function cashBreakEvenBeforeEachRow(timeline: readonly BacktestCycleTimelineRow[], splitFactorOf: SplitFactorOfDay = noSplits, options: CashBreakEvenOptions = {}): (number | null)[] {
   const moments = momentIndexes(timeline);
   const hedgeRealized = hedgeRealizedByRow(timeline, options.hedgeRealizedPnlIncluded === true, splitFactorOf);
-  // A look's hedge sales come before its option sales (backtestBaselineHedge.ts): their gain is in the floor those sales see.
+  // A look's hedge sales came before its option sales: their gain is in the floor those sales see.
   const hedgeRealizedByMoment = new Map<number, number>();
   hedgeRealized.forEach((amount, position) => {
     if (amount !== 0) hedgeRealizedByMoment.set(moments[position]!, (hedgeRealizedByMoment.get(moments[position]!) ?? 0) + amount);

@@ -107,7 +107,7 @@ export function volFarmerNoteOn(daySummary: string | null, symbol: string): stri
   return null;
 }
 
-/** The Vol Farmer's notes on held shares with no Call sold (backtestVolFarmerLook.ts), as reasons. */
+/** The original Vol Farmer's notes on held shares with no Call sold, as reasons. */
 const volFarmerNoCallReasons: { pattern: RegExp; reason: string }[] = [
   { pattern: /^no Call passes the hedge rule/, reason: "no Call passed the hedge rule" },
   { pattern: /^no Call has a Put that passes the hedge rule/, reason: "no Call with a Put passed the hedge rule" },

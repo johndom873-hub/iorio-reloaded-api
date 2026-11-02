@@ -16,7 +16,7 @@ if (!environment.testDatabaseUrl) {
 // split-adjusted (≈ $50 throughout). The engine must infer F = 2 before the split and 1 after, put every bar price on the
 // day's traded scale, keep the wheel cycle that began before the split on its own scale (its options become twice the
 // contracts on half the shares each, its later sales are today's contracts put on that scale), and value buy and hold
-// continuously. The baseline wheel decides: the options sold before the split are held to their expiry.
+// continuously. Vol Farmer v4 decides on the next expiry's options: the Call sold before the split is held to its expiry.
 
 const db: Knex = knexLibrary({ client: "pg", connection: environment.testDatabaseUrl });
 const symbol = `BTS${Date.now() % 100000}`;
@@ -55,7 +55,7 @@ beforeAll(async () => {
   await db("daily_price_bars").insert([...history, ...sessionBars].map((bar) => ({ ticker_id: tickerId, trading_date: bar.tradingDate, open_price: bar.open, high_price: bar.high, low_price: bar.low, close_price: bar.close, volume: bar.volume, implied_volatility: bar.impliedVolatility })));
   writeSyntheticIbkrBarsFromQuotes(path.join(dataDirectory, `${symbol}.sqlite`), [...history, ...sessionBars], 4, splitFactorOf);
   const [session] = await db("backtest_sessions")
-    .insert({ name: "engine split test", symbol, start_date: sessionDates[0], end_date: sessionDates.at(-1), starting_value: 1_000_000, tables_mode: "current", settings_snapshot: JSON.stringify(fixtureBacktestSettings()), overrides: JSON.stringify({ decisionMaker: "baseline" }) })
+    .insert({ name: "engine split test", symbol, start_date: sessionDates[0], end_date: sessionDates.at(-1), starting_value: 1_000_000, tables_mode: "current", settings_snapshot: JSON.stringify(fixtureBacktestSettings()), overrides: JSON.stringify({ decisionMaker: "vol_farmer_v4", volFarmerV4: { optionsExpiry: "next" } }) })
     .returning("id");
   sessionId = session.id;
 });
@@ -116,15 +116,15 @@ describe("runBacktestSession across a split", () => {
     }
     const settlementDay = days.find((day) => day.tradingDate === "2026-03-16")!;
     expect(settlementDay.decision_summary).toContain("held across a split (×2)");
-    // A put assigned after the split delivers its shares on the cycle's scale: 100 a contract at the strike as sold, which
-    // the day's note gives as traded (twice the shares at half the strike).
-    const assignedPut = heldAcross.find((trade) => trade.ended_by === "assigned" && trade.option_right === "P")!;
-    const assignmentFill = fills.find((fill) => fill.instrument === "stock" && fill.action_id === null)!;
-    expect(assignmentFill).toMatchObject({ side: "buy", is_closing: false });
-    expect(Number(assignmentFill.quantity)).toBe(Number(assignedPut.contracts) * 100);
-    expect(Number(assignmentFill.price)).toBe(Number(assignedPut.strike));
-    expect(Number(assignmentFill.price_scale)).toBe(2);
-    expect(settlementDay.decision_summary).toContain(`$${Number(assignedPut.strike) / 2} Put · 13 Mar assigned at the 48.00 close: ${Number(assignedPut.contracts) * 200} shares bought at the strike`);
+    // The shares bought with that Call before the split, 100 a contract on the scale of their day; expired below its strike
+    // after the split, the Call leaves them held, which the day's note gives as traded (twice the shares at half the strike).
+    const callHeldAcross = heldAcross.find((trade) => trade.option_right === "C")!;
+    const shareFill = fills.find((fill) => fill.instrument === "stock" && fill.side === "buy")!;
+    expect(shareFill).toMatchObject({ is_closing: false });
+    expect(Number(shareFill.quantity)).toBe(Number(callHeldAcross.contracts) * 100);
+    expect(Number(shareFill.price_scale)).toBe(1);
+    expect(callHeldAcross.ended_by).toBe("expired_worthless");
+    expect(settlementDay.decision_summary).toContain(`$${Number(callHeldAcross.strike) / 2} Call · 13 Mar expired worthless at the 48.00 close, ${Number(callHeldAcross.contracts) * 200} shares kept`);
 
     // A sale after the split, in the cycle that began before it: the trade is as traded that day (≈ $48 strikes, 100
     // shares a contract), its leg on the cycle's scale (twice the prices, 50 of the cycle's shares a contract).
@@ -148,7 +148,7 @@ describe("runBacktestSession across a split", () => {
     expect(cycles[0]).toMatchObject({ status: "open", data_flags: [] });
     const sharesHeld = legs.filter((leg) => leg.leg_type === "stock" && leg.exit_at === null).reduce((sum, leg) => sum + Number(leg.quantity), 0);
     expect(Number(cycles[0].shares_held)).toBe(sharesHeld);
-    expect(sharesHeld).toBeGreaterThanOrEqual(Number(assignedPut.contracts) * 100);
+    expect(sharesHeld).toBe(Number(callHeldAcross.contracts) * 100);
     // With the account marked on today's prices: cash + the shares at the last 10:00 price − the open options at their mids.
     const lastDay = days.at(-1)!;
     expect(Number(lastDay.account_value) - Number(lastDay.cash)).toBeCloseTo(sharesHeld * 2 * tradedPrices.at(-1)!, -2);

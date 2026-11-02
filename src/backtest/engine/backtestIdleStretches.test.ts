@@ -4,7 +4,7 @@ import { addCalendarDays } from "../../lib/calendarDays.js";
 import { backtestCandidateChecks, type BacktestOrderShortfall } from "../backtestTypes.js";
 import { buildCycleGaps, buildStockOnlyStretches, closeLookupOf, type NoSaleRecords } from "./backtestIdleStretches.js";
 import type { BacktestNoCandidateNote, BacktestNoSaleNote } from "./backtestLookTypes.js";
-import { describeBaselineRules, type BaselineRejections } from "./baselineSaleSteps.js";
+import type { BaselineRejections } from "./baselineSaleSteps.js";
 import type { LedgerLeg } from "./ledger/simulatedLedger.js";
 
 // Weekdays, Good Friday 2021 (2 April) closed.
@@ -37,7 +37,22 @@ const entryFilterNote = (tradingDate: string, extensionZ: number | null, ivRank:
 const noReasons = { extensionZ: 0, ivRank: 0, ladderPutInstead: 0, cash: 0, volume: 0, noCandidate: 0, unrecorded: 0 };
 const noRejections: BaselineRejections = Object.fromEntries(backtestCandidateChecks.map((check) => [check, 0])) as Record<(typeof backtestCandidateChecks)[number], number>;
 // The rules as a put entry applied them: DTE 1–45, |delta| 0.05–0.30, spread 15%, a 20% volume share.
-const putRules = describeBaselineRules({ settings: { minDte: 1, maxDte: 45, minAbsDelta: 0.05, maxAbsDelta: 0.3, maxSpreadPctOfMid: 15 }, previousSessionVolumeByContract: new Map(), minimumPremiumYield: null, model: null });
+const putRules: Record<keyof BaselineRejections, string> = {
+  outsideExpiryRange: "expiry outside 1–45 days",
+  spansEarnings: "expiry on or after an earnings report",
+  belowCost: "strike below the floor",
+  aboveCeiling: "strike above the cap",
+  noUsableQuote: "no usable quote (a bid under $0.05, or no ask above the bid)",
+  spreadTooWide: "spread wider than 15% of the mid",
+  tooLittleVolume: "under 1 contract at 20% of the previous session's volume",
+  noImpliedVolatility: "no implied volatility at the mid",
+  outsideDeltaRange: "|delta| outside 0.05–0.3",
+  alreadyHeld: "already held",
+  noTimeValue: "no time value left after the commission",
+  belowMinimumYield: "premium yield not above 0% a year",
+  noForecast: "no volatility forecast",
+  belowVolatilityEdge: "volatility edge under 0 points",
+};
 const noCandidate = (tradingDate: string, order: "entry" | "calls", counts: Partial<BaselineRejections>, symbol = "INTC"): BacktestNoCandidateNote => ({
   tradingDate,
   lookTimeEt: "10:00",

@@ -2,7 +2,6 @@ import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
 import { blackScholesDelta, impliedVolatilityFromPrice } from "../../lib/impliedVolatilitySurface.js";
 import { daysToExpiry, describeOptionContract, describeOrderSize } from "../../lib/optionContractLabel.js";
 import type { BacktestVolFarmerSettings, BacktestVolFarmerV2Settings, BacktestVolFarmerV3Settings } from "../backtestTypes.js";
-import type { HedgePutQuoteSource } from "./backtestBaselineHedge.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { baselineQuoteRejection, describeRejections, roundedStrike, selectBaselineCandidates, type BaselineCandidate, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
@@ -222,6 +221,14 @@ export function chooseVolFarmerV2Leaps(input: { quotes: readonly { expiry: strin
   return best;
 }
 
+/** The long-dated Calls a look reads for the LEAPS (runBacktestSession.ts builds it from the symbol's file, Pluto from its chain). */
+export interface LeapsCallQuoteSource {
+  /** Every Call expiry listed that day, ascending. */
+  listedExpiries(): readonly string[];
+  /** The look's Calls of one expiry. */
+  quotesOf(expiry: string): readonly SymbolFileQuote[];
+}
+
 /** What one look knows of one symbol's market, as traded today, and how its book's records scale. */
 export interface VolFarmerV2Market {
   symbol: string;
@@ -244,7 +251,7 @@ export interface VolFarmerV2Market {
   /** Years from the look to an expiry's settlement: the LEAPS' time. */
   yearsToExpiry(expiry: string): number;
   /** The long-dated Calls the LEAPS is chosen from; absent when none are quoted at this look. */
-  leapsCallQuotes: HedgePutQuoteSource | undefined;
+  leapsCallQuotes: LeapsCallQuoteSource | undefined;
   /** IBKR's 30-day IV stored for the session before the look's, which the implied-move Step reads; null when it has none. */
   stepImpliedVolatility(): number | null;
   /** The trading sessions from today's to an expiry's, both in full: what the premium yields are annualized over (tradingSessionsHeld.ts). */
