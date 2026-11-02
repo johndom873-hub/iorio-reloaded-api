@@ -51,7 +51,11 @@ export function detectAddressing(msg: NonNullable<TelegramUpdate["message"]>): s
     return (text.slice(0, mention.offset) + text.slice(mention.offset + mention.length)).trim();
   }
 
-  if (msg.reply_to_message?.from?.id === botId) {
+  // A reply to the bot's message that @mentions someone else is for that person (Marcelo 2026-11-02: a reply to an alert
+  // with "@JID2126 este mensaje es de prod" was answered). The bot is not mentioned here, or the branch above returned;
+  // naming "genosuke" still addresses it (below).
+  const mentionsSomeoneElse = entities.some((e) => e.type === "mention" || e.type === "text_mention");
+  if (msg.reply_to_message?.from?.id === botId && !mentionsSomeoneElse) {
     return text.trim();
   }
 

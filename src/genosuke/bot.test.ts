@@ -211,7 +211,7 @@ function textMessage(text: string, overrides: Partial<TelegramMessage> = {}): Te
 }
 
 /** Entities for `text` where `needle` is a bot_command or mention. */
-function entityFor(text: string, needle: string, type: "bot_command" | "mention") {
+function entityFor(text: string, needle: string, type: "bot_command" | "mention" | "text_mention") {
   return { type, offset: text.indexOf(needle), length: needle.length };
 }
 
@@ -278,6 +278,17 @@ describe("detectAddressing", () => {
 
   it("answers a reply to one of the bot's own messages, whatever the text", () => {
     expect(detectAddressing(textMessage("  ready  ", { reply_to_message: { message_id: 40, from: { id: 1 }, text: "Gateway needs a login" } }))).toBe("ready");
+  });
+
+  it("ignores a reply to its own message that @mentions someone else: it is for that person (2026-09-30, @JID2126)", () => {
+    const text = "@JID2126 este mensaje es de prod, estoy tratando de configurarlo";
+    const replyToBot = { reply_to_message: { message_id: 40, from: { id: 1 }, text: "Gateway needs a login" } };
+    expect(detectAddressing(textMessage(text, { ...replyToBot, entities: [entityFor(text, "@JID2126", "mention")] }))).toBeNull();
+    // A person without a username is a text_mention.
+    expect(detectAddressing(textMessage("Juan mira esto", { ...replyToBot, entities: [entityFor("Juan mira esto", "Juan", "text_mention")] }))).toBeNull();
+    // Naming Genosuke still asks it.
+    const named = "@JID2126 genosuke, is this prod?";
+    expect(detectAddressing(textMessage(named, { ...replyToBot, entities: [entityFor(named, "@JID2126", "mention")] }))).toBe(named);
   });
 
   it("ignores a reply to someone else's message", () => {
