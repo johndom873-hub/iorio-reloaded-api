@@ -701,11 +701,11 @@ describe("backtest routes", () => {
         barsCount: 2,
         detectedSplits: null,
         issueDays: 1,
-        issues: { notStored: [], partial: [], unavailable: [{ tradingDate: "2026-09-09", part: "quotes", reason: "HTTP 500" }] },
+        issues: { notStored: [], partial: [], unavailable: [{ tradingDate: "2026-09-09", part: "quotes", reason: "HTTP 500" }], farExpiries: [] },
       });
     });
 
-    it("list a file's issues for the Issues tooltip: nothing stored (runs across a weekend), stored with parts missing, not retrievable", async () => {
+    it("list a file's issues for the Issues tooltip: nothing stored (runs across a weekend), stored with parts missing, not retrievable; expirations over 45 days out apart, open interest that cannot exist left out", async () => {
       // The part file: nothing for the 3rd, 4th and 7th (one run over the weekend), the 9th not retrievable.
       const partFile = ((await request("GET", "/backtest/overview")).body as BacktestOverview).files.find((file) => file.symbol === partFileSymbol)!;
       expect(partFile.issueDays).toBe(4);
@@ -715,6 +715,7 @@ describe("backtest routes", () => {
       writeSymbolFile(issuesFileSymbol, [
         { tradingDate: "2026-09-01", status: "complete" },
         { tradingDate: "2026-09-02", status: "complete" },
+        { tradingDate: "2026-09-03", status: "complete" },
       ]);
       const database = new DatabaseSync(path.join(dataDirectory, `${issuesFileSymbol}.sqlite`));
       database.exec("CREATE TABLE day_issues (trading_date TEXT NOT NULL, part TEXT NOT NULL, expiry TEXT, message TEXT NOT NULL, recorded_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 1);");
@@ -723,8 +724,11 @@ describe("backtest routes", () => {
       insertIssue.run("2026-09-01", "intraday_quotes", "2026-10-16", failed("intraday_quotes", "INVALID_ARGUMENT: Wrong number of data fields, expecting 11, got 6"));
       insertIssue.run("2026-09-01", "quotes", "2026-10-16", failed("quotes", "INVALID_ARGUMENT: Wrong number of data fields, expecting 11, got 6"));
       insertIssue.run("2026-09-01", "quotes", "2026-11-20", failed("quotes", "UNAVAILABLE: failed to connect to all addresses"));
-      insertIssue.run("2026-09-02", "open_interest", null, "no data returned");
+      // Open interest is the previous close's count: none on the file's first day, nor the day after a day without 10:00 quotes.
+      insertIssue.run("2026-09-01", "open_interest", null, "no data returned");
+      insertIssue.run("2026-09-02", "quotes", null, "no data returned");
       insertIssue.run("2026-09-02", "eod", null, "no data returned");
+      insertIssue.run("2026-09-03", "open_interest", null, "no data returned");
       database.close();
       try {
         const issuesFile = ((await request("GET", "/backtest/overview")).body as BacktestOverview).files.find((file) => file.symbol === issuesFileSymbol)!;
@@ -733,10 +737,10 @@ describe("backtest routes", () => {
           notStored: [],
           partial: [
             { tradingDate: "2026-09-01", expiry: "2026-10-16", parts: ["quotes", "intraday_quotes"], reason: "ThetaData sent malformed data" },
-            { tradingDate: "2026-09-01", expiry: "2026-11-20", parts: ["quotes"], reason: "ThetaData could not be reached" },
-            { tradingDate: "2026-09-02", expiry: null, parts: ["eod", "open_interest"], reason: "no data returned" },
+            { tradingDate: "2026-09-02", expiry: null, parts: ["quotes", "eod"], reason: "no data returned" },
           ],
           unavailable: [],
+          farExpiries: [{ tradingDate: "2026-09-01", expiry: "2026-11-20", parts: ["quotes"], reason: "ThetaData could not be reached" }],
         });
       } finally {
         rmSync(path.join(dataDirectory, `${issuesFileSymbol}.sqlite`), { force: true });

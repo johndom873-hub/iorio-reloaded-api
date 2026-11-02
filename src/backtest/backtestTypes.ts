@@ -794,11 +794,16 @@ export type BacktestDataFilePart = "quotes" | "eod" | "open_interest" | "intrada
 export interface BacktestDataFileIssues {
   /** Weekdays between firstDate and lastDate with nothing stored and no failed attempt recorded, as runs of consecutive weekdays. */
   notStored: { firstDate: string; lastDate: string; weekdays: number }[];
-  /** Days stored with a part or an expiration missing: one entry per day, expiration and reason. */
+  /** Days stored with a part, or an expiration within dataFileNearExpiryDays, missing: one entry per day, expiration and reason. */
   partial: { tradingDate: string; expiry: string | null; parts: BacktestDataFilePart[]; reason: string }[];
   /** Days, or a day's intraday quotes, the downloader could not retrieve; every later download asks for them again. */
   unavailable: { tradingDate: string; part: BacktestDataFilePart | null; reason: string }[];
+  /** Expirations further out than dataFileNearExpiryDays missing on a stored day: only a LEAPS choice that day can differ, so they are not counted in issueDays. */
+  farExpiries: { tradingDate: string; expiry: string; parts: BacktestDataFilePart[]; reason: string }[];
 }
+
+/** The furthest expiry, in calendar days, a session's Calls and Puts can sell (optionsMaxDaysToExpiry is at most 45): a missing expiration within it can change what a session sells. */
+export const dataFileNearExpiryDays = 45;
 
 export interface BacktestDataFileSummary {
   symbol: string;
@@ -822,7 +827,7 @@ export interface BacktestDataFileSummary {
   barsLastDate: string | null;
   /** How many of those bars are stored; 0 when none. */
   barsCount: number;
-  /** Distinct days in `issues`: nothing stored, stored with a part missing, or not retrievable. */
+  /** Distinct days in `issues` but its farExpiries: nothing stored, stored with a part or a near expiration missing, or not retrievable. */
   issueDays: number;
   issues: BacktestDataFileIssues;
 }

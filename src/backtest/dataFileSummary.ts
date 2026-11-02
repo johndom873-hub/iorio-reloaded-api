@@ -5,7 +5,8 @@ import { db } from "../db/connection.js";
 import { openBacktestDataFileReadOnly } from "./backtestDataFile.js";
 import { countFileDailyBars } from "./backtestFileStockBars.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "./backtestDataDirectory.js";
-import type { BacktestDataFileIssues, BacktestDataFilePart, BacktestDataFileSummary } from "./backtestTypes.js";
+import { calendarDaysBetween } from "../lib/easternIsoDate.js";
+import { dataFileNearExpiryDays, type BacktestDataFileIssues, type BacktestDataFilePart, type BacktestDataFileSummary } from "./backtestTypes.js";
 import { addCalendarDays, isWeekendDate, weekdaysBetweenInclusive } from "./jobs/backtestJobRules.js";
 import type { DataFileCoverage, DataFilePeriodContents } from "./jobs/backtestSessionRequest.js";
 import { readSplitScheduleCache, splitScheduleFingerprint, splitScheduleFingerprintsMatch } from "./engine/splitFactors.js";
@@ -111,7 +112,7 @@ export function readBacktestDataFilePeriodContents(symbol: string, startDate: st
   }
 }
 
-const noIssues: BacktestDataFileIssues = { notStored: [], partial: [], unavailable: [] };
+const noIssues: BacktestDataFileIssues = { notStored: [], partial: [], unavailable: [], farExpiries: [] };
 const partOrder: BacktestDataFilePart[] = ["quotes", "intraday_quotes", "eod", "open_interest"];
 /** unavailable_days.reason starts with the part it is about (docs/backtesting/DATA-FILES.md). */
 const unavailableReasonPrefixes: { prefix: string; part: BacktestDataFilePart }[] = [
@@ -169,7 +170,19 @@ export function readBacktestDataFileIssues(symbol: string): { issueDays: number;
       if (!entry.parts.includes(row.part)) entry.parts.push(row.part);
       partialByKey.set(key, entry);
     }
-    const partial = [...partialByKey.values()].map((entry) => ({ ...entry, parts: partOrder.filter((part) => entry.parts.includes(part)) }));
+    const allPartial = [...partialByKey.values()].map((entry) => ({ ...entry, parts: partOrder.filter((part) => entry.parts.includes(part)) }));
+
+    // Open interest is the count at the previous session's close: none exists on a file's first day, nor on the day after
+    // a day ThetaData has no 10:00 quotes for, so its absence there is not a fault.
+    const storedDates = (database.prepare("SELECT trading_date AS tradingDate FROM days WHERE status = 'complete' ORDER BY trading_date").all() as { tradingDate: string }[]).map((row) => row.tradingDate);
+    const daysWithoutQuotes = new Set(allPartial.filter((entry) => entry.expiry === null && entry.parts.includes("quotes")).map((entry) => entry.tradingDate));
+    const openInterestCannotExist = (tradingDate: string) => {
+      const index = storedDates.indexOf(tradingDate);
+      return index === 0 || (index > 0 && daysWithoutQuotes.has(storedDates[index - 1]!));
+    };
+    const isFarExpiry = (entry: (typeof allPartial)[number]): entry is (typeof allPartial)[number] & { expiry: string } => entry.expiry !== null && calendarDaysBetween(entry.tradingDate, entry.expiry) > dataFileNearExpiryDays;
+    const partial = allPartial.filter((entry) => !isFarExpiry(entry) && !(entry.expiry === null && entry.parts.length === 1 && entry.parts[0] === "open_interest" && entry.reason === "no data returned" && openInterestCannotExist(entry.tradingDate)));
+    const farExpiries = allPartial.filter(isFarExpiry);
 
     const range = database.prepare("SELECT min(trading_date) AS firstDate, max(trading_date) AS lastDate FROM days WHERE status = 'complete'").get() as { firstDate: string | null; lastDate: string | null };
     const notStoredDates: string[] = [];
@@ -180,7 +193,7 @@ export function readBacktestDataFileIssues(symbol: string): { issueDays: number;
     }
 
     const issueDays = new Set([...notStoredDates, ...partial.map((entry) => entry.tradingDate), ...unavailable.map((entry) => entry.tradingDate)]).size;
-    return { issueDays, issues: { notStored: weekdayRuns(notStoredDates), partial, unavailable } };
+    return { issueDays, issues: { notStored: weekdayRuns(notStoredDates), partial, unavailable, farExpiries } };
   } finally {
     database.close();
   }
