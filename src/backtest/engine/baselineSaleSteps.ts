@@ -2,7 +2,7 @@ import { yieldOnExposure } from "../../lib/contractValuation.js";
 import { blackScholesDelta, forwardAtSpot, impliedVolatilityFromPrice, parityImpliedForward, yearsBetweenIsoDates } from "../../lib/impliedVolatilitySurface.js";
 import { daysToExpiry } from "../../lib/optionContractLabel.js";
 import { contractKey } from "../../lib/optionContractKey.js";
-import type { BacktestBaselineSettings, BacktestOrderShortfall } from "../backtestTypes.js";
+import type { BacktestBaselineSettings } from "../backtestTypes.js";
 import { computeSaleFillPrice, sharesPerContract } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import type { CommissionEstimator, StockCommissionEstimator } from "../../lib/commissionEstimate.js";
@@ -277,14 +277,3 @@ export function baselineContractsForCash(freeCash: number, candidate: Pick<Basel
   const perContract = entry === "put" ? (candidate.strike - candidate.fillPrice) * sharesPerContract + optionCommission : (stockFillPrice - candidate.fillPrice) * sharesPerContract + optionCommission + stockCommissionPerLot(commissions);
   return perContract > 0 ? Math.max(0, Math.floor(freeCash / perContract)) : 0;
 }
-
-/** A look's order that found no contract within the rules: how many each check left out, and each check's rule then (the CC + Put Ladder's records, read by the Wheel cycles' gaps). */
-export interface BaselineNoCandidate {
-  order: "entry" | "calls";
-  right: "C" | "P";
-  rejections: BaselineRejections;
-  rules: Record<keyof BaselineRejections, string> | null;
-}
-
-/** The Entry filters blocked the entry; or a ladder put was sold instead of the calls on the free shares, a call qualifying or none. */
-export type BaselineNoSaleReason = "entry_filter" | "ladder_put_instead_of_calls" | "no_call_candidate";

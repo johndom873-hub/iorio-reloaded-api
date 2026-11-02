@@ -1,7 +1,6 @@
 import { easternInstant } from "../../lib/easternIsoDate.js";
 import { addCalendarDays } from "../../lib/calendarDays.js";
-import { backtestCandidateChecks, type BacktestCycle, type BacktestCycleGap, type BacktestIdleStretch, type BacktestNoCandidateDetail, type BacktestNoSaleDays, type BacktestOrderShortfall, type BacktestStockOnlyStretch } from "../backtestTypes.js";
-import type { BacktestNoCandidateNote, BacktestNoSaleNote } from "./backtestLookTypes.js";
+import type { BacktestCycle, BacktestCycleGap, BacktestIdleStretch, BacktestNoSaleDays, BacktestOrderShortfall, BacktestStockOnlyStretch } from "../backtestTypes.js";
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import type { LedgerLeg } from "./ledger/simulatedLedger.js";
 
@@ -17,42 +16,21 @@ import type { LedgerLeg } from "./ledger/simulatedLedger.js";
 //                       shares held make one stretch.
 //   stock move        = C(last idle day) ÷ C(the session before the first idle day) − 1, on IBKR's split-adjusted closes
 //                       (a split inside the stretch is no fall); null when either close is missing.
-//   no-sale days      = per reason, the idle days on which any look recorded it (a day counts under every reason seen);
-//                       unrecorded = the idle days with none. Gaps read the entry order: the Entry filters (extension z,
-//                       IV Rank) and its shortfalls (cash, volume, no candidate). Stock-only stretches read the calls on the
-//                       free shares: their shortfalls (volume, no candidate) and a ladder put sold instead of them.
+//   no-sale days      = per reason, the idle days on which any look recorded a shortfall for it (a day counts under every
+//                       reason seen); unrecorded = the idle days with none. Gaps read the entry order's shortfalls (cash,
+//                       volume, no candidate); stock-only stretches read those of the calls on the free shares. The
+//                       Entry filters' and the ladder's reasons, the no-candidate detail and the filters' limits are what
+//                       the retired CC + Put Ladder recorded: they stay in the rows' shape, 0 and null.
 //
-// Example: a cycle closes Fri 9 Apr at expiry (close $63.00); the IV Rank filter blocks Mon 12 to Wed 14 Apr; the next
-// cycle opens Thu 15 Apr. Gap: 12–14 Apr, 3 idle sessions, Wed's close $60.48: 60.48 ÷ 63.00 − 1 = −4.0%, IV Rank 3 days.
+// Example: a cycle closes Fri 9 Apr at expiry (close $63.00); the free cash holds the entry back Mon 12 to Wed 14 Apr;
+// the next cycle opens Thu 15 Apr. Gap: 12–14 Apr, 3 idle sessions, Wed's close $60.48: 60.48 ÷ 63.00 − 1 = −4.0%, cash
+// 3 days.
 
 type NoSaleReason = Exclude<keyof BacktestNoSaleDays, "unrecorded">;
 
 /** What the looks recorded about sales not made. */
 export interface NoSaleRecords {
   shortfalls: readonly BacktestOrderShortfall[];
-  notes: readonly BacktestNoSaleNote[];
-  /** The first look of each day, symbol and order that found no contract within the rules. */
-  noCandidates: readonly BacktestNoCandidateNote[];
-}
-
-/** The no-candidate days of a stretch, for its order (the entry, or the calls on the free shares), as the screen explains them. */
-function noCandidateDetailOf(idleDays: readonly string[], records: NoSaleRecords, symbol: string, order: BacktestNoCandidateNote["order"]): BacktestNoCandidateDetail | null {
-  const idle = new Set(idleDays);
-  const notes = records.noCandidates.filter((note) => note.symbol === symbol && note.order === order && idle.has(note.tradingDate));
-  const first = notes[0];
-  if (!first) return null;
-  const daysByCheck: BacktestNoCandidateDetail["daysByCheck"] = {};
-  for (const note of notes) for (const check of backtestCandidateChecks) if (note.rejections[check] > 0) daysByCheck[check] = (daysByCheck[check] ?? 0) + 1;
-  return {
-    right: first.right,
-    days: notes.length,
-    daysByCheck,
-    firstDay: {
-      date: first.tradingDate,
-      lookTimeEt: first.lookTimeEt,
-      checks: backtestCandidateChecks.filter((check) => first.rejections[check] > 0).map((check) => ({ check, rule: first.rules?.[check] ?? check, contracts: first.rejections[check] })),
-    },
-  };
 }
 
 /** A symbol's split-adjusted daily closes, ascending, read by date. */
@@ -91,15 +69,6 @@ function reasonsByDay(records: NoSaleRecords, symbol: string, order: "entry" | "
   };
   const step = order === "entry" ? "entry" : "held_calls";
   for (const shortfall of records.shortfalls) if (shortfall.symbol === symbol && shortfall.step === step) add(shortfall.tradingDate, shortfallReason[shortfall.reason]);
-  for (const note of records.notes) {
-    if (note.symbol !== symbol) continue;
-    if (order === "entry" && note.reason === "entry_filter") {
-      if (note.entryFilterLimits?.extensionZ != null) add(note.tradingDate, "extensionZ");
-      if (note.entryFilterLimits?.ivRank != null) add(note.tradingDate, "ivRank");
-    }
-    if (order === "calls" && note.reason === "ladder_put_instead_of_calls") add(note.tradingDate, "ladderPutInstead");
-    if (order === "calls" && note.reason === "no_call_candidate") add(note.tradingDate, "noCandidate");
-  }
   return byDay;
 }
 
@@ -113,7 +82,7 @@ function countNoSaleDays(idleDays: readonly string[], reasons: Map<string, Set<N
   return counts;
 }
 
-function idleStretch(idleDays: readonly string[], closes: CloseLookup, reasons: Map<string, Set<NoSaleReason>>, noCandidate: BacktestNoCandidateDetail | null): BacktestIdleStretch {
+function idleStretch(idleDays: readonly string[], closes: CloseLookup, reasons: Map<string, Set<NoSaleReason>>): BacktestIdleStretch {
   const firstIdleDay = idleDays[0]!;
   const lastIdleDay = idleDays.at(-1)!;
   const reference = closes.closeBefore(firstIdleDay);
@@ -124,20 +93,8 @@ function idleStretch(idleDays: readonly string[], closes: CloseLookup, reasons: 
     idleSessions: idleDays.length,
     stockMove: reference === null || last === null || !(reference > 0) ? null : last / reference - 1,
     noSaleDays: countNoSaleDays(idleDays, reasons),
-    noCandidate,
+    noCandidate: null,
   };
-}
-
-/** The Entry filters' limits seen on the idle days (the last one seen, in the rare case a limit changed). */
-function entryFilterLimitsIn(idleDays: readonly string[], records: NoSaleRecords, symbol: string): BacktestCycleGap["entryFilterLimits"] {
-  const idle = new Set(idleDays);
-  const limits: BacktestCycleGap["entryFilterLimits"] = { extensionZ: null, ivRank: null };
-  for (const note of records.notes) {
-    if (note.symbol !== symbol || note.reason !== "entry_filter" || !idle.has(note.tradingDate) || note.entryFilterLimits === null) continue;
-    limits.extensionZ = note.entryFilterLimits.extensionZ ?? limits.extensionZ;
-    limits.ivRank = note.entryFilterLimits.ivRank ?? limits.ivRank;
-  }
-  return limits;
 }
 
 /** A symbol's gaps, oldest first. `cycles` are the symbol's, in order; `firstDay`/`lastDay` its first and last session days. */
@@ -156,7 +113,7 @@ export function buildCycleGaps(input: {
   const addGap = (fromIso: string, throughIso: string, afterCycleNumber: number | null, beforeCycleNumber: number | null) => {
     const idleDays = input.calendar.openDaysBetween(fromIso < firstDay ? firstDay : fromIso, throughIso > lastDay ? lastDay : throughIso);
     if (idleDays.length === 0) return;
-    gaps.push({ symbol, afterCycleNumber, beforeCycleNumber, ...idleStretch(idleDays, input.closes, reasons, noCandidateDetailOf(idleDays, input.records, symbol, "entry")), entryFilterLimits: entryFilterLimitsIn(idleDays, input.records, symbol) });
+    gaps.push({ symbol, afterCycleNumber, beforeCycleNumber, ...idleStretch(idleDays, input.closes, reasons), entryFilterLimits: { extensionZ: null, ivRank: null } });
   };
   if (cycles.length === 0) {
     addGap(firstDay, lastDay, null, null);
@@ -199,7 +156,7 @@ export function buildStockOnlyStretches(input: {
   let run: { days: string[]; held: number } | null = null;
   const closeRun = () => {
     if (run === null) return;
-    stretches.push({ ...idleStretch(run.days, input.closes, reasons, noCandidateDetailOf(run.days, input.records, input.symbol, "calls")), sharesHeld: run.held * input.sharesAsTradedOn(run.days[0]!) });
+    stretches.push({ ...idleStretch(run.days, input.closes, reasons), sharesHeld: run.held * input.sharesAsTradedOn(run.days[0]!) });
     run = null;
   };
   for (const dateIso of cycleDays) {

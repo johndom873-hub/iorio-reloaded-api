@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { easternInstant } from "../../lib/easternIsoDate.js";
 import { addCalendarDays } from "../../lib/calendarDays.js";
-import { backtestCandidateChecks, type BacktestOrderShortfall } from "../backtestTypes.js";
+import type { BacktestOrderShortfall } from "../backtestTypes.js";
 import { buildCycleGaps, buildStockOnlyStretches, closeLookupOf, type NoSaleRecords } from "./backtestIdleStretches.js";
-import type { BacktestNoCandidateNote, BacktestNoSaleNote } from "./backtestLookTypes.js";
-import type { BaselineRejections } from "./baselineSaleSteps.js";
 import type { LedgerLeg } from "./ledger/simulatedLedger.js";
 
 // Weekdays, Good Friday 2021 (2 April) closed.
@@ -33,35 +31,7 @@ const shortfall = (tradingDate: string, step: BacktestOrderShortfall["step"], re
   lookCount: 1,
   bestCandidate: null,
 });
-const entryFilterNote = (tradingDate: string, extensionZ: number | null, ivRank: number | null, symbol = "INTC"): BacktestNoSaleNote => ({ tradingDate, symbol, reason: "entry_filter", entryFilterLimits: { extensionZ, ivRank } });
 const noReasons = { extensionZ: 0, ivRank: 0, ladderPutInstead: 0, cash: 0, volume: 0, noCandidate: 0, unrecorded: 0 };
-const noRejections: BaselineRejections = Object.fromEntries(backtestCandidateChecks.map((check) => [check, 0])) as Record<(typeof backtestCandidateChecks)[number], number>;
-// The rules as a put entry applied them: DTE 1–45, |delta| 0.05–0.30, spread 15%, a 20% volume share.
-const putRules: Record<keyof BaselineRejections, string> = {
-  outsideExpiryRange: "expiry outside 1–45 days",
-  spansEarnings: "expiry on or after an earnings report",
-  belowCost: "strike below the floor",
-  aboveCeiling: "strike above the cap",
-  noUsableQuote: "no usable quote (a bid under $0.05, or no ask above the bid)",
-  spreadTooWide: "spread wider than 15% of the mid",
-  tooLittleVolume: "under 1 contract at 20% of the previous session's volume",
-  noImpliedVolatility: "no implied volatility at the mid",
-  outsideDeltaRange: "|delta| outside 0.05–0.3",
-  alreadyHeld: "already held",
-  noTimeValue: "no time value left after the commission",
-  belowMinimumYield: "premium yield not above 0% a year",
-  noForecast: "no volatility forecast",
-  belowVolatilityEdge: "volatility edge under 0 points",
-};
-const noCandidate = (tradingDate: string, order: "entry" | "calls", counts: Partial<BaselineRejections>, symbol = "INTC"): BacktestNoCandidateNote => ({
-  tradingDate,
-  lookTimeEt: "10:00",
-  symbol,
-  order,
-  right: order === "entry" ? "P" : "C",
-  rejections: { ...noRejections, ...counts },
-  rules: order === "entry" ? putRules : null,
-});
 
 describe("closeLookupOf", () => {
   it("reads a close on a date and the last close before one", () => {
@@ -101,44 +71,15 @@ describe("buildCycleGaps", () => {
       shortfall("2021-04-14", "held_calls", "volume"),
       shortfall("2021-04-14", "entry", "volume", "HOOD"),
     ],
-    notes: [entryFilterNote("2021-04-12", null, 80), entryFilterNote("2021-04-13", 1, 80), { tradingDate: "2021-04-14", symbol: "INTC", reason: "ladder_put_instead_of_calls", entryFilterLimits: null }],
-    // 272 puts on the 12th: 80 without a usable quote, then 17 too wide, then the last 175 under the volume limit. The
-    // calls' order and another symbol are not the gap's.
-    noCandidates: [noCandidate("2021-04-12", "entry", { noUsableQuote: 80, spreadTooWide: 17, tooLittleVolume: 175 }), noCandidate("2021-04-14", "calls", { belowCost: 4 }), noCandidate("2021-04-14", "entry", { spreadTooWide: 3 }, "HOOD")],
   };
 
-  it("finds the sessions with no cycle open before the first, between two and after the last, with the stock's move and why no entry was made", () => {
+  it("finds the sessions with no cycle open before the first, between two and after the last, with the stock's move and the entry's shortfalls", () => {
     const gaps = buildCycleGaps({ symbol: "INTC", cycles, firstDay: "2021-03-25", lastDay: "2021-04-21", calendar, closes, records });
     expect(gaps).toEqual([
       // 50 → 51 from the close before the session's first day.
       { symbol: "INTC", afterCycleNumber: null, beforeCycleNumber: 1, firstIdleDay: "2021-03-25", lastIdleDay: "2021-03-26", idleSessions: 2, stockMove: expect.closeTo(0.02, 10), noSaleDays: { ...noReasons, unrecorded: 2 }, noCandidate: null, entryFilterLimits: { extensionZ: null, ivRank: null } },
-      // 63.00 on the closing day → 60.48: −4.0%. A day counts under every reason seen on it.
-      {
-        symbol: "INTC",
-        afterCycleNumber: 2,
-        beforeCycleNumber: 3,
-        firstIdleDay: "2021-04-12",
-        lastIdleDay: "2021-04-14",
-        idleSessions: 3,
-        stockMove: expect.closeTo(-0.04, 10),
-        noSaleDays: { ...noReasons, ivRank: 2, extensionZ: 1, noCandidate: 1, cash: 1, unrecorded: 1 },
-        // Each check with its rule, in the order the checks run.
-        noCandidate: {
-          right: "P",
-          days: 1,
-          daysByCheck: { noUsableQuote: 1, spreadTooWide: 1, tooLittleVolume: 1 },
-          firstDay: {
-            date: "2021-04-12",
-            lookTimeEt: "10:00",
-            checks: [
-              { check: "noUsableQuote", rule: "no usable quote (a bid under $0.05, or no ask above the bid)", contracts: 80 },
-              { check: "spreadTooWide", rule: "spread wider than 15% of the mid", contracts: 17 },
-              { check: "tooLittleVolume", rule: "under 1 contract at 20% of the previous session's volume", contracts: 175 },
-            ],
-          },
-        },
-        entryFilterLimits: { extensionZ: 1, ivRank: 80 },
-      },
+      // 63.00 on the closing day → 60.48: −4.0%. Each day under the entry's shortfall seen on it.
+      { symbol: "INTC", afterCycleNumber: 2, beforeCycleNumber: 3, firstIdleDay: "2021-04-12", lastIdleDay: "2021-04-14", idleSessions: 3, stockMove: expect.closeTo(-0.04, 10), noSaleDays: { ...noReasons, noCandidate: 1, cash: 1, unrecorded: 1 }, noCandidate: null, entryFilterLimits: { extensionZ: null, ivRank: null } },
       // To the session's end; no close on its last day.
       { symbol: "INTC", afterCycleNumber: 3, beforeCycleNumber: null, firstIdleDay: "2021-04-19", lastIdleDay: "2021-04-21", idleSessions: 3, stockMove: null, noSaleDays: { ...noReasons, unrecorded: 3 }, noCandidate: null, entryFilterLimits: { extensionZ: null, ivRank: null } },
     ]);
@@ -190,37 +131,15 @@ describe("buildStockOnlyStretches", () => {
     { date: "2021-04-21", close: 98.94 },
   ]);
   const records: NoSaleRecords = {
+    // The entry's shortfall on the 13th is not the shares'.
     shortfalls: [shortfall("2021-04-12", "held_calls", "no_candidate"), shortfall("2021-04-13", "entry", "cash"), shortfall("2021-04-20", "held_calls", "volume")],
-    notes: [{ tradingDate: "2021-04-13", symbol: "INTC", reason: "ladder_put_instead_of_calls", entryFilterLimits: null }],
-    // The calls found none on the 12th and 13th (the entry's order is not the shares'); a look without rules names its checks.
-    noCandidates: [noCandidate("2021-04-12", "calls", { belowCost: 193, noUsableQuote: 34 }), noCandidate("2021-04-12", "entry", { spreadTooWide: 9 }), noCandidate("2021-04-13", "calls", { outsideExpiryRange: 5, belowCost: 190, noUsableQuote: 30 })],
   };
 
   it("counts the whole sessions with shares and no option open: a put alone or a call on some of them makes none, nor a weekend roll; the shares from the cycle's trades", () => {
     const stretches = buildStockOnlyStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: null }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesHeldAt, sharesAsTradedOn: () => 1 });
     expect(stretches).toEqual([
       // Assigned Friday, no option Monday and Tuesday, a put Wednesday: 95 → 93.10, −2%.
-      {
-        firstIdleDay: "2021-04-12",
-        lastIdleDay: "2021-04-13",
-        idleSessions: 2,
-        stockMove: expect.closeTo(-0.02, 10),
-        noSaleDays: { ...noReasons, noCandidate: 1, ladderPutInstead: 1 },
-        noCandidate: {
-          right: "C",
-          days: 2,
-          daysByCheck: { outsideExpiryRange: 1, belowCost: 2, noUsableQuote: 2 },
-          firstDay: {
-            date: "2021-04-12",
-            lookTimeEt: "10:00",
-            checks: [
-              { check: "belowCost", rule: "belowCost", contracts: 193 },
-              { check: "noUsableQuote", rule: "noUsableQuote", contracts: 34 },
-            ],
-          },
-        },
-        sharesHeld: 500,
-      },
+      { firstIdleDay: "2021-04-12", lastIdleDay: "2021-04-13", idleSessions: 2, stockMove: expect.closeTo(-0.02, 10), noSaleDays: { ...noReasons, noCandidate: 1, unrecorded: 1 }, noCandidate: null, sharesHeld: 500 },
       // The call on 300 shares expired Tuesday: none open Wednesday (97 → 98.94, +2%), 700 shares since Friday's assignment.
       { firstIdleDay: "2021-04-21", lastIdleDay: "2021-04-21", idleSessions: 1, stockMove: expect.closeTo(0.02, 10), noSaleDays: { ...noReasons, unrecorded: 1 }, noCandidate: null, sharesHeld: 700 },
     ]);

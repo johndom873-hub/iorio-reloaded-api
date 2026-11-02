@@ -771,8 +771,8 @@ async function loadCycleNoCallRuns(input: { sessionId: string; symbol: string; c
 
 /**
  * Per day, what a session's looks recorded about the calls on a symbol's free shares, as backtestIdleStretches.ts reads
- * them while the session runs: their shortfalls, and a ladder put sold in their place (its reason, as baselineSaleSteps.ts
- * words it: "its yield … beats the best call's …", or "no call qualifies").
+ * them while the session runs: their shortfalls, and a ladder put sold in their place (its reason, as the CC + Put Ladder
+ * worded it: "its yield … beats the best call's …", or "no call qualifies").
  */
 async function loadHeldCallReasonsByDay(sessionId: string, symbol: string, fromDate: string, toDate: string): Promise<Map<string, Set<Exclude<keyof BacktestNoSaleDays, "unrecorded">>>> {
   const [shortfalls, ladderPuts]: [{ trading_date: string; reason: "cash" | "volume" | "no_candidate" }[], { trading_date: string; chosen_because: string }[]] = await Promise.all([

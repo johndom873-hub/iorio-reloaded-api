@@ -305,6 +305,45 @@ describe("a session through the wheel", () => {
   }, 60_000);
 });
 
+describe("a Vol Farmer v4 LEAPS", () => {
+  it("is marked at what selling it would bring with v4's own LEAPS spread cost share, not v2's", async () => {
+    // A cycle at 100 on 6 April, its Call expiring worthless; Puts on 13 April at 95, assigned at the 88 close on the 17th;
+    // on Monday 20 April at 87, under B-E2 (about 89), the LEAPS (17 July, 60 or more days out) is bought, 10 contracts as
+    // its ask offers; on the 21st at 90.50, above B-E2, its top-up waits and the LEAPS held is marked from that day's
+    // quote. v4 charges 50% of the half-spread, v2's section the default 33%.
+    const fileDates = weekdaysBetween("2026-04-06", "2026-04-21");
+    //                        6    7   8   9   10  13  14  15  16  17  20  21
+    const tenOClockPrices = [100, 99, 98, 97, 96.5, 95, 93, 91, 89, 88.5, 87, 90.5];
+    const closes = /*     */ [99.5, 98.5, 97.5, 96.5, 96, 94, 92, 90, 89, 88, 87.2, 90.6];
+    const session = await runWheelSession({
+      symbol: "WHLL",
+      fileDates,
+      lastSessionDate: "2026-04-21",
+      tenOClockPrices,
+      closes,
+      expiriesOn: () => ["2026-04-10", "2026-04-17", "2026-04-24", "2026-07-17"],
+      overrides: {
+        decisionMaker: "vol_farmer_v4",
+        volFarmerV2: { leapsSpreadCostChargedPct: 33 },
+        volFarmerV4: { optionsExpiry: "next", tickerAllocationPct: { WHLL: 50 }, excessAllowancePct: 0, firstPositionPct: 50, rebalanceBandPct: 1_000, putsStartCallYieldPct: 1_000, stepRule: "fixed", stepBelowFirstBreakEvenPct: 0, leapsMinDte: 60, leapsMaxAccountPct: 0, leapsSpreadCostChargedPct: 50 },
+      },
+    });
+    expect(session.detail.session.status).toBe("succeeded");
+    const purchase = filledActionsOf(session).find((action) => action.kind === "buy_leaps")!;
+    expect([purchase.tradingDate, purchase.contract!.expiry]).toEqual(["2026-04-20", "2026-07-17"]);
+    const legs = await testDb("backtest_position_legs").where({ session_id: session.sessionId, position_id: purchase.positionIds![0] });
+    expect(legs).toHaveLength(1);
+    const leg = legs[0]!;
+    const [position] = await testDb("backtest_positions").where({ session_id: session.sessionId, position_id: purchase.positionIds![0] });
+    expect([position.strategy_key, position.status]).toEqual(["leaps", "open"]);
+    // The 21st's quote: mid less 50% of the half-spread, not 33%.
+    const quote = quoteOf(session, "2026-04-21", "2026-07-17", purchase.contract!.strike!, "C");
+    const unrealizedAt = (spreadShare: number) => (quote.mid - (spreadShare * (quote.ask - quote.bid)) / 2 - Number(leg.entry_price)) * Number(leg.quantity) * Number(leg.multiplier);
+    expect(Number(position.unrealized_pnl_dollars)).toBeCloseTo(unrealizedAt(0.5), 6);
+    expect(Math.abs(unrealizedAt(0.5) - unrealizedAt(0.33))).toBeGreaterThan(1);
+  }, 60_000);
+});
+
 describe("a session of several symbols on one book", () => {
   const dates = weekdaysBetween("2026-04-06", "2026-04-15");
   //                        6     7      8      9      10     13     14     15

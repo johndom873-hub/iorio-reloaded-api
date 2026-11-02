@@ -26,14 +26,14 @@ export interface IntradayLookCheck {
 export interface DayDataRequestExtras {
   /** A look to check for a quote in a strike range while the day is read (PrefetchedSymbolDay.intradayLookHasQuoteWithin); null for none. */
   intradayLookCheck: IntradayLookCheck | null;
-  /** The file day before the day (null on the first), read with it when the threads read Vol Farmer v2's days. */
+  /** The file day before the day (null on the first), read with it when the threads read Vol Farmer v4's days. */
   previousFileDay: string | null;
 }
 
 /** One symbol's day as the reader thread sends it. */
 export interface DayDataPayload {
   strings: string[];
-  /** Every 10:00 quote of the day within 45 days, and every end-of-day row within 46; null when the threads read Vol Farmer v2's day instead. */
+  /** Every 10:00 quote of the day within 45 days, and every end-of-day row within 46; null when the threads read Vol Farmer v4's day instead. */
   quotes: DayDataTable | null;
   endOfDay: DayDataTable | null;
   /** NextCallExpiryDay, its rows as columns; null when the threads read the day in full. */
@@ -86,12 +86,12 @@ function endOfDayRowsOf(strings: readonly string[], table: DayDataTable): Symbol
 export class PrefetchedSymbolDay {
   constructor(private readonly payload: DayDataPayload) {}
 
-  /** BacktestSymbolFile.loadQuotes; null when the day was read for Vol Farmer v2 (the caller reads the file then). */
+  /** BacktestSymbolFile.loadQuotes; null when the day was read for Vol Farmer v4 (the caller reads the file then). */
   quotes(): SymbolFileQuote[] | null {
     return this.payload.quotes === null ? null : quoteRowsOf(this.payload.strings, this.payload.quotes);
   }
 
-  /** BacktestSymbolFile.loadEndOfDay; null when the day was read for Vol Farmer v2 (the caller reads the file then). */
+  /** BacktestSymbolFile.loadEndOfDay; null when the day was read for Vol Farmer v4 (the caller reads the file then). */
   endOfDay(): SymbolFileEndOfDayRow[] | null {
     return this.payload.endOfDay === null ? null : endOfDayRowsOf(this.payload.strings, this.payload.endOfDay);
   }
@@ -138,7 +138,7 @@ export class PrefetchedSymbolDay {
  * The reader threads of one session, each with its own connection to the files. prefetch() queues a symbol's day;
  * take() hands it over once read (null when it could not be: the caller reads the file). Without `readsIntradayQuotes`
  * (a session whose looks after 10:00 only mark what it holds, reading the held contracts by their key) the threads leave
- * the intraday rows alone; with `readsNextCallExpiryOnly` (Vol Farmer v2) they read its NextCallExpiryDay in place of
+ * the intraday rows alone; with `readsNextCallExpiryOnly` (Vol Farmer v4) they read its NextCallExpiryDay in place of
  * the day's 10:00 quotes and end-of-day rows.
  */
 export class BacktestDayDataReader {

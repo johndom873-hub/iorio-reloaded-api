@@ -1,12 +1,11 @@
 import { breakEvenForPosition, type OpenCycleSummary } from "../../../lib/cycleBreakEven.js";
-import { runningAverageShareCost } from "../../../lib/shareAverageCost.js";
 import { buildCycleInputFromRows, summarizeOpenCycleFromRows, type CycleInputRows, type CycleOptionLegRow, type CycleStockTradeRow } from "../../../lib/cycleInputRows.js";
 import { stockAcquisitionByPositionIdFromRecords } from "../../../lib/stockAcquisitionTracing.js";
 import { deriveCycles, type Cycle, type CycleInput } from "../../../lib/cycles.js";
 import { computeUnrealizedPnlByPosition, type UnrealizedPnlByPosition } from "../../../lib/positionOrderRules.js";
 import { availableUncoveredShares, cashLockedInCashSecuredPuts, positionCapitalAtRisk, positionCapitalDeployed, positionRealizedPnl, type PositionFigures, type PositionRealizedPnl } from "../../../lib/positionSelectors.js";
 import { easternIsoDate } from "../../../lib/easternIsoDate.js";
-import { cycleStartSplitFactor, findLeg, findPosition, ledgerRevision, legsOfPosition, rememberedForRevision, positionsOfSymbol, requirePosition, type LedgerLeg, type LedgerPosition, type SimulatedLedger } from "./simulatedLedger.js";
+import { cycleStartSplitFactor, ledgerRevision, legsOfPosition, rememberedForRevision, positionsOfSymbol, requirePosition, type LedgerLeg, type LedgerPosition, type SimulatedLedger } from "./simulatedLedger.js";
 
 // The simulated book's figures. They come from the functions the platform itself uses, fed with the ledger's rows:
 // position figures from positionSelectors.ts (tested against the positions SQL), cycles and the break-even through the
@@ -119,7 +118,7 @@ function optionLegRows(ledger: SimulatedLedger, symbol: string, expiryCloseByDat
     return price === null || cycleFactor === null || dayFactor === null ? price : (price * dayFactor) / cycleFactor;
   };
   const rows: (CycleOptionLegRow & { positionCloseReason: string | null })[] = [];
-  for (const position of cyclePositionsOfSymbol(ledger, symbol)) {
+  for (const position of positionsOfSymbol(ledger, symbol)) {
     for (const leg of legsOfPosition(ledger, position.id)) {
       if (leg.legType !== "option" || leg.optionType === null || leg.strikePrice === null || leg.expiryDate === null) continue;
       rows.push({
@@ -150,8 +149,6 @@ function optionLegRows(ledger: SimulatedLedger, symbol: string, expiryCloseByDat
             closingFillPrice: asTradedOn(leg, fillFiguresOf(leg.id, true).price, leg.exitAt),
           };
         })(),
-        ...(leg.enteredBy === "taken_from_kept" ? { openingRowLabel: `Put from the kept ones @ ${leg.entryPrice.toFixed(2)}` } : {}),
-        ...(leg.exitedBy === "kept_between_cycles" && leg.exitPrice !== null ? { closingRowLabel: `Put kept for the next entry @ ${leg.exitPrice.toFixed(2)}` } : {}),
         ...(position.strategyKey === "leaps" ? { leaps: true } : {}),
       });
     }
@@ -190,7 +187,7 @@ function openPositionPremiumPnlOf(ledger: SimulatedLedger, symbolPositions: read
 
 /** The rows the cycle loader would select for the symbol (cycleQueries.ts), from the ledger. The symbol stands in for the ticker id. */
 export function ledgerCycleInputRows(ledger: SimulatedLedger, symbol: string, market: LedgerCycleMarket): CycleInputRows {
-  const symbolPositions = cyclePositionsOfSymbol(ledger, symbol);
+  const symbolPositions = positionsOfSymbol(ledger, symbol);
   const openPositionPremiumPnl = openPositionPremiumPnlOf(ledger, symbolPositions, market);
   return {
     optionRows: optionLegRows(ledger, symbol, new Map(market.dailyCloses.map((bar) => [bar.date, bar.close])), market.splitFactorOn),
@@ -238,52 +235,12 @@ export function ledgerCycleInput(ledger: SimulatedLedger, symbol: string, market
     kept = { revision, dailyCloses: market.dailyCloses, splitFactorOn: market.splitFactorOn, input: buildCycleInputFromRows(symbol, ledgerCycleInputRows(ledger, symbol, { dailyCloses: market.dailyCloses, ...(market.splitFactorOn ? { splitFactorOn: market.splitFactorOn } : {}) })) };
     bySymbol.set(symbol, kept);
   }
-  return { ...kept.input, openPositionPremiumPnl: openPositionPremiumPnlOf(ledger, cyclePositionsOfSymbol(ledger, symbol), market) };
+  return { ...kept.input, openPositionPremiumPnl: openPositionPremiumPnlOf(ledger, positionsOfSymbol(ledger, symbol), market) };
 }
 
 /** The symbol's wheel cycles, open and closed (deriveCycles). */
 export function ledgerCycles(ledger: SimulatedLedger, symbol: string, market: LedgerCycleMarket): Cycle[] {
   return deriveCycles(ledgerCycleInput(ledger, symbol, market));
-}
-
-/**
- * The price per share of the symbol's latest share acquisition (a purchase, or a put assigned at its strike), on the
- * ledger's (cycle) scale; null when it never acquired any.
- */
-export function ledgerLatestShareAcquisitionPrice(ledger: SimulatedLedger, symbol: string): number | null {
-  for (let index = ledger.trades.length - 1; index >= 0; index--) {
-    const trade = ledger.trades[index]!;
-    if (trade.side !== "buy" || trade.isClosingTrade) continue;
-    const leg = findLeg(ledger, trade.legId);
-    if (leg?.legType !== "stock" || findPosition(ledger, leg.positionId)?.symbol !== symbol) continue;
-    return trade.price;
-  }
-  return null;
-}
-
-/**
- * The average price paid for the symbol's shares held now, on the ledger's (cycle) scale; null when it holds none
- * (runningAverageShareCost, shared with the live ladder). Shares called away at expiry leave no trade, so they are added
- * as moves of their own.
- */
-export function ledgerHeldSharesAverageCost(ledger: SimulatedLedger, symbol: string): number | null {
-  return rememberedForRevision(ledger, `heldSharesAverageCost:${symbol}`, () => {
-    const shareMoves: { at: number; order: number; shares: number; price: number }[] = [];
-    ledger.trades.forEach((trade, index) => {
-      const leg = findLeg(ledger, trade.legId);
-      if (leg?.legType !== "stock" || findPosition(ledger, leg.positionId)?.symbol !== symbol) return;
-      shareMoves.push({ at: trade.executedAt.getTime(), order: index, shares: trade.side === "buy" ? trade.quantity : -trade.quantity, price: trade.price });
-    });
-    for (const position of positionsOfSymbol(ledger, symbol)) {
-      if (position.strategyKey !== "covered_call" || position.closeReason !== "assigned" || position.closedAt === null) continue;
-      const calledAwayAt = position.closedAt.getTime();
-      for (const leg of legsOfPosition(ledger, position.id)) {
-        if (leg.legType === "stock" && leg.exitAt !== null && leg.exitAt.getTime() === calledAwayAt) shareMoves.push({ at: calledAwayAt, order: -1, shares: -leg.quantity, price: leg.exitPrice ?? 0 });
-      }
-    }
-    shareMoves.sort((a, b) => a.at - b.at || a.order - b.order);
-    return runningAverageShareCost(shareMoves);
-  });
 }
 
 /** ledgerOpenCycleSummary per ledger and symbol, kept for one ledger revision (it reads the book alone). */
@@ -317,33 +274,7 @@ export function ledgerLegsDueForSettlement(ledger: SimulatedLedger, dateIso: str
   return openLegs(ledger).flatMap(({ leg }) => (leg.legType === "option" && leg.side === "short" && leg.expiryDate !== null && leg.expiryDate <= dateIso ? [leg] : []));
 }
 
-/** Open hedge Puts whose expiry date is on or before `dateIso`: what the day's settlement settles when the hedge could not sell them. */
-export function ledgerHedgeLegsDueForSettlement(ledger: SimulatedLedger, dateIso: string): LedgerLeg[] {
-  return openLegs(ledger).flatMap(({ leg, position }) => (position.strategyKey === "hedge" && leg.legType === "option" && leg.expiryDate !== null && leg.expiryDate <= dateIso ? [leg] : []));
-}
-
 /** Open LEAPS Calls whose expiry date is on or before `dateIso`: what the day's settlement settles of those held to expiry. */
 export function ledgerLeapsLegsDueForSettlement(ledger: SimulatedLedger, dateIso: string): LedgerLeg[] {
   return openLegs(ledger).flatMap(({ leg, position }) => (position.strategyKey === "leaps" && leg.legType === "option" && leg.expiryDate !== null && leg.expiryDate <= dateIso ? [leg] : []));
-}
-
-/** The symbol's open hedge Puts in its cycle, oldest purchase first (the order the hedge sells them in); kept ones are not. */
-export function ledgerOpenHedgeLegs(ledger: SimulatedLedger, symbol: string): LedgerLeg[] {
-  return openLegs(ledger)
-    .filter(({ leg, position }) => position.symbol === symbol && position.strategyKey === "hedge" && position.keptSince === undefined && leg.legType === "option")
-    .map(({ leg }) => leg)
-    .sort((a, b) => a.entryAt.getTime() - b.entryAt.getTime());
-}
-
-/** The symbol's hedge Puts kept between cycles, the longest kept first (the order an entry takes them in). */
-export function ledgerKeptHedgeLegs(ledger: SimulatedLedger, symbol: string): { leg: LedgerLeg; keptSince: Date }[] {
-  return openLegs(ledger)
-    .filter(({ leg, position }) => position.symbol === symbol && position.keptSince !== undefined && leg.legType === "option")
-    .map(({ leg, position }) => ({ leg, keptSince: position.keptSince! }))
-    .sort((a, b) => a.keptSince.getTime() - b.keptSince.getTime());
-}
-
-/** The symbol's positions the wheel's cycles are made of: every one but the Puts kept between cycles. */
-function cyclePositionsOfSymbol(ledger: SimulatedLedger, symbol: string): LedgerPosition[] {
-  return positionsOfSymbol(ledger, symbol).filter((position) => position.keptSince === undefined);
 }

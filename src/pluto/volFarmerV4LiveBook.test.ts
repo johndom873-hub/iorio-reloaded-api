@@ -23,6 +23,11 @@ import {
 const settings = { ...plutoSafetyLimitsSettingsFixture, ...plutoVolFarmerV4SettingsFixture } as unknown as PlutoSettings;
 /** Half the pot in shares: the numbers the book's tests were first written on. */
 const halfInShares = { ...settings, volFarmerV4FirstPositionPct: 50 };
+/** Pluto's rules on halfInShares, selling the next expiry after today (these tests' quotes expire on 6 November). */
+const rulesOnNextExpiry = () => {
+  const rules = volFarmerV4RulesOf(halfInShares);
+  return { ...rules, v3: { ...rules.v3, optionsExpiry: "next" as const } };
+};
 const optionCommissionDollars = (contracts: number) => 0.65 * contracts;
 const stockCommissionDollars = (shares: number) => 0.005 * shares;
 
@@ -106,8 +111,8 @@ describe("the live book and its orders", () => {
   it("opens a cycle on a flat ticker with half its allocation, the shares bought with the first Call", () => {
     const state = newVolFarmerV2SymbolState();
     const { book, planned } = createVolFarmerV4LiveBook({ state, pending: [], snapshot: snapshotOf() });
-    const { farmer, v2 } = volFarmerV4RulesOf(halfInShares);
-    runVolFarmerV2Steps({ state, market: marketOf(100), farmer, v2, book });
+    const { farmer, v2, v3 } = rulesOnNextExpiry();
+    runVolFarmerV2Steps({ state, market: marketOf(100), farmer, v2, v3, book });
     // P = the allocation, $64,000: floor(32,000 ÷ 10,000.50) = 3 lots.
     expect(state.potDollars).toBe(64_000);
     expect(planned.map((order) => order.kind)).toEqual(["covered_call"]);
@@ -123,8 +128,8 @@ describe("the live book and its orders", () => {
   it("counts an order still working as planned, and settles a filled one at its fills", () => {
     const state = newVolFarmerV2SymbolState();
     const first = createVolFarmerV4LiveBook({ state, pending: [], snapshot: snapshotOf() });
-    const { farmer, v2 } = volFarmerV4RulesOf(halfInShares);
-    runVolFarmerV2Steps({ state, market: marketOf(100), farmer, v2, book: first.book });
+    const { farmer, v2, v3 } = rulesOnNextExpiry();
+    runVolFarmerV2Steps({ state, market: marketOf(100), farmer, v2, v3, book: first.book });
     const order = first.planned[0]!;
     const pending = pendingVolFarmerV4Order(state, order, "a1", optionCommissionDollars);
     replaceVolFarmerV4LegRef(state, order.ref, pending.ref);
@@ -133,7 +138,7 @@ describe("the live book and its orders", () => {
 
     // The next look, the order still working: the ticker is not flat, the Call is open, nothing new is planned.
     const second = createVolFarmerV4LiveBook({ state, pending: [pending], snapshot: snapshotOf({ flat: true }) });
-    runVolFarmerV2Steps({ state, market: marketOf(100), farmer, v2, book: second.book });
+    runVolFarmerV2Steps({ state, market: marketOf(100), farmer, v2, v3, book: second.book });
     expect(second.planned).toEqual([]);
     expect(state.first!.calls).toEqual([{ legId: "action:a1", shares: 300 }]);
 
@@ -147,8 +152,8 @@ describe("the live book and its orders", () => {
   it("undoes an opening order that never filled: no cycle", () => {
     const state = newVolFarmerV2SymbolState();
     const { book, planned } = createVolFarmerV4LiveBook({ state, pending: [], snapshot: snapshotOf() });
-    const { farmer, v2 } = volFarmerV4RulesOf(halfInShares);
-    runVolFarmerV2Steps({ state, market: marketOf(100), farmer, v2, book });
+    const { farmer, v2, v3 } = rulesOnNextExpiry();
+    runVolFarmerV2Steps({ state, market: marketOf(100), farmer, v2, v3, book });
     const pending = pendingVolFarmerV4Order(state, planned[0]!, "a1", optionCommissionDollars);
     replaceVolFarmerV4LegRef(state, planned[0]!.ref, pending.ref);
     expect(settleVolFarmerV4Order(state, pending, unfilledVolFarmerV4Outcome)).toContain("did not fill");

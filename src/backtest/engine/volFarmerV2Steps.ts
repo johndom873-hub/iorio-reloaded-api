@@ -7,12 +7,12 @@ import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { baselineQuoteRejection, describeRejections, roundedStrike, selectBaselineCandidates, type BaselineCandidate, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
 import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchaseFillPrice, optionSaleFillPrice } from "./ledger/ledgerFills.js";
 
-// Vol Farmer v2 (decision maker "vol_farmer_v2", Marcelo 2026-10-27; research): two Covered Calls at different price
-// levels and a LEAPS Call, no hedge Put. The steps of one look at one symbol, shared by the backtest
+// Vol Farmer v2's steps (Marcelo 2026-10-27) with Vol Farmer v3's rules, as Vol Farmer v4 runs them: two Covered Calls
+// at different price levels and a LEAPS Call, no hedge Put. The steps of one look at one symbol, shared by the backtest
 // (backtestVolFarmerV2Look.ts, on the simulated ledger) and Pluto (on the live book): what they read and the orders they
 // place go through a VolFarmerV2Book, so the rules exist once. Per symbol (prices as traded today, S the look's stock
-// price, P the cycle's pot: the backtest's ticker share of the account's value, so one ticker's free cash; Pluto's ticker
-// allocation):
+// price, P the ticker's pot at the look (potForNewCycle): the backtest's ticker share of the account's value, so one
+// ticker's free cash; Pluto's ticker allocation):
 //   1. flat: the first position buys lots = floor(P × firstPositionPct ÷ 100 ÷ (100 × S + the stock commission)) at S (no more
 //      than the free cash pays for), with a Call sold on them as in 2 (none: no cycle, tried again at the next look).
 //   2. Calls: each position holding shares with no Call open sells one on every lot: the Calls of the next listed expiry
@@ -56,8 +56,9 @@ import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchas
 // above $236 yields 5% a year, so Puts are sold struck at most 236 × 0.85 = $200.60: floor(50,000 ÷ 19,500) = 2 contracts
 // of the $195 Put.
 //
-// Vol Farmer v3 (decision maker "vol_farmer_v3", Marcelo 2026-10-30; the lab only, `v3` set): the same steps, P being the
-// ticker's pot at the look (potForNewCycle) for step 3's Puts too, and before step 2:
+// Vol Farmer v3's rules (Marcelo 2026-10-30; `v3`): the options' expiry (the next after today, or today's on the days one
+// ends), how far out it may be, the Calls' strike floor, when the Puts are sold and their strike cap, a first position
+// called away rebuilt, and before step 2:
 //   1b. the first position holding shares with no Call open, its value V = its shares × S, its target T = P ×
 //       firstPositionPct ÷ 100: when |V − T| > P × rebalanceBandPct ÷ 100, whole lots are bought with the free cash
 //       (no more than it pays for), or sold, to floor(T ÷ (100 × S + the stock commission)) lots, never below one. A
@@ -286,7 +287,7 @@ export interface VolFarmerV2CallSale {
   contracts: number;
   /** A new cycle: the shares are bought with the Call, at the look's stock price. */
   startsCycle: boolean;
-  /** Vol Farmer v3's rebuilt first position (the lab's book only): its shares are bought with the Call beside the second position's. */
+  /** Vol Farmer v3's rebuilt first position: its shares are bought with the Call beside the second position's. */
   buysShares?: true;
   description: string;
   chosenBecause: string;
@@ -384,7 +385,7 @@ export interface VolFarmerV2Book {
   sellLeaps(sale: VolFarmerV2LeapsSale): void;
   /** The backtest records the orders the free cash cut (tickers sharing the account); live books leave it out. */
   noteCashCut?(cut: VolFarmerV2CashCut): void;
-  /** Vol Farmer v3's rebalancing (the lab's book): shares bought with the free cash, or uncovered ones sold, at the look's price. */
+  /** Vol Farmer v3's rebalancing: shares bought with the free cash, or uncovered ones sold, at the look's price. */
   buyShares?(order: VolFarmerV3SharesOrder): void;
   sellShares?(order: VolFarmerV3SharesOrder): void;
   /** The backtest's P&L by position (the run's note): each cash flow of a position as it happens; live books leave it out. */
@@ -407,8 +408,8 @@ export interface VolFarmerV2LookInput {
   market: VolFarmerV2Market;
   farmer: Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid">;
   v2: BacktestVolFarmerV2Settings;
-  /** Vol Farmer v3: the first position rebalanced (step 1b), the Puts sized on the pot at the look; absent for v2. */
-  v3?: BacktestVolFarmerV3Settings;
+  /** Vol Farmer v3's rules: the first position rebalanced (step 1b), the options' expiry, the strike floor and caps. */
+  v3: BacktestVolFarmerV3Settings;
   book: VolFarmerV2Book;
 }
 
@@ -502,7 +503,7 @@ export interface VolFarmerV2Turn {
  * 2026-10-28): steps 1 to 3 go to the book now, step 4 when `leaps` is called, once every ticker has had its turn.
  */
 export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn {
-  const { state, market, farmer, v2, book } = input;
+  const { state, market, farmer, v2, v3, book } = input;
   const { symbol, todayIso, stockPrice, riskFreeRate, quotes, priceToCycleScale } = market;
   const parts: string[] = [];
   reconcile(book, state, parts, priceToCycleScale);
@@ -528,17 +529,17 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
     if (book.isFlat()) return finish();
   }
 
-  // Vol Farmer v3 may sell options expiring at today's close, on the days one does; v2 sells the next after today.
-  const sameDay = input.v3?.optionsExpiry === "today";
+  // Options expiring at today's close, on the days one does; or the next after today.
+  const sameDay = v3.optionsExpiry === "today";
   const nextExpiry = sameDay
     ? (market.expiryEndsToday ?? quotes.some((quote) => quote.right === "C" && quote.expiry === todayIso))
       ? todayIso
       : null
     : quotes.reduce<string | null>((next, quote) => (quote.right === "C" && quote.expiry > todayIso && (next === null || quote.expiry < next) ? quote.expiry : next), null);
   // Or wait for the next expiry to come within optionsMaxDaysToExpiry.
-  const tooFar = !sameDay && nextExpiry !== null && input.v3 !== undefined && daysToExpiry(nextExpiry, todayIso) > input.v3.optionsMaxDaysToExpiry;
+  const tooFar = !sameDay && nextExpiry !== null && daysToExpiry(nextExpiry, todayIso) > v3.optionsMaxDaysToExpiry;
   if ((nextExpiry === null && sameDay) || tooFar) {
-    const held = holdWithoutOptions(input, sameDay ? "an expiry day" : `the next expiry is ${input.v3!.optionsMaxDaysToExpiry} days or fewer away`);
+    const held = holdWithoutOptions(input, sameDay ? "an expiry day" : `the next expiry is ${v3.optionsMaxDaysToExpiry} days or fewer away`);
     if (held !== null) say(held);
     return finish();
   }
@@ -571,8 +572,8 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
     selected.rejections.outsideExpiryRange += market.quotesLeftUnreadByRight?.[right] ?? 0;
     return { ...selected, candidates: limits.kept ? selected.candidates.filter(limits.kept) : selected.candidates };
   };
-  // Vol Farmer v3 may sell its Calls at any strike above the price, its break-evens no floor.
-  const breakEvenFloor = input.v3?.callStrikeFloor !== "none";
+  // The Calls at or above the break-even, or (no floor) at any strike above the price.
+  const breakEvenFloor = v3.callStrikeFloor !== "none";
   /** Where the Calls were looked for, as a note says it: at or above the break-even, or (no floor) anywhere above the price. */
   const callsSought = (breakEvenAsTraded: number, whose: "its" | "the first") => (breakEvenFloor ? `at or above ${whose} break-even ${breakEvenAsTraded.toFixed(2)}` : `above the price ${stockPrice.toFixed(2)}`);
   const callCandidates = (breakEvenAsTraded: number, heldExcluded: boolean) => {
@@ -582,7 +583,7 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
 
   /**
    * The first position's lots bought with its first Call, as a cycle opens, sized on `firstPositionDollars` (`sizedBy`
-   * names it). `rebuild`: Vol Farmer v3 rebuilding it beside the second position's shares, which keep the cycle going.
+   * names it). `rebuild`: rebuilt beside the second position's shares, which keep the cycle going.
    */
   const openFirstPosition = (pot: number, firstPositionDollars: number, sizedBy: string, rebuild: boolean): void => {
     const notOpened = rebuild ? "no first position rebuilt" : "no cycle opened";
@@ -639,18 +640,18 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
     return finish();
   }
 
-  // 1a. Vol Farmer v3: a first position called away while the second still holds shares, rebuilt as a cycle opens (less
-  // the second's shares' value when both positions are rebalanced as one).
-  if (input.v3?.firstPositionAfterCalledAway === "rebuild" && state.first === null && state.second !== null && state.second.shares > 0) {
+  // 1a. A first position called away while the second still holds shares, rebuilt as a cycle opens (less the second's
+  // shares' value when both positions are rebalanced as one).
+  if (v3.firstPositionAfterCalledAway === "rebuild" && state.first === null && state.second !== null && state.second.shares > 0) {
     const pot = book.potForNewCycle();
-    const both = input.v3.rebalances === "both_positions";
+    const both = v3.rebalances === "both_positions";
     const secondValue = state.second.shares * priceToCycleScale * stockPrice;
     openFirstPosition(pot, (pot * v2.firstPositionPct) / 100 - (both ? secondValue : 0), both ? `${shareOfPotLabel(v2.firstPositionPct)} less the second position's shares` : shareOfPotLabel(v2.firstPositionPct), true);
   }
 
-  // 1b. Vol Farmer v3: the holding back to its target, between the first position's Calls.
-  if (input.v3 && state.first !== null && state.first.shares > 0 && state.first.calls.length === 0) {
-    const rebalanced = rebalanceHolding(input, input.v3);
+  // 1b. The holding back to its target, between the first position's Calls.
+  if (state.first !== null && state.first.shares > 0 && state.first.calls.length === 0) {
+    const rebalanced = rebalanceHolding(input, v3);
     if (rebalanced !== null) say(rebalanced);
   }
 
@@ -689,9 +690,9 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
     const firstBreakEven = breakEvenAsTraded(first)!;
     const bestCall = callCandidates(firstBreakEven, false).calls[0] ?? null;
     const bestYield = bestCall?.premiumYield ?? 0;
-    // Vol Farmer v3 may sell them with every Call, and anywhere below the price.
-    const withEveryCall = input.v3?.putsSold === "with_every_call";
-    const belowThePrice = input.v3?.putStrikeCap === "none";
+    // Or with every Call, and (no cap) anywhere below the price.
+    const withEveryCall = v3.putsSold === "with_every_call";
+    const belowThePrice = v3.putStrikeCap === "none";
     const trigger = withEveryCall ? "Puts with every Call" : bestCall === null ? `no Call ${callsSought(firstBreakEven, "the first")}` : `the best Call ${callsSought(firstBreakEven, "the first")} yields ${percent(bestYield, 2)} a year, under ${v2.putsStartCallYieldPct}%`;
     const putsTriggered = withEveryCall || bestYield * 100 < v2.putsStartCallYieldPct;
     const step = !putsTriggered ? null : belowThePrice ? { stepPct: 0, impliedVolatility: null } : volFarmerV2StepAtLook(v2, market);
@@ -703,8 +704,8 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
       const stepScores: Record<string, number | null> = v2.stepRule === "fixed" ? {} : { stepPct: step.stepPct, stepImpliedVolatility: step.impliedVolatility };
       const { candidates: puts, rejections } = candidatesOf("P", { minAbsDelta: 0, maxAbsDelta: v2.putMaxAbsDelta, maximumStrike: strikeCap, heldExcluded: true });
       const freeCash = book.freeCash();
-      // Vol Farmer v3 sizes them on the pot at the look, v2 on the cycle's.
-      const putsDollars = ((input.v3 ? book.potForNewCycle() : state.potDollars) * (100 - v2.firstPositionPct)) / 100;
+      // Sized on the pot at the look.
+      const putsDollars = (book.potForNewCycle() * (100 - v2.firstPositionPct)) / 100;
       const potContracts = (candidate: BaselineCandidate) => Math.floor(putsDollars / (candidate.strike * sharesPerContract) + 1e-9);
       const wanted = (candidate: BaselineCandidate) => Math.min(potContracts(candidate), Math.floor(freeCash / (candidate.strike * sharesPerContract) + 1e-9));
       const put = pickByVolume(puts, wanted, (candidate) => candidate.volumeCap);
@@ -751,7 +752,7 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
 }
 
 /**
- * Vol Farmer v3 on a day it sells no option (selling those that expire today, on a day none does; or the next expiry
+ * A day the steps sell no option (selling those that expire today, on a day none does; or the next expiry
  * further away than optionsMaxDaysToExpiry): the holding is rebalanced, and a flat ticker's first position (or one the
  * second outlived, rebuilt) buys its lots with no Call, as a cycle opens; its Calls come on the first day it sells
  * options, `until` saying which. Answers what it did, or null.
@@ -760,12 +761,12 @@ function holdWithoutOptions(input: VolFarmerV2LookInput, until: string): string 
   const { state, market, v2, v3, book } = input;
   if (!book.buyShares) throw new Error("Vol Farmer v3 needs a book that trades shares.");
   const notes: string[] = [];
-  const rebuild = v3!.firstPositionAfterCalledAway === "rebuild" && state.first === null && state.second !== null && state.second.shares > 0;
+  const rebuild = v3.firstPositionAfterCalledAway === "rebuild" && state.first === null && state.second !== null && state.second.shares > 0;
   if ((state.first === null && state.second === null && state.leaps === null && book.isFlat()) || rebuild) {
     const { stockPrice, priceToCycleScale } = market;
     const sharesPerContractOnCycleScale = Math.round(sharesPerContract / priceToCycleScale);
     const pot = book.potForNewCycle();
-    const secondValue = rebuild && v3!.rebalances === "both_positions" ? state.second!.shares * priceToCycleScale * stockPrice : 0;
+    const secondValue = rebuild && v3.rebalances === "both_positions" ? state.second!.shares * priceToCycleScale * stockPrice : 0;
     const firstPositionDollars = (pot * v2.firstPositionPct) / 100 - secondValue;
     const lotCost = stockPrice * sharesPerContract + market.stockCommissionDollars(sharesPerContract);
     const lots = Math.min(Math.floor(firstPositionDollars / lotCost + 1e-9), Math.floor(book.freeCash() / lotCost + 1e-9));
@@ -784,7 +785,7 @@ function holdWithoutOptions(input: VolFarmerV2LookInput, until: string): string 
     return [...notes, description].join("; ");
   }
   if (state.first !== null && state.first.shares > 0 && state.first.calls.length === 0) {
-    const rebalanced = rebalanceHolding(input, v3!);
+    const rebalanced = rebalanceHolding(input, v3);
     if (rebalanced !== null) notes.push(rebalanced);
   }
   return notes.length === 0 ? null : notes.join("; ");

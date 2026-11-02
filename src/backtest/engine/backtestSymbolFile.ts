@@ -45,8 +45,8 @@ export interface SymbolFileDayIssue {
 }
 
 /**
- * What Vol Farmer v2 reads of a day (it decides on the next Call expiry only), each part as the full read would give it
- * (loadNextCallExpiryDay).
+ * What Vol Farmer v4 reads of a day selling the next expiry after today (it decides on the next Call expiry only), each
+ * part as the full read would give it (loadNextCallExpiryDay).
  */
 export interface NextCallExpiryDay {
   /** The first Call expiry after the day within the 45-day window; null when there is none. */
@@ -135,7 +135,7 @@ export class BacktestSymbolFile {
     return this.slices.loadEndOfDay(tradingDate);
   }
 
-  /** Vol Farmer v2's read of a day (NextCallExpiryDay), with the file day before it (null on the first). */
+  /** Vol Farmer v4's read of a day (NextCallExpiryDay), with the file day before it (null on the first). */
   loadNextCallExpiryDay(tradingDate: string, previousFileDay: string | null): NextCallExpiryDay {
     return this.slices.loadNextCallExpiryDay(tradingDate, previousFileDay);
   }
@@ -201,22 +201,7 @@ export class BacktestSymbolFile {
     return this.slices.nextIntradayLookTime(tradingDate, afterLookTime);
   }
 
-  /** Every Put expiry the day's 10:00 quotes hold, ascending, whatever its distance (the hedge's; the files hold every expiry). */
-  loadPutExpiries(tradingDate: string): string[] {
-    return this.slices.loadPutExpiries(tradingDate);
-  }
-
-  /** One expiry's Puts at 10:00, with their sizes. */
-  loadPutQuotesOfExpiry(tradingDate: string, expiry: string): SymbolFileQuote[] {
-    return this.slices.quotesOfExpiry(tradingDate, null, expiry, "P", false);
-  }
-
-  /** One expiry's Puts at a look after 10:00 ("HH:MM" Eastern), without their sizes. */
-  loadIntradayPutQuotesOfExpiry(tradingDate: string, lookTime: string, expiry: string): SymbolFileQuote[] {
-    return this.slices.quotesOfExpiry(tradingDate, lookTime, expiry, "P", false);
-  }
-
-  /** Every Call expiry the day's 10:00 quotes hold, ascending, whatever its distance (Vol Farmer v2's LEAPS). */
+  /** Every Call expiry the day's 10:00 quotes hold, ascending, whatever its distance (the files hold every expiry; Vol Farmer v4's LEAPS). */
   loadCallExpiries(tradingDate: string): string[] {
     return this.slices.loadCallExpiries(tradingDate);
   }
@@ -226,7 +211,7 @@ export class BacktestSymbolFile {
     return this.slices.quotesOfExpiry(tradingDate, null, expiry, "C", false);
   }
 
-  /** One expiry's Calls at a look after 10:00 ("HH:MM" Eastern), with their sizes (Vol Farmer v2's LEAPS at every look). */
+  /** One expiry's Calls at a look after 10:00 ("HH:MM" Eastern), with their sizes (Vol Farmer v4's LEAPS at every look). */
   loadIntradayCallQuotesOfExpiry(tradingDate: string, lookTime: string, expiry: string): SymbolFileQuote[] {
     return this.slices.quotesOfExpiry(tradingDate, lookTime, expiry, "C", true);
   }

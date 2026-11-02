@@ -3,7 +3,7 @@ import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { optionSaleFillPrice } from "./ledger/ledgerFills.js";
 
 // How a session marks the options it holds: from a two-sided quote, at its mid; a LEAPS at what selling it would bring,
-// the mid less volFarmerV2.leapsSpreadCostChargedPct of the half-spread (Marcelo 2026-10-28). With no bid, a placeholder
+// the mid less volFarmerV4.leapsSpreadCostChargedPct of the half-spread (Marcelo 2026-10-28). With no bid, a placeholder
 // ask (a $4.5 call quoted 0 / 5.80) would make the mark half of it, so such a quote gives no mark and the option keeps its
 // last one.
 

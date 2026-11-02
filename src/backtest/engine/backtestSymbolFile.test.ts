@@ -117,7 +117,7 @@ describe("BacktestSymbolFile", () => {
     const file = BacktestSymbolFile.open("EDGES");
     try {
       expect(file.loadQuotes("2026-03-02")).toStrictEqual(edgeQuotes.filter((quote) => quote.expiry <= "2026-04-16"));
-      expect(file.loadPutQuotesOfExpiry("2026-03-02", "2026-12-27")).toStrictEqual(edgeQuotes.filter((quote) => quote.expiry === "2026-12-27" && quote.right === "P"));
+      expect(file.loadCallQuotesOfExpiry("2026-03-02", "2026-12-27")).toStrictEqual(edgeQuotes.filter((quote) => quote.expiry === "2026-12-27" && quote.right === "C"));
       expect(file.loadEndOfDay("2026-03-02").map(({ strike, right, bid, ask }) => ({ strike, right, bid, ask }))).toStrictEqual(edgeQuotes.filter((quote) => quote.expiry <= "2026-04-17").map(({ strike, right, bid, ask }) => ({ strike, right, bid, ask })));
     } finally {
       file.close();

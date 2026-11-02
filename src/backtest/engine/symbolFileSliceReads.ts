@@ -114,7 +114,6 @@ export class SymbolFileSliceReads {
   private readonly tenOClockAskAboveZeroBetween: StatementSync;
   private readonly volumeBetween: StatementSync;
   private readonly tenOClockCallKeysBetween: StatementSync;
-  private readonly tenOClockPutKeysBetween: StatementSync;
 
   constructor(database: DatabaseSync) {
     this.tenOClock = new SliceTable(database, "ten_oclock_quote_slices");
@@ -126,8 +125,6 @@ export class SymbolFileSliceReads {
     this.volumeBetween = database.prepare("SELECT 1 AS found FROM end_of_day_slices WHERE key BETWEEN ? AND ? AND has_volume = 1 LIMIT 1");
     this.tenOClockCallKeysBetween = database.prepare("SELECT key FROM ten_oclock_quote_slices WHERE key BETWEEN ? AND ? AND call_count > 0 ORDER BY key");
     this.tenOClockCallKeysBetween.setReturnArrays(true);
-    this.tenOClockPutKeysBetween = database.prepare("SELECT key FROM ten_oclock_quote_slices WHERE key BETWEEN ? AND ? AND put_count > 0 ORDER BY key");
-    this.tenOClockPutKeysBetween.setReturnArrays(true);
   }
 
   /** A day's 10:00 quote slices expiring within 45 days (the reader thread's quotes). */
@@ -241,18 +238,10 @@ export class SymbolFileSliceReads {
     return next === null ? null : lookTimeOfMinute(next);
   }
 
-  private tenOClockExpiriesWith(tradingDate: string, right: "C" | "P"): string[] {
-    const dayNumber = dayNumberOf(tradingDate);
-    const keys = (right === "C" ? this.tenOClockCallKeysBetween : this.tenOClockPutKeysBetween).all(sliceKey(dayNumber, tenOClockLookMinute, 0), sliceKey(dayNumber, tenOClockLookMinute, lastDaysToExpiry)) as unknown as [number][];
-    return keys.map(([key]) => expiryOfKey(key));
-  }
-
-  loadPutExpiries(tradingDate: string): string[] {
-    return this.tenOClockExpiriesWith(tradingDate, "P");
-  }
-
   loadCallExpiries(tradingDate: string): string[] {
-    return this.tenOClockExpiriesWith(tradingDate, "C");
+    const dayNumber = dayNumberOf(tradingDate);
+    const keys = this.tenOClockCallKeysBetween.all(sliceKey(dayNumber, tenOClockLookMinute, 0), sliceKey(dayNumber, tenOClockLookMinute, lastDaysToExpiry)) as unknown as [number][];
+    return keys.map(([key]) => expiryOfKey(key));
   }
 
   /** One expiry's contracts of one right: the 10:00 quotes (lookTime null, with sizes) or an intraday look's (with sizes when asked). */

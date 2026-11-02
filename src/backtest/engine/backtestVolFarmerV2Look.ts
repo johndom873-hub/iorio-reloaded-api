@@ -69,8 +69,8 @@ export function volFarmerV2TickerShares(sessionSymbols: readonly string[], v2: P
 }
 
 /**
- * The Vol Farmer v4 look: v2's steps with v3's rebalancing (runBacktestSession.ts skips the looks after 10:00 when its
- * looks are the first only). The values come from volFarmerStepSettingsOf, which reads a v2 or v3 section as well.
+ * The Vol Farmer v4 look: v2's steps with v3's rebalancing, on v4's values (volFarmerStepSettingsOf; runBacktestSession.ts
+ * skips the looks after 10:00 when its looks are the first only).
  */
 export async function runVolFarmerV2Look(context: BacktestLookContext): Promise<BacktestLookResult> {
   const { settings, ledger, todayIso } = context;
@@ -87,7 +87,7 @@ export async function runVolFarmerV2Look(context: BacktestLookContext): Promise<
     const share = shareBySymbol.get(lookSymbol.profile.symbol) ?? 0;
     const market = marketOf(context, lookSymbol, at, share);
     const book = ledgerBook({ context, lookSymbol, market, at, lookTimeEt, share, actions, optionSales, shortfalls });
-    return { lookSymbol, ...runVolFarmerV2Turn({ state: stateOf(ledger, lookSymbol.profile.symbol), market, farmer, v2, ...(v3 ? { v3 } : {}), book }) };
+    return { lookSymbol, ...runVolFarmerV2Turn({ state: stateOf(ledger, lookSymbol.profile.symbol), market, farmer, v2, v3, book }) };
   });
   // The LEAPS once every ticker has had its turn, in the same order: new cycles and Puts have the free cash first.
   for (const turn of turns) turn.leaps?.();
@@ -303,7 +303,7 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
       chosenBecause: input.order.chosenBecause,
       outcome: "filled",
       blockReason: null,
-      gateResults: [{ gate: context.settings.decisionMaker === "vol_farmer_v4" ? "vol_farmer_v4" : "vol_farmer_v3", ok: true, detail: `${sharesAsTraded} shares` }],
+      gateResults: [{ gate: "vol_farmer_v4", ok: true, detail: `${sharesAsTraded} shares` }],
       contract: null,
       candidateScores: input.order.candidateScores,
       quantity: sharesAsTraded,

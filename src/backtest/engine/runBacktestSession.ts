@@ -399,11 +399,11 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
   const volFarmerSteps = isVolFarmerV4 ? volFarmerStepSettingsOf(settings) : null;
   // Vol Farmer v4 decides on the next Call expiry's quotes only: its days are read as NextCallExpiryDay (backtestSymbolFile.ts).
   // Selling options that expire today, it reads every expiry of the day, as the Steady Stake does.
-  const readsNextCallExpiryOnly = volFarmerSteps !== null && volFarmerSteps.v3?.optionsExpiry !== "today";
+  const readsNextCallExpiryOnly = volFarmerSteps !== null && volFarmerSteps.v3.optionsExpiry !== "today";
   // The Steady Stake decides at 10:00 only, Vol Farmer v4 at every look unless its looks say the first only.
   const decidesAtCaptureLookOnly = volFarmerSteps !== null ? volFarmerSteps.v2.looks === "first_look" : true;
   // Vol Farmer v4's Calls expiring today in the money at the day's last look, bought back there (v3's rule).
-  const buysBackCallsAtLastLook = volFarmerSteps?.v3?.callsInTheMoneyAtLastLook === "bought_back";
+  const buysBackCallsAtLastLook = volFarmerSteps?.v3.callsInTheMoneyAtLastLook === "bought_back";
   const severalSymbols = symbolNames.length > 1;
   const startingValue = Number(session.startingValue);
   const dataDirectory = requireBacktestDataDirectory();
@@ -567,7 +567,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     let baselineCash = startingValue;
     const symbolOfLeg = (leg: LedgerLeg) => symbolByName.get(requirePosition(ledger, leg.positionId).symbol)!;
     /** A held option's mark from its two-sided quote: the mid; a LEAPS at what selling it would bring (backtestOptionMarks.ts). */
-    const markOfLeg = (leg: LedgerLeg, quote: TwoSidedQuote) => markOfTwoSidedQuote(quote, requirePosition(ledger, leg.positionId).strategyKey === "leaps" ? settings.volFarmerV2.leapsSpreadCostChargedPct / 100 : 0);
+    const markOfLeg = (leg: LedgerLeg, quote: TwoSidedQuote) => markOfTwoSidedQuote(quote, requirePosition(ledger, leg.positionId).strategyKey === "leaps" ? settings.volFarmerV4.leapsSpreadCostChargedPct / 100 : 0);
     /** A note about one symbol: named when the session has several. */
     const noteFor = (entry: SessionSymbol, text: string) => (severalSymbols ? `${entry.symbol}: ${text}` : text);
     let lastProgressAtMs = 0;
@@ -1175,8 +1175,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     if (skippedUnavailableDays.length > 0) sessionNotes.push(`${formatCount(skippedUnavailableDays.length)} day(s) inside the period could not be downloaded for any symbol and were skipped: ${skippedUnavailableDays.join(", ")}.`);
     const volFarmerV4Note = volFarmerSteps !== null ? describeVolFarmerV2Run(ledger, symbols.map((entry) => entry.symbol), volFarmerSteps.v2.firstPositionPct, "Vol Farmer v4", priceByLegId) : null;
     if (volFarmerV4Note !== null) sessionNotes.push(volFarmerV4Note);
-    // The looks record no no-sale or no-candidate notes: the cycle gaps read the shortfalls only.
-    const bookRecords = buildBookRecords({ ledger, symbols, optionSales, actions, priceByLegId, lastSessionDateIso, calendar, noSaleRecords: { shortfalls, notes: [], noCandidates: [] } });
+    const bookRecords = buildBookRecords({ ledger, symbols, optionSales, actions, priceByLegId, lastSessionDateIso, calendar, noSaleRecords: { shortfalls } });
     // The book holds every share it sells (the ledger refuses anything else); the platform's cycle derivation reading it
     // must agree. A cycle whose shares do not reconcile is named in the notes, its figures not to be trusted.
     const unreconciledCycles = bookRecords.cycles.filter((cycle) => cycle.dataFlags.some(isShareReconciliationFlag));

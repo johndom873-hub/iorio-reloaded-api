@@ -1,5 +1,4 @@
 import type { BacktestAction, BacktestBreakEvenLevel, BacktestOrderShortfall, EffectiveBacktestSettings } from "../backtestTypes.js";
-import type { BaselineNoCandidate, BaselineNoSaleReason } from "./baselineSaleSteps.js";
 import type { BacktestBarHistory } from "./backtestBarHistory.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import type { BacktestDayMarket, BacktestTickerProfile } from "./backtestTickerInputs.js";
@@ -104,16 +103,4 @@ export interface BacktestLookResult {
   shortfalls?: BacktestOrderShortfall[];
   /** Vol Farmer v4: both positions' break-evens after the look, per symbol whose cycle holds shares. */
   breakEvenLevels?: BacktestBreakEvenLevel[];
-}
-
-/** An order of a look that found no contract within the rules (BaselineNoCandidate), recorded only: the Wheel cycles' explanation. */
-export type BacktestNoCandidateNote = BaselineNoCandidate & { tradingDate: string; lookTimeEt: string; symbol: string };
-
-/** A look that sold nothing where a sale was due (BaselineNoSaleReason), recorded only: the Wheel cycles' gaps and uncovered stretches read it. */
-export interface BacktestNoSaleNote {
-  tradingDate: string;
-  symbol: string;
-  reason: BaselineNoSaleReason;
-  /** "entry_filter": each filter's limit when it blocked, null for one that did not. */
-  entryFilterLimits: { extensionZ: number | null; ivRank: number | null } | null;
 }

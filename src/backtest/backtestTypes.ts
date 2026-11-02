@@ -1,7 +1,6 @@
 import type { PlutoSettings } from "../pluto/settingsStore.js";
 import type { TradingSettings } from "../lib/tradingSettingsStore.js";
 import type { KellyEdgeBasis } from "../pluto/postModelGates.js";
-import type { LadderLevels } from "./engine/backtestBaselineLadder.js";
 
 // The backtesting API contract (docs/backtesting/). The app mirrors these types in src/api/backtest.ts.
 
@@ -30,7 +29,7 @@ export const activeBacktestDecisionMakers = ["steady_stake", "vol_farmer_v4"] as
 /** The retired ones: their past sessions stay readable. */
 export const retiredBacktestDecisionMakers = ["rules", "llm", "vol_farmer", "baseline", "vol_farmer_v2", "vol_farmer_v3"] as const satisfies readonly BacktestDecisionMaker[];
 
-/** Vol Farmer v2, v3 and v4: all ran v2's steps (volFarmerV2Steps.ts), v3 and v4 with v3's rebalancing (volFarmerStepSettingsOf); their stored sessions read alike. */
+/** Vol Farmer v2, v3 and v4: all ran v2's steps (volFarmerV2Steps.ts), v3 and v4 with v3's rebalancing; their stored sessions read alike. */
 export function runsVolFarmerV2Steps(decisionMaker: BacktestDecisionMaker): boolean {
   return decisionMaker === "vol_farmer_v2" || decisionMaker === "vol_farmer_v3" || decisionMaker === "vol_farmer_v4";
 }
@@ -68,7 +67,7 @@ export interface BacktestBaselineSettings {
    * per share acquired); only at or above the cycle's cash break-even (cashBreakEvenPerShare: what the shares held must
    * bring for the cycle to end flat); only at or above
    * the price of the latest share acquisition (a purchase, or a put assigned at its strike); only at or above the average
-   * price paid for the shares held (ledgerHeldSharesAverageCost); at or above that average first and, for the lots still
+   * price paid for the shares held; at or above that average first and, for the lots still
    * uncovered, at or above the cycle's break-even; or none (the shares are held uncovered).
    */
   callStrike: "delta_range" | "above_share_cost" | "above_break_even" | "above_latest_entry" | "above_average_cost" | "above_average_cost_else_break_even" | "none";
@@ -530,13 +529,10 @@ export type BacktestVolFarmerV4Settings = Pick<BacktestVolFarmerSettings, "callM
 
 export const defaultBacktestVolFarmerV4Settings: BacktestVolFarmerV4Settings = { callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, firstPositionPct: 80, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 20, rebalanceBandPct: 5, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned" };
 
-/** The shared steps' values (volFarmerV2Steps.ts) for a Vol Farmer v2, v3 or v4 session: v4's own, else the Vol Farmer's Calls with v2's values (and v3's). */
-export function volFarmerStepSettingsOf(settings: Pick<EffectiveBacktestSettings, "decisionMaker" | "volFarmer" | "volFarmerV2" | "volFarmerV3" | "volFarmerV4">): { farmer: Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid">; v2: BacktestVolFarmerV2Settings; v3: BacktestVolFarmerV3Settings | undefined } {
-  if (settings.decisionMaker === "vol_farmer_v4") {
-    const { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid, rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, callsInTheMoneyAtLastLook, ...v2 } = settings.volFarmerV4;
-    return { farmer: { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid }, v2, v3: { rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, callsInTheMoneyAtLastLook } };
-  }
-  return { farmer: settings.volFarmer, v2: settings.volFarmerV2, v3: settings.decisionMaker === "vol_farmer_v3" ? settings.volFarmerV3 : undefined };
+/** The shared steps' values (volFarmerV2Steps.ts) for a Vol Farmer v4 session, from its own section: the Calls' limits, v2's values and v3's. */
+export function volFarmerStepSettingsOf(settings: Pick<EffectiveBacktestSettings, "volFarmerV4">): { farmer: Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid">; v2: BacktestVolFarmerV2Settings; v3: BacktestVolFarmerV3Settings } {
+  const { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid, rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, callsInTheMoneyAtLastLook, ...v2 } = settings.volFarmerV4;
+  return { farmer: { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid }, v2, v3: { rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, callsInTheMoneyAtLastLook } };
 }
 
 /**
@@ -708,17 +704,6 @@ export interface BacktestOrderShortfall {
   lookCount: number;
   /** The best contract the order was allowed to sell (the first in its ranking not already held); null when none. */
   bestCandidate: { expiry: string; strike: number; dte: number; premiumYield: number; volumeCap: number } | null;
-}
-
-/** The put ladder's levels at a symbol's first look of a day while its cycle holds shares (recorded only), on that day's scale. */
-export interface BacktestLadderLevel {
-  tradingDate: string;
-  at: string;
-  lookTimeEt: string;
-  symbol: string;
-  /** Today's cumulative split factor: the price as traded ÷ it = split-adjusted. */
-  splitFactor: number;
-  levels: LadderLevels;
 }
 
 /** Vol Farmer v2: each position's break-even per share after a look, as traded, per symbol whose cycle holds shares. */

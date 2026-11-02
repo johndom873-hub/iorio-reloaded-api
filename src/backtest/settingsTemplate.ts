@@ -19,8 +19,6 @@ export async function loadCurrentBacktestSettings(connection: Knex = db): Promis
 
 type RowDefinition = Omit<BacktestSettingRow, "now" | "group" | "section" | "appliesWhen"> & { fixedValue?: number | string };
 
-const percentOfAccount = "% of the account";
-
 /** Every row but Vol Farmer v4's (volFarmerV4RowDefinitions): label, unit and note. "fixed." rows are model constants, shown but not editable. */
 const rowDefinitionsBeforeVolFarmerV4: readonly RowDefinition[] = [
   { path: "fixed.earningsDateKnownCalendarDaysAhead", label: "Earnings dates known 30 days ahead", unit: "days", editable: false, note: "a report's date is seen from 30 calendar days before it: expiries spanning it are skipped only from then", fixedValue: earningsDateKnownCalendarDaysAhead },
