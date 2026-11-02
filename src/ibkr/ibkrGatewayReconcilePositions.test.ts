@@ -1362,10 +1362,13 @@ describe("stock split: detected in the holdings, frozen, rewritten, unfrozen", (
     const expiry = isoDateDaysFromToday(30);
     const stockPositionId = await insertPosition(ticker.id, "unstructured", "assigned_put");
     const stockLegId = await insertStockLeg(stockPositionId, stockConId, 300, 100);
-    await testDb("trades").insert({ position_leg_id: stockLegId, ibkr_exec_id: `split-test-${stockLegId}`, side: "buy", quantity: 300, price: 100, executed_at: new Date(Date.now() - 86_400_000), is_closing_trade: false });
+    // Two days back, not 24 hours: on a 25-hour day (clocks going back) 24 hours earlier can still be today in New York.
+    const beforeTheSplit = new Date(Date.now() - 2 * 86_400_000);
+    await testDb("position_legs").where({ id: stockLegId }).update({ entry_at: beforeTheSplit });
+    await testDb("trades").insert({ position_leg_id: stockLegId, ibkr_exec_id: `split-test-${stockLegId}`, side: "buy", quantity: 300, price: 100, executed_at: beforeTheSplit, is_closing_trade: false });
     const putPositionId = await insertPosition(ticker.id, "cash_secured_put");
     const putLegId = await insertShortOptionLeg(putPositionId, oldPutConId, "put", 90, expiry, 2);
-    await testDb("position_legs").where({ id: putLegId }).update({ quantity: 3 });
+    await testDb("position_legs").where({ id: putLegId }).update({ quantity: 3, entry_at: beforeTheSplit });
     const userId = await plutoTestUser();
     const [order] = await testDb("order_requests").insert({ requested_by_user_id: userId, request_type: "open_position", payload: JSON.stringify({ symbol: ticker.symbol, legs: [] }), status: "submitted" }).returning(["id"]);
     // The split's first day is today (the holdings detector records today's Eastern date), so the records above, dated
