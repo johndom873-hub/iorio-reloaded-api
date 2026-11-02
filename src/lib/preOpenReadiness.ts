@@ -188,6 +188,8 @@ export interface AccountFigures {
   totalCashValue: number | null;
   /** The cash account's settled cash (Pluto's Vol Farmer v4 buys and sells Puts on it); null when IBKR reports none. */
   settledCash: number | null;
+  /** The paper account reports no settled cash, so settledCash is its total cash (settledCashForTrading). */
+  settledCashIsTotalCash: boolean;
   buyingPower: number | null;
   excessLiquidity: number | null;
 }
@@ -228,7 +230,7 @@ export interface PlutoCashFigures {
  *   budget left   = capital budget % × net liquidation value − committed on Pluto's tickers
  *   account free  = cash − the open Puts' strikes − the orders working
  *   settled free  = settled cash − the open Puts' strikes − the orders working (the cash account, Marcelo 2026-10-31; none
- *                   reported: 0)
+ *                   reported: 0; on the paper account the total cash stands in)
  * judged against plutoLowCashWarningPctOfBudget of the budget.
  */
 export function evaluatePlutoCash(account: AccountFigures | null, pluto: PlutoCashFigures | null): ReadinessCheck {
@@ -252,7 +254,8 @@ export function evaluatePlutoCash(account: AccountFigures | null, pluto: PlutoCa
         : accountFree < budgetLeft
           ? `the account's free cash; ${budgetLeftNote}`
           : "the budget left";
-  const detail = `free cash ${formatWholeDollars(freeCash)} is ${((freeCash / budget) * 100).toFixed(1)}% of Pluto's ${formatWholeDollars(budget)} budget (${pluto.capitalBudgetPct}% of net liquidation), limited by ${limitedBy}`;
+  const standInNote = account.settledCashIsTotalCash ? "; IBKR reports no settled cash on the paper account, so the total cash stands in" : "";
+  const detail = `free cash ${formatWholeDollars(freeCash)} is ${((freeCash / budget) * 100).toFixed(1)}% of Pluto's ${formatWholeDollars(budget)} budget (${pluto.capitalBudgetPct}% of net liquidation), limited by ${limitedBy}${standInNote}`;
   if ((freeCash / budget) * 100 < plutoLowCashWarningPctOfBudget) {
     return check(name, "warn", `${detail}. Below ${plutoLowCashWarningPctOfBudget}%: Pluto's new Puts and cycles will be cut or skipped`);
   }

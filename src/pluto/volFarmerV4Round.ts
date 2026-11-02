@@ -73,7 +73,7 @@ import { loadVolFarmerV4LeftoverStockLeg, loadVolFarmerV4LegStatuses, loadVolFar
 // orders, planned on the shares after it, are undone and planned again once it ends, and the ticker waits while it works.
 // The account is a cash account (Marcelo 2026-10-31): the free cash is also held to the settled cash left, IBKR's settled
 // cash less the cash the open Puts hold, the orders in flight and the round's earlier orders; with no settled cash
-// reported, nothing is bought and no Put sold.
+// reported, nothing is bought and no Put sold, except on the paper account (a margin account), where the total cash stands in.
 
 /** The expiry v4 sells today under its Options expiry setting (YYYY-MM-DD): today's, when one ends at the close, or the next listed after today. */
 export function volFarmerV4SoldExpiry(expirations: readonly string[], todayIso: string, optionsExpiry: BacktestVolFarmerV3Settings["optionsExpiry"]): string | null {
@@ -117,6 +117,8 @@ export interface VolFarmerV4RoundInput {
   totalCashValue: number | null;
   /** IBKR's settled cash (the cash account's): null when IBKR reported none, and then nothing is bought. */
   settledCashValue: number | null;
+  /** The paper account reports no settled cash, so settledCashValue is its total cash (settledCashForTrading). */
+  settledCashIsTotalCash: boolean;
   netLiquidationValue: number;
   cancelByMs: number | null;
   /** Only these symbols (a round about some tickers); empty = every enabled ticker. */
@@ -357,6 +359,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   // bought earlier this round leave $25,000.
   const settledFree = round.settledFreeCash === null ? 0 : round.settledFreeCash - round.accountInFlightAtStart - round.committedThisRound;
   if (round.settledFreeCash === null && pass === "cycles_calls_puts") note("IBKR reports no settled cash, so the free cash is 0: nothing is bought and no Put sold");
+  if (input.settledCashIsTotalCash && pass === "cycles_calls_puts") note("IBKR reports no settled cash on the paper account, so the total cash stands in");
   const snapshot = {
     legStatusById,
     openOptionContracts: openOptionLegs.map((leg) => ({ expiry: leg.expiryDate!, strike: leg.strikePrice! })),

@@ -1,6 +1,7 @@
 import { OrderAction, OptionType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
-import { ibkrMarketDataLinesEnabled } from "../config/env.js";
+import { environment, ibkrMarketDataLinesEnabled } from "../config/env.js";
+import { settledCashForTrading } from "./accountContext.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { fetchWhatIfCommissionRange } from "../ibkr/ibkrWhatIfCommission.js";
 import { marketDataFeedRefusal, pooledLineError, pooledLineState, subscribeToPooledQuote, waitForFirstReading, type PooledQuote } from "../ibkr/marketDataPool.js";
@@ -239,7 +240,8 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
     loadTradingHalt: () => fetchTradingHalt(),
     loadAccount: async () => {
       const summary = await fetchAccountSummary();
-      return { netLiquidationValue: summary.netLiquidationValue, totalCashValue: summary.totalCashValue, settledCash: summary.settledCash, buyingPower: summary.buyingPower, excessLiquidity: summary.excessLiquidity };
+      const settled = settledCashForTrading(summary, environment.ibkrTradingMode);
+      return { netLiquidationValue: summary.netLiquidationValue, totalCashValue: summary.totalCashValue, settledCash: settled.settledCash, settledCashIsTotalCash: settled.totalCashStandsIn, buyingPower: summary.buyingPower, excessLiquidity: summary.excessLiquidity };
     },
     loadProbeContract: () => loadProbeContractFromStoredChain(),
     probeOrderPath: async (contract) => {
