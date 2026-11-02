@@ -12,11 +12,13 @@ import { treasuryBillCachePath, treasuryBillSeriesId, type TreasuryBillCache } f
 import type { AnalysisRunView, TickerAnalysisView } from "../backtest/analysis/analysisStore.js";
 
 // The Analyse window's routes on the real backtest router against the test database: starting an analysis (Re-run
-// analysis and Run a trial) stores its row and claims its job, the refusals, the window's view and history, the data
+// analysis and Run a trial) stores its row and queues its job (started at once while a place is free), the refusals, the window's view and history, the data
 // file's figures before a first analysis, cancelling, the Data files table's figures, and a lab save marking analyses out
 // of date for Re-run out of date. The job process itself is not started (spawn mocked).
 const dataDirectory = mkdtempSync(path.join(os.tmpdir(), "backtest-analysis-route-test-"));
 process.env.BACKTEST_DATA_DIR = dataDirectory;
+process.env.BACKTEST_MAX_PARALLEL_SESSIONS = "1000";
+process.env.BACKTEST_MAX_PARALLEL_ANALYSES = "1000";
 
 const spawnBacktestJobProcessMock = vi.fn<(jobId: string) => number>();
 const terminateLeftoverJobProcessesMock = vi.fn<(pid: number | null, jobId: string) => number>();
@@ -223,6 +225,44 @@ describe("analysis routes", () => {
     expect(resumed.body.error).toMatch(/not resumed/);
     // The job ended without its process writing the analysis: the run reads as cancelled.
     expect((await call<AnalysisRunView>("GET", `/analyses/runs/${started.body.id}`)).body.status).toBe("cancelled");
+  });
+
+  it("queues analyses beyond BACKTEST_MAX_PARALLEL_ANALYSES, cancels a queued one, and starts the next once a place frees", async () => {
+    // This file's earlier jobs end; whatever else runs in the test database counts, so the limit leaves one place for the blocker.
+    await testDb("backtest_jobs").whereIn("symbol", [symbol, symbolWithoutFile]).where({ kind: "analysis", status: "running" }).update({ status: "succeeded", finished_at: testDb.fn.now() });
+    const othersRunningRows: { count: string | number }[] = await testDb("backtest_jobs").where({ kind: "analysis", status: "running" }).where("heartbeat_at", ">", testDb.raw("now() - interval '60 seconds'")).count("* as count");
+    const configuredLimit = process.env.BACKTEST_MAX_PARALLEL_ANALYSES;
+    process.env.BACKTEST_MAX_PARALLEL_ANALYSES = String(Number(othersRunningRows[0]?.count ?? 0) + 1);
+    const [blocker] = await testDb("backtest_jobs").insert({ kind: "analysis", symbol: symbolWithoutFile, status: "running", started_at: testDb.fn.now(), heartbeat_at: testDb.fn.now() }).returning("id");
+    try {
+      const queued = await call<AnalysisRunView>("POST", `/analyses/${symbol}`, {});
+      expect(queued.status).toBe(202);
+      expect(queued.body.status).toBe("queued");
+      expect(await testDb("backtest_jobs").where({ id: queued.body.jobId }).first("status", "pid", "started_at")).toEqual({ status: "queued", pid: null, started_at: null });
+      // A queued saved analysis counts as running: the ticker is not queued twice.
+      expect((await call<{ error: string }>("POST", `/analyses/${symbol}`, {})).body.error).toMatch(/already running/);
+
+      const cancelled = await call<AnalysisRunView>("POST", `/analyses/runs/${queued.body.id}/cancel`);
+      expect(cancelled.body.status).toBe("cancelled");
+      expect((await testDb("backtest_ticker_analyses").where({ id: queued.body.id }).first("status")).status).toBe("cancelled");
+      expect((await testDb("backtest_jobs").where({ id: queued.body.jobId }).first("status")).status).toBe("cancelled");
+
+      const next = await call<AnalysisRunView>("POST", `/analyses/${symbol}`, {});
+      expect(next.body.status).toBe("queued");
+      expect(spawnBacktestJobProcessMock).not.toHaveBeenCalled();
+      // The blocker's process stops reporting: it no longer holds its place, and reading the overview starts the next.
+      await testDb("backtest_jobs").where({ id: blocker.id }).update({ heartbeat_at: testDb.raw("now() - interval '2 minutes'") });
+      expect((await call("GET", "/overview")).status).toBe(200);
+      expect(spawnBacktestJobProcessMock).toHaveBeenCalledExactlyOnceWith(next.body.jobId);
+      expect(await testDb("backtest_jobs").where({ id: next.body.jobId }).first("status", "pid")).toEqual({ status: "running", pid: 424_243 });
+      expect((await call<AnalysisRunView>("GET", `/analyses/runs/${next.body.id}`)).body.status).toBe("running");
+
+      await testDb("backtest_jobs").where({ id: next.body.jobId }).update({ status: "cancelled", finished_at: testDb.fn.now() });
+      await testDb("backtest_ticker_analyses").where({ id: next.body.id }).update({ status: "cancelled", finished_at: testDb.fn.now() });
+    } finally {
+      process.env.BACKTEST_MAX_PARALLEL_ANALYSES = configuredLimit;
+      await testDb("backtest_jobs").where({ id: blocker.id }).delete();
+    }
   });
 
   it("a lab save marks the analyses out of date instead of re-running them; Re-run out of date runs them", async () => {

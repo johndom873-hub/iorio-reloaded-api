@@ -25,7 +25,7 @@ export const plutoVolFarmerV4SettingsFixture = {
   volFarmerV4CallMinAbsDelta: 0.05,
   volFarmerV4CallMaxAbsDelta: 0.5,
   volFarmerV4MaxSpreadPctOfMid: 50,
-  volFarmerV4RebalanceBandPct: 5,
+  volFarmerV4RebalanceBandPct: 20,
   volFarmerV4Rebalances: "both_positions",
   volFarmerV4FirstPositionAfterCalledAway: "wait",
   volFarmerV4OptionsExpiry: "today",

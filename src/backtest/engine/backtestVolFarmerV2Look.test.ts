@@ -131,10 +131,11 @@ describe("the v2 formulas", () => {
 
   it("reads Vol Farmer v4's values from its own section", () => {
     const v4 = volFarmerStepSettingsOf({ volFarmerV4: defaultBacktestVolFarmerV4Settings });
-    // The research's best run: Calls' |delta| up to 0.5, 80% in shares with a 20% allowance, both positions rebalanced, today's expiry, no strike floor.
+    // The research's best run: Calls' |delta| up to 0.5, 80% in shares with a 20% allowance, both positions rebalanced, today's expiry, no strike floor;
+    // the rebalancing band 20%.
     expect(v4.farmer).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50 });
     expect(v4.v2).toEqual({ ...defaultBacktestVolFarmerV2Settings, firstPositionPct: 80, excessAllowancePct: 20 });
-    expect(v4.v3).toEqual({ ...defaultBacktestVolFarmerV3Settings, rebalances: "both_positions", optionsExpiry: "today", callStrikeFloor: "none" });
+    expect(v4.v3).toEqual({ ...defaultBacktestVolFarmerV3Settings, rebalanceBandPct: 20, rebalances: "both_positions", optionsExpiry: "today", callStrikeFloor: "none" });
   });
 });
 

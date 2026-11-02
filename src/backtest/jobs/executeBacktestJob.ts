@@ -14,7 +14,7 @@ import { describeUnmatchedOptions, refreshSplitScheduleForSymbol, type SplitSche
 import { runAnalysisJob } from "../analysis/runAnalysisJob.js";
 import { backfillDailyHistoryForBacktest, backtestHistoryStartDate, describeBacktestHistoryBackfill, isIbkrNoSuchContractError } from "../backfillDailyHistory.js";
 import { formatDownloadProgressLabel, jobHeartbeatIntervalMilliseconds, lastFinishedBacktestSessionDate } from "./backtestJobRules.js";
-import { finishSessionOfJob, kickBacktestQueue, kickDownloadQueue, loadBacktestJobRow, requeuePausedDownload, type BacktestJobRow } from "./backtestJobStore.js";
+import { finishSessionOfJob, kickAnalysisQueue, kickBacktestQueue, kickDownloadQueue, loadBacktestJobRow, requeuePausedDownload, type BacktestJobRow } from "./backtestJobStore.js";
 import { thetaDataDownloaderScriptName } from "./spawnBacktestJobProcess.js";
 import { describeDownloadGaps, parseDownloaderLine } from "./thetaDataDownloaderProtocol.js";
 
@@ -349,4 +349,5 @@ export async function executeBacktestJob(jobId: string): Promise<void> {
   console.log(`Backtest job ${jobId}: ${control.ownershipLost ? "stopped (no longer this process's job)" : outcome.status}${outcome.error ? ` — ${outcome.error}` : ""}.`);
   if (job.kind === "download") await kickDownloadQueue();
   if (job.kind === "backtest") await kickBacktestQueue();
+  if (job.kind === "analysis") await kickAnalysisQueue();
 }

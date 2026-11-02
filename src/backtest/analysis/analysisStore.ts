@@ -11,7 +11,7 @@ import { loadTickerSuitability } from "../tickerSuitabilityStore.js";
 import { BacktestLabSettingsValidationError } from "../labSettingsStore.js";
 import { loadAllTickerOwnValues, loadTickerOwnValues, mergedVolFarmerV4Problem, tickerFieldValuesOf, validateTickerOwnValuesInput, withTickerOwnValues, type StoredTickerOwnValues, type TickerFieldValues, type TickerOwnValues } from "../labTickerValuesStore.js";
 import { deriveJobDisplayStatus } from "../jobs/backtestJobRules.js";
-import { BacktestRequestError, cancelBacktestJob, findUnfinishedDownloadJob, insertClaimedAnalysisJob, startClaimedBacktestJob } from "../jobs/backtestJobStore.js";
+import { BacktestRequestError, cancelBacktestJob, findUnfinishedDownloadJob, insertQueuedAnalysisJob, kickAnalysisQueue } from "../jobs/backtestJobStore.js";
 import { analysisFormulasVersion, computeAnalysisFileFigures, type AnalysisFigures, type AnalysisFigureValues, type AnalysisFileFigures, type AnalysisStep } from "./analysisFigures.js";
 import type { AnalysisBacktestFigures } from "./analysisBacktest.js";
 import { barIndicatorsOf } from "./analysisPriceFigures.js";
@@ -189,8 +189,9 @@ export async function assertTickerCanBeAnalysed(givenSymbol: string, kind: "save
 }
 
 /**
- * Starts an analysis as a job. A trial runs beside a saved one; a saved one is refused while another saved one runs, and
- * while the ticker's download runs (the file is being written). A trial's values must leave a v4 section the lab could run.
+ * Starts an analysis as a job in the analyses' queue (at once while fewer than BACKTEST_MAX_PARALLEL_ANALYSES run). A trial
+ * runs beside a saved one; a saved one is refused while another saved one is queued or runs, and while the ticker's download
+ * runs (the file is being written). A trial's values must leave a v4 section the lab could run.
  */
 export async function startTickerAnalysis(input: { symbol: string; reason: AnalysisReason; trial?: AnalysisTrialValues | null }, connection: Knex = db): Promise<{ analysisId: string; jobId: string }> {
   const trial = input.reason === "trial" ? (input.trial ?? null) : null;
@@ -204,13 +205,13 @@ export async function startTickerAnalysis(input: { symbol: string; reason: Analy
   const values = await resolveAnalysisLabValues(symbol, trial, connection);
   const { hash, ...labValues } = values;
   const ids = await connection.transaction(async (transaction) => {
-    const jobId = await insertClaimedAnalysisJob(symbol, transaction);
+    const jobId = await insertQueuedAnalysisJob(symbol, transaction);
     const [row] = await transaction("backtest_ticker_analyses")
       .insert({ symbol, job_id: jobId, status: "queued", formulas_version: analysisFormulasVersion, lab_values: JSON.stringify(labValues), lab_values_hash: hash, reason: input.reason, summary_status: "skipped" })
       .returning("id");
     return { analysisId: row.id as string, jobId };
   });
-  await startClaimedBacktestJob(ids.jobId);
+  await kickAnalysisQueue();
   return ids;
 }
 
@@ -412,7 +413,8 @@ export async function cancelTickerAnalysis(analysisId: string, connection: Knex 
   const run = await loadTickerAnalysisRun(analysisId, connection);
   if (!run.jobId || !["queued", "running", "stopped"].includes(run.status)) throw new BacktestRequestError("This analysis has already finished.", 409);
   await cancelBacktestJob(run.jobId);
-  if (run.status === "stopped") await connection("backtest_ticker_analyses").where({ id: analysisId }).whereIn("status", ["queued", "running"]).update({ status: "cancelled", finished_at: connection.fn.now() });
+  // A running one's process marks it cancelled; a queued or stopped one has no process to do it.
+  if (run.status === "queued" || run.status === "stopped") await connection("backtest_ticker_analyses").where({ id: analysisId }).whereIn("status", ["queued", "running"]).update({ status: "cancelled", finished_at: connection.fn.now() });
   return loadTickerAnalysisRun(analysisId, connection);
 }
 

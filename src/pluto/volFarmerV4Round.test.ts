@@ -166,7 +166,7 @@ function holdingFirstPosition(shares: number): void {
 
 /**
  * A ticker whose LEAPS is due: both positions hold 600 shares (inside the rebalancing band: $120,000 against half the
- * $250,000 pot ± $12,500), the first's break-even 100 (a Call to sell), the second's 130 (no Call at or above it, and the
+ * $250,000 pot ± $50,000), the first's break-even 100 (a Call to sell), the second's 130 (no Call at or above it, and the
  * price of 100 more than half a Step below it); its 17 Dec 2027 LEAPS expiry listed and quoted.
  */
 function withLeapsDue(tickerId: string): void {
@@ -422,7 +422,7 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
     roundSettings = { ...v4Settings, volFarmerV4OptionsExpiry: "next" };
     holdingFirstPosition(1_000);
     await round();
-    // $100,000 of shares against 80% of the pot, $200,000 ± $12,500: 9 lots bought to floor(200,000 ÷ 10,000.50) = 19.
+    // $100,000 of shares against 80% of the pot, $200,000 ± $50,000: 9 lots bought to floor(200,000 ÷ 10,000.50) = 19.
     expect(harness.executed).toEqual([expect.objectContaining({ kind: "shares_buy", plan: expect.objectContaining({ quantity: 900 }) })]);
     let memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
     expect(memory.state.first).toMatchObject({ shares: 1_900, calls: [], premiums: [] });
@@ -453,10 +453,10 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
   });
 
   it("trims from the leftover-stock position at the mid; a part fill leaves the shares it did not sell in the position", async () => {
-    roundSettings = v4Settings;
+    // A 5% band: $250,000 of shares against $200,000 ± $12,500, 6 lots sold, to 19 (at 20%, ± $50,000, $250,000 is inside).
+    roundSettings = { ...v4Settings, volFarmerV4RebalanceBandPct: 5 };
     holdingFirstPosition(2_500);
     await round();
-    // $250,000 of shares against $200,000 ± $12,500: 6 lots sold, to 19.
     expect(harness.actions).toEqual([expect.objectContaining({ kind: "close_shares", quantity: 600, limitPrice: 100 })]);
     expect(harness.executed).toEqual([expect.objectContaining({ kind: "shares_sell", positionId: "p1", legId: "s1", plan: expect.objectContaining({ quantity: 600, limitPrice: 100 }) })]);
     expect((harness.memory.get("t-VFT") as VolFarmerV4Memory).pending).toEqual([expect.objectContaining({ kind: "sell_shares", shares: 600, saleParts: [{ position: "first", shares: 600 }] })]);

@@ -19,8 +19,8 @@ import { tickerPotFraction } from "./tickerSettingsStore.js";
 const volFarmerV4ExampleStockPrice = 100;
 const volFarmerV4ExampleFirstBreakEven = 96;
 const volFarmerV4ExampleImpliedVolatility = 0.6;
-const volFarmerV4ExampleFallPrice = 90;
-const volFarmerV4ExampleRisePrice = 110;
+const volFarmerV4ExampleFallPrice = 70;
+const volFarmerV4ExampleRisePrice = 130;
 const volFarmerV4ExampleAccountValue = 2_000_000;
 const volFarmerV4ExampleAllocationPct = 20;
 

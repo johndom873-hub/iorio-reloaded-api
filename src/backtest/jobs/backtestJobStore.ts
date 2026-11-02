@@ -385,14 +385,46 @@ export async function kickBacktestQueue(): Promise<string[]> {
   return startedJobIds;
 }
 
-/** Inserts a ticker analysis's job already claimed (analyses do not queue); startClaimedBacktestJob then starts its process. */
-export async function insertClaimedAnalysisJob(symbol: string, connection: Knex = db): Promise<string> {
-  const [row] = await connection("backtest_jobs").insert({ kind: "analysis", symbol, status: "running", heartbeat_at: connection.fn.now(), started_at: connection.fn.now() }).returning("id");
+/**
+ * How many ticker analyses run at once (BACKTEST_MAX_PARALLEL_ANALYSES, required wherever analyses start): the rest wait in
+ * their own queue. Not the sessions' places: an analysis waits for its own backtest, which queues as a session, so sharing
+ * places could fill them all with analyses whose backtests never start.
+ */
+export function readBacktestMaxParallelAnalyses(): number {
+  const configured = process.env.BACKTEST_MAX_PARALLEL_ANALYSES?.trim();
+  if (!configured) throw new Error("BACKTEST_MAX_PARALLEL_ANALYSES is not set: how many ticker analyses run at once (docs/backtesting/DATA-FILES.md).");
+  const value = Number(configured);
+  if (!Number.isInteger(value) || value < 1) throw new Error(`BACKTEST_MAX_PARALLEL_ANALYSES must be a whole number of 1 or more, got "${configured}".`);
+  return value;
+}
+
+/** Inserts a ticker analysis's job in the analyses' queue; kickAnalysisQueue starts it when a place is free. */
+export async function insertQueuedAnalysisJob(symbol: string, connection: Knex = db): Promise<string> {
+  const [row] = await connection("backtest_jobs").insert({ kind: "analysis", symbol, status: "queued", queued_at: connection.raw("clock_timestamp()") }).returning("id");
   return row.id as string;
 }
 
-export async function startClaimedBacktestJob(jobId: string): Promise<void> {
-  await spawnClaimedJob(jobId);
+/**
+ * Starts the queued analyses, oldest first, while fewer than BACKTEST_MAX_PARALLEL_ANALYSES run (a stopped one does not
+ * count). Kicked when an analysis is started, when one ends, by the overview, and when the API starts. Returns the started
+ * jobs' ids.
+ */
+export async function kickAnalysisQueue(): Promise<string[]> {
+  const maxParallel = readBacktestMaxParallelAnalyses();
+  const startedJobIds = await db.transaction(async (transaction) => {
+    await transaction.raw("SELECT pg_advisory_xact_lock(hashtext('backtest_analysis_queue'))");
+    const runningRows: { count: string | number }[] = await transaction("backtest_jobs")
+      .where({ kind: "analysis", status: "running" })
+      .where("heartbeat_at", ">", transaction.raw("now() - (?::int * interval '1 millisecond')", [staleHeartbeatMilliseconds]))
+      .count("* as count");
+    const freePlaces = maxParallel - Number(runningRows[0]?.count ?? 0);
+    if (freePlaces <= 0) return [];
+    const next: { id: string }[] = await transaction("backtest_jobs").where({ kind: "analysis", status: "queued" }).orderBy(["queued_at", "created_at", "id"]).limit(freePlaces).select("id");
+    for (const job of next) await claimJob(transaction, job.id, { resetProgress: false });
+    return next.map((job) => job.id);
+  });
+  for (const jobId of startedJobIds) await spawnClaimedJob(jobId);
+  return startedJobIds;
 }
 
 /**

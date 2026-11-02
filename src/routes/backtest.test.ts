@@ -39,6 +39,7 @@ process.env.BACKTEST_DATA_DIR = dataDirectory;
 // The mocked job processes never finish, so every started backtest keeps its place: the queue's limit is high here, and
 // the batch test sets its own.
 process.env.BACKTEST_MAX_PARALLEL_SESSIONS = "1000";
+process.env.BACKTEST_MAX_PARALLEL_ANALYSES = "1000";
 
 vi.mock("../db/connection.js", async () => {
   const { config } = await import("dotenv");
@@ -249,7 +250,7 @@ describe("backtest routes", () => {
     expect(template.rows.find((row) => row.path === "volFarmerV2.leapsAbsDelta")?.appliesWhen?.allOf).toEqual([{ path: "decisionMaker", oneOf: ["vol_farmer_v2", "vol_farmer_v3"] }]);
     expect(template.rows.find((row) => row.path === "volFarmerV3.rebalanceBandPct")?.appliesWhen?.allOf).toEqual([{ path: "decisionMaker", oneOf: ["vol_farmer_v3"] }]);
     // Vol Farmer v4 reads its own copy of every value, defaulting to the research's best run, its rows applying to it alone.
-    expect(template.settings.volFarmerV4).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, firstPositionPct: 80, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 20, rebalanceBandPct: 5, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned" });
+    expect(template.settings.volFarmerV4).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, firstPositionPct: 80, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 20, rebalanceBandPct: 20, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned" });
     expect(template.rows.filter((row) => row.section === "vol_farmer_v4").every((row) => JSON.stringify(row.appliesWhen?.allOf) === JSON.stringify([{ path: "decisionMaker", oneOf: ["vol_farmer_v4"] }]))).toBe(true);
     expect(template.rows.find((row) => row.path === "volFarmerV4.callMaxAbsDelta")).toMatchObject({ label: "Calls' |delta| to", now: 0.5, editable: true });
     expect(template.rows.find((row) => row.path === "volFarmerV4.optionsExpiry")).toMatchObject({ label: "Calls and Puts expire", now: "today", choices: [{ value: "next" }, { value: "today" }] });
