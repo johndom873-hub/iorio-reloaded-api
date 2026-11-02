@@ -5,6 +5,9 @@ import type { BacktestLabSettingsView, BacktestOverview, BacktestSessionEstimate
 import { listBacktestDataFileSymbols, readBacktestDataFileContents, readBacktestDataFilePeriodContents, summarizeBacktestDataFiles } from "../backtest/dataFileSummary.js";
 import { loadTickerSuitabilityBySymbol, saveTickerSuitability, tickerSuitabilityNoteMaxLength, tickerSuitabilityMarks } from "../backtest/tickerSuitabilityStore.js";
 import { deleteBacktestDataFile } from "../backtest/deleteBacktestDataFile.js";
+import { summarizeMarketIndexFiles } from "../backtest/engine/marketIndexDailyBars.js";
+import { refreshMarketIndexFiles } from "../backtest/fetchMarketIndexDailyBars.js";
+import { connectToIbkrGateway } from "../ibkr/connectIbkr.js";
 import { backtestHistoryStartDate } from "../backtest/backfillDailyHistory.js";
 import { backtestNotReplayed, buildBacktestSettingRows, editableBacktestSettingPaths } from "../backtest/settingsTemplate.js";
 import {
@@ -74,8 +77,32 @@ backtestRouter.get("/overview", async (_request, response) => {
   // Reading the overview is one of the moments the queues move on (a stopped download, backtest or analysis no longer blocks them).
   await Promise.all([kickDownloadQueue(), kickBacktestQueue(), kickAnalysisQueue()]);
   const [files, jobs, suitabilityBySymbol] = await Promise.all([summarizeBacktestDataFiles(), listOverviewJobViews(), loadTickerSuitabilityBySymbol()]);
-  const overview: BacktestOverview = { dataDirectory: requireBacktestDataDirectory(), files, suitabilityBySymbol, jobs, maxParallelSessions: readBacktestMaxParallelSessions() };
+  const dataDirectory = requireBacktestDataDirectory();
+  const overview: BacktestOverview = { dataDirectory, files, suitabilityBySymbol, jobs, maxParallelSessions: readBacktestMaxParallelSessions(), marketIndexFiles: summarizeMarketIndexFiles(dataDirectory) };
   response.json(overview);
+});
+
+let marketIndexRefreshRunning = false;
+
+/** Refresh VIX: the VIX and VIX3M files fetched again from IBKR (about 15 s); answers what they hold now. */
+backtestRouter.post("/market-indices/refresh", async (_request, response) => {
+  if (marketIndexRefreshRunning) throw new BacktestRequestError("A VIX refresh is already running.", 409);
+  marketIndexRefreshRunning = true;
+  const dataDirectory = requireBacktestDataDirectory();
+  try {
+    const connection = await connectToIbkrGateway();
+    try {
+      await refreshMarketIndexFiles(connection, dataDirectory, { lastFinishedSessionIso: lastFinishedBacktestSessionDate(new Date()) });
+    } finally {
+      connection.disconnect();
+    }
+  } catch (error) {
+    const keptUpTo = summarizeMarketIndexFiles(dataDirectory)?.lastDateIso;
+    throw new BacktestRequestError(`The VIX refresh failed: ${error instanceof Error ? error.message : String(error)}. ${keptUpTo ? `The files keep the days they had (to ${keptUpTo}).` : "There is no VIX file yet."} Try again in a minute.`, 502);
+  } finally {
+    marketIndexRefreshRunning = false;
+  }
+  response.json(summarizeMarketIndexFiles(dataDirectory));
 });
 
 // Body: { status: "suitable" | "unsuitable", note }. Admin only; the ticker must have a data file.

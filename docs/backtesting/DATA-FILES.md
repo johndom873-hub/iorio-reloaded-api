@@ -8,6 +8,7 @@ Local-only (Marcelo's Mac). Decisions: `project_backtesting_design_decisions_202
 
 - `<SYMBOL>.sqlite` — one file per symbol: the option data, written only by the downloader, and IBKR's stock bars ("IBKR stock bars" below), written only by Node.
 - `fred-DTB3.json` — the 3-month T-bill series cache (risk-free rate and interest on cash), written by the engine.
+- `ibkr-VIX.json`, `ibkr-VIX3M.json` — IBKR daily bars of the CBOE VIX and 3-month VIX indices from 2015-01-02 to the last finished session, for rules that read market volatility (`src/backtest/engine/marketIndexDailyBars.ts`). Written only by `npm run backtest:fetch-market-indices` (one request per index, the whole file rewritten); a backtest reads them and never fetches. A rule reads the close of the session before the day it decides on (`closeBefore`): the VIX closes at 16:15 ET, after the 10:00 look.
 - `tables/<YEAR>.json` — walk-forward model tables built from history before 1 January of YEAR, written by the engine.
 
 ## Symbol file (`<SYMBOL>.sqlite`, schema version 4)

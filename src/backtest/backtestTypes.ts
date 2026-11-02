@@ -978,6 +978,15 @@ export interface BacktestOverview {
   jobs: BacktestJobView[];
   /** How many backtests run at once (BACKTEST_MAX_PARALLEL_SESSIONS); the rest wait in the queue. */
   maxParallelSessions: number;
+  /** The VIX and VIX3M files (engine/marketIndexDailyBars.ts); null while either is missing. */
+  marketIndexFiles: BacktestMarketIndexFiles | null;
+}
+
+/** The days both market index files hold, and when the older of them was fetched. */
+export interface BacktestMarketIndexFiles {
+  firstDateIso: string;
+  lastDateIso: string;
+  fetchedAtIso: string;
 }
 
 /** One value a "choice" row can take. */

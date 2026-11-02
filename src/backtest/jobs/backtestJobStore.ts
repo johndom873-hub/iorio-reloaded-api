@@ -20,7 +20,7 @@ import { spawnBacktestJobProcess, terminateLeftoverJobProcesses } from "./spawnB
 export class BacktestRequestError extends Error {
   constructor(
     message: string,
-    readonly httpStatus: 400 | 404 | 409,
+    readonly httpStatus: 400 | 404 | 409 | 502,
   ) {
     super(message);
     this.name = "BacktestRequestError";

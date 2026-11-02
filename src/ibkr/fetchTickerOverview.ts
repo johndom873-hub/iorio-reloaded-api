@@ -1,4 +1,4 @@
-import { BarSizeSetting, EventName, Stock, WhatToShow } from "@stoqey/ib";
+import { BarSizeSetting, EventName, Stock, WhatToShow, type Contract } from "@stoqey/ib";
 import { randomUUID } from "node:crypto";
 import { describeMarketDataLineShortage, releaseMarketDataLines, reserveMarketDataLines } from "./marketDataLineBudget.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
@@ -201,8 +201,9 @@ export async function fetchHistoricalBarsRaw(
   /**
    * `endDateTime`: the instant the bars end at ("yyyyMMdd-HH:mm:ss", UTC); now when omitted. `timeoutMs`: for a request of a long history.
    * `includeExtendedHours`: also return pre-market and after-hours bars (04:00-20:00 ET); regular hours only when omitted.
+   * `contract`: what the bars are of (an index, for example); the stock `symbol` on SMART in USD when omitted.
    */
-  options: { endDateTime?: string; timeoutMs?: number; includeExtendedHours?: boolean } = {},
+  options: { endDateTime?: string; timeoutMs?: number; includeExtendedHours?: boolean; contract?: Contract } = {},
 ): Promise<PriceBar[]> {
   const { ib } = connection;
 
@@ -246,7 +247,7 @@ export async function fetchHistoricalBarsRaw(
 
     ib.on(EventName.historicalData, onHistoricalData);
     ib.on(EventName.error, onError);
-    ib.reqHistoricalData(reqId, new Stock(symbol, "SMART", "USD"), options.endDateTime ?? "", duration, barSize, whatToShow, options.includeExtendedHours ? 0 : 1, 2, false);
+    ib.reqHistoricalData(reqId, options.contract ?? new Stock(symbol, "SMART", "USD"), options.endDateTime ?? "", duration, barSize, whatToShow, options.includeExtendedHours ? 0 : 1, 2, false);
   });
 }
 
