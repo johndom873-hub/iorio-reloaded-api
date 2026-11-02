@@ -57,7 +57,6 @@ beforeAll(async () => {
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   if (savedState) await testDb("pluto_state").where({ id: 1 }).update(savedState);
-  await testDb("pluto_settings").where({ id: 1 }).update({ execution_strategy: "edge_margin" });
   await testDb("pluto_events").whereRaw("payload->>'symbol' in (?, ?)", [enabledSymbol, otherSymbol]).del();
   await testDb("shortlist_entries").whereIn("ticker_id", tickerIds).del();
   await testDb("tickers").whereIn("id", tickerIds).del();

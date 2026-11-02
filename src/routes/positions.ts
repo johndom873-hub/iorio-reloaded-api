@@ -1016,10 +1016,9 @@ async function traderPlutoTickerRefusal(request: Request, symbol: string): Promi
   return `Pluto trades ${symbol}, so only an admin can open or roll on it.`;
 }
 
-/** Manual trades are locked on the tickers the CC + Put Ladder trades (Marcelo 2026-10-15): enabled in Pluto while it is the active strategy. */
+/** Manual trades are locked on the tickers the CC + Put Ladder trades (Marcelo 2026-10-15): the tickers enabled in Pluto, which runs the ladder only since 2026-10-27. */
 async function manualOrdersLockedOn(symbol: string): Promise<boolean> {
-  const settings = await db("pluto_settings").where({ id: 1 }).first("execution_strategy");
-  return settings?.execution_strategy === "cc_put_ladder" && (await plutoMayTradeSymbol(symbol));
+  return plutoMayTradeSymbol(symbol);
 }
 
 function readSignalSnapshot(raw: unknown): { ok: true; value: Record<string, unknown> | null } | { ok: false; error: string } {

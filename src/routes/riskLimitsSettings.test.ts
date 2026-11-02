@@ -55,7 +55,6 @@ const knownRow = {
   delta_target_max: 0.3,
   recovery_dte_min: 30,
   recovery_dte_max: 45,
-  min_annualized_yield_pct: 50,
   commission_warn_share_of_premium_pct: 5,
   price_check_max_deviation_pct: 10,
   price_check_min_tolerance_dollars: 0.05,

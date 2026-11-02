@@ -27,7 +27,6 @@ const knownValues = {
   delta_target_max: 0.3,
   recovery_dte_min: 30,
   recovery_dte_max: 45,
-  min_annualized_yield_pct: 50,
   commission_warn_share_of_premium_pct: 5,
   price_check_max_deviation_pct: 10,
   price_check_min_tolerance_dollars: 0.05,
@@ -235,7 +234,6 @@ describe("database constraints on trading_settings", () => {
     "max_order_pct_of_portfolio",
     "max_concentration_per_ticker_pct",
     "min_cash_reserve_pct",
-    "min_annualized_yield_pct",
     "commission_warn_share_of_premium_pct",
   ];
 

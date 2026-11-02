@@ -240,7 +240,7 @@ describe("database schema round-trips", () => {
     expect(rows).toHaveLength(1);
     const [row] = rows;
     expect(row.id).toBe(true);
-    for (const column of ["max_order_pct_of_portfolio", "max_concentration_per_ticker_pct", "min_cash_reserve_pct", "min_annualized_yield_pct", "commission_warn_share_of_premium_pct"]) {
+    for (const column of ["max_order_pct_of_portfolio", "max_concentration_per_ticker_pct", "min_cash_reserve_pct", "commission_warn_share_of_premium_pct"]) {
       expect(Number(row[column]), column).toBeGreaterThanOrEqual(0);
       expect(Number(row[column]), column).toBeLessThanOrEqual(100);
     }

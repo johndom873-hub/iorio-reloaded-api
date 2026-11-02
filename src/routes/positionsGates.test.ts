@@ -430,8 +430,8 @@ describe("POST /positions/orders/:id/confirm", () => {
 
       expect((await call("POST", `/positions/orders/${orderId}/confirm`, {})).status).toBe(200);
       expect((await orderRow(orderId)).status).toBe("confirmed");
-      // A person's own order needs no lease.
-      expect((await call("POST", `/positions/orders/${await insertOrder(ticker.symbol)}/confirm`, {}, { agentHolder: null })).status).toBe(200);
+      // A person's own order needs no lease (on a ticker Pluto does not trade: Pluto's are locked to people).
+      expect((await call("POST", `/positions/orders/${await insertOrder((await createTicker()).symbol)}/confirm`, {}, { agentHolder: null })).status).toBe(200);
     } finally {
       await testDb("order_requests").where({ pluto_action_id: action.id }).del();
       await testDb("pluto_actions").where({ id: action.id }).del();
@@ -479,12 +479,10 @@ describe("POST /positions/orders/:id/confirm", () => {
     }
   });
 
-  it("locks a person's orders on a ticker Pluto trades while the CC + Put Ladder is the active strategy", async () => {
+  it("locks a person's orders on a ticker Pluto trades (the CC + Put Ladder, Pluto's only strategy)", async () => {
     const ticker = await createTicker();
     const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, bot_enabled: true }).returning("id");
-    const before = await testDb("pluto_settings").where({ id: 1 }).first("execution_strategy");
     try {
-      await testDb("pluto_settings").where({ id: 1 }).update({ execution_strategy: "cc_put_ladder" });
       const locked = await insertOrder(ticker.symbol);
       const refused = await call("POST", `/positions/orders/${locked}/confirm`, {});
       expect(refused.status).toBe(409);
@@ -493,12 +491,7 @@ describe("POST /positions/orders/:id/confirm", () => {
       // Switched off in Pluto, the ticker is a person's to trade again.
       await testDb("shortlist_entries").where({ id: entry.id }).update({ bot_enabled: false });
       expect((await call("POST", `/positions/orders/${locked}/confirm`, {})).status).toBe(200);
-      // Under Edge Margin nothing is locked.
-      await testDb("shortlist_entries").where({ id: entry.id }).update({ bot_enabled: true });
-      await testDb("pluto_settings").where({ id: 1 }).update({ execution_strategy: "edge_margin" });
-      expect((await call("POST", `/positions/orders/${await insertOrder(ticker.symbol)}/confirm`, {})).status).toBe(200);
     } finally {
-      await testDb("pluto_settings").where({ id: 1 }).update({ execution_strategy: before?.execution_strategy ?? "edge_margin" });
       await testDb("shortlist_entries").where({ id: entry.id }).del();
     }
   });

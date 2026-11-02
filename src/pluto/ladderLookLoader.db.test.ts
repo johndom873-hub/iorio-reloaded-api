@@ -31,7 +31,7 @@ const putPayload = { symbol: "LOOK", strategyKey: "cash_secured_put", legs: [{ r
 const coveredCallEntryPayload = { symbol: "LOOK", strategyKey: "covered_call", legs: [{ role: "stock", action: "BUY", symbol: "LOOK", quantity: 300, unitPrice: 50.5 }, { role: "option", action: "SELL", symbol: "LOOK", quantity: 3, unitPrice: 1.1, strike: 55, expiry: "20261120", right: "C" }] };
 
 beforeAll(async () => {
-  await testDb("pluto_settings").insert({ id: 1, execution_strategy: "cc_put_ladder" });
+  await testDb("pluto_settings").insert({ id: 1 });
   await testDb("users").insert({ id: userId, username: "ladder-look", display_name: "Ladder Look", password_hash: "x" });
   await testDb("tickers").insert({ id: tickerId, symbol: "LOOK", company_name: "Look Co" });
   await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: userId, bot_enabled: true });

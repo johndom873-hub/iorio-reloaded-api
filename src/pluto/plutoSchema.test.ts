@@ -36,15 +36,10 @@ describe("Pluto schema", () => {
   it("pluto_settings and pluto_state are seeded single rows with the approved defaults", async () => {
     const settings = await db("pluto_settings");
     expect(settings).toHaveLength(1);
-    expect(settings[0].model_id).toBe("openai/gpt-6-luna");
-    // Approved 2026-10-06 for the $1M paper account: budget 50 %, order size 10 % of it, 15 positions, $1/day, 20 calls.
+    // Approved 2026-10-06 for the $1M paper account: budget 50 %.
     expect(Number(settings[0].capital_budget_pct)).toBe(50);
-    expect(Number(settings[0].order_size_pct_of_budget)).toBe(10);
-    expect(settings[0].max_open_positions).toBe(15);
-    expect(Number(settings[0].daily_cost_ceiling_usd)).toBe(1);
-    // Model review (2026-10-10): the drift gate measures the edge margin in points, default 10.
-    expect(Number(settings[0].max_edge_margin_drift_pts)).toBe(10);
-    expect(settings[0]).not.toHaveProperty("max_edge_drift_vp");
+    // The model's and Edge Margin's settings are gone with Signals (dropped 2026-11-02).
+    for (const dropped of ["model_id", "order_size_pct_of_budget", "max_open_positions", "daily_cost_ceiling_usd", "max_edge_margin_drift_pts", "execution_strategy", "max_edge_drift_vp"]) expect(settings[0]).not.toHaveProperty(dropped);
     expect(settings[0].day_signals_poll_seconds).toBe(1);
     await expect(db("pluto_settings").insert({ id: 2 })).rejects.toThrow();
 
