@@ -41,6 +41,9 @@ const harness = vi.hoisted(() => ({
   actions: [] as Record<string, unknown>[],
   executed: [] as Record<string, unknown>[],
   events: [] as { type: string; detail: Record<string, unknown> }[],
+  /** The last stored close before today (the split guard's reference); the live price is 100. */
+  previousClose: 99.5 as number | null,
+  notices: [] as { symbol: string; reason: string }[],
 }));
 
 /** The orders sent and still working, with the notional the in-flight order requests count them at. */
@@ -63,6 +66,8 @@ vi.mock("../lib/commissionEstimate.js", async (original) => ({ ...(await origina
 vi.mock("../lib/accountContext.js", () => ({ accountContextFromTotalCash: async (cash: number | null) => ({ freeCash: cash === 500_000 ? harness.accountFreeCash : harness.settledFreeCash }) }));
 vi.mock("../lib/tickerFreeze.js", () => ({ frozenSymbolSet: async () => new Set() }));
 vi.mock("../ibkr/pricePool.js", () => ({ fetchPricesPoolFirst: async () => ({ stock: 100 }) }));
+vi.mock("../lib/tickerCalendarQueries.js", () => ({ loadPreviousClose: async () => (harness.previousClose === null ? null : { close: harness.previousClose, dateIso: "2026-10-19" }) }));
+vi.mock("./plutoTickerNotices.js", () => ({ noticePlutoTicker: async (symbol: string, reason: string) => (harness.notices.push({ symbol, reason }), true) }));
 vi.mock("../ibkr/fetchOptionChain.js", () => ({ loadStoredOptionChain: async () => ({ ...harness.chain, fetchedAt: null }) }));
 vi.mock("../lib/cycleBreakEvenQueries.js", () => ({ fetchOpenCycleSummaryRowsByTickerId: async (ids: string[]) => new Map(ids.map((id) => [id, {}])) }));
 vi.mock("../lib/cycleInputRows.js", () => ({ summarizeOpenCycleFromRows: () => ({ breakEvenPerShare: harness.breakEven }) }));
@@ -205,6 +210,8 @@ beforeEach(() => {
   harness.actions.length = 0;
   harness.executed.length = 0;
   harness.events.length = 0;
+  harness.previousClose = 99.5;
+  harness.notices.length = 0;
 });
 
 describe("runVolFarmerV4Round", () => {
@@ -358,6 +365,30 @@ describe("runVolFarmerV4Round", () => {
 
 describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
   const filledPurchase = (shares: number, price: number) => ({ working: false, filledContracts: 0, optionLegIds: [], optionNetDollars: 0, sharesBought: shares, sharesCostDollars: shares * price + shares * 0.005, sharesSold: 0 });
+
+  it("stops a ticker whose price is about a split's factor from the previous close, with none recorded, and tells a person once", async () => {
+    // $100 against a previous close of $200.40: 0.499, within 5% of ½, a 2-for-1 split's factor.
+    harness.previousClose = 200.4;
+    const summary = await round();
+    expect(harness.actions).toEqual([]);
+    expect(harness.executed).toEqual([]);
+    expect(summary.sent).toBe(0);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringMatching(/^trades at 100\.00 against a previous close of 200\.40, about a .* with none recorded: Pluto stops on it until a person looks$/)]);
+    expect(harness.notices).toEqual([{ symbol: "VFT", reason: "split_guard" }]);
+    // A 10% move is not a split's factor: the ticker trades.
+    harness.previousClose = 111;
+    await round();
+    expect(harness.executed.length).toBeGreaterThan(0);
+  });
+
+  it("buys no shares on a stock quote older than the order route's 15 seconds, and says so", async () => {
+    roundSettings = v4Settings;
+    harness.stockQuote = { ...harness.stockQuote, updatedAtMs: Date.now() - 60_000 };
+    const summary = await round();
+    expect(harness.actions).toEqual([expect.objectContaining({ kind: "buy_shares", outcome: "blocked", blockReason: expect.stringContaining("live_quote: no two-sided stock quote of the last 15 seconds") })]);
+    expect(harness.executed).toEqual([]);
+    expect(summary.sent).toBe(0);
+  });
 
   it("on a day no option ends, buys a flat ticker's first position alone at the mid of Pluto's quote, waits while it works, then holds the shares at their fill", async () => {
     roundSettings = v4Settings;

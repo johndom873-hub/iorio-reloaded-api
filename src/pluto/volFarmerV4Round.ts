@@ -15,6 +15,11 @@ import { loadLiveTradingSessions } from "../lib/liveTradingSessions.js";
 import { summarizeOpenCycleFromRows } from "../lib/cycleInputRows.js";
 import { blackScholesDelta, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import type { InternalApiClient } from "../lib/internalApiClient.js";
+import { maximumLiveQuoteAgeMs } from "../lib/signalSnapshotLiveQuotes.js";
+import { splitSuggestedByPrice } from "../lib/stockSplits.js";
+import { loadPreviousClose } from "../lib/tickerCalendarQueries.js";
+import { describePriceAdjustment } from "../ibkr/dailyBarSplitCheck.js";
+import { noticePlutoTicker } from "./plutoTickerNotices.js";
 import { strategyDeltaVerdict, type StrategyDeltaContext } from "../lib/strategyOrderGates.js";
 import { daysToExpiry, describeExpiry } from "../lib/optionContractLabel.js";
 import { optionMidLimitPrice } from "../lib/optionLimitPrice.js";
@@ -308,8 +313,9 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   }
 
   // 3. The market and the book at this round.
-  const [prices, bandQuotes, bandCycle, forwardAnchors, previousSessionVolumeByContract, stepImpliedVolatility, chain, inFlight, tickerExposure] = await Promise.all([
+  const [prices, previousClose, bandQuotes, bandCycle, forwardAnchors, previousSessionVolumeByContract, stepImpliedVolatility, chain, inFlight, tickerExposure] = await Promise.all([
     fetchPricesPoolFirst([{ key: "stock", legType: "stock", symbol }]),
+    loadPreviousClose(tickerId, clock.todayIso),
     loadOptionQuoteBandQuotes(tickerId, clock.todayIso),
     loadFinishedOptionQuoteBandCycle(tickerId, clock.todayIso),
     defaultOptionQuoteBandPlannerDependencies.loadForwardAnchors(tickerId, clock.todayIso),
@@ -322,6 +328,16 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   const stockPrice = prices["stock"] ?? null;
   if (stockPrice === null || !(stockPrice > 0)) {
     note("no live stock price");
+    await saveVolFarmerV4Memory(tickerId, memory, adopted);
+    return nothingDue;
+  }
+  // The split guard (stockSplits.ts): a price about a known split's factor from the previous close with no split recorded
+  // stops every order on the ticker this round, a person told once a day; a real move of that size stops it too.
+  const suggestedSplit = previousClose === null ? null : splitSuggestedByPrice(stockPrice, previousClose.close);
+  if (suggestedSplit !== null) {
+    const stopped = `trades at ${stockPrice.toFixed(2)} against a previous close of ${previousClose!.close.toFixed(2)}, about a ${describePriceAdjustment(suggestedSplit)} with none recorded: Pluto stops on it until a person looks`;
+    note(stopped);
+    await noticePlutoTicker(symbol, "split_guard", settings, now);
     await saveVolFarmerV4Memory(tickerId, memory, adopted);
     return nothingDue;
   }
@@ -657,7 +673,8 @@ async function sendShareOrder(context: { input: VolFarmerV4RoundInput; ticker: P
 
   const quote = input.marketWatch.snapshot(ticker.symbol);
   const nowMs = Date.now();
-  const fresh = quote !== null && quote.updatedAtMs !== null && nowMs - quote.updatedAtMs <= settings.maxQuoteAgeMinutes * 60_000;
+  // Held to the order route's live-quote rule (signalSnapshotLiveQuotes.ts, Marcelo 2026-11-02), so it never sends a share order the route refuses.
+  const fresh = quote !== null && quote.updatedAtMs !== null && nowMs - quote.updatedAtMs <= maximumLiveQuoteAgeMs;
   const twoSided = fresh && quote.bid !== null && quote.ask !== null && quote.bid > 0 && quote.ask >= quote.bid ? { bid: quote.bid, ask: quote.ask } : null;
   const limitPrice = twoSided ? optionMidLimitPrice(twoSided.bid, twoSided.ask, buying ? "buy" : "sell") : null;
   const notional = buying && limitPrice !== null ? limitPrice * shares : 0;
@@ -666,7 +683,7 @@ async function sendShareOrder(context: { input: VolFarmerV4RoundInput; ticker: P
   const scores = buying ? order.order.candidateScores : order.kind === "sell_shares" ? order.orders[0]!.candidateScores : {};
   const gateResults: PlutoGateResult[] = [
     { gate: "vol_farmer_v4", ok: true, detail: chosenBecause },
-    { gate: "live_quote", ok: twoSided !== null, detail: twoSided ? `stock bid ${twoSided.bid.toFixed(2)}, ask ${twoSided.ask.toFixed(2)}` : `no two-sided stock quote of the last ${settings.maxQuoteAgeMinutes} minutes` },
+    { gate: "live_quote", ok: twoSided !== null, detail: twoSided ? `stock bid ${twoSided.bid.toFixed(2)}, ask ${twoSided.ask.toFixed(2)}` : `no two-sided stock quote of the last ${maximumLiveQuoteAgeMs / 1000} seconds` },
     ...(capital ? [bookCapitalGate(capital)] : []),
   ];
   const ok = gateResults.every((gate) => gate.ok) && limitPrice !== null;

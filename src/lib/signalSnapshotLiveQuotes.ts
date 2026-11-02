@@ -24,8 +24,9 @@ function describeQuoteProblem(label: string, quote: unknown, now: Date): string 
 
 /**
  * The first reason a Signals snapshot's pricing quotes are not live and fresh, or null when every quote is (or the snapshot
- * is not a Signals one). A CC + Put Ladder order's snapshot (kind "ladder") records its contract with the same quote fields
- * and is held to the same rule (Marcelo 2026-10-15).
+ * is not a Signals one). A Vol Farmer v4 order's snapshot (kind "vol_farmer_v4") records its contract, or for a share order
+ * its stock quote, with the same quote fields and is held to the same rule (Marcelo 2026-11-02; the CC + Put Ladder's
+ * from 2026-10-15 until it retired).
  */
 export function findNonLiveSnapshotQuoteReason(snapshot: Record<string, unknown> | null, now: Date = new Date()): string | null {
   if (snapshot === null) return null;
@@ -35,8 +36,8 @@ export function findNonLiveSnapshotQuoteReason(snapshot: Record<string, unknown>
           { label: "The leg being closed", quote: snapshot.closeLeg },
           { label: "The new leg", quote: snapshot.replacement },
         ]
-      : snapshot.kind === "ladder"
-        ? [{ label: "The contract", quote: snapshot.contract }]
+      : snapshot.kind === "vol_farmer_v4"
+        ? [snapshot.stock !== undefined ? { label: "The stock", quote: snapshot.stock } : { label: "The contract", quote: snapshot.contract }]
         : snapshot.candidate !== undefined
           ? [{ label: "The contract", quote: snapshot.candidate }]
           : [];
