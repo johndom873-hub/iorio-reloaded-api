@@ -39,7 +39,6 @@
     "job:expiry-settlement-audit": "tsx scripts/run-daily-expiry-settlement-audit-job.ts",
     "ibkr:health-check": "tsx scripts/check-ibkr-health.ts",
     "sync-market-calendar": "tsx scripts/sync-market-calendar.ts",
-    "model:build-tables": "tsx scripts/build-volatility-model-tables.ts",
     "backtest:setup": "python3 -m venv .venv-backtest && .venv-backtest/bin/pip install -r scripts/backtest/requirements.txt",
     "backtest:job": "tsx scripts/run-backtest-job.ts",
     "backtest:backfill-history": "tsx scripts/backfill-backtest-history.ts",

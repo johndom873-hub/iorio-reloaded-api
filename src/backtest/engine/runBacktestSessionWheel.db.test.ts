@@ -10,7 +10,6 @@ import { defaultBacktestVolFarmerV4Settings, type BacktestAction, type BacktestF
 import { computeParityStockPrice } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile } from "./testSupport/syntheticBacktestData.js";
-import { dollarsAfter } from "./testSupport/gateTextDollars.js";
 
 // Whole sessions through the wheel, in a private copy of the test tables: each on its own synthetic symbol (a file of
 // 10:00 quotes priced at a chosen implied volatility per day, IBKR bars with chosen closes, DTB3 at 4%), run by
@@ -23,7 +22,7 @@ vi.mock("../../db/connection.js", async () => {
 const { db } = await import("../../db/connection.js");
 const { dropIsolatedTestDatabase } = await import("../../lib/testSupport/isolatedTestSchema.js");
 const { runBacktestSession } = await import("./runBacktestSession.js");
-const { loadBacktestCycleDetail, loadBacktestSessionActions, loadBacktestSessionDetail, loadBacktestSessionFills } = await import("../jobs/backtestSessionStore.js");
+const { loadBacktestSessionActions, loadBacktestSessionDetail, loadBacktestSessionFills } = await import("../jobs/backtestSessionStore.js");
 const testDb: Knex = db;
 
 const ratePercent = 4;
@@ -213,8 +212,6 @@ function expectAccountToReconcile(session: WheelSession): void {
   }
 }
 
-const commissionPerContract = 0.68;
-
 /** Vol Farmer v4 selling the next expiry's options (its default sells those expiring today, which the synthetic quotes price at their intrinsic value only). */
 const volFarmerV4Overrides: BacktestSettingsOverrides = { decisionMaker: "vol_farmer_v4", volFarmerV4: { optionsExpiry: "next" } };
 
@@ -226,14 +223,8 @@ function quoteOf(session: WheelSession, dateIso: string, expiry: string, strike:
   return { bid: quote.bid!, ask: quote.ask!, mid, saleFill: mid - spreadShare, purchaseFill: mid + spreadShare };
 }
 
-/** The 10:00 stock price the day's quotes imply. */
-function stockPriceOn(session: WheelSession, dateIso: string): number {
-  return computeParityStockPrice(session.quotesOn(dateIso), dateIso, ratePercent / 100, maximumSpreadFractionOfMid)!.price;
-}
-
 const filledActionsOf = (session: WheelSession) => session.actions.filter((action) => action.outcome === "filled");
 const dayOf = (session: WheelSession, dateIso: string) => session.detail.days.find((day) => day.tradingDate === dateIso)!;
-const totalInterest = (session: WheelSession) => session.detail.days.reduce((sum, day) => sum + day.interestDollars, 0);
 
 beforeAll(() => {
   dataDirectory = mkdtempSync(path.join(tmpdir(), "backtest-wheel-"));

@@ -5,7 +5,7 @@ import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
 import { describeOptionContract } from "../../lib/optionContractLabel.js";
 import { contractKey } from "../../lib/optionContractKey.js";
 import { addCalendarDays } from "../../lib/calendarDays.js";
-import { isEtfSector, tickerCalendarProfile } from "../../lib/tickerCalendarRelevance.js";
+import { tickerCalendarProfile } from "../../lib/tickerCalendarRelevance.js";
 import { effectiveWindowEndEt } from "../../pluto/sessionSchedule.js";
 import { isRetiredBacktestDecisionMaker, retiredBacktestDecisionMakerMessage, volFarmerStepSettingsOf, type BacktestAction, type BacktestBreakEvenLevel, type BacktestCycle, type BacktestCycleGap, type BacktestFill, type BacktestOrderShortfall, type BacktestPosition, type BacktestRunStatistics, type BacktestSettings, type BacktestSettingsOverrides } from "../backtestTypes.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtestDataDirectory.js";
@@ -148,7 +148,6 @@ async function loadTickerProfile(symbol: string, connection: Knex): Promise<Back
     symbol: ticker.symbol,
     companyName: ticker.company_name,
     sector: ticker.sector,
-    valuationGroup: isEtfSector(ticker.sector) ? "etf" : "stock",
     calendarChecksApply: calendarProfile.calendarChecksApply,
     earningsCalendarResolved: calendarProfile.earningsCalendarResolved,
     earnings: events.filter((event) => event.eventType === "earnings").map((event) => ({ dateIso: event.dateIso, eventTime: event.eventTime })),

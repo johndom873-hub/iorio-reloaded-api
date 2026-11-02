@@ -1,5 +1,4 @@
 import { easternInstant } from "../../lib/easternIsoDate.js";
-import type { ValuationGroup } from "../../lib/volatilityModelTables.js";
 import { backtestCaptureLookTimeEt } from "../backtestTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 
@@ -13,7 +12,6 @@ export interface BacktestTickerProfile {
   symbol: string;
   companyName: string | null;
   sector: string | null;
-  valuationGroup: ValuationGroup;
   /** False for an ETF: no earnings or ex-dividend checks (tickerCalendarProfile). */
   calendarChecksApply: boolean;
   earningsCalendarResolved: boolean;
