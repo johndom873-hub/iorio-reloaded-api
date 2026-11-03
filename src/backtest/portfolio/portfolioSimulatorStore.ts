@@ -21,7 +21,8 @@ import { portfolioWarningsOf, worstFallWithin, type PortfolioWarning } from "./p
 // series' (from 2010). A ticker's inputs are kept in memory until its analysis or its bars change.
 
 export const projectionPathCount = 2000;
-export const suggestionPathCount = 1000;
+/** The projection's own paths, so a suggestion's "before" is the headline figure. */
+export const suggestionPathCount = projectionPathCount;
 export const projectionSeed = 20261103;
 export const horizonYearsChoices = [3, 5] as const;
 export type HorizonYears = (typeof horizonYearsChoices)[number];

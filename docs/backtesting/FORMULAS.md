@@ -387,7 +387,7 @@ The lab's portfolio simulator projects a book of Vol Farmer v4 tickers 3 or 5 ye
 - **W5**: its analysis backtest saw no 20% fall of SPY from a peak inside it.
 - **W6**: the allocations don't add up to 100%.
 
-**Suggestions**: one change at a time, scored by the neutral projection's median Excess Calmar on 1,000 paths shared by every candidate:
+**Suggestions**: one change at a time, scored by the neutral projection's median Excess Calmar on its own 2,000 paths, shared by every candidate:
 - drop a ticker (the others keep their proportions);
 - add a "suits" ticker at 1 ÷ (N + 1);
 - halve or double one (the others rescaled to 100%).
