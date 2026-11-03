@@ -44,6 +44,8 @@ const harness = vi.hoisted(() => ({
   events: [] as { type: string; detail: Record<string, unknown> }[],
   /** The last stored close before today (the split guard's reference); the live price is 100. */
   previousClose: 99.5 as number | null,
+  /** One option contract's commission, as the round's estimator gives it. */
+  optionCommission: 0.65,
   notices: [] as { symbol: string; reason: string }[],
 }));
 
@@ -63,7 +65,7 @@ vi.mock("../lib/liveTradingSessions.js", async () => {
     },
   };
 });
-vi.mock("../lib/commissionEstimate.js", async (original) => ({ ...(await original<object>()), loadCommissionEstimator: async () => ({ perContractDollars: () => 0.65 }), loadStockCommissionEstimator: async () => ({ perShareDollars: () => 0.005 }) }));
+vi.mock("../lib/commissionEstimate.js", async (original) => ({ ...(await original<object>()), loadCommissionEstimator: async () => ({ perContractDollars: () => harness.optionCommission }), loadStockCommissionEstimator: async () => ({ perShareDollars: () => 0.005 }) }));
 // The round hands the account's cash (500,000) and the settled cash in turn.
 vi.mock("../lib/accountContext.js", () => ({ accountContextFromTotalCash: async (cash: number | null) => ({ freeCash: cash === 500_000 ? harness.accountFreeCash : harness.settledFreeCash }) }));
 vi.mock("../lib/tickerFreeze.js", () => ({ frozenSymbolSet: async () => new Set() }));
@@ -112,6 +114,7 @@ vi.mock("../lib/orderLimits.js", async (original) => ({ ...(await original<objec
 vi.mock("./ledger.js", () => ({
   recordPlutoAction: vi.fn(async (input: Record<string, unknown>) => (harness.actions.push(input), `action-${harness.actions.length}`)),
   recordPlutoEvent: vi.fn(async (type: string, detail: Record<string, unknown>) => void harness.events.push({ type, detail })),
+  recordCommissionCapSkip: vi.fn(async (detail: Record<string, unknown>) => void harness.events.push({ type: "call_skipped_commission", detail })),
 }));
 vi.mock("./tickerSettingsStore.js", async (original) => ({ ...(await original<object>()), loadEnabledPlutoTickerSettings: async () => harness.enabled }));
 vi.mock("./volFarmerV4LookLoader.js", () => ({
@@ -215,9 +218,23 @@ beforeEach(() => {
   harness.events.length = 0;
   harness.previousClose = 99.5;
   harness.notices.length = 0;
+  harness.optionCommission = 0.65;
 });
 
 describe("runVolFarmerV4Round", () => {
+  it("sells no Call whose commission is more than 20% of its premium, and records the one it would have sold for the activity", async () => {
+    // The best Call, the $105 at 1.4849, brings $148.49 a contract; a $40 commission is 27% of it, and every other Call brings
+    // less: the flat ticker opens no cycle, and the activity hears of the $105.
+    harness.optionCommission = 40;
+    const summary = await round();
+    expect(harness.executed).toEqual([]);
+    expect(summary.sent).toBe(0);
+    expect(harness.events.filter((event) => event.type === "call_skipped_commission")).toEqual([
+      { type: "call_skipped_commission", detail: expect.objectContaining({ symbol: "VFT", position: "first", strike: 105, premiumDollars: 148.49, commissionDollars: 40, maxShareOfPremium: 0.2, tradingDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) }) },
+    ]);
+    expect(harness.lastRounds.get("t-VFT")!.notes.join(" ")).toMatch(/first position: the \$\d+ Call .* not sold: its commission \$40\.00 is 27% of its \$148\.49 premium, over 20%/);
+  });
+
   it("opens a cycle on a flat ticker: one Covered Call with its shares, recorded under v4 and kept as pending", async () => {
     const summary = await round();
     expect(summary.looked).toEqual(["VFT"]);

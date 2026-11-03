@@ -37,7 +37,7 @@ import { loadFinishedOptionQuoteBandCycle, loadOptionQuoteBandQuotes } from "./o
 import { latestCycleQuotes } from "./latestBandQuotes.js";
 import { loadOpenPositionFigures } from "./openPositionFigures.js";
 import { loadSafetyLimitBookCounts, plutoOrdersSentToday } from "./safetyLimits.js";
-import { recordPlutoAction, recordPlutoEvent, type PlutoActionKind, type PlutoGateResult } from "./ledger.js";
+import { recordCommissionCapSkip, recordPlutoAction, recordPlutoEvent, type PlutoActionKind, type PlutoGateResult } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { tickerCooldownStatus } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
@@ -484,14 +484,14 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   const runOnce = (leapsQuotesByExpiry: ReadonlyMap<string, SymbolFileQuote[]>) => {
     const state = structuredClone(memory!.state);
     const missing = new Set<string>();
-    const { book, planned, cashCutNotes } = createVolFarmerV4LiveBook({ state, pending: memory!.pending, snapshot });
+    const { book, planned, cashCutNotes, commissionCapSkips } = createVolFarmerV4LiveBook({ state, pending: memory!.pending, snapshot });
     const turn = runVolFarmerV2Turn({ state, market: marketWith(leapsQuotesByExpiry, missing), farmer, v2, v3, book });
     if (pass === "cycles_calls_puts") {
       const turnNote = turn.note();
-      return { state, planned, missing, leapsDue: turn.leaps !== null, notes: turnNote === null ? [] : [turnNote.slice(`${symbol}: `.length)] };
+      return { state, planned, missing, leapsDue: turn.leaps !== null, commissionCapSkips, notes: turnNote === null ? [] : [turnNote.slice(`${symbol}: `.length)] };
     }
     const leapsNote = turn.leaps?.() ?? null;
-    return { state, planned, missing, leapsDue: false, notes: [...(leapsNote === null ? [] : [leapsNote]), ...cashCutNotes] };
+    return { state, planned, missing, leapsDue: false, commissionCapSkips: [], notes: [...(leapsNote === null ? [] : [leapsNote]), ...cashCutNotes] };
   };
   // The steps ask for a LEAPS expiry's quotes only when they buy, top up or sell one: quoted then, and the look run again.
   let look = runOnce(new Map());
@@ -502,6 +502,9 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   }
   if (pass === "cycles_calls_puts") summary.looked.push(symbol);
   lastRound.notes.push(...look.notes);
+  for (const { position, candidate, maxShareOfPremium } of look.commissionCapSkips) {
+    await recordCommissionCapSkip({ passId: input.passId, symbol, tradingDate: clock.todayIso, position, expiry: candidate.expiry, strike: candidate.strike, dte: candidate.dte, fillPrice: candidate.fillPrice, premiumDollars: candidate.premiumDollars, commissionDollars: candidate.commissionDollars, maxShareOfPremium });
+  }
 
   // 4. The orders, in the steps' order: each one not sent is undone, as if never placed. The second pass sends the LEAPS
   // only: what steps 1 to 3 plan again went out at the first (or waits for a later round). A look that trades shares sends

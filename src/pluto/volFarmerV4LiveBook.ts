@@ -5,6 +5,7 @@ import {
   volFarmerV2CallPremiumShare,
   type VolFarmerV2Book,
   type VolFarmerV2CallSale,
+  type VolFarmerV2CommissionCapSkip,
   type VolFarmerV2LeapsPurchase,
   type VolFarmerV2LeapsSale,
   type VolFarmerV2LegStatus,
@@ -370,10 +371,11 @@ export function sharesOfPlannedOrder(order: VolFarmerV4PlannedOrder): number {
  * The tickers share Pluto's budget (Marcelo 2026-10-28), so an order the free cash cut is noted: the steps word a new
  * cycle's and a Put's in the look's note, and a LEAPS held below its cap is worded here (`cashCutNotes`).
  */
-export function createVolFarmerV4LiveBook(input: { state: VolFarmerV2SymbolState; pending: readonly VolFarmerV4PendingOrder[]; snapshot: VolFarmerV4LiveSnapshot }): { book: VolFarmerV2Book; planned: VolFarmerV4PlannedOrder[]; cashCutNotes: string[] } {
+export function createVolFarmerV4LiveBook(input: { state: VolFarmerV2SymbolState; pending: readonly VolFarmerV4PendingOrder[]; snapshot: VolFarmerV4LiveSnapshot }): { book: VolFarmerV2Book; planned: VolFarmerV4PlannedOrder[]; cashCutNotes: string[]; commissionCapSkips: VolFarmerV2CommissionCapSkip[] } {
   const { state, pending, snapshot } = input;
   const planned: VolFarmerV4PlannedOrder[] = [];
   const cashCutNotes: string[] = [];
+  const commissionCapSkips: VolFarmerV2CommissionCapSkip[] = [];
   let freeCash = snapshot.freeCash;
   const openStatus = (strike: number, contracts: number): VolFarmerV2LegStatus => ({ closed: false, assigned: false, strike, contracts });
   const statusOfPlanned = (ref: string): VolFarmerV2LegStatus | undefined => {
@@ -441,11 +443,14 @@ export function createVolFarmerV4LiveBook(input: { state: VolFarmerV2SymbolState
       else planned.push({ ref: nextRef(), kind: "sell_shares", orders: [order], positionsBeforeSale: structuredClone({ first: state.first, second: state.second, leapsBought: state.leapsBought, leapsToSell: state.leapsToSell, leapsTrigger: state.leapsTrigger }) });
     },
     // A LEAPS the free cash pays for no contract of is the steps' "no LEAPS" note.
+    noteCommissionCapSkip(skip) {
+      commissionCapSkips.push(skip);
+    },
     noteCashCut(cut) {
       if (cut.order === "leaps" && cut.filledContracts > 0) cashCutNotes.push(`the free cash (${formatWholeDollars(cut.freeCash)}) held the LEAPS to ${cut.filledContracts} of the ${cut.filledContracts + cut.unsoldContracts} contracts its cap allows`);
     },
   };
-  return { book, planned, cashCutNotes };
+  return { book, planned, cashCutNotes, commissionCapSkips };
 }
 
 /** What a planned order is counted as until it settles, with the action that sent it. */

@@ -175,6 +175,7 @@ export type PlutoEventType =
   | "stress_override_changed"
   | "order_adopted"
   | "holdings_adopted"
+  | "call_skipped_commission"
   | "readiness_check"
   | "warning";
 
@@ -216,6 +217,7 @@ export const plutoEventCategoryByType: Record<PlutoEventType | LegacyPlutoEventT
   order_confirmed: "trading",
   order_outcome: "trading",
   order_adopted: "trading",
+  call_skipped_commission: "trading",
   pass_started: "info",
   pass_skipped: "info",
 };
@@ -225,6 +227,30 @@ export function plutoEventTypesInCategories(categories: PlutoEventCategory[]): (
 }
 
 /** Appends to the timeline and pushes a `pluto_event` notification so open screens update live. */
+/** A Call Vol Farmer v4's commission cap kept from being sold (volFarmerV4CallMaxCommissionShareOfPremium). */
+export interface CommissionCapSkipEvent {
+  passId: string;
+  symbol: string;
+  tradingDate: string;
+  position: "first" | "second";
+  expiry: string;
+  strike: number;
+  dte: number;
+  fillPrice: number;
+  premiumDollars: number;
+  commissionDollars: number;
+  maxShareOfPremium: number;
+}
+
+/** Recorded once per ticker, contract and trading day: the looks every half minute that find it again add nothing. */
+export async function recordCommissionCapSkip(skip: CommissionCapSkipEvent): Promise<void> {
+  const recorded = await db("pluto_events")
+    .where({ type: "call_skipped_commission" })
+    .whereRaw("payload->>'symbol' = ? and payload->>'tradingDate' = ? and payload->>'expiry' = ? and (payload->>'strike')::numeric = ?", [skip.symbol, skip.tradingDate, skip.expiry, skip.strike])
+    .first("id");
+  if (!recorded) await recordPlutoEvent("call_skipped_commission", { ...skip });
+}
+
 export async function recordPlutoEvent(type: PlutoEventType, payload: Record<string, unknown> = {}): Promise<void> {
   const [row] = await db("pluto_events").insert({ type, payload: JSON.stringify(payload) }).returning(["id", "occurred_at"]);
   await publishNotification({ type: "pluto_event", eventId: Number(row.id), eventType: type, occurredAt: new Date(row.occurred_at).toISOString(), payload });

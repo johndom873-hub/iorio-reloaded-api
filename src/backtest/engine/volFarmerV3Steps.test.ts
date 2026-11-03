@@ -199,6 +199,27 @@ describe("Vol Farmer v3's holding", () => {
     expect(covered.orders.calls).toEqual([]);
   });
 
+  it("sells no Call whose commission is more than 20% of its premium; every Call capped, none is sold and the best is told", () => {
+    const lookAt = (commissionPerContract: number) => {
+      const commissions = { option: { perContractDollars: () => commissionPerContract }, stock: flatStockCommissionEstimator };
+      const skips: Parameters<NonNullable<VolFarmerV2Book["noteCommissionCapSkip"]>>[0][] = [];
+      const { book, orders } = recordingBook();
+      const state = { ...newVolFarmerV2SymbolState(), first: positionOf(400, 90) };
+      const note = runVolFarmerV2Steps({ state, market: { ...marketOf(100), commissions }, farmer: defaultBacktestVolFarmerSettings, v2, v3: defaultBacktestVolFarmerV3Settings, book: { ...book, noteCommissionCapSkip: (skip) => void skips.push(skip) } });
+      return { note, skips, calls: orders.calls };
+    };
+    // The best Call, the $105 at $1.4849 ($148.49 a contract): a $30 commission is 20.2% of it, over the cap, and every
+    // other Call brings less: none is sold, the $105 told.
+    const capped = lookAt(30);
+    expect(capped.calls).toEqual([]);
+    expect(capped.skips.map((skip) => [skip.position, skip.candidate.strike, skip.candidate.premiumDollars, skip.maxShareOfPremium])).toEqual([["first", 105, 148.49, 0.2]]);
+    expect(capped.note).toContain("first position: the $105 Call · 6 Nov (10DTE) not sold: its commission $30.00 is 20% of its $148.49 premium, over 20%");
+    expect(capped.note).toContain("commission over cap");
+    // $29: 19.5% of it, under the cap: the $105 is sold and nothing is told (the Calls the cap leaves out all yield less).
+    const sold = lookAt(29);
+    expect([sold.calls.map((sale) => sale.candidate.strike), sold.skips]).toEqual([[105], []]);
+  });
+
   it("waits for the next expiry to come within the days set: further out, the look sells no option", () => {
     // The look's next expiry is 10 days out. 400 shares at 100 are within a lot of the $50,000 target: nothing to rebalance.
     const state = { ...newVolFarmerV2SymbolState(), first: positionOf(400, 100) };

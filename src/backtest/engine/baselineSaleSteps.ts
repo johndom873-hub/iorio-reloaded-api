@@ -53,6 +53,14 @@ export interface BaselineRejections {
   spansEarnings: number;
   noForecast: number;
   belowVolatilityEdge: number;
+  /** The commission more than maxCommissionShareOfPremium of the premium (Vol Farmer v4's Calls). */
+  commissionOverCap: number;
+}
+
+/** A contract the commission cap left out, with what the rule compared: one contract's commission against its premium (fill × 100). */
+export interface BaselineCommissionCapped extends BaselineCandidate {
+  commissionDollars: number;
+  premiumDollars: number;
 }
 
 /** An expiry's forward as the day's first look that quoted it found it (parity), with the stock price then. */
@@ -119,6 +127,8 @@ export interface BaselineCandidateInput {
   minimumStrike?: number | null;
   /** The highest strike allowed (puts under a cost rule); absent or null when any strike is. */
   maximumStrike?: number | null;
+  /** Leaves out a contract whose commission is more than this share of its premium (0.2 = 20%); absent: no cap. */
+  maxCommissionShareOfPremium?: number;
 }
 
 /** Each expiry's days, years and sessions to it, worked out the first time a quote of it reaches the check that reads it. */
@@ -171,8 +181,9 @@ export function hedgePutCostYieldOnCalendarDays(input: { fillPrice: number; stri
 }
 
 /** Pure: the contracts of one right that pass the rules, best premium yield first (ties: nearer expiry, then lower strike). */
-export function selectBaselineCandidates(input: BaselineCandidateInput): { candidates: BaselineCandidate[]; rejections: BaselineRejections } {
-  const rejections: BaselineRejections = { outsideExpiryRange: 0, noUsableQuote: 0, spreadTooWide: 0, tooLittleVolume: 0, noImpliedVolatility: 0, outsideDeltaRange: 0, noTimeValue: 0, alreadyHeld: 0, belowCost: 0, aboveCeiling: 0, belowMinimumYield: 0, spansEarnings: 0, noForecast: 0, belowVolatilityEdge: 0 };
+export function selectBaselineCandidates(input: BaselineCandidateInput): { candidates: BaselineCandidate[]; rejections: BaselineRejections; commissionCapped: BaselineCommissionCapped[] } {
+  const commissionCapped: BaselineCommissionCapped[] = [];
+  const rejections: BaselineRejections = { outsideExpiryRange: 0, noUsableQuote: 0, spreadTooWide: 0, tooLittleVolume: 0, noImpliedVolatility: 0, outsideDeltaRange: 0, noTimeValue: 0, alreadyHeld: 0, belowCost: 0, aboveCeiling: 0, belowMinimumYield: 0, spansEarnings: 0, noForecast: 0, belowVolatilityEdge: 0, commissionOverCap: 0 };
   const isCall = input.right === "C";
   // The day's anchor moved with the stock (sticky moneyness), as Pluto's surface; an expiry without one (not noted) on spot × e^(rT).
   const forwardOf = (expiry: string, yearsToExpiry: number) => {
@@ -240,7 +251,7 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
       rejections.noTimeValue++;
       continue;
     }
-    candidates.push({
+    const candidate: BaselineCandidate = {
       expiry: quote.expiry,
       strike: quote.strike,
       right: input.right,
@@ -255,15 +266,25 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
       volumeCap,
       volatilityEdge: null,
       edgeYield: null,
-    });
+    };
+    // Example: a Call at a $0.05 fill brings $5.00 a contract; a $1.11 commission is 22% of it, over a 20% cap.
+    const commissionDollars = optionCommissionPerContract(input.commissions);
+    const premiumDollars = fillPrice * sharesPerContract;
+    if (input.maxCommissionShareOfPremium !== undefined && commissionDollars > input.maxCommissionShareOfPremium * premiumDollars) {
+      rejections.commissionOverCap++;
+      commissionCapped.push({ ...candidate, commissionDollars, premiumDollars });
+      continue;
+    }
+    candidates.push(candidate);
   }
   candidates.sort((a, b) => b.premiumYield - a.premiumYield || a.expiry.localeCompare(b.expiry) || a.strike - b.strike);
-  return { candidates, rejections };
+  commissionCapped.sort((a, b) => b.premiumYield - a.premiumYield);
+  return { candidates, rejections, commissionCapped };
 }
 
 /** "spread 40, volume 12": the rules that left contracts out, most first. */
 export function describeRejections(rejections: BaselineRejections): string {
-  const labels: Record<keyof BaselineRejections, string> = { outsideExpiryRange: "expiry", noUsableQuote: "quote", spreadTooWide: "spread", tooLittleVolume: "volume", noImpliedVolatility: "IV", outsideDeltaRange: "delta", noTimeValue: "time value", alreadyHeld: "held", belowCost: "below cost", aboveCeiling: "above ceiling", belowMinimumYield: "yield", spansEarnings: "earnings", noForecast: "no forecast", belowVolatilityEdge: "IV not above forecast" };
+  const labels: Record<keyof BaselineRejections, string> = { outsideExpiryRange: "expiry", noUsableQuote: "quote", spreadTooWide: "spread", tooLittleVolume: "volume", noImpliedVolatility: "IV", outsideDeltaRange: "delta", noTimeValue: "time value", alreadyHeld: "held", belowCost: "below cost", aboveCeiling: "above ceiling", belowMinimumYield: "yield", spansEarnings: "earnings", noForecast: "no forecast", belowVolatilityEdge: "IV not above forecast", commissionOverCap: "commission over cap" };
   return (Object.entries(rejections) as [keyof BaselineRejections, number][])
     .filter(([, count]) => count > 0)
     .sort(([, a], [, b]) => b - a)

@@ -1,5 +1,5 @@
 import { baselineMaxVolumeShare, baselineMinimumBid } from "../backtest/engine/baselineSaleSteps.js";
-import { volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap } from "../backtest/engine/volFarmerV2Steps.js";
+import { volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap, volFarmerV4CallMaxCommissionShareOfPremium } from "../backtest/engine/volFarmerV2Steps.js";
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { regularCloseEt } from "../lib/marketSessionStatus.js";
 import { roundToCents } from "../lib/positionOrderRules.js";
@@ -62,6 +62,8 @@ export interface PlutoHowItWorks {
     maxSpreadPctOfMid: number;
     minimumBid: number;
     maxVolumeSharePct: number;
+    /** No Call is sold whose commission is more than this % of its premium. */
+    callMaxCommissionPctOfPremium: number;
     /** % of the pot the first position's shares are bought with; the Puts sell on the rest. */
     firstPositionPct: number;
     putsStartCallYieldPct: number;
@@ -177,6 +179,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       maxSpreadPctOfMid: settings.volFarmerV4MaxSpreadPctOfMid,
       minimumBid: baselineMinimumBid,
       maxVolumeSharePct: percent(baselineMaxVolumeShare),
+      callMaxCommissionPctOfPremium: percent(volFarmerV4CallMaxCommissionShareOfPremium),
       firstPositionPct: settings.volFarmerV4FirstPositionPct,
       putsStartCallYieldPct: settings.volFarmerV4PutsStartCallYieldPct,
       putMaxAbsDelta: settings.volFarmerV4PutMaxAbsDelta,

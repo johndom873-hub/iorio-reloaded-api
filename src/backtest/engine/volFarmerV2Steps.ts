@@ -4,7 +4,7 @@ import { daysToExpiry, describeOptionContract, describeOrderSize } from "../../l
 import type { BacktestVolFarmerSettings, BacktestVolFarmerV2Settings, BacktestVolFarmerV3Settings } from "../backtestTypes.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
-import { baselineQuoteRejection, describeRejections, roundedStrike, selectBaselineCandidates, type BaselineCandidate, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
+import { baselineQuoteRejection, describeRejections, roundedStrike, selectBaselineCandidates, type BaselineCandidate, type BaselineCommissionCapped, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
 import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchaseFillPrice, optionSaleFillPrice } from "./ledger/ledgerFills.js";
 
 // Vol Farmer v2's steps (Marcelo 2026-10-27) with Vol Farmer v3's rules, as Vol Farmer v4 runs them: two Covered Calls
@@ -69,6 +69,19 @@ import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchas
 //       (38,400 − 800) ÷ 400 = $94.00.
 
 const percent = (fraction: number, digits = 1) => `${(fraction * 100).toFixed(digits)}%`;
+
+/**
+ * Vol Farmer v4's safeguard (Marcelo 2026-11-03): no Call is sold whose commission is more than this share of its premium
+ * (fill × 100). Example: a $0.05 Call brings $5.00 a contract; a $1.11 commission is 22% of it, so it is left out.
+ */
+export const volFarmerV4CallMaxCommissionShareOfPremium = 0.2;
+
+/** A Call the commission cap left out that would otherwise have been sold (the best yield, or the only Call). */
+export interface VolFarmerV2CommissionCapSkip {
+  position: "first" | "second";
+  candidate: BaselineCommissionCapped;
+  maxShareOfPremium: number;
+}
 
 /** A premium one option brought a position. */
 export interface VolFarmerV2Premium {
@@ -386,6 +399,8 @@ export interface VolFarmerV2Book {
   sellLeaps(sale: VolFarmerV2LeapsSale): void;
   /** The backtest records the orders the free cash cut (tickers sharing the account); live books leave it out. */
   noteCashCut?(cut: VolFarmerV2CashCut): void;
+  /** A Call the commission cap kept from being sold: Pluto's activity shows it. */
+  noteCommissionCapSkip?(skip: VolFarmerV2CommissionCapSkip): void;
   /** Vol Farmer v3's rebalancing: shares bought with the free cash, or uncovered ones sold, at the look's price. */
   buyShares?(order: VolFarmerV3SharesOrder): void;
   sellShares?(order: VolFarmerV3SharesOrder): void;
@@ -551,7 +566,7 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
   const dte = daysToExpiry(nextExpiry, todayIso);
   const heldContracts = new Set(book.openOptionContracts().map((contract) => contractKeyOf({ expiry: contract.expiry, strike: asTraded(contract.strike) })));
   /** The next expiry's candidates that `kept` keeps, and its rejections. */
-  const candidatesOf = (right: "C" | "P", limits: { minAbsDelta: number; maxAbsDelta: number; minimumStrike?: number; maximumStrike?: number; heldExcluded: boolean; kept?: (candidate: BaselineCandidate) => boolean }) => {
+  const candidatesOf = (right: "C" | "P", limits: { minAbsDelta: number; maxAbsDelta: number; minimumStrike?: number; maximumStrike?: number; heldExcluded: boolean; kept?: (candidate: BaselineCandidate) => boolean; maxCommissionShareOfPremium?: number }) => {
     const selected = selectBaselineCandidates({
       quotes,
       forwardAnchors: market.forwardAnchors,
@@ -569,17 +584,27 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
       tradingSessionsThrough: market.tradingSessionsThrough,
       ...(limits.minimumStrike === undefined ? {} : { minimumStrike: limits.minimumStrike }),
       ...(limits.maximumStrike === undefined ? {} : { maximumStrike: limits.maximumStrike }),
+      ...(limits.maxCommissionShareOfPremium === undefined ? {} : { maxCommissionShareOfPremium: limits.maxCommissionShareOfPremium }),
     });
     selected.rejections.outsideExpiryRange += market.quotesLeftUnreadByRight?.[right] ?? 0;
-    return { ...selected, candidates: limits.kept ? selected.candidates.filter(limits.kept) : selected.candidates };
+    const kept = limits.kept;
+    return { ...selected, candidates: kept ? selected.candidates.filter(kept) : selected.candidates, commissionCapped: kept ? selected.commissionCapped.filter(kept) : selected.commissionCapped };
   };
   // The Calls at or above the break-even, or (no floor) at any strike above the price.
   const breakEvenFloor = v3.callStrikeFloor !== "none";
   /** Where the Calls were looked for, as a note says it: at or above the break-even, or (no floor) anywhere above the price. */
   const callsSought = (breakEvenAsTraded: number, whose: "its" | "the first") => (breakEvenFloor ? `at or above ${whose} break-even ${breakEvenAsTraded.toFixed(2)}` : `above the price ${stockPrice.toFixed(2)}`);
   const callCandidates = (breakEvenAsTraded: number, heldExcluded: boolean) => {
-    const selected = candidatesOf("C", { minAbsDelta: farmer.callMinAbsDelta, maxAbsDelta: farmer.callMaxAbsDelta, ...(breakEvenFloor ? { minimumStrike: breakEvenAsTraded } : {}), heldExcluded, kept: (candidate) => candidate.strike > stockPrice });
-    return { calls: selected.candidates, rejections: selected.rejections };
+    const selected = candidatesOf("C", { minAbsDelta: farmer.callMinAbsDelta, maxAbsDelta: farmer.callMaxAbsDelta, ...(breakEvenFloor ? { minimumStrike: breakEvenAsTraded } : {}), heldExcluded, kept: (candidate) => candidate.strike > stockPrice, maxCommissionShareOfPremium: volFarmerV4CallMaxCommissionShareOfPremium });
+    return { calls: selected.candidates, rejections: selected.rejections, commissionCapped: selected.commissionCapped };
+  };
+  /** A Call the commission cap left out that yields more than the one chosen (or, none chosen, the best of them): noted and told to the book. */
+  const noteCommissionCapped = (name: "first" | "second", capped: readonly BaselineCommissionCapped[], chosen: BaselineCandidate | null): void => {
+    const skipped = capped.find((candidate) => chosen === null || candidate.premiumYield > chosen.premiumYield);
+    if (skipped === undefined) return;
+    book.noteCommissionCapSkip?.({ position: name, candidate: skipped, maxShareOfPremium: volFarmerV4CallMaxCommissionShareOfPremium });
+    const label = describeOptionContract({ strike: skipped.strike, right: "C", expiry: skipped.expiry, dte: skipped.dte });
+    say(`${name} position: the ${label} not sold: its commission $${skipped.commissionDollars.toFixed(2)} is ${percent(skipped.commissionDollars / skipped.premiumDollars, 0)} of its $${skipped.premiumDollars.toFixed(2)} premium, over ${percent(volFarmerV4CallMaxCommissionShareOfPremium, 0)}`);
   };
 
   /**
@@ -600,13 +625,14 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
     const lotsTarget = Math.min(lotsWanted, Math.floor(freeCash / lotCost + 1e-9));
     const shareCost = stockPrice + market.stockCommissionDollars(Math.max(1, lotsTarget) * sharesPerContract) / (Math.max(1, lotsTarget) * sharesPerContract);
     // A rebuilt first position leaves out the contracts the second holds (one position per contract).
-    const { calls, rejections } = callCandidates(shareCost, rebuild);
+    const { calls, rejections, commissionCapped } = callCandidates(shareCost, rebuild);
     if (lotsTarget < 1 && calls.length > 0) {
       book.noteCashCut?.({ order: "new_cycle", candidate: calls[0]!, wantedContracts: lotsWanted, filledContracts: 0, unsoldContracts: Math.min(lotsWanted, calls[0]!.volumeCap), freeCash });
       say(`${notOpened}: the free cash (${formatWholeDollars(freeCash)}) pays for none of the ${lotsWanted} lots ${sizedBy} wants (${formatWholeDollars(lotCost)} each)`);
       return;
     }
     const call = lotsTarget < 1 ? null : pickByVolume(calls, () => lotsTarget, (candidate) => candidate.volumeCap);
+    if (lotsTarget >= 1) noteCommissionCapped("first", commissionCapped, call);
     if (call === null) {
       say(`${notOpened}: no Call at or above the shares' cost ${shareCost.toFixed(2)} (${describeRejections(rejections) || "none listed"})`);
       return;
@@ -668,9 +694,10 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
     const breakEven = breakEvenAsTraded(position)!;
     // Contracts held from earlier looks are left out (one position per contract); one the other position picks at this
     // look is not, and they sell it as one order.
-    const { calls, rejections } = callCandidates(breakEven, true);
+    const { calls, rejections, commissionCapped } = callCandidates(breakEven, true);
     const capLeft = (candidate: BaselineCandidate) => candidate.volumeCap - (volumeUsed.get(contractKeyOf(candidate)) ?? 0);
     const call = pickByVolume(calls, () => lots, capLeft);
+    noteCommissionCapped(name, commissionCapped, call);
     if (call === null) {
       say(`${name} position: no Call ${callsSought(breakEven, "its")} (${describeRejections(rejections) || "none listed"})`);
       continue;
