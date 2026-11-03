@@ -3,7 +3,7 @@ import { sharedLiveConnection } from "./sharedReadConnection.js";
 import { reserveMarketDataLines, releaseMarketDataLines } from "./marketDataLineBudget.js";
 import { planPoolCapacity, type PoolCapacityEntry } from "./marketDataPoolCapacity.js";
 import { loadFallbackStockPrices } from "../lib/priceService.js";
-import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
+import { isDelayedDataFallbackNotice, logMarketDataEntitlementNotice } from "./requestMarketData.js";
 import type { PriceContract } from "./fetchLivePrices.js";
 import { competingLiveSessionErrorCode, liveDataProbeSymbol, probeCompetingLiveSession } from "./probeCompetingLiveSession.js";
 import { broadcastToLocalSubscribers } from "../lib/notificationBroadcaster.js";
@@ -570,10 +570,13 @@ function attachListeners(ib: IBApi): void {
     const poolKey = reqIdToPoolKey.get(reqId);
     if (!poolKey) return;
     // Kept even for a delayed-data notice: on this REALTIME-only connection it means the contract is not entitled to live
-    // data, which is what the readiness option probe reports. Only the logging below skips it.
+    // data, which is what the readiness option probe reports, and it is logged once per contract.
     const entry = entriesByPoolKey.get(poolKey);
     if (entry && entry.reqId === reqId) entry.lastError = { code, message: error.message };
-    if (isDelayedDataFallbackNotice(code)) return;
+    if (isDelayedDataFallbackNotice(code)) {
+      logMarketDataEntitlementNotice("marketDataPool", poolKey, code, error.message);
+      return;
+    }
     if (code === competingLiveSessionErrorCode && feedRefusal === null) setFeedRefusal({ code, message: error.message, since: new Date().toISOString() });
     console.error(`marketDataPool: error for ${poolKey} (code ${code}): ${error.message}`);
   });

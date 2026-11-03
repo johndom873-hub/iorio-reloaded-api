@@ -1,5 +1,5 @@
 import { EventName, Option, OptionType, Stock, type Contract, type IBApi } from "@stoqey/ib";
-import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
+import { isDelayedDataFallbackNotice, logMarketDataEntitlementNotice } from "./requestMarketData.js";
 import type { LineUsageMeter } from "./lineUsageMeter.js";
 
 // The market quote loop's quote fetcher (approved 2026-09-24): a rolling
@@ -194,8 +194,14 @@ export function runRollingQuoteWindow(contracts: WindowContract[], options: Roll
       if (entry.impliedVolatility !== null && entry.bid !== null && entry.ask !== null) settle(reqId, null, false);
     }
 
-    function onError(_error: Error, code: number, reqId: number): void {
-      if (!pending.has(reqId) || isDelayedDataFallbackNotice(code)) return;
+    function onError(error: Error, code: number, reqId: number): void {
+      const entry = pending.get(reqId);
+      if (!entry) return;
+      if (isDelayedDataFallbackNotice(code)) {
+        const { contract } = entry;
+        logMarketDataEntitlementNotice("rollingQuoteWindow", contract.legType === "stock" ? contract.symbol : `${contract.symbol} ${contract.expiry} ${contract.strike}${contract.right}`, code, error.message);
+        return;
+      }
       settle(reqId, code, false);
     }
 

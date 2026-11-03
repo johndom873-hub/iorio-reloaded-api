@@ -68,6 +68,7 @@ const { systemHealthRouter } = await import("./systemHealth.js");
 const presenceTracker = await import("../lib/presenceTracker.js");
 const llmStats = await import("../genosuke/llmStats.js");
 const { requestRateMiddleware } = await import("../lib/requestRateTracker.js");
+const { workerHeartbeatStaleAfterSeconds } = await import("../lib/tradingGate.js");
 
 const testDb: Knex = db;
 const runLabel = `syshealthtest${Date.now()}`;
@@ -658,6 +659,14 @@ describe("GET /system-health/gateway", () => {
 
     const { json } = await callJson("/gateway");
     expect(json).toMatchObject({ connected: false, uptimeMs: null, lastSystemStatusCode: null, clientId: null, staleOrMissing: false });
+  });
+
+  it("reports a worker row past the heartbeat limit as stale and not connected, keeping its last update time", async () => {
+    const staleUpdatedAt = new Date(Date.now() - (workerHeartbeatStaleAfterSeconds + 30) * 1000);
+    await insertWorkerRow({ updated_at: staleUpdatedAt });
+
+    const { json } = await callJson("/gateway");
+    expect(json).toMatchObject({ connected: false, staleOrMissing: true, updatedAt: staleUpdatedAt.toISOString() });
   });
 
   it("reports the trading halt switch", async () => {

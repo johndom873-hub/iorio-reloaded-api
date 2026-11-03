@@ -167,13 +167,14 @@ describe("lookupPricingSnapshot", () => {
     expect(mocks.releases).toHaveLength(1);
   });
 
-  it("explains a timeout with the last real IBKR error for its request and logs it, but not delayed-data notices", async () => {
+  it("explains a timeout with the last real IBKR error for its request; a delayed-data notice is logged as an entitlement line, not taken as the error", async () => {
     const ib = new FakeIbApi();
     const captured = lookupPricingSnapshot(asConnection(ib), "AAPL", 2).catch((error: Error) => error);
     await vi.advanceTimersByTimeAsync(0);
     ib.emit(EventName.error, new Error("Requested market data is not subscribed. Displaying delayed market data."), 10167, 2);
     ib.emit(EventName.error, new Error("other request"), 200, 9);
-    expect(console.warn).not.toHaveBeenCalled();
+    expect(console.warn).toHaveBeenCalledTimes(1);
+    expect(console.warn).toHaveBeenCalledWith("fetchTickerOverview: not entitled to live data for AAPL (code 10167): Requested market data is not subscribed. Displaying delayed market data.");
     ib.emit(EventName.error, new Error("No security definition has been found"), 200, 2);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(((await captured) as Error).message).toBe("Pricing snapshot error for AAPL (code 200): No security definition has been found");

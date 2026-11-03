@@ -45,7 +45,6 @@ afterAll(async () => {
   await db("market_data_snapshots").where({ ticker_id: tickerId }).del();
   await db("account_pnl_snapshots").where({ snapshot_date: "2026-08-11" }).del();
   await db("job_runs").where({ job_name: "schema_test_job" }).del();
-  await db("strategy_settings").where({ strategy_key: "schema_test_strategy" }).del();
   await db("tickers").where({ id: tickerId }).del();
   await db("users").where({ id: userId }).del();
   await db.destroy();
@@ -192,16 +191,6 @@ describe("database schema round-trips", () => {
     expect(run.status).toBe("success");
   });
 
-  it("strategy_settings: stores and retrieves a row, enforces unique strategy_key", async () => {
-    const [settings] = await db("strategy_settings")
-      .insert({ strategy_key: "schema_test_strategy", delta_target_min: 0.15, delta_target_max: 0.35 })
-      .returning("*");
-    expect(Number(settings.delta_target_min)).toBeCloseTo(0.15);
-
-    await expect(
-      db("strategy_settings").insert({ strategy_key: "schema_test_strategy", delta_target_min: 0.2 }),
-    ).rejects.toThrow(/duplicate key/i);
-  });
   it("order_requests: gate_evaluation is a nullable jsonb that round-trips a nested verdict exactly", async () => {
     const [bare] = await db("order_requests")
       .insert({ requested_by_user_id: userId, request_type: "open_cash_secured_put", payload: JSON.stringify({ symbol: "SCHEMA", strategyKey: "cash_secured_put", legs: [] }) })

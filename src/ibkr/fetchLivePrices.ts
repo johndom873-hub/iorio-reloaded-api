@@ -2,7 +2,7 @@ import { EventName, MarketDataType, Option, OptionType, Stock, type IBApi } from
 import type { Contract } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
-import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
+import { isDelayedDataFallbackNotice, logMarketDataEntitlementNotice } from "./requestMarketData.js";
 import { loadFallbackStockPrices, recordStockPrices } from "../lib/priceService.js";
 import { describeOptionContract } from "../lib/optionContractLabel.js";
 import { optionMarkPrice } from "../lib/optionMarkPrice.js";
@@ -124,8 +124,10 @@ export function requestLivePrices(ib: IBApi, allocateReqId: () => number, contra
   function onError(error: Error, code: number, reqId: number) {
     const contract = reqIdToContract.get(reqId);
     if (!contract) return;
-    // Informational "using delayed data" notices, expected.
-    if (isDelayedDataFallbackNotice(code)) return;
+    if (isDelayedDataFallbackNotice(code)) {
+      logMarketDataEntitlementNotice("fetchLivePrices", `${contract.symbol} (${contract.legType})`, code, error.message);
+      return;
+    }
     console.error(`Live price error for ${contract.symbol} (${contract.legType}, code ${code}): ${error.message}`);
   }
 

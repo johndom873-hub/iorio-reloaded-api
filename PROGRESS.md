@@ -48,11 +48,8 @@ Rebuilt 2026-11-03: every item below was checked against the code that day. The 
 
 - **LEAPS exercise accounting (not built; deadline 17 May 2028, 30 days before the TLT $82 Call expires 16 Jun 2028).** Plain language: if a LEAPS Call is exercised, the app would record it as expired worthless and the shares as a separate buy. It should become shares bought at the strike with the premium in their cost, in positions and the Wheel cycle. Formula needs Marcelo's sign-off.
 - **Flex report reminders.** The live account's exact `Deposits & Withdrawals` label is confirmed only by its first real deposit; staging's Flex token expiry has never been checked; prod's token expires 2027-09-02 (renew by ~2027-08-02).
-- **IBKR "not entitled" codes 10089/10091/10167 are not logged** (`isDelayedDataFallbackNotice`, `src/ibkr/requestMarketData.ts`): a missing price from a missing subscription would have no explanation. The 2026-10-10 analysis never concluded.
-- **Old 23:30 UTC watchdog** (`scripts/run-watchdog-job.ts`) still runs beside the ops monitor; it was to go once the monitor had a week of clean digests.
-- **Unused `strategy_settings` table** still exists; only `schema.test.ts` reads it.
-- **`/system-health/gateway` reports `connected` from a stale worker row** (no heartbeat-age check).
-- **Better Stack log access is not documented in CLAUDE.md.**
+- **Old 23:30 UTC watchdog** (`scripts/run-watchdog-job.ts`) still runs beside the ops monitor, which covers all its checks (every daily job's deadline and stuck runs in `jobDeadlines.ts`; the health check and the monitor watch each other). To retire: remove its Heroku Scheduler entry on staging and prod first (Marcelo), then the code, or the 23:30 run fails without an alert.
+- **Fixed 2026-11-03 (not pushed):** IBKR's "not entitled" codes 10089/10091/10167 are logged once per contract and code (`logMarketDataEntitlementNotice`, `src/ibkr/requestMarketData.ts`), still not treated as errors; `strategy_settings` dropped (migration `20261103200001`); `/system-health/gateway` reports a worker row older than the trading gate's 120 s heartbeat limit as stale and not connected (Pulse already shows "Gateway worker not reporting" for it); Better Stack access documented in CLAUDE.md. None is in the worker's code, so a push does not redeploy the VPS worker.
 - **IBKR data-capture audit (2026-09-23): Marcelo's sign-off** (rule: the nightly job fetches and stores structure; everything else reads the DB). Not to be marked done from Claude's side.
 - **Steady Stake formulas: Marcelo's sign-off** still recorded as pending, though it is a lab choice used in reports since.
 - **Juan: alternative IBKR order types** (marketable limit, midpoint/peg) — never scoped.

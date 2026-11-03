@@ -1,7 +1,7 @@
 import { EventName, Option, OptionType } from "@stoqey/ib";
 import type { IBApi } from "@stoqey/ib";
 import { nextReqIdFor } from "./sharedReadConnection.js";
-import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
+import { isDelayedDataFallbackNotice, logMarketDataEntitlementNotice } from "./requestMarketData.js";
 import { countSentMessages, createLineUsageMeter, percentileOfSorted, type LineUsageSummary } from "./lineUsageMeter.js";
 
 export { percentileOfSorted };
@@ -591,7 +591,11 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
 
   function onError(error: Error, code: number, reqId: number): void {
     const entry = pending.get(reqId);
-    if (!entry || isDelayedDataFallbackNotice(code)) return;
+    if (!entry) return;
+    if (isDelayedDataFallbackNotice(code)) {
+      logMarketDataEntitlementNotice("captureOptionQuoteBatch", `${entry.group.symbol} ${entry.quote.expiry} ${entry.quote.strike}${entry.quote.right}`, code, error.message);
+      return;
+    }
     entry.quote.errorCode = code;
     console.warn(`Option capture error for ${entry.group.symbol} ${entry.quote.expiry} ${entry.quote.strike}${entry.quote.right} (code ${code}): ${error.message}`);
     checkSettled(reqId);

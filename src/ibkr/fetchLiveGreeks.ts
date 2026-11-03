@@ -1,7 +1,7 @@
 import { EventName, MarketDataType, Option, OptionType, type IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
-import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "./requestMarketData.js";
+import { isDelayedDataFallbackNotice, logMarketDataEntitlementNotice, requestRealtimeMarketData } from "./requestMarketData.js";
 import { randomUUID } from "node:crypto";
 import { describeMarketDataLineShortage, releaseMarketDataLines, reserveMarketDataLines } from "./marketDataLineBudget.js";
 
@@ -107,10 +107,10 @@ function requestLiveGreeks(ib: IBApi, allocateReqId: () => number, contracts: Gr
   function onError(error: Error, code: number, reqId: number) {
     const contract = reqIdToContract.get(reqId);
     if (!contract) return;
-    // Informational "using delayed data" notices, expected wherever this
-    // account isn't entitled for real-time on a given symbol. See the same
-    // handling in fetchOptionChain.ts's fetchQuotesForContracts.
-    if (isDelayedDataFallbackNotice(code)) return;
+    if (isDelayedDataFallbackNotice(code)) {
+      logMarketDataEntitlementNotice("fetchLiveGreeks", `${contract.symbol} ${contract.expiry} ${contract.strike}${contract.right}`, code, error.message);
+      return;
+    }
     console.error(
       `Live greeks error for ${contract.symbol} ${contract.expiry} ${contract.strike}${contract.right} (code ${code}): ${error.message}`,
     );

@@ -2,7 +2,7 @@ import { BarSizeSetting, EventName, Stock, WhatToShow, type Contract } from "@st
 import { randomUUID } from "node:crypto";
 import { describeMarketDataLineShortage, releaseMarketDataLines, reserveMarketDataLines } from "./marketDataLineBudget.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "./requestMarketData.js";
+import { isDelayedDataFallbackNotice, logMarketDataEntitlementNotice, requestRealtimeMarketData } from "./requestMarketData.js";
 import { recordStockPrices } from "../lib/priceService.js";
 
 export interface TickerPricing {
@@ -165,7 +165,10 @@ async function lookupPricingSnapshotUnbudgeted(connection: IbkrConnection, symbo
     // generic timeout string.
     function onError(error: Error, code: number, errorReqId: number) {
       if (errorReqId !== reqId) return;
-      if (isDelayedDataFallbackNotice(code)) return;
+      if (isDelayedDataFallbackNotice(code)) {
+        logMarketDataEntitlementNotice("fetchTickerOverview", symbol, code, error.message);
+        return;
+      }
       console.warn(`IBKR pricing snapshot warning for ${symbol} (code ${code}): ${error.message}`);
       lastError = `Pricing snapshot error for ${symbol} (code ${code}): ${error.message}`;
     }

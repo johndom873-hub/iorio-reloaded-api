@@ -31,3 +31,21 @@ export function markMarketDataTypeManaged(ib: IBApi): void {
 export function isDelayedDataFallbackNotice(code: number): boolean {
   return code === 10089 || code === 10091 || code === 10167;
 }
+
+// Each (source, contract, code) is logged once per process, so a subscription re-made after every reconnect, or a
+// contract fetched every round, leaves one line rather than one per request. Cleared past the cap to stay bounded.
+const loggedEntitlementNotices = new Set<string>();
+const loggedEntitlementNoticesCap = 5_000;
+
+/**
+ * Logs a delayed-data notice (isDelayedDataFallbackNotice): it means the account has no live-data subscription for the
+ * contract, so a missing or delayed price has this as its explanation. Returns whether the line was written.
+ */
+export function logMarketDataEntitlementNotice(source: string, contractLabel: string, code: number, message: string): boolean {
+  const noticeKey = `${source}|${contractLabel}|${code}`;
+  if (loggedEntitlementNotices.has(noticeKey)) return false;
+  if (loggedEntitlementNotices.size >= loggedEntitlementNoticesCap) loggedEntitlementNotices.clear();
+  loggedEntitlementNotices.add(noticeKey);
+  console.warn(`${source}: not entitled to live data for ${contractLabel} (code ${code}): ${message}`);
+  return true;
+}

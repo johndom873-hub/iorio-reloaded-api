@@ -17,6 +17,7 @@ import { dbQueryTimingStats } from "../lib/dbQueryTimingTracker.js";
 import { requireEnvironmentVariable } from "../config/env.js";
 import { marketQuoteLoopStatus } from "../lib/marketQuoteLoop.js";
 import { fetchTradingHalt } from "../lib/platformControls.js";
+import { workerHeartbeatStaleAfterSeconds } from "../lib/tradingGate.js";
 import { marketDataPoolSnapshot } from "../ibkr/marketDataPool.js";
 import { loadActiveMarketDataLineReservations, summarizeMarketDataLineUsage } from "../ibkr/marketDataLineBudget.js";
 
@@ -225,8 +226,12 @@ async function loadGatewayHealth() {
     return { connected: false, staleOrMissing: true, inFlightOrderCount: Number(orderCountResult?.count ?? 0), tradingHalted: tradingHalt.enabled };
   }
 
+  // A row the worker stopped updating keeps its last `connected`; past the trading gate's heartbeat limit it is reported
+  // stale and not connected, as the gate treats it.
+  const heartbeatStale = Date.now() - new Date(health.updated_at).getTime() > workerHeartbeatStaleAfterSeconds * 1000;
+
   return {
-    connected: health.connected,
+    connected: health.connected && !heartbeatStale,
     // The operator kill switch (platform_controls.trading_halt): the Pulse Gateway card's "Trading" row.
     tradingHalted: tradingHalt.enabled,
     uptimeMs: health.uptime_ms !== null ? Number(health.uptime_ms) : null,
@@ -240,7 +245,7 @@ async function loadGatewayHealth() {
     // IBKR market-data lines in use across every process sharing the login (web dyno pool, capture,
     // Day Signals, one-off snapshots), against the shared budget — see summarizeMarketDataLineUsage.
     marketDataLines: summarizeMarketDataLineUsage(reservations, marketDataPoolSnapshot().openLineCount),
-    staleOrMissing: false,
+    staleOrMissing: heartbeatStale,
   };
 }
 
