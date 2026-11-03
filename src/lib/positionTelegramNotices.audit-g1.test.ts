@@ -215,7 +215,7 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     await insertLeg(positionId, { leg_type: "stock", side: "long", quantity: 100, multiplier: 1, option_type: null, strike_price: null, expiry_date: null, entry_price: 50, exit_price: 50, exit_at: new Date() });
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
-    expect(pass.sent[0]!.split("\n")[0]).toBe(`📤 Position closed: ${symbol} stock, no strategy — shares moved into a covered call`);
+    expect(pass.sent[0]!.split("\n")[0]).toBe(`📤 Position closed: ${symbol} stock, No Strategy — shares moved into a covered call`);
     // The base is what the shares cost (100 × 50), even once they have moved on.
     expect(pass.sent[0]!.split("\n").at(-1)).toBe("P&L: $0.00 (0.00%)");
   });
@@ -261,7 +261,7 @@ describe("describePositionClosedNotice and describePositionOpenedNotice (pure)",
       sharesCarriedFromPositions: [{ positionId: "a", strategyKey: "cash_secured_put" }, { positionId: "b", strategyKey: "unstructured" }],
       legs: [{ legType: "stock" as const, side: "long" as const, quantity: 200, optionType: null, strikePrice: null, expiryDate: null, entryPrice: 96.2, exitPrice: null, openingFill: { quantity: 100, averagePrice: 92.4325, commission: null } }],
     };
-    expect(describePositionOpenedNotice(opened).split("\n").slice(1)).toEqual(["• Buy 100 shares @ 92.4325", "• 100 shares carried from a cash-secured put and a position with no strategy"]);
+    expect(describePositionOpenedNotice(opened).split("\n").slice(1)).toEqual(["• Buy 100 shares @ 92.4325", "• 100 shares carried from a cash-secured put and a No Strategy position"]);
   });
 
   it("an option leg with no opening trade recorded keeps its entry price and shows no commission", () => {

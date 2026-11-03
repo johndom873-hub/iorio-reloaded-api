@@ -1150,7 +1150,7 @@ describe("POST /positions/:id/recovery-path", () => {
   it("streams the evaluation's outcome as one frame carrying the status a plain route would have sent", async () => {
     const cases: [string, unknown, number, unknown][] = [
       ["not_found", { status: "not_found" }, 404, { error: "Position not found." }],
-      ["not_unstructured", { status: "not_unstructured", reason: "Only an open unstructured position can be evaluated for recovery." }, 400, { error: "Only an open unstructured position can be evaluated for recovery." }],
+      ["not_unstructured", { status: "not_unstructured", reason: "Only an open No Strategy position can be evaluated for recovery." }, 400, { error: "Only an open No Strategy position can be evaluated for recovery." }],
       ["no_shares", { status: "no_shares" }, 422, { error: "No open stock shares held on this position." }],
       ["no_settings", { status: "no_settings" }, 409, { error: "No strategy settings configured for covered calls." }],
     ];

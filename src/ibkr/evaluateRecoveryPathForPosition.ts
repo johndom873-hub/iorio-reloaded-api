@@ -86,7 +86,7 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
 
   if (!positionRow) return { status: "not_found" };
   if (positionRow.status !== "open" || positionRow.strategyKey !== "unstructured") {
-    return { status: "not_unstructured", reason: "Only an open unstructured position can be evaluated for recovery." };
+    return { status: "not_unstructured", reason: "Only an open No Strategy position can be evaluated for recovery." };
   }
 
   const legs: { quantity: string; entryPrice: string }[] = await db("position_legs")

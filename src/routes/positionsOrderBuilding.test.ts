@@ -1128,7 +1128,7 @@ describe("POST /positions/:id/close", () => {
 
     const withContracts = await call("POST", `/positions/${positionId}/close`, { legs: [{ legId: legIds[1], limitPrice: 1 }], contractsToClose: 1 });
     expect(withContracts.status).toBe(400);
-    expect(withContracts.json.error).toBe("contractsToClose is not supported for unstructured positions — provide a quantity per leg instead.");
+    expect(withContracts.json.error).toBe("contractsToClose is not supported for No Strategy positions — provide a quantity per leg instead.");
   });
 
   it("answers 500 and builds nothing when an option leg has no expiry date to put in the order", async () => {

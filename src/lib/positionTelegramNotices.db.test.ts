@@ -151,7 +151,7 @@ describe("sendDuePositionTelegramNotices", () => {
     await sendDuePositionTelegramNotices(sender.send);
     expect(sender.sent.filter((message) => message.includes(expired.symbol))).toEqual([]);
     expect(sender.sent.filter((message) => message.includes(leftover.symbol))).toEqual([
-      `📥 New position: ${leftover.symbol} stock, no strategy (left over from a put assignment)\n• Buy 100 shares @ 180.00`,
+      `📥 New position: ${leftover.symbol} stock, No Strategy (left over from a put assignment)\n• Buy 100 shares @ 180.00`,
     ]);
   });
 

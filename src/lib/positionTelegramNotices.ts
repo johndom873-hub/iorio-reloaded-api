@@ -33,17 +33,17 @@ const closeReasonLabels: Record<string, string> = {
 function describePositionSubject(event: PositionEvent, unstructuredReason: string | null): string {
   if (event.strategyKey !== "unstructured") return `${event.symbol} ${labelStrategy(event.strategyKey)}`;
   const reason = unstructuredReason ? unstructuredReasonLabels[unstructuredReason] ?? unstructuredReason : null;
-  return `${event.symbol} stock, no strategy${reason ? ` (${reason})` : ""}`;
+  return `${event.symbol} stock, No Strategy${reason ? ` (${reason})` : ""}`;
 }
 
 const shareHandOverPositionLabels: Record<string, string> = {
   covered_call: "a covered call",
   cash_secured_put: "a cash-secured put",
   hedge: "a hedge",
-  unstructured: "a position with no strategy",
+  unstructured: "a No Strategy position",
 };
 
-/** "a covered call", "a cash-secured put and a position with no strategy"; null when there is none. */
+/** "a covered call", "a cash-secured put and a No Strategy position"; null when there is none. */
 function describeShareHandOverPositions(positions: ShareHandOverPosition[]): string | null {
   if (positions.length === 0) return null;
   return positions.map((position) => shareHandOverPositionLabels[position.strategyKey] ?? `a ${labelStrategy(position.strategyKey)} position`).join(" and ");

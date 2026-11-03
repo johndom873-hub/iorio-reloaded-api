@@ -2099,7 +2099,7 @@ positionsRouter.post("/:id/close", async (request, response) => {
   const optionLegs = legsToClose.filter((leg) => leg.leg_type === "option");
   if (contractsToClose !== undefined) {
     if (isUnstructured) {
-      response.status(400).json({ error: "contractsToClose is not supported for unstructured positions — provide a quantity per leg instead." });
+      response.status(400).json({ error: "contractsToClose is not supported for No Strategy positions — provide a quantity per leg instead." });
       return;
     }
     if (optionLegs.length !== 1) {
