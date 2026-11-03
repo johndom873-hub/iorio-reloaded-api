@@ -35,6 +35,7 @@ import {
 import { validateBacktestBookPageQuery, validateBacktestSessionsPageQuery } from "../backtest/jobs/backtestSessionRequest.js";
 import { validateBatchRequestAgainstLab, validateSessionRequestAgainstLab } from "../backtest/jobs/labSessionRequest.js";
 import { registerTickerAnalysisRoutes } from "./backtestAnalysisRoutes.js";
+import { registerPortfolioSimulatorRoutes } from "./backtestPortfolioRoutes.js";
 import { analysesOutOfDateAfter } from "../backtest/analysis/analysisStore.js";
 import { loadBacktestSessionPriceChart } from "../backtest/analysis/sessionPriceChart.js";
 import { loadBacktestSessionStockPrices } from "../backtest/analysis/sessionStockPrices.js";
@@ -353,6 +354,7 @@ backtestRouter.delete("/sessions/:id", async (request, response) => {
 });
 
 registerTickerAnalysisRoutes(backtestRouter);
+registerPortfolioSimulatorRoutes(backtestRouter);
 
 // A request the job or session state does not allow is answered with its own status and message; anything else goes on
 // to the app's error handler.

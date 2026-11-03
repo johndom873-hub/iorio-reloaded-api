@@ -349,6 +349,51 @@ Each ticker's Analyse window (Backtesting → Data files) judges it for Vol Farm
 
 **Out of date.** An analysis records the lab values it read (v4's section, the fills' spread share, Pluto's window and the default account); a save that changes one of them, or a newer formulas version, shows it as out of date until Re-run analysis or the Data files table's Re-run out of date runs it again. Saves re-run nothing themselves.
 
+## Portfolio simulator (approved by Marcelo 2026-11-03)
+
+The lab's portfolio simulator projects a book of Vol Farmer v4 tickers 3 or 5 years ahead, week by week (Monday to Sunday). It is built up from parts measured on each ticker's latest analysis backtest, not a backtest of the book. Code: `src/backtest/portfolio/`. Feasibility: one-ticker backtests combined at fixed weights every day gave 18.10% · −19.59% against a 41-ticker engine book's 18.29% · −20.06% (2020–2026, the same engine). Worked examples are XLE's.
+
+**A ticker's parts** (its analysis backtest, the account and the buy-and-hold line marked at 10:00):
+- **P1 options' income per Call day** = k × IV, with k = Σ premium collected ÷ Σ (account at the week's start × IV at the week's start × Call days in the week). Example: k 0.00926 at IV 28.3% gives 0.26% of the account per Call day.
+- **P2 Call days a week** = expiry days a week over the data file's last 3 months × the share of its last 12 months' expiry days with a Call sold. Example: 1.51 × 86% = 1.30. (Measured on the 35 "suits" tickers: tickers whose expiries went from weekly to three or five a week get the extra premium without the extra call-aways P3 measured at one Call a week; the code also offers the backtest's own Call days a week, `callDaysPace: "backtest"`, pending Marcelo's choice.)
+- **P3 swing capture**: up = Σ swing over the weeks the stock rose ÷ Σ its rises; down likewise over the weeks it fell. Swing = the week's change of the account − premium − interest, ÷ the account at the week's start. Example: up 0.588, down 0.718. A 3% rise adds 1.76%; a 3% fall takes 2.15%.
+- **P4 cash** = (1 − the shares' average share of the account) × the T-bill now. Example: 36.5% × 3.99% = 1.46% a year.
+- **Lot fit**: P1, P3 and the shares' share are scaled by F3's share of the 80% target whole lots reach at the book's pot ÷ that at the analysis pot, at today's price. The book's pot = allocation × (1 + the allowance) × account; the allowance is the analyses' own (read-only). Example: $300 a share, $50,000 pot against $120,000: 75.0% ÷ 93.75% = 0.80.
+
+**A ticker's week**: T-bill + s × (k × IV × Call days + capture × move − shares held × T-bill), with s the lot-fit scale. Example: IV 28.3%, 1.30 Call days, a 2% rise, T-bill 3.99%: 0.341% + 1.176% + 0.028% = 1.545%.
+
+**Paths**:
+- **P5**: blocks of 4 consecutive weeks drawn from SPY's weeks since 2006, the same dates for every ticker, from a seeded generator. Each week uses that week's close move and the IBKR IV at the end of the week before. Before a ticker's listing, its week = its average + β × (SPY's move − SPY's average) + one of its own leftover weeks, and its IV = SPY's IV × (its median IV ÷ SPY's median IV). β = cov ÷ var of SPY over its own weeks. IV is capped at the highest IV at a week's start in its backtest.
+- **P6 neutral**: every week of a ticker moves by the same amount, so its average week becomes T-bill now + β × (SPY's average week − the T-bill's average week). The T-bill's average is from 2010, where the cached series starts. Example: NVDA's 41.9% a year since 2006 counts 3.99% + 1.62 × 8.62% = 17.95%.
+- **P7 the book's week** = Σ allocation × the ticker's week (fixed weights). Empty allocations take an equal share of what the set ones leave.
+- **P8**: 2,000 paths. Each path's CAGR = end value ^ (52.18 ÷ weeks) − 1, its Max drawdown is on weekly values (about 1.5 points shallower than daily), and its Excess Calmar = (CAGR − T-bill now) ÷ |Max drawdown|. The outputs are the 10th, 50th and 90th percentiles, Max drawdown at every whole percentile (the chance of a fall worse than X), and the book's value each week at the 10th, 50th and 90th percentile.
+- **P9 replays**: the book through the actual weeks of 2008 (8 Oct 2007 to 9 Mar 2009), Covid (17 Feb to 23 Mar 2020) and 2022 (3 Jan to 10 Oct 2022). A ticker not yet listed moves as its average + β × SPY's move around SPY's average.
+
+**Read-outs**:
+- **D1 the average year**: each part's average week over every path × 52.18 (options' income, swings, T-bills). They add up to the average year, not exactly the CAGR.
+- **D2 moves like N independent tickers** = 1 ÷ Σᵢ Σⱼ wᵢ wⱼ ρᵢⱼ, with ρ on weekly moves over the weeks both traded. A pair with fewer than 52 shared weeks counts 0. Example: 41 equal tickers at an average correlation of 0.318 move like 3.0.
+- **D3 share of the fall**: in each path's Max drawdown window, a ticker's dollars = Σ (value before the week × allocation × its week). Its share = its dollars ÷ the book's, averaged over the paths with a fall. The shares add up to 100%.
+- **D4 share of the return** = allocation × the ticker's average week ÷ the book's average week.
+- **D5 book beta** = the slope of the book's weeks through the whole history on SPY's.
+- **Worst weeks together** = of the weeks both traded, the share of A's worst 10% that are also among B's worst 10% (the same count for both). Unrelated tickers score about 10%; QQQ–SPY 77%, NVDA–SMH 65%, XLE–SPY 55%, GLD–SPY 17%. It replaced correlation on SPY's down weeks, which reads lower than on every week (0.24 against 0.32 on 41 tickers) because keeping only those weeks removes most of the market's own move.
+- **Groups**: tickers joined by average linkage on worst weeks together, while two groups average 50% or more.
+- **2020–2026 replay**: the book's analysis backtests combined at fixed weights every day. A ticker before its backtest starts earns the T-bill.
+
+**Warnings**:
+- **W1**: its latest analysis says v4 doesn't suit it.
+- **W2**: one lot (100 × today's price + $0.50) is over 80% of its pot.
+- **W3**: one group holds over 30% of the book.
+- **W4**: under 5 years of its own daily bars.
+- **W5**: its analysis backtest saw no 20% fall of SPY from a peak inside it.
+- **W6**: the allocations don't add up to 100%.
+
+**Suggestions**: one change at a time, scored by the neutral projection's median Excess Calmar on 1,000 paths shared by every candidate:
+- drop a ticker (the others keep their proportions);
+- add a "suits" ticker at 1 ÷ (N + 1);
+- halve or double one (the others rescaled to 100%).
+
+The five largest rises are shown, each with its median CAGR and Max drawdown.
+
 ## Baselines (comparison only)
 
 Two buy-and-hold series run beside every session, marked at 10:00 each session day and measured with the same formulas as the session (return, CAGR, Sortino, drawdown, worst month). They are for comparison only: nothing in the session depends on them. Neither counts dividends.
