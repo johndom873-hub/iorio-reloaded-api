@@ -69,7 +69,7 @@ export interface ExecuteLeapsSaleInput {
 }
 
 /**
- * Vol Farmer v4's share purchase (its rebalancing, or a first position bought on a day it sells no option): shares bought
+ * Vol Farmer v4's share purchase (its rebalancing top-up, on a day it sells a Call: never a first position alone): shares bought
  * on their own through the order route (strategyKey "shares"); `plan.quantity` is the shares.
  */
 export interface ExecuteSharesPurchaseInput {

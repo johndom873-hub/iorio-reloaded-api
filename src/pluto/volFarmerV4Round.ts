@@ -73,7 +73,8 @@ import { loadVolFarmerV4LeftoverStockLeg, loadVolFarmerV4LegStatuses, loadVolFar
 // (alphabetical, starting one ticker further each day), a new cycle buys no more lots than the free cash pays for, and
 // the LEAPS go last: a second pass looks again at the tickers whose LEAPS purchase or top-up is due and sends only those,
 // on the free cash every ticker's first pass left. What the free cash cut is in the ticker's notes.
-// v4's share orders (Marcelo 2026-10-31): a look that rebalances, or buys a first position on a day it sells no option,
+// v4's share orders (Marcelo 2026-10-31): a look that rebalances (a top-up only on a day it sells a Call, Marcelo 2026-11-03:
+// no shares are bought without one, so a flat ticker waits for that day and its shares go with the Call),
 // sends that share order alone once no other order of the ticker works, at the mid of Pluto's own stock quote; its option
 // orders, planned on the shares after it, are undone and planned again once it ends, and the ticker waits while it works.
 // The account is a cash account (Marcelo 2026-10-31): the free cash is also held to the settled cash left, IBKR's settled
@@ -804,7 +805,7 @@ function bookCapitalGate(capital: ReturnType<typeof strategyBookCapitalVerdict>)
 }
 
 /**
- * One share order (v4's rebalancing, or a first position bought on a day it sells no option): a purchase within the caps
+ * One share order (v4's rebalancing: a top-up on a day it sells a Call, or a trim): a purchase within the caps
  * and Pluto's capital budget, a sale from the ticker's leftover-stock position, each at the mid of Pluto's own stock
  * quote (bid and ask, no older than the band's quote age), then the executor. Answers as sendOrder does.
  */

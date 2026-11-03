@@ -1025,7 +1025,7 @@ function readSignalSnapshot(raw: unknown): { ok: true; value: Record<string, unk
 
 /**
  * Vol Farmer v4's share purchase (strategyKey "shares", Marcelo 2026-10-31): a stock leg alone, bought at Pluto's limit when
- * it rebalances, or buys a first position on a day it sells no option. Pluto's only, for an action taken under v4; the worker
+ * it tops up its holding on a day it sells a Call (a first position is bought only with its Call). Pluto's only, for an action taken under v4; the worker
  * writes its fills to the ticker's uncovered shares (ibkrGatewayOrderTracking.ts).
  */
 async function buildPlutoSharePurchase(request: Request, response: Response): Promise<void> {

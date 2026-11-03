@@ -368,6 +368,11 @@ describe("runVolFarmerV4Round", () => {
 
 describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
   const filledPurchase = (shares: number, price: number) => ({ working: false, filledContracts: 0, optionLegIds: [], optionNetDollars: 0, sharesBought: shares, sharesCostDollars: shares * price + shares * 0.005, sharesSold: 0 });
+  /** A day a Call is sold (the next expiry): 1,000 shares ($100,000) against 80% of the $250,000 pot ± $50,000, a top-up of 900. */
+  const topUpDue = () => {
+    roundSettings = { ...v4Settings, volFarmerV4OptionsExpiry: "next" };
+    holdingFirstPosition(1_000);
+  };
 
   it("stops a ticker whose price is about a split's factor from the previous close, with none recorded, and tells a person once", async () => {
     // $100 against a previous close of $200.40: 0.499, within 5% of ½, a 2-for-1 split's factor.
@@ -385,7 +390,7 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
   });
 
   it("buys no shares on a stock quote older than the order route's 15 seconds, and says so", async () => {
-    roundSettings = v4Settings;
+    topUpDue();
     harness.stockQuote = { ...harness.stockQuote, updatedAtMs: Date.now() - 60_000 };
     const summary = await round();
     expect(harness.actions).toEqual([expect.objectContaining({ kind: "buy_shares", outcome: "blocked", blockReason: expect.stringContaining("live_quote: no two-sided stock quote of the last 15 seconds") })]);
@@ -393,32 +398,17 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
     expect(summary.sent).toBe(0);
   });
 
-  it("on a day no option ends, buys a flat ticker's first position alone at the mid of Pluto's quote, waits while it works, then holds the shares at their fill", async () => {
+  it("on a day no option ends, buys no shares, a flat ticker's first position nor a top-up, and says why", async () => {
     roundSettings = v4Settings;
     const summary = await round();
-    // 80% of the $250,000 pot: floor(200,000 ÷ 10,000.50) = 19 lots, bought at the mid of 99.98 / 100.02.
-    expect(harness.actions).toEqual([expect.objectContaining({ kind: "buy_shares", symbol: "VFT", quantity: 1_900, limitPrice: 100, executionStrategy: "vol_farmer_v4", outcome: "validated" })]);
-    expect(harness.executed).toEqual([expect.objectContaining({ kind: "shares_buy", symbol: "VFT", plan: expect.objectContaining({ quantity: 1_900, limitPrice: 100, notional: 190_000 }) })]);
-    expect(summary).toMatchObject({ planned: 1, sent: 1 });
-    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringContaining("VFT Buy 1900 shares @ 100.00 (a new cycle's first position: 80% of the $250,000 pot, with no Call until an expiry day)")]);
-    let memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
-    expect(memory.pending).toEqual([expect.objectContaining({ ref: "action:action-1", kind: "buy_shares", shares: 1_900, startsCycle: true, plannedSpentDollars: 190_009.5 })]);
-    expect(memory.state.first).toMatchObject({ shares: 1_900 });
+    expect([harness.actions, harness.executed]).toEqual([[], []]);
+    expect(summary).toMatchObject({ planned: 0, sent: 0 });
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual(["no cycle opened: no Call is sold today, and shares are bought only with one (until an expiry day)"]);
 
-    // Still working: the ticker waits, nothing else is planned.
+    holdingFirstPosition(1_000);
     await round();
-    expect(harness.executed).toHaveLength(1);
-    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual(["waits for its purchase of 1900 shares to end"]);
-
-    // Filled at 99.99: the shares cost what they filled at, commission included; within the band, nothing more to do.
-    harness.outcomes.set("action-1", filledPurchase(1_900, 99.99));
-    harness.positionsByTickerId.set("t-VFT", [{ strategyKey: "unstructured", status: "open", legs: [stockLeg("s1", 1_900)] }]);
-    await round();
-    memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
-    expect(memory.pending).toEqual([]);
-    expect(memory.state.first!.shares).toBe(1_900);
-    expect(memory.state.first!.costPerShare).toBeCloseTo(99.995, 10);
-    expect(harness.executed).toHaveLength(1);
+    expect(harness.executed).toEqual([]);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringMatching(/^no top-up: first position \$100,000 against a target of \$200,000 .*, but no Call is sold today, and shares are bought only with one \(until an expiry day\)$/)]);
   });
 
   it("sends a share order alone: a top-up's Call is undone, and sold once the shares are bought", async () => {
@@ -441,15 +431,14 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
   });
 
   it("holds a share order back while another order of the ticker works, and sends nothing of the look", async () => {
-    roundSettings = v4Settings;
-    holdingFirstPosition(1_000);
+    topUpDue();
     const memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
     memory.state.second = { shares: 0, costPerShare: 0, premiums: [{ legId: "action:put-1", dollars: 100, shares: 200 }], calls: [], puts: [{ legId: "action:put-1", shares: 200 }] };
     memory.pending = [{ ref: "action:put-1", actionId: "put-1", kind: "cash_secured_put", expiry: "2026-11-06", strike: 90, contracts: 2, startsCycle: false, contractsByPosition: { first: 0, second: 2 }, plannedPremiumByPosition: { first: 0, second: 100 }, leapsBeforeSale: null }];
     harness.outcomes.set("put-1", { working: true, filledContracts: 0, optionLegIds: [], optionNetDollars: 0, sharesBought: 0, sharesCostDollars: 0, sharesSold: 0 });
     await round();
     expect(harness.executed).toEqual([]);
-    expect(harness.lastRounds.get("t-VFT")!.notes.at(-1)).toMatch(/^VFT Buy 900 shares @ 100\.00 .* waits for the ticker's 1 working order\(s\) to end$/);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toContainEqual(expect.stringMatching(/^VFT Buy 900 shares @ 100\.00 .* waits for the ticker's 1 working order\(s\) to end$/));
     const saved = harness.memory.get("t-VFT") as VolFarmerV4Memory;
     expect(saved.state.first).toMatchObject({ shares: 1_000, costPerShare: 100 });
     expect(saved.pending.map((order) => order.actionId)).toEqual(["put-1"]);
@@ -474,22 +463,23 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
   });
 
   it("buys no more than the settled cash left pays for, and nothing when IBKR reports no settled cash", async () => {
-    roundSettings = v4Settings;
+    topUpDue();
     harness.settledFreeCash = 50_000;
     await round();
     expect(harness.executed).toEqual([expect.objectContaining({ kind: "shares_buy", plan: expect.objectContaining({ quantity: 400 }) })]);
     expect(harness.lastRounds.get("t-VFT")!.figures).toMatchObject({ freeCashDollars: 50_000 });
 
-    harness.memory.clear();
+    holdingFirstPosition(1_000);
     harness.executed.length = 0;
     harness.settledCashValue = null;
     await round();
-    expect(harness.executed).toEqual([]);
-    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual(["IBKR reports no settled cash, so the free cash is 0: nothing is bought and no Put sold", expect.stringContaining("no first position bought")]);
+    // A Call on the shares held needs no cash: only the purchase is left out.
+    expect(harness.executed.map((order) => order.kind)).toEqual(["strategy_open"]);
+    expect(harness.lastRounds.get("t-VFT")!.notes.slice(0, 2)).toEqual(["IBKR reports no settled cash, so the free cash is 0: nothing is bought and no Put sold", expect.stringContaining("no top-up")]);
   });
 
   it("on the paper account, with the total cash standing in for the settled cash, buys and says so", async () => {
-    roundSettings = v4Settings;
+    topUpDue();
     harness.settledCashValue = 500_000;
     harness.settledCashIsTotalCash = true;
     await round();

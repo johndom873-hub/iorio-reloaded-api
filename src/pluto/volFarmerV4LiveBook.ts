@@ -429,7 +429,8 @@ export function createVolFarmerV4LiveBook(input: { state: VolFarmerV2SymbolState
     },
     buyShares(order) {
       const spentDollars = order.shares * snapshot.stockPrice + snapshot.stockCommissionDollars(order.shares);
-      // Bought on a flat ticker, the shares open its cycle (a first position bought alone on a day no option is sold).
+      // A rebalancing top-up: the steps buy no shares on a flat ticker without its first Call (Marcelo 2026-11-03), so this
+      // opens no cycle; the flag stays for orders saved before.
       planned.push({ ref: nextRef(), kind: "buy_shares", order, spentDollars, startsCycle: isFlat() });
       freeCash -= spentDollars;
     },
