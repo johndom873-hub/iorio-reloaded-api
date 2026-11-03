@@ -156,13 +156,14 @@ solvedInputs.fill(Number.NaN);
 const hashScratch = new Float64Array(1);
 const hashScratchWords = new Uint32Array(hashScratch.buffer);
 
-function solvedSlotOf(inputs: readonly [number, number, number, number, number, number]): number {
-  let hash = 0x811c9dc5;
-  for (const value of inputs) {
-    hashScratch[0] = value;
-    hash = Math.imul(hash ^ hashScratchWords[0]!, 0x01000193);
-    hash = Math.imul(hash ^ hashScratchWords[1]!, 0x01000193);
-  }
+/** FNV-1a over a number's two 32-bit words. */
+function mixedHash(hash: number, value: number): number {
+  hashScratch[0] = value;
+  return Math.imul(Math.imul(hash ^ hashScratchWords[0]!, 0x01000193) ^ hashScratchWords[1]!, 0x01000193);
+}
+
+function solvedSlotOf(price: number, forward: number, strike: number, yearsToExpiry: number, riskFreeRate: number, call: number): number {
+  let hash = mixedHash(mixedHash(mixedHash(mixedHash(mixedHash(mixedHash(0x811c9dc5, price), forward), strike), yearsToExpiry), riskFreeRate), call);
   hash ^= hash >>> 15;
   return (hash >>> 0) & (solvedSlotCount - 1);
 }
@@ -171,15 +172,20 @@ function solvedSlotOf(inputs: readonly [number, number, number, number, number, 
 export function impliedVolatilityFromPrice(price: number, forward: number, strike: number, yearsToExpiry: number, riskFreeRate: number, isCall: boolean): number | null {
   if (!(price > 0) || !(yearsToExpiry > 0) || !(forward > 0) || !(strike > 0)) return null;
   if (!exactInputCachesAreEnabled()) return solveImpliedVolatility(price, forward, strike, yearsToExpiry, riskFreeRate, isCall);
-  const inputs = [price, forward, strike, yearsToExpiry, riskFreeRate, isCall ? 1 : 0] as const;
-  const slot = solvedSlotOf(inputs);
+  const call = isCall ? 1 : 0;
+  const slot = solvedSlotOf(price, forward, strike, yearsToExpiry, riskFreeRate, call);
   const at = slot * 6;
-  if (solvedInputs[at] === price && solvedInputs[at + 1] === forward && solvedInputs[at + 2] === strike && solvedInputs[at + 3] === yearsToExpiry && solvedInputs[at + 4] === riskFreeRate && solvedInputs[at + 5] === inputs[5]) {
+  if (solvedInputs[at] === price && solvedInputs[at + 1] === forward && solvedInputs[at + 2] === strike && solvedInputs[at + 3] === yearsToExpiry && solvedInputs[at + 4] === riskFreeRate && solvedInputs[at + 5] === call) {
     const answer = solvedAnswers[slot]!;
     return Number.isNaN(answer) ? null : answer;
   }
   const volatility = solveImpliedVolatility(price, forward, strike, yearsToExpiry, riskFreeRate, isCall);
-  solvedInputs.set(inputs, at);
+  solvedInputs[at] = price;
+  solvedInputs[at + 1] = forward;
+  solvedInputs[at + 2] = strike;
+  solvedInputs[at + 3] = yearsToExpiry;
+  solvedInputs[at + 4] = riskFreeRate;
+  solvedInputs[at + 5] = call;
   solvedAnswers[slot] = volatility ?? Number.NaN;
   return volatility;
 }
