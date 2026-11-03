@@ -33,10 +33,9 @@ function runWorker(request: ProjectionWorkerRequest, onPathDone: () => void): Pr
   });
 }
 
-/** Every path's outcome, in path order; `onProgress` after each path with how many are done. */
-export async function runProjectionInParallel(input: ProjectionInput, paths: readonly DayPath[], onProgress?: (done: number, total: number) => void): Promise<PathOutcome[]> {
+/** Every path's outcome, in path order; `onProgress` after each path with how many are done. `workerCount` for timing only. */
+export async function runProjectionInParallel(input: ProjectionInput, paths: readonly DayPath[], onProgress?: (done: number, total: number) => void, workerCount = projectionWorkerCount(paths.length)): Promise<PathOutcome[]> {
   if (paths.length === 0) return [];
-  const workerCount = projectionWorkerCount(paths.length);
   const chunkSize = Math.ceil(paths.length / workerCount);
   let done = 0;
   const chunks: Promise<PathOutcome[]>[] = [];

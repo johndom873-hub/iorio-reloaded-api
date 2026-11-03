@@ -13,6 +13,7 @@ import {
   recordCash,
   requireLeg,
   requirePosition,
+  unexitedLegsOf,
   type CashJournalKind,
   type LedgerCloseReason,
   type LedgerLeg,
@@ -102,8 +103,7 @@ function requirePositiveWholeNumber(value: number, what: string): void {
 
 /** One position per symbol, expiry and strike, puts and calls alike: a second sale would merge into the held one, which Pluto's gates never allow. */
 function requireContractNotHeld(ledger: SimulatedLedger, symbol: string, expiryDate: string, strike: number): void {
-  const heldPositionIds = new Set(positionsOfSymbol(ledger, symbol).map((position) => position.id));
-  const held = ledger.legs.find((leg) => heldPositionIds.has(leg.positionId) && leg.legType === "option" && leg.exitAt === null && leg.expiryDate === expiryDate && leg.strikePrice !== null && Math.abs(leg.strikePrice - strike) < 0.0001);
+  const held = unexitedLegsOf(ledger).find((leg) => leg.legType === "option" && leg.expiryDate === expiryDate && leg.strikePrice !== null && Math.abs(leg.strikePrice - strike) < 0.0001 && requirePosition(ledger, leg.positionId).symbol === symbol);
   if (held) throw new Error(`${symbol} already holds an open option at $${strike} expiring ${expiryDate} (leg ${held.id}): one position per contract.`);
 }
 

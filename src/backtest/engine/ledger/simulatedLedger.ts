@@ -237,9 +237,59 @@ export function positionsOfSymbol(ledger: SimulatedLedger, symbol: string): Ledg
   return [...(rowIndexOf(ledger).positionsBySymbol.get(symbol) ?? [])];
 }
 
+/**
+ * The positions still open and the legs not yet exited, each in the ledger's order. A position only ever goes from open
+ * to closed and a leg's exit is only ever set (ledgerEvents.ts), so the rows open at a read are those open at the last
+ * one plus the rows appended since: each read keeps the earlier ones still open and takes in the new, instead of going
+ * through every row of the book. A ledger whose arrays were replaced (a test building one by hand) is read afresh.
+ */
+interface OpenRowsIndex {
+  positions: LedgerPosition[];
+  legs: LedgerLeg[];
+  scannedPositionCount: number;
+  scannedLegCount: number;
+  openPositions: LedgerPosition[];
+  unexitedLegs: LedgerLeg[];
+}
+
+const openRowsByLedger = new WeakMap<SimulatedLedger, OpenRowsIndex>();
+
+function openRowsOf(ledger: SimulatedLedger): OpenRowsIndex {
+  return rememberedForRevision(ledger, "openRows", () => {
+    let index = openRowsByLedger.get(ledger);
+    if (!index || index.positions !== ledger.positions || index.legs !== ledger.legs) {
+      index = { positions: ledger.positions, legs: ledger.legs, scannedPositionCount: 0, scannedLegCount: 0, openPositions: [], unexitedLegs: [] };
+      openRowsByLedger.set(ledger, index);
+    }
+    const openPositions = index.openPositions.filter((position) => position.status === "open");
+    for (; index.scannedPositionCount < ledger.positions.length; index.scannedPositionCount++) {
+      const position = ledger.positions[index.scannedPositionCount]!;
+      if (position.status === "open") openPositions.push(position);
+    }
+    const unexitedLegs = index.unexitedLegs.filter((leg) => leg.exitAt === null);
+    for (; index.scannedLegCount < ledger.legs.length; index.scannedLegCount++) {
+      const leg = ledger.legs[index.scannedLegCount]!;
+      if (leg.exitAt === null) unexitedLegs.push(leg);
+    }
+    index.openPositions = openPositions;
+    index.unexitedLegs = unexitedLegs;
+    return index;
+  });
+}
+
+/** The open positions, in the ledger's order (a new array). */
+export function openPositionsOf(ledger: SimulatedLedger): LedgerPosition[] {
+  return [...openRowsOf(ledger).openPositions];
+}
+
+/** The legs not yet exited, whatever their position's status, in the ledger's order (a new array). */
+export function unexitedLegsOf(ledger: SimulatedLedger): LedgerLeg[] {
+  return [...openRowsOf(ledger).unexitedLegs];
+}
+
 /** Flat: no open position on the symbol (no shares, no open option leg), which is when a wheel cycle ends. */
 export function isSymbolFlat(ledger: SimulatedLedger, symbol: string): boolean {
-  return !ledger.positions.some((position) => position.symbol === symbol && position.status === "open");
+  return !openRowsOf(ledger).openPositions.some((position) => position.symbol === symbol);
 }
 
 /**

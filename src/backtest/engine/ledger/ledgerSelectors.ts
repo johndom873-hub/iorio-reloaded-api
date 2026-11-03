@@ -5,7 +5,7 @@ import { deriveCycles, type Cycle, type CycleInput } from "../../../lib/cycles.j
 import { computeUnrealizedPnlByPosition, type UnrealizedPnlByPosition } from "../../../lib/positionOrderRules.js";
 import { availableUncoveredShares, cashLockedInCashSecuredPuts, positionCapitalAtRisk, positionCapitalDeployed, positionRealizedPnl, type PositionFigures, type PositionRealizedPnl } from "../../../lib/positionSelectors.js";
 import { easternIsoDate } from "../../../lib/easternIsoDate.js";
-import { cycleStartSplitFactor, ledgerRevision, legsOfPosition, rememberedForRevision, positionsOfSymbol, requirePosition, type LedgerLeg, type LedgerPosition, type SimulatedLedger } from "./simulatedLedger.js";
+import { cycleStartSplitFactor, ledgerRevision, legsOfPosition, openPositionsOf, rememberedForRevision, positionsOfSymbol, requirePosition, unexitedLegsOf, type LedgerLeg, type LedgerPosition, type SimulatedLedger } from "./simulatedLedger.js";
 
 // The simulated book's figures. They come from the functions the platform itself uses, fed with the ledger's rows:
 // position figures from positionSelectors.ts (tested against the positions SQL), cycles and the break-even through the
@@ -20,14 +20,14 @@ export function ledgerPositionFigures(ledger: SimulatedLedger, position: LedgerP
 
 /** Open positions, in the ledger's order (one list per ledger revision). */
 function openPositions(ledger: SimulatedLedger): readonly LedgerPosition[] {
-  return rememberedForRevision(ledger, "openPositions", () => ledger.positions.filter((position) => position.status === "open"));
+  return rememberedForRevision(ledger, "openPositions", () => openPositionsOf(ledger));
 }
 
 /** Open legs of open positions, in the ledger's order (one list per ledger revision). */
 function openLegs(ledger: SimulatedLedger): readonly { leg: LedgerLeg; position: LedgerPosition }[] {
   return rememberedForRevision(ledger, "openLegs", () => {
     const openPositionById = new Map(openPositions(ledger).map((position) => [position.id, position]));
-    return ledger.legs.flatMap((leg) => {
+    return unexitedLegsOf(ledger).flatMap((leg) => {
       const position = openPositionById.get(leg.positionId);
       return position && isOpen(leg) ? [{ leg, position }] : [];
     });
