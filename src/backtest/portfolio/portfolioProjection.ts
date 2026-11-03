@@ -9,7 +9,6 @@ import { betaOf, drawPathWeeks, seededRandom, weeksPerYear, type MarketHistory, 
 // - P7 the book's week = Σ allocation × the ticker's week (fixed weights, the shared pool's pots).
 // - P8 2,000 paths of the horizon's weeks: each path's CAGR = its end value ^ (52.18 ÷ weeks) − 1, its Max drawdown on the
 //   weekly values, its Excess Calmar = (CAGR − the T-bill now) ÷ |Max drawdown|; the 10th, 50th and 90th percentiles.
-// - P9 replays: the book through the actual weeks of a window, a ticker not yet listed moving as β × SPY.
 // - D1 the average year: each part's average week over every path × 52.18 (they add up to the average year, not exactly
 //   the CAGR). D3 share of the fall: in each path's Max drawdown window, a ticker's part of the dollars lost (Σ over the
 //   window's weeks of the value before the week × its allocation × its week) ÷ the book's, averaged over the paths with a
@@ -213,44 +212,10 @@ export function bookOutcome(tickers: readonly ProjectedTicker[], excessByTicker:
   };
 }
 
-export const replayWindows = [
-  { name: "2008", from: "2007-10-08", to: "2009-03-09" },
-  { name: "Covid", from: "2020-02-17", to: "2020-03-23" },
-  { name: "2022", from: "2022-01-03", to: "2022-10-10" },
-] as const;
-
-export interface Replay {
-  name: string;
-  from: string;
-  to: string;
-  bookReturn: number;
-  worstFall: number;
-  spyReturn: number;
-}
-
 /** A ticker's week through the actual history at `at` (no leftover drawn before its listing), IV capped or not. */
 function historyWeek(ticker: ProjectedTicker, at: number, riskFreeWeek: number, capped: boolean): number {
   const ivs = capped ? ticker.history.ivs : ticker.history.ivsUncapped;
   return riskFreeWeek + ticker.lotScale * excessWeek(ticker, ivs[at - 1] ?? ivs[at]!, ticker.history.returns[at]!, riskFreeWeek);
-}
-
-/** P9: the book through each window's actual weeks. */
-export function replaysOf(tickers: readonly ProjectedTicker[], market: MarketHistory, riskFreeWeek: number, capped = true): Replay[] {
-  return replayWindows.flatMap((window) => {
-    const first = market.weeks.findIndex((week) => week >= window.from);
-    if (first < 1 || market.weeks.at(-1)! < window.to) return [];
-    let value = 1;
-    let peak = 1;
-    let worstFall = 0;
-    let spy = 1;
-    for (let at = first; at < market.weeks.length && market.weeks[at]! <= window.to; at++) {
-      value *= 1 + tickers.reduce((sum, ticker) => sum + ticker.weight * historyWeek(ticker, at, riskFreeWeek, capped), 0);
-      spy *= 1 + (market.spyReturns[at] ?? 0);
-      peak = Math.max(peak, value);
-      worstFall = Math.min(worstFall, value / peak - 1);
-    }
-    return [{ name: window.name, from: window.from, to: window.to, bookReturn: value - 1, worstFall, spyReturn: spy - 1 }];
-  });
 }
 
 /** D5: the slope of the book's weeks through the whole history on SPY's. */

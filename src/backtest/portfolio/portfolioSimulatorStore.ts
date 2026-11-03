@@ -11,7 +11,7 @@ import { loadTreasuryBillRates, type TreasuryBillRates } from "../engine/treasur
 import { groupsOf, independentTickersOf, pairMatrixOf, correlationOf, worstWeeksTogetherOf, type PairMatrix } from "./portfolioCorrelation.js";
 import { callDaysPerWeekAtTodaysPace, lotFitScale, tickerPartsFromWeeks, type BacktestWeek, type TickerParts } from "./portfolioParts.js";
 import { marketHistoryOf, mondayOf, tickerHistoryOf, weeklyBarsOf, weeksPerYear, type MarketHistory, type TickerHistory, type WeeklyBar } from "./portfolioPaths.js";
-import { bookBetaOf, bookOutcome, drawPaths, replaysOf, tickerPathExcess, type BookOutcome, type Drift, type ProjectedTicker, type Replay } from "./portfolioProjection.js";
+import { bookBetaOf, bookOutcome, drawPaths, tickerPathExcess, type BookOutcome, type Drift, type ProjectedTicker } from "./portfolioProjection.js";
 import { rankSuggestions, suggestionCandidatesOf, type Suggestion } from "./portfolioSuggestions.js";
 import { portfolioWarningsOf, worstFallWithin, type PortfolioWarning } from "./portfolioWarnings.js";
 
@@ -381,7 +381,6 @@ export interface PortfolioSimulation {
   groups: { symbols: string[]; share: number }[];
   independentTickers: number | null;
   bookBeta: number;
-  replays: Replay[];
   historyReplay: HistoryReplay | null;
   warnings: PortfolioWarning[];
 }
@@ -467,18 +466,9 @@ export async function simulatePortfolio(request: PortfolioBookRequest, connectio
     groups,
     independentTickers: independentTickersOf(correlation, weights),
     bookBeta: bookBetaOf(projected, marketInputs.market, marketInputs.riskFreeNowWeek),
-    replays: replaysOf(projected, marketInputs.market, marketInputs.riskFreeNowWeek),
     historyReplay: historyReplayOf(prepared, new Map(projected.map((ticker) => [ticker.symbol, ticker.weight]))),
     warnings,
   };
-}
-
-/** The replays with and without the IV cap (for checking the cap's effect). */
-export async function replaysWithAndWithoutIvCap(request: PortfolioBookRequest, connection: Knex = db): Promise<{ capped: Replay[]; uncapped: Replay[] }> {
-  const prepared = await prepareBook(request, connection);
-  const inputsBySymbol = new Map(prepared.inputs.map((input) => [input.symbol, input]));
-  const projected = request.tickers.map((ticker) => projectedTickerOf(inputsBySymbol.get(ticker.symbol)!, prepared.histories.get(ticker.symbol)!, prepared.allocationPct.get(ticker.symbol)! / 100, request.accountDollars, prepared.excessAllowancePct, request.callDaysPace));
-  return { capped: replaysOf(projected, prepared.marketInputs.market, prepared.marketInputs.riskFreeNowWeek, true), uncapped: replaysOf(projected, prepared.marketInputs.market, prepared.marketInputs.riskFreeNowWeek, false) };
 }
 
 /** The one-change suggestions on the neutral projection, `onProgress` after each candidate. */

@@ -8,6 +8,7 @@ import { loadTreasuryBillRates } from "../engine/treasuryBillRates.js";
 import { loadBacktestLabSettings } from "../labSettingsStore.js";
 import { dayHistoryStartIso, drawDayPaths, marketDayHistoryOf, sharedLeftoverDays, tickerDayHistoryOf, tradingDaysPerYear } from "./portfolioDayHistory.js";
 import { floorAllocationPctOf, maxAllocationPct, potDollarsOf, potFiguresOf, suggestAllocations, type PotFigures, type SuggestedAllocations } from "./portfolioPots.js";
+import { runReplayPaths, type ProjectionInput } from "./portfolioDayProjection.js";
 import { runProjectionInParallel } from "./portfolioProjectionPool.js";
 import { loadTickerProjectionSource, type TickerProjectionSource } from "./portfolioProjectionInputs.js";
 import { summarizeProjection, type ProjectionSummary } from "./portfolioProjectionSummary.js";
@@ -20,6 +21,13 @@ import { PortfolioRequestError, horizonYearsChoices, parsePortfolioBookRequest, 
 
 export const projectionSeed = 20261103;
 export const maxProjectionPaths = 2000;
+export const defaultProjectionPaths = 500;
+/** The windows a book is replayed through. */
+export const replayWindows = [
+  { name: "2008", from: "2007-10-08", to: "2009-03-09" },
+  { name: "Covid", from: "2020-02-17", to: "2020-03-23" },
+  { name: "2022", from: "2022-01-03", to: "2022-10-10" },
+] as const;
 const treasuryBillAverageFromIso = "2010-01-04";
 
 export type ProjectionDrift = "as_it_happened" | "neutral";
@@ -29,13 +37,13 @@ export interface PortfolioProjectionRequest extends PortfolioBookRequest {
   pathCount: number;
 }
 
-/** The book (parsePortfolioBookRequest), a drift (neutral by default) and a path count from 1 to 2,000. */
+/** The book (parsePortfolioBookRequest), a drift (neutral by default) and a path count from 1 to 2,000 (500 by default). */
 export function parsePortfolioProjectionRequest(body: unknown): PortfolioProjectionRequest {
   const book = parsePortfolioBookRequest(body);
   const value = (body ?? {}) as Record<string, unknown>;
   const drift = value.drift ?? "neutral";
   if (drift !== "neutral" && drift !== "as_it_happened") throw new PortfolioRequestError("drift must be neutral or as_it_happened.");
-  const pathCount = value.pathCount;
+  const pathCount = value.pathCount ?? defaultProjectionPaths;
   if (typeof pathCount !== "number" || !Number.isInteger(pathCount) || pathCount < 1 || pathCount > maxProjectionPaths) throw new PortfolioRequestError(`pathCount must be a whole number from 1 to ${maxProjectionPaths}.`);
   return { ...book, drift, pathCount };
 }
@@ -122,6 +130,8 @@ export interface PortfolioProjection {
   summary: ProjectionSummary;
   pots: TickerPot[];
   tickers: { symbol: string; allocationPct: number; price: number; strikeSpacing: number; expiryWeekdays: number[]; beta: number; ownHistoryFrom: string | null; tenOclockFrom: string | null; chainDays: number }[];
+  /** Today's book through each window's actual days (one path each, at the actual drift), and SPY's return over them. */
+  replays: { name: string; from: string; to: string; days: number; bookReturn: number; maxDrawdown: number; spyReturn: number }[];
 }
 
 /** The book's projection; `onProgress` after each path. */
@@ -135,29 +145,30 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
   const histories = prepared.sources.map((source) => tickerDayHistoryOf(source.symbol, source.sessions, market, riskFreeNowDay, riskFreeMeanDay));
   const horizonDays = request.horizonYears * tradingDaysPerYear;
   const paths = drawDayPaths(market.dates.length, horizonDays, request.pathCount, projectionSeed, sharedLeftoverDays(histories));
-  const outcomes = await runProjectionInParallel(
-    {
-      asOfIso: prepared.asOfIso,
-      tickers: prepared.sources.map((source, index) => ({
-        symbol: source.symbol,
-        history: histories[index]!,
-        todaysPrice: source.calibration.price,
-        strikeSpacing: source.calibration.strikeSpacing,
-        expiryWeekdays: source.calibration.expiryWeekdays,
-        sameDayVolatilityUplift: source.calibration.sameDayVolatilityUplift ?? 1,
-        observedDays: source.observedDays,
-        anchorCurve: source.anchorCurve,
-      })),
-      settings: prepared.settings,
-      accountDollars: request.accountDollars,
-      horizonYears: request.horizonYears,
-      drift: request.drift,
-      riskFreeRatePercent: prepared.riskFreeNowPct,
-      seed: projectionSeed,
-    },
-    paths,
-    onProgress,
-  );
+  const input: ProjectionInput = {
+    asOfIso: prepared.asOfIso,
+    tickers: prepared.sources.map((source, index) => ({
+      symbol: source.symbol,
+      history: histories[index]!,
+      todaysPrice: source.calibration.price,
+      strikeSpacing: source.calibration.strikeSpacing,
+      expiryWeekdays: source.calibration.expiryWeekdays,
+      sameDayVolatilityUplift: source.calibration.sameDayVolatilityUplift ?? 1,
+      observedDays: source.observedDays,
+      anchorCurve: source.anchorCurve,
+    })),
+    settings: prepared.settings,
+    accountDollars: request.accountDollars,
+    horizonYears: request.horizonYears,
+    drift: request.drift,
+    riskFreeRatePercent: prepared.riskFreeNowPct,
+    seed: projectionSeed,
+  };
+  const outcomes = await runProjectionInParallel(input, paths, onProgress);
+  const windows = replayWindows
+    .map((window) => ({ ...window, days: Int32Array.from(market.dates.flatMap((date, at) => (date >= window.from && date <= window.to ? [at] : []))) }))
+    .filter((window) => window.days.length > 0 && window.days[0]! > 0 && market.dates.at(-1)! >= window.to);
+  const replays = await runReplayPaths({ ...input, drift: "as_it_happened" }, windows);
   return {
     asOf: prepared.asOfIso,
     horizonYears: request.horizonYears,
@@ -177,6 +188,15 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
       ownHistoryFrom: market.dates[histories[index]!.own.indexOf(1)] ?? null,
       tenOclockFrom: source.firstTenOclockDate !== null && source.firstTenOclockDate < dayHistoryStartIso ? dayHistoryStartIso : source.firstTenOclockDate,
       chainDays: source.observedDays.length,
+    })),
+    replays: windows.map((window, index) => ({
+      name: window.name,
+      from: market.dates[window.days[0]!]!,
+      to: market.dates[window.days.at(-1)!]!,
+      days: window.days.length,
+      bookReturn: replays[index]!.bookReturn,
+      maxDrawdown: replays[index]!.maxDrawdown,
+      spyReturn: Math.exp(Array.from(window.days).reduce((sum, at) => sum + market.overnight[at]! + market.day[at]!, 0)) - 1,
     })),
   };
 }

@@ -98,8 +98,8 @@ describe("portfolio simulator routes", () => {
     expect(portfolioPotsMock).toHaveBeenCalledWith({ tickers: [{ symbol: "XLE", allocationPct: null }], accountDollars: 1_000_000, horizonYears: 5, callDaysPace: "today" });
   });
 
-  it("refuses a projection without a path count from 1 to 2,000 or with another drift, before any work", async () => {
-    for (const extra of [{}, { pathCount: 0 }, { pathCount: 2001 }, { pathCount: 2.5 }, { pathCount: 10, drift: "bullish" }]) {
+  it("refuses a projection with a path count outside 1 to 2,000 or with another drift, before any work", async () => {
+    for (const extra of [{ pathCount: 0 }, { pathCount: 2001 }, { pathCount: 2.5 }, { pathCount: 10, drift: "bullish" }]) {
       const book = encodeURIComponent(JSON.stringify({ tickers: [{ symbol: "XLE" }], accountDollars: 1_000_000, ...extra }));
       const response = await fetch(`${baseUrl}/backtest/portfolio/projection/stream?book=${book}`);
       expect(response.status).toBe(400);
@@ -107,16 +107,16 @@ describe("portfolio simulator routes", () => {
     expect(projectPortfolioMock).not.toHaveBeenCalled();
   });
 
-  it("streams the projection's progress, then its result, neutral by default", async () => {
+  it("streams the projection's progress, then its result, neutral with 500 paths by default", async () => {
     projectPortfolioMock.mockImplementationOnce(async (_book: unknown, onProgress: (done: number, total: number) => void) => {
       onProgress(4, 4);
       return { asOf: "2026-10-30" };
     });
-    const book = encodeURIComponent(JSON.stringify({ tickers: [{ symbol: "XLE" }], accountDollars: 1_000_000, pathCount: 4 }));
+    const book = encodeURIComponent(JSON.stringify({ tickers: [{ symbol: "XLE" }], accountDollars: 1_000_000 }));
     const text = await (await fetch(`${baseUrl}/backtest/portfolio/projection/stream?book=${book}`)).text();
     expect(text).toContain('"done":4,"total":4');
     expect(text).toContain('event: result\ndata: {"asOf":"2026-10-30"}');
-    expect(projectPortfolioMock.mock.calls[0]![0]).toMatchObject({ drift: "neutral", pathCount: 4, horizonYears: 5 });
+    expect(projectPortfolioMock.mock.calls[0]![0]).toMatchObject({ drift: "neutral", pathCount: 500, horizonYears: 5 });
   });
 
   it("streams a failure when the projection fails", async () => {

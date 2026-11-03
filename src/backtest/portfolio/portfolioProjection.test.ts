@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { weeksPerYear, type MarketHistory, type TickerHistory } from "./portfolioPaths.js";
-import { bookOutcome, drawPaths, excessWeek, pathFiguresOf, replaysOf, tickerPathExcess, type ProjectedTicker } from "./portfolioProjection.js";
+import { weeksPerYear, type TickerHistory } from "./portfolioPaths.js";
+import { bookOutcome, drawPaths, excessWeek, pathFiguresOf, tickerPathExcess, type ProjectedTicker } from "./portfolioProjection.js";
 
 const xle = { premiumRatio: 0.00926, callDaysPerWeek: 1.3, upCapture: 0.588, downCapture: 0.718, sharesHeldShare: 0.635 };
 
@@ -81,20 +81,5 @@ describe("bookOutcome (P7, P8, D1, D3, D4)", () => {
     const first = tickerPathExcess(a, drawPaths(100, 26, 10, 9), "as_it_happened", 0).excess;
     const second = tickerPathExcess(a, drawPaths(100, 26, 10, 9), "as_it_happened", 0).excess;
     expect(Array.from(first)).toEqual(Array.from(second));
-  });
-});
-
-describe("replaysOf (P9)", () => {
-  it("runs the book through a window's actual weeks", () => {
-    const weeks = Array.from({ length: 60 }, (_, index) => new Date(Date.parse("2021-11-01T00:00:00Z") + index * 7 * 86_400_000).toISOString().slice(0, 10));
-    const spyReturns = weeks.map((_, index) => (index === 0 ? null : -0.01));
-    const market: MarketHistory = { weeks, spyReturns, spyIvs: weeks.map(() => 0.2), spyMedianIv: 0.2, spyMeanWeek: -0.01 };
-    const ticker = tickerOf("A", 1, weeks.map(() => -0.01), { downCapture: 0.5 });
-    const [replay] = replaysOf([ticker], market, 0);
-    expect(replay?.name).toBe("2022");
-    // The window's weeks: its Mondays from 2022-01-03 to 2022-10-10.
-    const windowWeeks = weeks.filter((week) => week >= "2022-01-03" && week <= "2022-10-10").length;
-    expect(replay?.spyReturn).toBeCloseTo(0.99 ** windowWeeks - 1, 10);
-    expect(replay?.bookReturn).toBeCloseTo(0.995 ** windowWeeks - 1, 10);
   });
 });

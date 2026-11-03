@@ -96,6 +96,37 @@ export function maxDrawdownOf(values: ArrayLike<number>): { maxDrawdown: number;
   return { maxDrawdown: worst, from, to };
 }
 
+/** One path through v4's own day on `dates` (the path as long as them): the simulator's result. */
+function simulatePath(input: ProjectionInput, path: DayPath, pathIndex: number, dates: readonly string[], expiriesByTicker: readonly string[][]) {
+  const prices = input.tickers.map((ticker) => tickerPathPrices(ticker.history, path, ticker.todaysPrice, input.drift));
+  return simulateBookDays({
+    dates,
+    tickers: input.tickers.map((ticker) => ({ symbol: ticker.symbol, sameDayVolatilityUplift: ticker.sameDayVolatilityUplift })),
+    dayOf: (tickerIndex, day) => {
+      const ticker = input.tickers[tickerIndex]!;
+      const price = prices[tickerIndex]!;
+      const nextExpiry = expiriesByTicker[tickerIndex]![day]!;
+      const candidates = observedDaysNearest(ticker.observedDays, calendarDaysBetween(dates[day]!, nextExpiry));
+      const elevation = price.elevation[day]!;
+      const impliedVolatility = price.iv[day]!;
+      return {
+        tenOclockPrice: price.tenOclock[day]!,
+        close: price.close[day]!,
+        impliedVolatility,
+        nextExpiry,
+        strikeSpacing: ticker.strikeSpacing,
+        observedChain:
+          candidates.length === 0
+            ? null
+            : { day: candidates[Math.floor(projectionDraw(input.seed, pathIndex, tickerIndex, day) * candidates.length)]!, volatilityAnchor: impliedVolatility * anchorFactorAt(ticker.anchorCurve, Number.isFinite(elevation) ? elevation : null) },
+      };
+    },
+    settings: input.settings,
+    startingValue: input.accountDollars,
+    riskFreeRatePercent: input.riskFreeRatePercent,
+  });
+}
+
 /** Runs the paths `paths` (their indexes from `firstPathIndex`): one outcome each. */
 export async function runProjectionPaths(input: ProjectionInput, paths: readonly DayPath[], firstPathIndex: number, onPathDone?: () => void): Promise<PathOutcome[]> {
   const horizonDays = Math.round(input.horizonYears * tradingDaysPerYear);
@@ -103,35 +134,7 @@ export async function runProjectionPaths(input: ProjectionInput, paths: readonly
   const expiriesByTicker = input.tickers.map((ticker) => nextExpiriesOf(dates, ticker.expiryWeekdays));
   const outcomes: PathOutcome[] = [];
   for (let offset = 0; offset < paths.length; offset++) {
-    const pathIndex = firstPathIndex + offset;
-    const path = paths[offset]!;
-    const prices = input.tickers.map((ticker) => tickerPathPrices(ticker.history, path, ticker.todaysPrice, input.drift));
-    const result = await simulateBookDays({
-      dates,
-      tickers: input.tickers.map((ticker) => ({ symbol: ticker.symbol, sameDayVolatilityUplift: ticker.sameDayVolatilityUplift })),
-      dayOf: (tickerIndex, day) => {
-        const ticker = input.tickers[tickerIndex]!;
-        const price = prices[tickerIndex]!;
-        const nextExpiry = expiriesByTicker[tickerIndex]![day]!;
-        const candidates = observedDaysNearest(ticker.observedDays, calendarDaysBetween(dates[day]!, nextExpiry));
-        const elevation = price.elevation[day]!;
-        const impliedVolatility = price.iv[day]!;
-        return {
-          tenOclockPrice: price.tenOclock[day]!,
-          close: price.close[day]!,
-          impliedVolatility,
-          nextExpiry,
-          strikeSpacing: ticker.strikeSpacing,
-          observedChain:
-            candidates.length === 0
-              ? null
-              : { day: candidates[Math.floor(projectionDraw(input.seed, pathIndex, tickerIndex, day) * candidates.length)]!, volatilityAnchor: impliedVolatility * anchorFactorAt(ticker.anchorCurve, Number.isFinite(elevation) ? elevation : null) },
-        };
-      },
-      settings: input.settings,
-      startingValue: input.accountDollars,
-      riskFreeRatePercent: input.riskFreeRatePercent,
-    });
+    const result = await simulatePath(input, paths[offset]!, firstPathIndex + offset, dates, expiriesByTicker);
     const values = result.accountValues;
     const endValue = values[values.length - 1]!;
     const { maxDrawdown, from, to } = maxDrawdownOf(values);
@@ -139,6 +142,36 @@ export async function runProjectionPaths(input: ProjectionInput, paths: readonly
     for (let year = 1; year * tradingDaysPerYear <= horizonDays; year++) yearEndValues.push(values[Math.min(values.length - 1, year * tradingDaysPerYear)]!);
     outcomes.push({ cagr: (endValue / input.accountDollars) ** (1 / input.horizonYears) - 1, maxDrawdown, maxDrawdownFrom: from, maxDrawdownTo: to, endValue, yearEndValues, sources: result.sources, byTicker: result.byTicker });
     onPathDone?.();
+  }
+  return outcomes;
+}
+
+export interface ReplayWindow {
+  name: string;
+  /** The window's history days (indexes into the market's dates), in order. */
+  days: Int32Array;
+}
+
+export interface ReplayOutcome {
+  name: string;
+  bookReturn: number;
+  maxDrawdown: number;
+  sources: SimulationSources;
+}
+
+/**
+ * Each window replayed as one path: today's book from today's prices through the window's days in order, at their
+ * actual moves (the input's drift), on simulated sessions after today; a ticker's day before its listing is β × SPY's
+ * moves with no leftover.
+ */
+export async function runReplayPaths(input: ProjectionInput, windows: readonly ReplayWindow[]): Promise<ReplayOutcome[]> {
+  const outcomes: ReplayOutcome[] = [];
+  for (const window of windows) {
+    const dates = simulatedSessionsAfter(input.asOfIso, window.days.length);
+    const expiriesByTicker = input.tickers.map((ticker) => nextExpiriesOf(dates, ticker.expiryWeekdays));
+    const result = await simulatePath(input, { days: window.days, leftoverDays: new Int32Array(window.days.length).fill(-1) }, 0, dates, expiriesByTicker);
+    const values = result.accountValues;
+    outcomes.push({ name: window.name, bookReturn: values[values.length - 1]! / input.accountDollars - 1, maxDrawdown: maxDrawdownOf(values).maxDrawdown, sources: result.sources });
   }
   return outcomes;
 }
