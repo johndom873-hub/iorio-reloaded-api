@@ -39,8 +39,8 @@ import { db } from "../src/db/connection.js";
 // slot too. Skipping the two slots that coincide with those (a couple of
 // minutes of dispatch slack either side) keeps this check from ever starting
 // its own IBKR handshake, SSH round trips and DB connections in the same
-// second as a daily job; four runs an hour still satisfy the watchdog's
-// "ran within the last 30 minutes" check. Decided 2026-09-24.
+// second as a daily job; four runs an hour leave at most 20 minutes between
+// runs, inside the ops monitor's healthCheckMaxSilenceMinutes. Decided 2026-09-24.
 function isSharedSchedulerSlot(now: Date): boolean {
   const minute = now.getUTCMinutes();
   return minute >= 58 || minute <= 2 || (minute >= 28 && minute <= 32);

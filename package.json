@@ -35,7 +35,6 @@
     "job:daily-calendar-capture": "tsx scripts/run-daily-calendar-capture-job.ts",
     "job:daily-pnl-snapshot": "tsx scripts/run-daily-pnl-snapshot-job.ts",
     "job:option-chain-structure": "tsx scripts/run-option-chain-structure-job.ts",
-    "job:watchdog": "tsx scripts/run-watchdog-job.ts",
     "job:expiry-settlement-audit": "tsx scripts/run-daily-expiry-settlement-audit-job.ts",
     "ibkr:health-check": "tsx scripts/check-ibkr-health.ts",
     "sync-market-calendar": "tsx scripts/sync-market-calendar.ts",

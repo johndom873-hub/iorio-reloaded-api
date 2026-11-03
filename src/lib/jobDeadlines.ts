@@ -5,8 +5,7 @@ import type { JobRunStatus } from "./jobRunStatus.js";
 // Deadline monitor (opsMonitor.ts): every scheduled job must have STARTED by a fixed time.
 // runJob already alerts when a run fails, but a run that never starts (Heroku Scheduler
 // misfire, an entry missing in the dashboard, a clock-guard skip, a crash before the job row
-// exists) leaves nothing to alert on. The old watchdog noticed at 11:30 PM UTC; this notices
-// minutes after the slot.
+// exists) leaves nothing to alert on. This notices minutes after the slot.
 //
 // Times are the Heroku Scheduler slots from PROGRESS.md's "Scheduled jobs" list; a job whose Scheduler
 // entries exist only to land on an Eastern time is judged in Eastern time (zone "eastern").

@@ -1,6 +1,6 @@
 // Parsing of MarketData.app's market-status response for market_calendar (scripts/sync-market-calendar.ts).
 // Every job's market-closed guard trusts market_calendar, so a misread status silently skips a real
-// trading day for every job and the watchdog. The API returns exactly "open", "closed", or null
+// trading day for every job and the ops monitor's deadlines. The API returns exactly "open", "closed", or null
 // (null = not published yet: dates more than about a year out, verified 2026-09-30). Anything else
 // is a format change and must fail the sync loudly, not be stored as "closed".
 

@@ -168,8 +168,8 @@ function wait(milliseconds: number): Promise<void> {
 
 /**
  * Detection only, never throws — a reconciliation problem is a data
- * finding, not a job execution failure, matching the watchdog's convention
- * of always succeeding and reporting via `notify`. If the check itself
+ * finding, not a job execution failure: the job always succeeds and reports
+ * it via `notify`. If the check itself
  * blows up (e.g. a query error), that's reported as a finding too rather
  * than failing the whole health-check job over it.
  */
