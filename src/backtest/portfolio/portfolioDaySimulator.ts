@@ -110,6 +110,7 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
   const figures = tickers.map<SimulatedTickerFigures>((ticker) => ({ symbol: ticker.symbol, premiumDollars: 0, callsSold: 0, callAways: 0, daysWithoutShares: 0 }));
   const figuresBySymbol = new Map(figures.map((entry) => [entry.symbol, entry]));
   const tickerIndexBySymbol = new Map(tickers.map((ticker, index) => [ticker.symbol, index]));
+  const sameDayOptionsOnly = settings.volFarmerV4.optionsExpiry === "today";
   const accountValues = new Float64Array(dates.length + 1);
   let interestDollars = 0;
   let callsDollars = 0;
@@ -166,11 +167,13 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
     accountValues[dayIndex] = ledgerNetLiquidationValue(ledger, priceByLegId);
     for (const ticker of tickers) if (!sharesHeld.has(ticker.symbol)) figuresBySymbol.get(ticker.symbol)!.daysWithoutShares += 1;
 
-    // d. The lab's v4 look at 10:00 on the day's synthetic chain.
+    // d. The lab's v4 look at 10:00 on the day's synthetic chain. Selling only options expiring today, v4 reads nothing of
+    // a day's quotes but whether a Call expires today (volFarmerV2Steps.ts): on another day the chain is left empty.
     const lookSymbols: BacktestLookSymbol[] = tickers.map((ticker, index) => {
       const day = days[index]!;
       const yearsToExpiry = (expiry: string) => Math.max(0, expirySettlementInstant(expiry).getTime() - at.getTime()) / millisecondsPerYear;
-      const { quotes, previousSessionVolumeByContract } = syntheticExpiryChain({
+      const chainUnread = sameDayOptionsOnly && day.nextExpiry !== todayIso;
+      const { quotes, previousSessionVolumeByContract } = chainUnread ? { quotes: [], previousSessionVolumeByContract: new Map<string, number>() } : syntheticExpiryChain({
         expiry: day.nextExpiry,
         stockPrice: day.tenOclockPrice,
         yearsToExpiry: yearsToExpiry(day.nextExpiry),

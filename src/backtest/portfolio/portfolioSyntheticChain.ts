@@ -47,7 +47,18 @@ export function syntheticExpiryChain(input: { expiry: string; stockPrice: number
   const halfWidth = Math.max(0.03, 5 * volatility * Math.sqrt(Math.max(yearsToExpiry, 1e-6)));
   const quotes: SymbolFileQuote[] = [];
   const previousSessionVolumeByContract = new Map<string, number>();
-  for (const strike of strikeGrid(stockPrice, strikeSpacing, halfWidth)) {
+  let strikes = strikeGrid(stockPrice, strikeSpacing, halfWidth);
+  if (observed !== undefined) {
+    // Only the strikes within the observed ones' reach can be listed (nearestObservedContract): the grid is cut to them,
+    // a little wide, before each strike is checked as it always is.
+    const reach = observedReach(observed.day);
+    if (reach === null) return { quotes, previousSessionVolumeByContract };
+    const scale = observed.thirtyDayVolatility * Math.sqrt(yearsToExpiry);
+    const lowest = stockPrice * Math.exp(reach.low * scale) * (1 - 1e-6);
+    const highest = stockPrice * Math.exp(reach.high * scale) * (1 + 1e-6);
+    strikes = strikes.filter((strike) => strike >= lowest && strike <= highest);
+  }
+  for (const strike of strikes) {
     for (const right of ["C", "P"] as const) {
       if (observed === undefined) {
         const mid = syntheticMid(stockPrice, strike, yearsToExpiry, riskFreeRate, volatility, right === "C");
@@ -71,6 +82,22 @@ export function syntheticExpiryChain(input: { expiry: string; stockPrice: number
     }
   }
   return { quotes, previousSessionVolumeByContract };
+}
+
+/** The standard deviations an observed day's contracts reach, Calls and Puts together, an outermost gap past each end; null with none. */
+function observedReach(day: ObservedChainDay): { low: number; high: number } | null {
+  let low = Number.POSITIVE_INFINITY;
+  let high = Number.NEGATIVE_INFINITY;
+  for (const contracts of [day.calls, day.puts]) {
+    if (contracts.length === 0) continue;
+    const first = contracts[0]!.standardDeviations;
+    const last = contracts[contracts.length - 1]!.standardDeviations;
+    const firstGap = contracts.length > 1 ? contracts[1]!.standardDeviations - first : 0;
+    const lastGap = contracts.length > 1 ? last - contracts[contracts.length - 2]!.standardDeviations : 0;
+    low = Math.min(low, first - firstGap);
+    high = Math.max(high, last + lastGap);
+  }
+  return low === Number.POSITIVE_INFINITY ? null : { low, high };
 }
 
 /** The third Friday of a month ("2027-06"): the standard monthly expiry. */
