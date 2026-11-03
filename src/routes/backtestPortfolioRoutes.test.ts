@@ -3,8 +3,8 @@ import express, { Router, type NextFunction, type Request, type Response } from 
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 
-// The portfolio simulator's routes on their own router: the request's checks (400s), the projection's answer, and the
-// suggestions' event stream. The store's database work is mocked; its request parsing is the real one.
+// The portfolio simulator's routes on their own router: the request's checks (400s), how the book moves together, its pot
+// table, and the projection's and suggestions' event streams. The store's database work is mocked; its request parsing is the real one.
 const simulatePortfolioMock = vi.fn();
 const suggestPortfolioChangesMock = vi.fn();
 vi.mock("../backtest/portfolio/portfolioSimulatorStore.js", async (importOriginal) => ({
@@ -12,6 +12,14 @@ vi.mock("../backtest/portfolio/portfolioSimulatorStore.js", async (importOrigina
   listPortfolioTickers: async () => [{ symbol: "XLE", verdict: "suits", sector: "Energy", analysedAt: "2026-11-02T07:14:07.000Z" }],
   simulatePortfolio: (...args: unknown[]) => simulatePortfolioMock(...args),
   suggestPortfolioChanges: (...args: unknown[]) => suggestPortfolioChangesMock(...args),
+}));
+
+const projectPortfolioMock = vi.fn();
+const portfolioPotsMock = vi.fn();
+vi.mock("../backtest/portfolio/portfolioProjectionStore.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../backtest/portfolio/portfolioProjectionStore.js")>()),
+  projectPortfolio: (...args: unknown[]) => projectPortfolioMock(...args),
+  portfolioPots: (...args: unknown[]) => portfolioPotsMock(...args),
 }));
 
 const { registerPortfolioSimulatorRoutes } = await import("./backtestPortfolioRoutes.js");
@@ -81,5 +89,40 @@ describe("portfolio simulator routes", () => {
 
   it("refuses a suggestions stream without a book", async () => {
     expect((await fetch(`${baseUrl}/backtest/portfolio/suggestions/stream?book=nope`)).status).toBe(400);
+  });
+
+  it("answers a book's pot table", async () => {
+    portfolioPotsMock.mockResolvedValueOnce({ asOf: "2026-10-30", pots: [] });
+    const response = await post("/portfolio/pots", { tickers: [{ symbol: "XLE" }], accountDollars: 1_000_000 });
+    expect(response.status).toBe(200);
+    expect(portfolioPotsMock).toHaveBeenCalledWith({ tickers: [{ symbol: "XLE", allocationPct: null }], accountDollars: 1_000_000, horizonYears: 5, callDaysPace: "today" });
+  });
+
+  it("refuses a projection without a path count from 1 to 2,000 or with another drift, before any work", async () => {
+    for (const extra of [{}, { pathCount: 0 }, { pathCount: 2001 }, { pathCount: 2.5 }, { pathCount: 10, drift: "bullish" }]) {
+      const book = encodeURIComponent(JSON.stringify({ tickers: [{ symbol: "XLE" }], accountDollars: 1_000_000, ...extra }));
+      const response = await fetch(`${baseUrl}/backtest/portfolio/projection/stream?book=${book}`);
+      expect(response.status).toBe(400);
+    }
+    expect(projectPortfolioMock).not.toHaveBeenCalled();
+  });
+
+  it("streams the projection's progress, then its result, neutral by default", async () => {
+    projectPortfolioMock.mockImplementationOnce(async (_book: unknown, onProgress: (done: number, total: number) => void) => {
+      onProgress(4, 4);
+      return { asOf: "2026-10-30" };
+    });
+    const book = encodeURIComponent(JSON.stringify({ tickers: [{ symbol: "XLE" }], accountDollars: 1_000_000, pathCount: 4 }));
+    const text = await (await fetch(`${baseUrl}/backtest/portfolio/projection/stream?book=${book}`)).text();
+    expect(text).toContain('"done":4,"total":4');
+    expect(text).toContain('event: result\ndata: {"asOf":"2026-10-30"}');
+    expect(projectPortfolioMock.mock.calls[0]![0]).toMatchObject({ drift: "neutral", pathCount: 4, horizonYears: 5 });
+  });
+
+  it("streams a failure when the projection fails", async () => {
+    projectPortfolioMock.mockRejectedValueOnce(new Error("XLE: no data file."));
+    const book = encodeURIComponent(JSON.stringify({ tickers: [{ symbol: "XLE" }], accountDollars: 1_000_000, pathCount: 4 }));
+    const text = await (await fetch(`${baseUrl}/backtest/portfolio/projection/stream?book=${book}`)).text();
+    expect(text).toContain('event: failure\ndata: {"error":"XLE: no data file."}');
   });
 });
