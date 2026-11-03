@@ -8,7 +8,7 @@ Last updated: 2026-10-13. Cleaned up 2026-09-21 (approved by Marcelo): shipped e
 Plain language: everything on staging since the 2 Nov promotions is live on prod: the reconcile and expiry-audit fixes, the P&L chart at session closes, Positions outside market hours, the Ladder / Vol Farmer v2 / v3 retirement, the option-chain trading-class fix (GOOGL), and Vol Farmer v4's newer rules (shares only with a Call, Calls on uncovered lots, no Call whose commission is over 20% of its premium, the forward from one quote cycle). Pluto stays off on prod.
 - API v228 = `9e69a73`, app v118 = `9b04178`; live worker on `9e69a73`, bound to U21518308. Release backup b048, 5 migrations (rehearsed on a restored prod copy: same result; prod keeps its 5% rebalancing band and "assigned" for Calls in the money at the window's end).
 - Gates passed: staging's first settlement on `a87fe6d` (2 Nov expiries, 03:14 UTC: four Calls expired worthless, shares handed over, share links exact, audit 104 legs, 0 corrections); prod audit dry run (10 legs, 0 corrections). IBKR settles on New York time: 02:46–03:36 UTC since the 1 Nov clock change.
-- Open: the first 09:00 UTC structure refresh on the new code (GOOGL should list 24 expiries).
+- First 09:00 UTC structure refresh on the new code: 14/14 tickers, GOOGL lists 24 expiries (fewest: AAOI 15); INTC's repeating leftover-stock anomaly stopped with the release.
 
 ## Prod promotion 2026-11-02 (Marcelo)
 Plain language: everything built since 12 Oct is now live on prod: Volatility screen instead of Signals, admin/trader access levels (Juan is a trader), per-position share costs, the market quote loop, Screener after the close, and the live worker on the same code. Pluto stays off on prod.
