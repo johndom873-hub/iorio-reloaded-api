@@ -4,7 +4,7 @@ import { forwardAnchorsFromBandQuotes } from "./optionQuoteBandForwardAnchors.js
 
 const clock = { todayIso: "2026-10-27", yearsToTodaysClose: 0.0005, riskFreeRate: 0.04 };
 const at = (minute: number) => new Date(`2026-10-27T15:${String(minute).padStart(2, "0")}:00Z`);
-const quote = (expiry: string, strike: number, right: "C" | "P", bid: number, ask: number, stockPrice: number, minute = 0): OptionQuoteBandQuote => ({ expiry, strike, right, bid, ask, stockPrice, errorCode: null, quotedAt: at(minute), cycleNumber: 1 });
+const quote = (expiry: string, strike: number, right: "C" | "P", bid: number, ask: number, stockPrice: number, minute = 0, cycleNumber = 1): OptionQuoteBandQuote => ({ expiry, strike, right, bid, ask, stockPrice, errorCode: null, quotedAt: at(minute), cycleNumber });
 
 describe("forwardAnchorsFromBandQuotes", () => {
   it("takes put-call parity where the band has a Call and a Put at a strike near the money", () => {
@@ -21,6 +21,19 @@ describe("forwardAnchorsFromBandQuotes", () => {
     expect(anchor.spotPrice).toBe(101);
     expect(anchor.forward).toBeGreaterThan(101);
     expect(anchor.forward).toBeLessThan(101.5);
+  });
+
+  it("pairs only the expiry's newest cycle: a Call left from an earlier cycle, the stock elsewhere then, is not paired", () => {
+    // Same-day expiry. Cycle 1 (stock 405): the $400 Call at 6.00. Cycle 40 (stock 399.97): the $400 Put at 2.50, the Call
+    // no longer quoted. Paired, they would read 400 + 6.00 − 2.50 = 403.50; the newest cycle has no pair, so the forward is
+    // the stock grown at the risk-free rate.
+    const today = "2026-10-27";
+    const anchors = forwardAnchorsFromBandQuotes([quote(today, 400, "C", 5.95, 6.05, 405, 1, 1), quote(today, 400, "P", 2.45, 2.55, 399.97, 30, 40), quote(today, 405, "C", 1.15, 1.25, 399.97, 30, 40)], clock);
+    expect(anchors.get(today)!.forward).toBeCloseTo(399.97 * Math.exp(0.04 * 0.0005), 6);
+
+    // Both quoted in the newest cycle: parity on them.
+    const paired = forwardAnchorsFromBandQuotes([quote(today, 400, "C", 1.95, 2.05, 399.97, 30, 40), quote(today, 400, "P", 2.0, 2.1, 399.97, 30, 40)], clock);
+    expect(paired.get(today)!.forward).toBeCloseTo(400 - 0.05 * Math.exp(0.04 * 0.0005), 6);
   });
 
   it("ignores expired contracts and quotes without a stock price", () => {
