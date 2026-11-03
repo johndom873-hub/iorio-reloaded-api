@@ -80,18 +80,25 @@ export function thirdFridayOf(yearMonth: string): string {
   return `${yearMonth}-${String(firstFriday + 14).padStart(2, "0")}`;
 }
 
+/** The monthly expiries 5 to 25 months after a month ("2026-11"), worked out once per month. */
+const leapsExpiriesByMonth = new Map<string, readonly string[]>();
+function leapsExpiriesOfMonth(yearMonth: string): readonly string[] {
+  let expiries = leapsExpiriesByMonth.get(yearMonth);
+  if (expiries === undefined) {
+    const [year, month] = yearMonth.split("-").map(Number) as [number, number];
+    expiries = Array.from({ length: 21 }, (_, index) => thirdFridayOf(new Date(Date.UTC(year, month - 1 + 5 + index, 1)).toISOString().slice(0, 7)));
+    leapsExpiriesByMonth.set(yearMonth, expiries);
+  }
+  return expiries;
+}
+
 /**
  * The long-dated Calls a LEAPS is chosen from: the monthly expiries from 5 to 25 months out, Calls from half the price to
  * 1.5 times it, at the larger of the strike spacing and 2.5% of the price (rounded to the spacing), priced at the 30-day IV.
  */
 export function syntheticLeapsSource(input: { todayIso: string; stockPrice: number; riskFreeRate: number; volatility: number; strikeSpacing: number; yearsToExpiry(expiry: string): number }): LeapsCallQuoteSource {
   const { todayIso, stockPrice, riskFreeRate, volatility, strikeSpacing } = input;
-  const expiries: string[] = [];
-  const today = new Date(`${todayIso}T00:00:00Z`);
-  for (let monthsOut = 5; monthsOut <= 25; monthsOut++) {
-    const month = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + monthsOut, 1));
-    expiries.push(thirdFridayOf(month.toISOString().slice(0, 7)));
-  }
+  const expiries = leapsExpiriesOfMonth(todayIso.slice(0, 7));
   const spacing = Math.max(strikeSpacing, Math.round((stockPrice * 0.025) / strikeSpacing) * strikeSpacing);
   const cache = new Map<string, SymbolFileQuote[]>();
   return {

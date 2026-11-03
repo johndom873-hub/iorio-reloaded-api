@@ -1,4 +1,5 @@
 import { parentPort } from "node:worker_threads";
+import { enableExactInputCaches } from "../../lib/exactInputCaches.js";
 import type { DayPath } from "./portfolioDayHistory.js";
 import { runProjectionPaths, type ProjectionInput } from "./portfolioDayProjection.js";
 
@@ -10,6 +11,9 @@ export interface ProjectionWorkerRequest {
   paths: DayPath[];
   firstPathIndex: number;
 }
+
+// The same quotes are scored more than once in a look (the backtest job process does the same).
+enableExactInputCaches();
 
 parentPort!.once("message", (request: ProjectionWorkerRequest) => {
   runProjectionPaths(request.input, request.paths, request.firstPathIndex, () => parentPort!.postMessage({ kind: "progress" }))

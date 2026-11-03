@@ -10,9 +10,13 @@ import type { ProjectionWorkerRequest } from "./portfolioProjectionWorker.js";
 
 const workerModuleUrl = () => new URL(import.meta.url.endsWith(".ts") ? "./portfolioProjectionWorker.ts" : "./portfolioProjectionWorker.js", import.meta.url);
 
-/** At least 1, at most 8, one core left free, no more than the paths. */
+/**
+ * At least 1, at most 4, one core left free, no more than the paths. Four is the Mac's performance cores: with 6 or 8
+ * workers the extra ones land on its efficiency cores and the run is slower (2026-11-03, 48 paths of a 10-ticker book:
+ * 0.56 s a path on 4, 0.59 on 6, 0.71 on 8).
+ */
 export function projectionWorkerCount(pathCount: number): number {
-  return Math.max(1, Math.min(8, os.availableParallelism() - 1, pathCount));
+  return Math.max(1, Math.min(4, os.availableParallelism() - 1, pathCount));
 }
 
 function runWorker(request: ProjectionWorkerRequest, onPathDone: () => void): Promise<PathOutcome[]> {

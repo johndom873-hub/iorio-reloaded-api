@@ -93,16 +93,30 @@ export function nearestObservedContract(contracts: readonly ObservedContract[], 
   return Math.abs(contracts[low]!.standardDeviations - standardDeviations) <= Math.abs(contracts[high]!.standardDeviations - standardDeviations) ? contracts[low]! : contracts[high]!;
 }
 
-/** The IV ratio of the observed contract with one standing nearest `standardDeviations`; null when none has one. */
+/** The contracts with an IV ratio, by standard deviations ascending, per contracts array (an observed day's calls or puts). */
+const contractsWithRatioByList = new WeakMap<readonly ObservedContract[], ObservedContract[]>();
+
+/** The IV ratio of the observed contract with one standing nearest `standardDeviations` (the lower one on a tie); null when none has one. */
 export function impliedVolatilityRatioNear(contracts: readonly ObservedContract[], standardDeviations: number): number | null {
-  let ratio: number | null = null;
-  let distance = Number.POSITIVE_INFINITY;
-  for (const contract of contracts) {
-    if (contract.impliedVolatilityRatio === null) continue;
-    const away = Math.abs(contract.standardDeviations - standardDeviations);
-    if (away < distance) [ratio, distance] = [contract.impliedVolatilityRatio, away];
+  let withRatio = contractsWithRatioByList.get(contracts);
+  if (withRatio === undefined) {
+    withRatio = contracts.filter((contract) => contract.impliedVolatilityRatio !== null);
+    contractsWithRatioByList.set(contracts, withRatio);
   }
-  return ratio;
+  if (withRatio.length === 0) return null;
+  // The first contract at or above `standardDeviations`; the one below it wins a tie, as a walk upwards keeping the first nearest does.
+  let low = 0;
+  let high = withRatio.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (withRatio[middle]!.standardDeviations < standardDeviations) low = middle + 1;
+    else high = middle;
+  }
+  if (low === 0) return withRatio[0]!.impliedVolatilityRatio;
+  if (low === withRatio.length) return withRatio[low - 1]!.impliedVolatilityRatio;
+  const below = withRatio[low - 1]!;
+  const above = withRatio[low]!;
+  return Math.abs(below.standardDeviations - standardDeviations) <= Math.abs(above.standardDeviations - standardDeviations) ? below.impliedVolatilityRatio : above.impliedVolatilityRatio;
 }
 
 const roundedToCents = (value: number) => Math.round(value * 100) / 100;
