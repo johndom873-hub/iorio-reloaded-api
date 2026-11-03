@@ -228,6 +228,11 @@ export function requirePosition(ledger: SimulatedLedger, positionId: string): Le
   return position;
 }
 
+/** The leg with this id (the first, as ledger.legs.find gives it); undefined with none. */
+export function findLeg(ledger: SimulatedLedger, legId: string): LedgerLeg | undefined {
+  return rowIndexOf(ledger).legById.get(legId);
+}
+
 export function requireLeg(ledger: SimulatedLedger, legId: string): LedgerLeg {
   const leg = rowIndexOf(ledger).legById.get(legId);
   if (!leg) throw new Error(`No leg ${legId} in the ledger.`);

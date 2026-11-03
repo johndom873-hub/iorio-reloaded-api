@@ -13,7 +13,7 @@ import { noteBaselineForwardAnchors, roundedStrike, type BaselineCommissions, ty
 import { buyBackCoveredCallKeepingShares, buyLeapsCall, buyShares, expirySettlementInstant, openCashSecuredPut, openCoveredCall, sellLeapsCall, sellShares } from "./ledger/ledgerEvents.js";
 import { optionCommissionDollars, optionPurchaseFillPrice, stockCommissionDollars } from "./ledger/ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
-import { cycleSplitFactorFor, cycleStartSplitFactor, isSymbolFlat, legsOfPosition, positionOrdinalOf, positionsOfSymbol, requirePosition, unexitedLegsOf, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
+import { cycleSplitFactorFor, cycleStartSplitFactor, findLeg, isSymbolFlat, legsOfPosition, positionOrdinalOf, positionsOfSymbol, requirePosition, unexitedLegsOf, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { newVolFarmerV2SymbolState, runVolFarmerV2Turn, volFarmerV2BreakEven, volFarmerV2TurnOrder, type VolFarmerV2Book, type VolFarmerV2CashCut, type VolFarmerV2Market, type VolFarmerV2Position, type VolFarmerV2PositionCashFlow, type VolFarmerV2SymbolState, type VolFarmerV3SharesOrder } from "./volFarmerV2Steps.js";
 
 // Vol Farmer v4 in the backtest: Vol Farmer v2's shared steps (volFarmerV2Steps.ts, where the rules are) with v3's
@@ -263,7 +263,7 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
   const symbol = lookSymbol.profile.symbol;
   const { stockPrice, priceToCycleScale } = market;
   const sharesPerContractOnCycleScale = Math.round(sharesPerContract / priceToCycleScale);
-  const legById = (legId: string): LedgerLeg | undefined => ledger.legs.find((leg) => leg.id === legId);
+  const legById = (legId: string): LedgerLeg | undefined => findLeg(ledger, legId);
   // The ticker's share of the account: one ticker's, flat, is its free cash.
   const tickerShareOfAccount = () => ledgerNetLiquidationValue(ledger, context.priceByLegId) * share;
   const noteCashCut = (cut: VolFarmerV2CashCut) => {
