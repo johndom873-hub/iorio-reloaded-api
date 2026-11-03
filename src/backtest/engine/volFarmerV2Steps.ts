@@ -15,7 +15,7 @@ import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchas
 // ticker's free cash; Pluto's ticker allocation):
 //   1. flat: the first position buys lots = floor(P × firstPositionPct ÷ 100 ÷ (100 × S + the stock commission)) at S (no more
 //      than the free cash pays for), with a Call sold on them as in 2 (none: no cycle, tried again at the next look).
-//   2. Calls: each position holding shares with no Call open sells one on every lot: the Calls of the next listed expiry
+//   2. Calls: each position sells one on every lot no open Call covers: the Calls of the next listed expiry
 //      after today, OTM, inside the Vol Farmer's |delta| range and spread limit (bid ≥ $0.05, volume as the ladder's),
 //      struck at or above the position's break-even, in order of premium yield: the first whose volume covers every lot,
 //      else the one covering the most. Held to expiry: in the money there, its shares are called away (the session's
@@ -656,15 +656,16 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
     if (rebalanced !== null) say(rebalanced);
   }
 
-  // 2. Calls on the positions holding shares with none open.
+  // 2. Calls on each position's lots no open Call covers (Marcelo 2026-11-03: a position holding more shares than its open
+  // Calls cover, e.g. holdings Pluto adopted or a sale the volume limit cut, sells Calls on the rest too).
   const firstNeedsCall = state.first !== null && state.first.shares > 0 && state.first.calls.length === 0;
   const volumeUsed = new Map<string, number>();
   const orders: CallOrder[] = [];
   for (const [name, position] of [["first", state.first], ["second", state.second]] as const) {
-    if (position === null || position.shares <= 0 || position.calls.length > 0) continue;
-    const breakEven = breakEvenAsTraded(position)!;
-    const lots = Math.floor(position.shares / sharesPerContractOnCycleScale + 1e-9);
+    if (position === null || position.shares <= 0) continue;
+    const lots = uncoveredLots(position, sharesPerContractOnCycleScale);
     if (lots < 1) continue;
+    const breakEven = breakEvenAsTraded(position)!;
     // Contracts held from earlier looks are left out (one position per contract); one the other position picks at this
     // look is not, and they sell it as one order.
     const { calls, rejections } = callCandidates(breakEven, true);
@@ -922,6 +923,12 @@ interface CallOrder {
  * Sells the look's Calls, one order per contract (positions picking the same one share it), each position's premium its
  * share of the order's. `buysShares`: Vol Farmer v3's rebuilt first position, its shares bought with its Call.
  */
+/** A position's whole lots no open Call covers. */
+function uncoveredLots(position: VolFarmerV2Position, sharesPerContractOnCycleScale: number): number {
+  const coveredShares = position.calls.reduce((sum, call) => sum + call.shares, 0);
+  return Math.floor((position.shares - coveredShares) / sharesPerContractOnCycleScale + 1e-9);
+}
+
 function sellCalls(input: VolFarmerV2LookInput, orders: readonly CallOrder[], buysShares = false): string {
   const { market, book } = input;
   const { symbol, stockPrice, priceToCycleScale } = market;
@@ -954,7 +961,7 @@ function sellCalls(input: VolFarmerV2LookInput, orders: readonly CallOrder[], bu
       startsCycle,
       ...(buysShares ? { buysShares: true as const } : {}),
       description,
-      chosenBecause: `vol farmer v2: the highest premium yield at or above the ${group.map((order) => order.name).join(" and ")} position's break-even, ${contracts < group.reduce((sum, order) => sum + Math.floor(order.position.shares / sharesPerContractOnCycleScale + 1e-9), 0) ? "the volume covering the most lots" : "its volume covering every lot"}`,
+      chosenBecause: `vol farmer v2: the highest premium yield at or above the ${group.map((order) => order.name).join(" and ")} position's break-even, ${contracts < group.reduce((sum, order) => sum + uncoveredLots(order.position, sharesPerContractOnCycleScale), 0) ? "the volume covering the most lots" : "its volume covering every lot"}`,
       candidateScores: { premiumYield: call.premiumYield, delta: call.delta, impliedVolatility: call.impliedVolatility, timeValue: call.timeValue, dte: call.dte, bid: call.bid, ask: call.ask, volumeCap: call.volumeCap, stockPrice, ...breakEvensBefore },
     });
     for (const order of group) order.position.calls.push({ legId: callLegId, shares: order.contracts * sharesPerContractOnCycleScale });

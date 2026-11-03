@@ -186,6 +186,19 @@ describe("Vol Farmer v3's holding", () => {
     expect([outlivedBook.orders.bought, outlived.first]).toEqual([[], null]);
   });
 
+  it("sells Calls on the lots no open Call covers, beside the Call still open; a position fully covered sells none", () => {
+    // 200 shares at 100, one Call open on 100 of them (holdings adopted that way): the other lot gets its Call.
+    const partly = { ...newVolFarmerV2SymbolState(), first: { ...positionOf(200, 100), calls: [{ legId: "call-0", shares: 100 }] } };
+    const partlyBook = recordingBook();
+    run(partly, 100, partlyBook.book, {});
+    expect(partlyBook.orders.calls.map((sale) => [sale.contracts, sale.startsCycle])).toEqual([[1, false]]);
+    expect(partly.first!.calls.map((call) => call.shares)).toEqual([100, 100]);
+    // Both lots covered: nothing more to sell.
+    const covered = recordingBook();
+    run(partly, 100, covered.book, {});
+    expect(covered.orders.calls).toEqual([]);
+  });
+
   it("waits for the next expiry to come within the days set: further out, the look sells no option", () => {
     // The look's next expiry is 10 days out. 400 shares at 100 are within a lot of the $50,000 target: nothing to rebalance.
     const state = { ...newVolFarmerV2SymbolState(), first: positionOf(400, 100) };
