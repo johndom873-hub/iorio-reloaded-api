@@ -1,7 +1,7 @@
 import { blackScholesPriceOnForward } from "../../lib/impliedVolatilitySurface.js";
 import { contractKey } from "../../lib/optionContractKey.js";
 import type { SymbolFileQuote } from "../engine/backtestSymbolFile.js";
-import type { LeapsCallQuoteSource } from "../engine/volFarmerV2Steps.js";
+import type { LeapsCallQuoteSource } from "../engine/volFarmerV4Steps.js";
 import { impliedVolatilityRatioNear, nearestObservedContract, quoteLikeObserved, standardDeviationsOf, type ObservedChainDay } from "./portfolioObservedChain.js";
 
 // The portfolio simulator's option chains (D4, Marcelo 2026-11-03): on a simulated day there is no recorded chain, so the

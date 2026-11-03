@@ -134,7 +134,7 @@ interface SessionAction {
   contract: { strike?: number; expiry?: string } | null;
 }
 
-/** The share purchases and sales v4 records for its band (volFarmerV2Steps.ts rebalanceHolding): "under the band", "over the band". */
+/** The share purchases and sales v4 records for its band (volFarmerV4Steps.ts rebalanceHolding): "under the band", "over the band". */
 const isTopUp = (action: SessionAction) => action.kind === "buy_shares" && (action.chosen_because ?? "").includes("under the band");
 const isTrim = (action: SessionAction) => action.kind !== "buy_shares" && (action.chosen_because ?? "").includes("over the band");
 

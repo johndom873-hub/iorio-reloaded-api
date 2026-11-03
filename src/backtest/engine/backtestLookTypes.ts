@@ -4,7 +4,7 @@ import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import type { BacktestDayMarket, BacktestTickerProfile } from "./backtestTickerInputs.js";
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import type { SimulatedLedger } from "./ledger/simulatedLedger.js";
-import type { LeapsCallQuoteSource } from "./volFarmerV2Steps.js";
+import type { LeapsCallQuoteSource } from "./volFarmerV4Steps.js";
 
 // What one look of a backtest day hands a decision maker (the Steady Stake, Vol Farmer v4) and what it answers.
 // runBacktestSession.ts builds the look; each decision maker's own module decides it.

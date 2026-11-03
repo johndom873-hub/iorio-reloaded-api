@@ -2,7 +2,7 @@ import { db } from "../db/connection.js";
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
 import { sharesPerContract } from "../backtest/engine/backtestBook.js";
 import { baselineQuoteRejection } from "../backtest/engine/baselineSaleSteps.js";
-import { newVolFarmerV2SymbolState, runVolFarmerV2Turn, volFarmerV2TurnOrder, type VolFarmerV2Market, type VolFarmerV2SymbolState } from "../backtest/engine/volFarmerV2Steps.js";
+import { newVolFarmerV4SymbolState, runVolFarmerV4Turn, volFarmerV4TurnOrder, type VolFarmerV4Market, type VolFarmerV4SymbolState } from "../backtest/engine/volFarmerV4Steps.js";
 import type { BacktestVolFarmerV3Settings, VolFarmerV3CallsInTheMoneyAtLastLook } from "../backtest/backtestTypes.js";
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { liveExpiryStrikes } from "../ibkr/liveOptionChainLookups.js";
@@ -188,7 +188,7 @@ export interface VolFarmerV4CallToBuyBack {
  * than the leg holds: a leg the book has not yet cut after a part fill is not bought back past what is still short). A
  * Call on the ticker that is not v4's stays.
  */
-export function volFarmerV4CallsToBuyBack(input: { state: VolFarmerV2SymbolState; openLegs: readonly PositionLegFigures[]; pending: readonly VolFarmerV4PendingOrder[]; stockPrice: number; todayIso: string }): VolFarmerV4CallToBuyBack[] {
+export function volFarmerV4CallsToBuyBack(input: { state: VolFarmerV4SymbolState; openLegs: readonly PositionLegFigures[]; pending: readonly VolFarmerV4PendingOrder[]; stockPrice: number; todayIso: string }): VolFarmerV4CallToBuyBack[] {
   const beingBoughtBack = new Set(input.pending.flatMap((order) => (order.kind === "buy_back_call" && order.boughtBackLegId !== undefined ? [order.boughtBackLegId] : [])));
   const contractsOf = (name: "first" | "second", legId: string) => (input.state[name]?.calls.filter((call) => call.legId === legId).reduce((sum, call) => sum + call.shares, 0) ?? 0) / sharesPerContract;
   return input.openLegs
@@ -217,7 +217,7 @@ export async function runVolFarmerV4Round(input: VolFarmerV4RoundInput): Promise
   if (v4Tickers.length === 0) return summary;
   // The tickers share Pluto's budget (Marcelo 2026-10-28): they take their turn in the day's order, so the one that finds
   // the free cash short is a different one each day.
-  const turnOrder = volFarmerV2TurnOrder(v4Tickers.map((ticker) => ticker.symbol), Math.round(Date.parse(`${input.todayIso}T00:00:00Z`) / 86_400_000));
+  const turnOrder = volFarmerV4TurnOrder(v4Tickers.map((ticker) => ticker.symbol), Math.round(Date.parse(`${input.todayIso}T00:00:00Z`) / 86_400_000));
   const tickers = [...v4Tickers].sort((a, b) => turnOrder.indexOf(a.symbol) - turnOrder.indexOf(b.symbol));
   const allocationBySymbol = effectiveAllocationPctBySymbol(enabled);
   const [bookCounts, bookCommittedAtStart, inFlightAtStart] = await Promise.all([loadSafetyLimitBookCounts(enabled, now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol)), loadInFlightNotionalsBySymbol()]);
@@ -281,7 +281,7 @@ type RoundState = {
   accountInFlightAtStart: number;
   optionCommissionDollars(contracts: number): number;
   stockCommissionDollars(shares: number): number;
-  commissions: VolFarmerV2Market["commissions"];
+  commissions: VolFarmerV4Market["commissions"];
   accountFreeCash: number;
   /** IBKR's settled cash less the cash the open Puts hold; null when IBKR reported no settled cash. */
   settledFreeCash: number | null;
@@ -341,7 +341,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   const openLegs = positions.flatMap((position) => position.legs.filter((leg) => leg.exitAt === null));
   let adopted = false;
   if (memory === null) {
-    if (openLegs.length === 0) memory = { state: newVolFarmerV2SymbolState(), pending: [] };
+    if (openLegs.length === 0) memory = { state: newVolFarmerV4SymbolState(), pending: [] };
     else {
       const cycleRows = (await fetchOpenCycleSummaryRowsByTickerId([tickerId])).get(tickerId);
       const cycle = cycleRows ? summarizeOpenCycleFromRows(tickerId, cycleRows) : null;
@@ -447,7 +447,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   // On an expiry day the steps sell on it even before (or without) a Call of it quoted, as the lab's day does; they word
   // the Calls they find none of, and this says why.
   if (pass === "cycles_calls_puts" && v3.optionsExpiry === "today" && soldExpiry !== null && noCallQuotedReason !== undefined) note(noCallQuotedReason);
-  const marketWith = (leapsQuotesByExpiry: ReadonlyMap<string, SymbolFileQuote[]>, missing: Set<string>): VolFarmerV2Market => ({
+  const marketWith = (leapsQuotesByExpiry: ReadonlyMap<string, SymbolFileQuote[]>, missing: Set<string>): VolFarmerV4Market => ({
     symbol,
     todayIso: clock.todayIso,
     stockPrice,
@@ -485,7 +485,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
     const state = structuredClone(memory!.state);
     const missing = new Set<string>();
     const { book, planned, cashCutNotes, commissionCapSkips } = createVolFarmerV4LiveBook({ state, pending: memory!.pending, snapshot });
-    const turn = runVolFarmerV2Turn({ state, market: marketWith(leapsQuotesByExpiry, missing), farmer, v2, v3, book });
+    const turn = runVolFarmerV4Turn({ state, market: marketWith(leapsQuotesByExpiry, missing), farmer, v2, v3, book });
     if (pass === "cycles_calls_puts") {
       const turnNote = turn.note();
       return { state, planned, missing, leapsDue: turn.leaps !== null, commissionCapSkips, notes: turnNote === null ? [] : [turnNote.slice(`${symbol}: `.length)] };
@@ -666,7 +666,7 @@ async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; t
 }
 
 /** Every leg reference the state holds. */
-function legIdsOf(state: VolFarmerV2SymbolState): string[] {
+function legIdsOf(state: VolFarmerV4SymbolState): string[] {
   return [...[state.first, state.second].flatMap((position) => (position === null ? [] : [...position.calls, ...position.puts].map((entry) => entry.legId))), ...(state.leaps?.legIds ?? [])];
 }
 

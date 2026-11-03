@@ -1,25 +1,25 @@
 import type { BacktestVolFarmerSettings, BacktestVolFarmerV2Settings, BacktestVolFarmerV3Settings } from "../backtest/backtestTypes.js";
 import {
-  newVolFarmerV2SymbolState,
-  removeVolFarmerV3Shares,
-  volFarmerV2CallPremiumShare,
-  type VolFarmerV2Book,
-  type VolFarmerV2CallSale,
-  type VolFarmerV2CommissionCapSkip,
-  type VolFarmerV2LeapsPurchase,
-  type VolFarmerV2LeapsSale,
-  type VolFarmerV2LegStatus,
-  type VolFarmerV2Position,
-  type VolFarmerV2PutSale,
-  type VolFarmerV2SymbolState,
-  type VolFarmerV3SharesOrder,
-} from "../backtest/engine/volFarmerV2Steps.js";
+  newVolFarmerV4SymbolState,
+  removeVolFarmerV4Shares,
+  volFarmerV4CallPremiumShare,
+  type VolFarmerV4Book,
+  type VolFarmerV4CallSale,
+  type VolFarmerV4CommissionCapSkip,
+  type VolFarmerV4LeapsPurchase,
+  type VolFarmerV4LeapsSale,
+  type VolFarmerV4LegStatus,
+  type VolFarmerV4Position,
+  type VolFarmerV4PutSale,
+  type VolFarmerV4SymbolState,
+  type VolFarmerV4SharesOrder,
+} from "../backtest/engine/volFarmerV4Steps.js";
 import { formatWholeDollars } from "../lib/formatWholeDollars.js";
 import type { PositionFigures } from "../lib/positionSelectors.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import type { PlutoTickerSettings } from "./tickerSettingsStore.js";
 
-// Vol Farmer v4 on Pluto's live book (Marcelo 2026-10-31; v2's from 2026-10-27): the shared steps (volFarmerV2Steps.ts)
+// Vol Farmer v4 on Pluto's live book (Marcelo 2026-10-31; v2's from 2026-10-27): the shared steps (volFarmerV4Steps.ts)
 // run on a book over the ticker's positions with v3's rules, and what they decide becomes orders. Pure;
 // volFarmerV4LookLoader.ts reads, volFarmerV4Round.ts sends.
 //   memory    the steps' state between looks (pluto_vol_farmer_v4_cycles) and the orders sent but not yet settled. The
@@ -88,7 +88,7 @@ export function volFarmerV4RulesOf(settings: PlutoSettings, ticker?: Pick<PlutoT
 export type VolFarmerV4OrderKind = "covered_call" | "cash_secured_put" | "buy_leaps" | "sell_leaps" | "buy_shares" | "sell_shares" | "buy_back_call";
 
 /** What a share sale may restore: the positions, and the LEAPS flags a second position sold out sets. */
-export type VolFarmerV4PositionsBeforeSale = Pick<VolFarmerV2SymbolState, "first" | "second" | "leapsBought" | "leapsToSell" | "leapsTrigger">;
+export type VolFarmerV4PositionsBeforeSale = Pick<VolFarmerV4SymbolState, "first" | "second" | "leapsBought" | "leapsToSell" | "leapsTrigger">;
 
 /** An order sent and not yet settled: what the steps counted it as when they placed it. */
 export interface VolFarmerV4PendingOrder {
@@ -107,7 +107,7 @@ export interface VolFarmerV4PendingOrder {
   contractsByPosition: { first: number; second: number };
   plannedPremiumByPosition: { first: number; second: number };
   /** A LEAPS sale: the LEAPS before it, restored when the sale does not sell it whole. */
-  leapsBeforeSale: VolFarmerV2SymbolState["leaps"];
+  leapsBeforeSale: VolFarmerV4SymbolState["leaps"];
   /** A share order: the shares it trades (a share order's expiry is "", its strike and contracts 0). */
   shares?: number;
   /** A share purchase: what the steps counted it as costing, commission included. */
@@ -120,7 +120,7 @@ export interface VolFarmerV4PendingOrder {
 }
 
 export interface VolFarmerV4Memory {
-  state: VolFarmerV2SymbolState;
+  state: VolFarmerV4SymbolState;
   pending: VolFarmerV4PendingOrder[];
 }
 
@@ -148,7 +148,7 @@ export const unfilledVolFarmerV4Outcome: VolFarmerV4OrderOutcome = { working: fa
  * nothing filled, the premium goes. A position saved before premiums were kept per option (2026-10-28) has the planned
  * premium in its total, which takes the difference instead.
  */
-function settleVolFarmerV4Premium(position: VolFarmerV2Position, order: VolFarmerV4PendingOrder, fill: { dollars: number; shares: number; legId: string }, plannedDollars: number): void {
+function settleVolFarmerV4Premium(position: VolFarmerV4Position, order: VolFarmerV4PendingOrder, fill: { dollars: number; shares: number; legId: string }, plannedDollars: number): void {
   const index = position.premiums.findIndex((premium) => premium.legId === order.ref);
   if (index >= 0) {
     if (fill.shares === 0) position.premiums.splice(index, 1);
@@ -161,7 +161,7 @@ function settleVolFarmerV4Premium(position: VolFarmerV2Position, order: VolFarme
 }
 
 /** Replaces the plan of a settled order with its fills, in place; a still-working order is left as planned. Answers a note, or null. */
-export function settleVolFarmerV4Order(state: VolFarmerV2SymbolState, order: VolFarmerV4PendingOrder, outcome: VolFarmerV4OrderOutcome): string | null {
+export function settleVolFarmerV4Order(state: VolFarmerV4SymbolState, order: VolFarmerV4PendingOrder, outcome: VolFarmerV4OrderOutcome): string | null {
   if (outcome.working) return null;
   if (order.kind === "buy_back_call") return settleVolFarmerV4CallBuyBack(state, order, outcome);
   if (order.kind === "buy_shares") return settleVolFarmerV4SharePurchase(state, order, outcome);
@@ -171,7 +171,7 @@ export function settleVolFarmerV4Order(state: VolFarmerV2SymbolState, order: Vol
   if (order.kind === "covered_call") {
     if (order.startsCycle && filled === 0) {
       // The cycle never opened: forget it as the steps had it, keeping the cash check.
-      Object.assign(state, { ...newVolFarmerV2SymbolState(), cash: state.cash });
+      Object.assign(state, { ...newVolFarmerV4SymbolState(), cash: state.cash });
       return `the cycle's opening order did not fill: no cycle`;
     }
     if (order.buysShares === true && filled === 0) {
@@ -239,7 +239,7 @@ export function settleVolFarmerV4Order(state: VolFarmerV2SymbolState, order: Vol
  * at $1.10 put −$4,205.84 ($4,180 + $25.84 commission) against the first position's premiums over 3,800 shares; 20 of the
  * 38 filled put −$2,213.60 over 2,000 and leave the Call on 1,800.
  */
-function settleVolFarmerV4CallBuyBack(state: VolFarmerV2SymbolState, order: VolFarmerV4PendingOrder, outcome: VolFarmerV4OrderOutcome): string | null {
+function settleVolFarmerV4CallBuyBack(state: VolFarmerV4SymbolState, order: VolFarmerV4PendingOrder, outcome: VolFarmerV4OrderOutcome): string | null {
   const filled = outcome.filledContracts;
   let left = filled;
   for (const name of ["first", "second"] as const) {
@@ -260,19 +260,19 @@ function settleVolFarmerV4CallBuyBack(state: VolFarmerV2SymbolState, order: VolF
 
 /**
  * A share purchase's fills in place of its plan: the first position holds the shares bought at what they cost (the steps'
- * top-up arithmetic, addVolFarmerV3Shares, with the fills). Nothing bought: a new cycle's first position is forgotten (no
+ * top-up arithmetic, addVolFarmerV4Shares, with the fills). Nothing bought: a new cycle's first position is forgotten (no
  * cycle), a rebuilt one is not there, a top-up leaves the position as it was. Example: 400 shares at $97.50 topped up by
  * 100 planned at $80 ($8,001 with commission): the steps' (39,000 + 8,001) ÷ 500 = $94.00 becomes (47,001 − 8,001 +
  * 7,951) ÷ 500 = $93.90 when they filled at $79.50.
  */
-function settleVolFarmerV4SharePurchase(state: VolFarmerV2SymbolState, order: VolFarmerV4PendingOrder, outcome: VolFarmerV4OrderOutcome): string | null {
+function settleVolFarmerV4SharePurchase(state: VolFarmerV4SymbolState, order: VolFarmerV4PendingOrder, outcome: VolFarmerV4OrderOutcome): string | null {
   const planned = order.shares ?? 0;
   const bought = outcome.sharesBought;
   const first = state.first;
   if (first !== null) {
     const sharesBefore = first.shares - planned;
     if (sharesBefore + bought <= 0) {
-      if (order.startsCycle) Object.assign(state, { ...newVolFarmerV2SymbolState(), cash: state.cash });
+      if (order.startsCycle) Object.assign(state, { ...newVolFarmerV4SymbolState(), cash: state.cash });
       else state.first = null;
     } else {
       // The steps spread each premium over the shares after the purchase: over those bought instead.
@@ -286,7 +286,7 @@ function settleVolFarmerV4SharePurchase(state: VolFarmerV2SymbolState, order: Vo
 }
 
 /** A share sale's fills in place of its plan: the positions as they were before it, less the shares sold, taken from each part in turn. */
-function settleVolFarmerV4ShareSale(state: VolFarmerV2SymbolState, order: VolFarmerV4PendingOrder, outcome: VolFarmerV4OrderOutcome): string | null {
+function settleVolFarmerV4ShareSale(state: VolFarmerV4SymbolState, order: VolFarmerV4PendingOrder, outcome: VolFarmerV4OrderOutcome): string | null {
   const planned = order.shares ?? 0;
   const sold = outcome.sharesSold;
   if (sold >= planned) return null;
@@ -296,7 +296,7 @@ function settleVolFarmerV4ShareSale(state: VolFarmerV2SymbolState, order: VolFar
     for (const part of order.saleParts ?? []) {
       const shares = Math.min(left, part.shares);
       left -= shares;
-      if (shares > 0 && state[part.position] !== null) removeVolFarmerV3Shares(state, part.position, shares);
+      if (shares > 0 && state[part.position] !== null) removeVolFarmerV4Shares(state, part.position, shares);
     }
   }
   return sold === 0 ? `the sale of ${planned} shares did not fill` : `the sale of ${planned} shares, ${sold} filled`;
@@ -306,7 +306,7 @@ function settleVolFarmerV4ShareSale(state: VolFarmerV2SymbolState, order: VolFar
 export function volFarmerV4MemoryFromStored(memory: VolFarmerV4Memory): VolFarmerV4Memory {
   for (const position of [memory.state.first, memory.state.second]) {
     if (position === null || Array.isArray(position.premiums)) continue;
-    const saved = position as VolFarmerV2Position & { premiumDollars?: number };
+    const saved = position as VolFarmerV4Position & { premiumDollars?: number };
     const savedTotal = saved.premiumDollars ?? 0;
     delete saved.premiumDollars;
     position.premiums = savedTotal === 0 ? [] : [{ legId: "", dollars: savedTotal, shares: 0 }];
@@ -315,7 +315,7 @@ export function volFarmerV4MemoryFromStored(memory: VolFarmerV4Memory): VolFarme
 }
 
 /** Every leg reference `from` in the state becomes `to` (a planned order's, once it is sent). */
-export function replaceVolFarmerV4LegRef(state: VolFarmerV2SymbolState, from: string, to: string): void {
+export function replaceVolFarmerV4LegRef(state: VolFarmerV4SymbolState, from: string, to: string): void {
   for (const position of [state.first, state.second]) {
     if (position === null) continue;
     for (const entry of [...position.calls, ...position.puts, ...position.premiums]) if (entry.legId === from) entry.legId = to;
@@ -324,13 +324,13 @@ export function replaceVolFarmerV4LegRef(state: VolFarmerV2SymbolState, from: st
 }
 
 /** The first look at a ticker that holds something: its holdings as v4's positions, or why it waits. */
-export function adoptVolFarmerV4Holdings(input: { positions: readonly PositionFigures[]; cycleBreakEvenPerShare: number | null; potDollars: number }): { state: VolFarmerV2SymbolState } | { waiting: string } {
+export function adoptVolFarmerV4Holdings(input: { positions: readonly PositionFigures[]; cycleBreakEvenPerShare: number | null; potDollars: number }): { state: VolFarmerV4SymbolState } | { waiting: string } {
   const openLegs = input.positions.filter((position) => position.status === "open").flatMap((position) => position.legs.filter((leg) => leg.exitAt === null));
   const shares = openLegs.filter((leg) => leg.legType === "stock" && leg.side === "long").reduce((sum, leg) => sum + leg.quantity, 0);
   if (shares === 0) return { waiting: "holds no shares yet: its open Puts are left to expire or be assigned before v4 adopts it" };
   if (input.cycleBreakEvenPerShare === null) return { waiting: "holds shares but its cycle's break-even cannot be worked out, so v4 cannot adopt it yet" };
   const shortOptions = (optionType: "call" | "put") => openLegs.filter((leg) => leg.legType === "option" && leg.side === "short" && leg.optionType === optionType).map((leg) => ({ legId: leg.id, shares: leg.quantity * leg.multiplier }));
-  const state = newVolFarmerV2SymbolState();
+  const state = newVolFarmerV4SymbolState();
   state.potDollars = input.potDollars;
   // The cycle's break-even already counts every premium of the cycle (its Puts' included): the positions add none.
   state.first = { shares, costPerShare: input.cycleBreakEvenPerShare, premiums: [], calls: shortOptions("call"), puts: [] };
@@ -342,7 +342,7 @@ export function adoptVolFarmerV4Holdings(input: { positions: readonly PositionFi
 /** What the live book reads of the ticker once its pending orders are settled. */
 export interface VolFarmerV4LiveSnapshot {
   /** Every leg the memory refers to and the ticker's open option legs, by id. */
-  legStatusById: ReadonlyMap<string, VolFarmerV2LegStatus>;
+  legStatusById: ReadonlyMap<string, VolFarmerV4LegStatus>;
   /** The ticker's open option legs' contracts. */
   openOptionContracts: readonly { expiry: string; strike: number }[];
   /** No shares and no option held on the ticker. */
@@ -357,12 +357,12 @@ export interface VolFarmerV4LiveSnapshot {
 }
 
 export type VolFarmerV4PlannedOrder =
-  | { ref: string; kind: "covered_call"; sale: VolFarmerV2CallSale }
-  | { ref: string; kind: "cash_secured_put"; sale: VolFarmerV2PutSale }
-  | { ref: string; kind: "buy_leaps"; purchase: VolFarmerV2LeapsPurchase }
-  | { ref: string; kind: "sell_leaps"; sale: VolFarmerV2LeapsSale; leapsBeforeSale: VolFarmerV2SymbolState["leaps"] }
-  | { ref: string; kind: "buy_shares"; order: VolFarmerV3SharesOrder; spentDollars: number; startsCycle: boolean }
-  | { ref: string; kind: "sell_shares"; orders: VolFarmerV3SharesOrder[]; positionsBeforeSale: VolFarmerV4PositionsBeforeSale };
+  | { ref: string; kind: "covered_call"; sale: VolFarmerV4CallSale }
+  | { ref: string; kind: "cash_secured_put"; sale: VolFarmerV4PutSale }
+  | { ref: string; kind: "buy_leaps"; purchase: VolFarmerV4LeapsPurchase }
+  | { ref: string; kind: "sell_leaps"; sale: VolFarmerV4LeapsSale; leapsBeforeSale: VolFarmerV4SymbolState["leaps"] }
+  | { ref: string; kind: "buy_shares"; order: VolFarmerV4SharesOrder; spentDollars: number; startsCycle: boolean }
+  | { ref: string; kind: "sell_shares"; orders: VolFarmerV4SharesOrder[]; positionsBeforeSale: VolFarmerV4PositionsBeforeSale };
 
 /** A share order's shares (the parts of a sale together); 0 for an option order. */
 export function sharesOfPlannedOrder(order: VolFarmerV4PlannedOrder): number {
@@ -377,14 +377,14 @@ export function sharesOfPlannedOrder(order: VolFarmerV4PlannedOrder): number {
  * The tickers share Pluto's budget (Marcelo 2026-10-28), so an order the free cash cut is noted: the steps word a new
  * cycle's and a Put's in the look's note, and a LEAPS held below its cap is worded here (`cashCutNotes`).
  */
-export function createVolFarmerV4LiveBook(input: { state: VolFarmerV2SymbolState; pending: readonly VolFarmerV4PendingOrder[]; snapshot: VolFarmerV4LiveSnapshot }): { book: VolFarmerV2Book; planned: VolFarmerV4PlannedOrder[]; cashCutNotes: string[]; commissionCapSkips: VolFarmerV2CommissionCapSkip[] } {
+export function createVolFarmerV4LiveBook(input: { state: VolFarmerV4SymbolState; pending: readonly VolFarmerV4PendingOrder[]; snapshot: VolFarmerV4LiveSnapshot }): { book: VolFarmerV4Book; planned: VolFarmerV4PlannedOrder[]; cashCutNotes: string[]; commissionCapSkips: VolFarmerV4CommissionCapSkip[] } {
   const { state, pending, snapshot } = input;
   const planned: VolFarmerV4PlannedOrder[] = [];
   const cashCutNotes: string[] = [];
-  const commissionCapSkips: VolFarmerV2CommissionCapSkip[] = [];
+  const commissionCapSkips: VolFarmerV4CommissionCapSkip[] = [];
   let freeCash = snapshot.freeCash;
-  const openStatus = (strike: number, contracts: number): VolFarmerV2LegStatus => ({ closed: false, assigned: false, strike, contracts });
-  const statusOfPlanned = (ref: string): VolFarmerV2LegStatus | undefined => {
+  const openStatus = (strike: number, contracts: number): VolFarmerV4LegStatus => ({ closed: false, assigned: false, strike, contracts });
+  const statusOfPlanned = (ref: string): VolFarmerV4LegStatus | undefined => {
     const order = planned.find((entry) => entry.ref === ref);
     if (order === undefined) return undefined;
     if (order.kind === "buy_leaps") return openStatus(order.purchase.strike, order.purchase.contracts);
@@ -397,7 +397,7 @@ export function createVolFarmerV4LiveBook(input: { state: VolFarmerV2SymbolState
     );
   const nextRef = () => `planned:${planned.length + 1}`;
   const isFlat = () => snapshot.flat && pending.length === 0 && planned.length === 0;
-  const book: VolFarmerV2Book = {
+  const book: VolFarmerV4Book = {
     isFlat,
     freeCash: () => Math.max(0, freeCash),
     potForNewCycle: () => snapshot.potDollars,
@@ -460,7 +460,7 @@ export function createVolFarmerV4LiveBook(input: { state: VolFarmerV2SymbolState
 }
 
 /** What a planned order is counted as until it settles, with the action that sent it. */
-export function pendingVolFarmerV4Order(state: VolFarmerV2SymbolState, order: VolFarmerV4PlannedOrder, actionId: string, optionCommissionDollars: (contracts: number) => number): VolFarmerV4PendingOrder {
+export function pendingVolFarmerV4Order(state: VolFarmerV4SymbolState, order: VolFarmerV4PlannedOrder, actionId: string, optionCommissionDollars: (contracts: number) => number): VolFarmerV4PendingOrder {
   const ref = `action:${actionId}`;
   const base = { ref, actionId, startsCycle: false, contractsByPosition: { first: 0, second: 0 }, plannedPremiumByPosition: { first: 0, second: 0 }, leapsBeforeSale: null };
   if (order.kind === "covered_call") {
@@ -468,7 +468,7 @@ export function pendingVolFarmerV4Order(state: VolFarmerV2SymbolState, order: Vo
     const contractsOf = (name: "first" | "second") => (state[name]?.calls.find((call) => call.legId === order.ref)?.shares ?? 0) / 100;
     const contractsByPosition = { first: contractsOf("first"), second: contractsOf("second") };
     const commission = optionCommissionDollars(contracts);
-    const premiumOf = (positionContracts: number) => (positionContracts === 0 ? 0 : volFarmerV2CallPremiumShare(candidate.fillPrice, positionContracts, contracts, commission));
+    const premiumOf = (positionContracts: number) => (positionContracts === 0 ? 0 : volFarmerV4CallPremiumShare(candidate.fillPrice, positionContracts, contracts, commission));
     return { ...base, kind: "covered_call", expiry: candidate.expiry, strike: candidate.strike, contracts, startsCycle: order.sale.startsCycle, ...(order.sale.buysShares === true ? { buysShares: true } : {}), contractsByPosition, plannedPremiumByPosition: { first: premiumOf(contractsByPosition.first), second: premiumOf(contractsByPosition.second) } };
   }
   if (order.kind === "cash_secured_put") {

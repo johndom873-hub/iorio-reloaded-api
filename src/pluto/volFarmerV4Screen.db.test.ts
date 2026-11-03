@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { Knex } from "knex";
-import { newVolFarmerV2SymbolState } from "../backtest/engine/volFarmerV2Steps.js";
+import { newVolFarmerV4SymbolState } from "../backtest/engine/volFarmerV4Steps.js";
 import type { VolFarmerV4PendingOrder } from "./volFarmerV4LiveBook.js";
 
 // The Pluto screen's Vol Farmer v2 card against a private copy of the test tables: an adopted ticker's two positions (a
@@ -46,7 +46,7 @@ describe("the Vol Farmer v2 card", () => {
     };
     const callLeg = await legOf({});
     const leapsLeg = await legOf({ side: "long", quantity: 3, strike_price: 90, expiry_date: "2027-12-17" });
-    const state = newVolFarmerV2SymbolState();
+    const state = newVolFarmerV4SymbolState();
     state.potDollars = 64_007;
     state.first = { shares: 500, costPerShare: 110, premiums: [{ legId: callLeg, dollars: 1_000, shares: 500 }], calls: [{ legId: callLeg, shares: 400 }], puts: [] };
     state.second = { shares: 0, costPerShare: 0, premiums: [{ legId: "action:a7", dollars: 150, shares: 200 }], calls: [], puts: [{ legId: "action:a7", shares: 200 }] };

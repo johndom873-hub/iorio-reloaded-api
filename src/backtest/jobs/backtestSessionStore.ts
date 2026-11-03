@@ -43,7 +43,7 @@ import { hedgePutCostYield, hedgePutCostYieldOnCalendarDays } from "../engine/ba
 import { optionCommissionDollars } from "../engine/ledger/ledgerFills.js";
 import { loadLadderRungs } from "../analysis/sessionLadderFigures.js";
 import { loadSessionFreeCash } from "../analysis/sessionFreeCash.js";
-import { backtestCaptureLookTimeEt, backtestEngineVersion, runsVolFarmerV2Steps } from "../backtestTypes.js";
+import { backtestCaptureLookTimeEt, backtestEngineVersion, runsVolFarmerSteps } from "../backtestTypes.js";
 import { computeCycleAccuracyBands, computeDaysWithNoOptions, computeDrawdowns, computeMonthlyReturns, computePnlSources, computeTradeAccuracyBands, cycleFiguresOf, type ClosedTradeFigures } from "../sessionAnalytics.js";
 import { excessCalmarOf, treasuryBillCagr } from "../analysis/analysisSessions.js";
 import { cachedTreasuryBillRates } from "../engine/treasuryBillRates.js";
@@ -716,7 +716,7 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
       noCandidate: stretch.noCandidate ?? null,
       freeCashShareAtStart: freeCash?.shareAtMark(stretch.firstIdleDay) ?? null,
     })),
-    noCallRuns: await loadCycleNoCallRuns({ sessionId, symbol, cycleNumber, notedBy: decisionMaker === "vol_farmer" ? decisionMaker : decisionMaker && runsVolFarmerV2Steps(decisionMaker) ? "vol_farmer_v2" : null, timeline: row.timeline, stretches, splitFactorOf }),
+    noCallRuns: await loadCycleNoCallRuns({ sessionId, symbol, cycleNumber, notedBy: decisionMaker === "vol_farmer" ? decisionMaker : decisionMaker && runsVolFarmerSteps(decisionMaker) ? "vol_farmer_v2" : null, timeline: row.timeline, stretches, splitFactorOf }),
   };
 }
 

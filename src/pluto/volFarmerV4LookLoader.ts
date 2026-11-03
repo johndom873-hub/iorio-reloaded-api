@@ -1,6 +1,6 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
-import type { VolFarmerV2LegStatus } from "../backtest/engine/volFarmerV2Steps.js";
+import type { VolFarmerV4LegStatus } from "../backtest/engine/volFarmerV4Steps.js";
 import { settlesAssigned } from "../lib/cycleBreakEven.js";
 import { previousOpenSessionDate } from "../lib/marketSessionStatus.js";
 import { orderFillsPendingSql } from "../lib/orderFills.js";
@@ -89,8 +89,8 @@ export async function loadVolFarmerV4OrderOutcomes(actionIds: readonly string[],
  * Each leg's status: closed once it has left the book, assigned as the cycle ledger books a short option (settled
  * without a trade and in the money by the threshold at its expiry's close: cycleBreakEven.ts settlesAssigned).
  */
-export async function loadVolFarmerV4LegStatuses(legIds: readonly string[], connection: Knex = db): Promise<Map<string, VolFarmerV2LegStatus>> {
-  const statuses = new Map<string, VolFarmerV2LegStatus>();
+export async function loadVolFarmerV4LegStatuses(legIds: readonly string[], connection: Knex = db): Promise<Map<string, VolFarmerV4LegStatus>> {
+  const statuses = new Map<string, VolFarmerV4LegStatus>();
   if (legIds.length === 0) return statuses;
   const rows: { id: string; position_id: string; leg_type: string; side: "long" | "short"; option_type: "call" | "put" | null; strike_price: string | null; expiry_date: string | null; quantity: number; multiplier: number; entry_price: string; entry_at: Date; exit_price: string | null; exit_at: Date | null; has_closing_trade: boolean; expiry_close: string | null }[] = await connection("position_legs as pl")
     .join("positions as p", "p.id", "pl.position_id")

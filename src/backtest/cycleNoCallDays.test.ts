@@ -101,7 +101,7 @@ describe("volFarmerRunReasons", () => {
 });
 
 describe("Vol Farmer v2's No Call reasons", () => {
-  // The notes as backtestVolFarmerV2Look.ts writes them, one per position, the Puts' after them.
+  // The notes as backtestVolFarmerV4Look.ts writes them, one per position, the Puts' after them.
   const first = "first position: no Call at or above its break-even 14.20 (expiry 130, below cost 20, quote 9)";
   const second = "second position: no Call at or above its break-even 8.35 (below cost 12, delta 4)";
   const noPut = "no Put: no Call at or above the first break-even 14.20, but none qualifies at or below 11.42 (Step 19.6%: IV 67.8% × √(21 ÷ 252)) (quote 10)";

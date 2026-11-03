@@ -7,7 +7,7 @@ import { computeSaleFillPrice, sharesPerContract } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import type { CommissionEstimator, StockCommissionEstimator } from "../../lib/commissionEstimate.js";
 
-// The candidate rules the Steady Stake, Vol Farmer v4 (volFarmerV2Steps.ts) and live Pluto sell by, first written for
+// The candidate rules the Steady Stake, Vol Farmer v4 (volFarmerV4Steps.ts) and live Pluto sell by, first written for
 // the CC + Put Ladder (Marcelo 2026-10-15): the realism limits (bid at least $0.05 with an ask above it, a spread within
 // maxSpreadPctOfMid of the mid, at most 20% of the contract's previous-session volume), delta on the expiry's parity
 // forward, and each sale's premium yield. The live Pluto process loads this file: keep its imports free of node:sqlite,

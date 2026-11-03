@@ -1,5 +1,5 @@
 import { baselineMaxVolumeShare, baselineMinimumBid } from "../backtest/engine/baselineSaleSteps.js";
-import { volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2PutStrikeCap, volFarmerV4CallMaxCommissionShareOfPremium } from "../backtest/engine/volFarmerV2Steps.js";
+import { volFarmerV4ImpliedMoveStep, volFarmerV4LeapsBudget, volFarmerV4PutStrikeCapOf, volFarmerV4CallMaxCommissionShareOfPremium } from "../backtest/engine/volFarmerV4Steps.js";
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { regularCloseEt } from "../lib/marketSessionStatus.js";
 import { roundToCents } from "../lib/positionOrderRules.js";
@@ -74,7 +74,7 @@ export interface PlutoHowItWorks {
     leapsMinDte: number;
     leapsAbsDelta: number;
     leapsMaxAllocationPct: number;
-    /** v3's rules (volFarmerV2Steps.ts): the rebalancing band, % of the pot, and the choices as the settings hold them. */
+    /** v3's rules (volFarmerV4Steps.ts): the rebalancing band, % of the pot, and the choices as the settings hold them. */
     rebalanceBandPct: number;
     rebalances: PlutoSettings["volFarmerV4Rebalances"];
     firstPositionAfterCalledAway: PlutoSettings["volFarmerV4FirstPositionAfterCalledAway"];
@@ -138,7 +138,7 @@ const percent = (fraction: number) => Math.round(fraction * 1_000_000) / 10_000;
 /** Pure: the tab's numbers from Pluto's settings, the platform's unfilled-order sweep and the code's constants. */
 export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfilledOrderCancelMinutes: number; tickers: readonly Pick<PlutoTickerSettings, "symbol" | "alwaysHoldTheStock">[] }): PlutoHowItWorks {
   const pot = volFarmerV4ExampleAccountValue * tickerPotFraction(volFarmerV4ExampleAllocationPct, settings);
-  const volFarmerV4Step = settings.volFarmerV4StepRule === "implied_move_at_put_sale" ? volFarmerV2ImpliedMoveStep(volFarmerV4ExampleImpliedVolatility).stepPct : settings.volFarmerV4StepBelowFirstBreakEvenPct;
+  const volFarmerV4Step = settings.volFarmerV4StepRule === "implied_move_at_put_sale" ? volFarmerV4ImpliedMoveStep(volFarmerV4ExampleImpliedVolatility).stepPct : settings.volFarmerV4StepBelowFirstBreakEvenPct;
   // A lot's cost at a price, as the steps count it (the shares and their commission).
   const lotCostAt = (price: number) => price * 100 + flatStockCommissionEstimator.perShareDollars("buy") * 100;
   const target = (pot * settings.volFarmerV4FirstPositionPct) / 100;
@@ -146,7 +146,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
   const lots = Math.floor(target / lotCostAt(volFarmerV4ExampleStockPrice) + 1e-9);
   const topUpCapDollars = settings.volFarmerV4TopUpCapPct > 0 ? (pot * settings.volFarmerV4TopUpCapPct) / 100 : null;
   const moneyInBefore = lots * lotCostAt(volFarmerV4ExampleStockPrice);
-  // Step 1b's rebalancing (volFarmerV2Steps.ts rebalanceHolding): outside the band, back to floor(target ÷ a lot's cost), never
+  // Step 1b's rebalancing (volFarmerV4Steps.ts rebalanceHolding): outside the band, back to floor(target ÷ a lot's cost), never
   // below one lot; a top-up buys no more lots than the cap's room over the money in pays for.
   const lotsAfterRebalanceAt = (price: number) => {
     const value = lots * 100 * price;
@@ -230,9 +230,9 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
         firstBreakEven: volFarmerV4ExampleFirstBreakEven,
         impliedVolatilityPct: percent(volFarmerV4ExampleImpliedVolatility),
         stepPct: volFarmerV4Step,
-        putStrikeCap: volFarmerV2PutStrikeCap(volFarmerV4ExampleFirstBreakEven, volFarmerV4Step),
+        putStrikeCap: volFarmerV4PutStrikeCapOf(volFarmerV4ExampleFirstBreakEven, volFarmerV4Step),
         leapsEntryBelowSecondBreakEvenPct: volFarmerV4Step / 2,
-        leapsCap: volFarmerV2LeapsBudget(Number.POSITIVE_INFINITY, pot, settings.volFarmerV4LeapsMaxAllocationPct),
+        leapsCap: volFarmerV4LeapsBudget(Number.POSITIVE_INFINITY, pot, settings.volFarmerV4LeapsMaxAllocationPct),
         buyBackTimeEt: hhmmMinutesBefore(settings.windowEndEt, 1),
         buyBackStockPrice: volFarmerV4ExampleBuyBackStockPrice,
         buyBackMid: volFarmerV4ExampleBuyBackMid,

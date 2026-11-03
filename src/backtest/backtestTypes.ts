@@ -29,8 +29,8 @@ export const activeBacktestDecisionMakers = ["steady_stake", "vol_farmer_v4"] as
 /** The retired ones: their past sessions stay readable. */
 export const retiredBacktestDecisionMakers = ["rules", "llm", "vol_farmer", "baseline", "vol_farmer_v2", "vol_farmer_v3"] as const satisfies readonly BacktestDecisionMaker[];
 
-/** Vol Farmer v2, v3 and v4: all ran v2's steps (volFarmerV2Steps.ts), v3 and v4 with v3's rebalancing; their stored sessions read alike. */
-export function runsVolFarmerV2Steps(decisionMaker: BacktestDecisionMaker): boolean {
+/** Vol Farmer v2, v3 and v4: all ran v2's steps (volFarmerV4Steps.ts), v3 and v4 with v3's rebalancing; their stored sessions read alike. */
+export function runsVolFarmerSteps(decisionMaker: BacktestDecisionMaker): boolean {
   return decisionMaker === "vol_farmer_v2" || decisionMaker === "vol_farmer_v3" || decisionMaker === "vol_farmer_v4";
 }
 
@@ -363,7 +363,7 @@ export const defaultBacktestVolFarmerSettings: BacktestVolFarmerSettings = { cal
  * once assigned, are the second position, with a break-even of its own (the strike less its Puts' and Calls' premiums).
  * Once the price is half a Step below the second position's break-even, the free cash buys a LEAPS Call, one a holding,
  * sold when the second position is called away (Marcelo 2026-10-28). Calls and Puts on the next listed expiry, held to
- * it; the Calls' |delta| range and the spread limit are the Vol Farmer's settings (backtestVolFarmerV2Look.ts).
+ * it; the Calls' |delta| range and the spread limit are the Vol Farmer's settings (backtestVolFarmerV4Look.ts).
  */
 export interface BacktestVolFarmerV2Settings {
   /**
@@ -548,7 +548,7 @@ export type BacktestVolFarmerV4Settings = Pick<BacktestVolFarmerSettings, "callM
 
 export const defaultBacktestVolFarmerV4Settings: BacktestVolFarmerV4Settings = { callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, firstPositionPct: 80, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 20, rebalanceBandPct: 20, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned", alwaysHoldTheStock: "on", tickerAlwaysHoldTheStock: {} };
 
-/** The shared steps' values (volFarmerV2Steps.ts) for a Vol Farmer v4 session, from its own section: the Calls' limits, v2's values and v3's. */
+/** The shared steps' values (volFarmerV4Steps.ts) for a Vol Farmer v4 session, from its own section: the Calls' limits, v2's values and v3's. */
 export function volFarmerStepSettingsOf(settings: Pick<EffectiveBacktestSettings, "volFarmerV4">): { farmer: Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid">; v2: BacktestVolFarmerV2Settings; v3: BacktestVolFarmerV3Settings } {
   const { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid, rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, callsInTheMoneyAtLastLook, alwaysHoldTheStock, tickerAlwaysHoldTheStock, ...v2 } = settings.volFarmerV4;
   return { farmer: { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid }, v2, v3: { rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, callsInTheMoneyAtLastLook, alwaysHoldTheStock, tickerAlwaysHoldTheStock } };

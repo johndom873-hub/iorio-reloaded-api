@@ -12,7 +12,7 @@ import { loadBacktestBarHistory, type StoredDailyBar } from "../engine/backtestB
 import { readSplitScheduleCache, refreshSplitScheduleForSymbol, type SplitSchedule } from "../engine/splitFactors.js";
 import { loadTreasuryBillRates } from "../engine/treasuryBillRates.js";
 import { optionCommissionDollars, stockCommissionDollars } from "../engine/ledger/ledgerFills.js";
-import { volFarmerV2BreakEven, volFarmerV2CallPremiumShare, volFarmerV2ImpliedMoveStep, volFarmerV2PutStrikeCap } from "../engine/volFarmerV2Steps.js";
+import { volFarmerV4BreakEven, volFarmerV4CallPremiumShare, volFarmerV4ImpliedMoveStep, volFarmerV4PutStrikeCapOf } from "../engine/volFarmerV4Steps.js";
 import type { BacktestVolFarmerV4Settings } from "../backtestTypes.js";
 import { openDaysFromCalendarRows } from "../../lib/marketSessionStatus.js";
 import { loadMarketCalendarRowsFrom } from "../engine/backtestTradingCalendar.js";
@@ -542,13 +542,13 @@ function todayOf(inputs: AnalysisInputs, values: AnalysisFigureValues, lastDayRo
   let firstBreakEven: number | null = null;
   if (price !== null && lots > 0) {
     const costPerShare = price + stockCommissionDollars(shares) / shares;
-    const premiums = call === null ? [] : [{ legId: "today", dollars: volFarmerV2CallPremiumShare(call.fillPrice, lots, lots, optionCommissionDollars(lots)), shares }];
-    firstBreakEven = volFarmerV2BreakEven({ shares, costPerShare, premiums });
+    const premiums = call === null ? [] : [{ legId: "today", dollars: volFarmerV4CallPremiumShare(call.fillPrice, lots, lots, optionCommissionDollars(lots)), shares }];
+    firstBreakEven = volFarmerV4BreakEven({ shares, costPerShare, premiums });
   }
   // The engine's Step at a look: the previous session's IV (the bar before the last day's).
   const previousBar = [...inputs.ohlcv].reverse().find((bar) => bar.tradingDate < date) ?? null;
   const previousIv = previousBar && previousBar.impliedVolatility !== null && previousBar.impliedVolatility > 0 ? previousBar.impliedVolatility : null;
-  const step = previousIv === null || previousBar === null ? null : { ...volFarmerV2ImpliedMoveStep(previousIv), impliedVolatility: previousIv, ivDate: previousBar.tradingDate };
+  const step = previousIv === null || previousBar === null ? null : { ...volFarmerV4ImpliedMoveStep(previousIv), impliedVolatility: previousIv, ivDate: previousBar.tradingDate };
   const putsStartCallYieldPct = values.v4.putsStartCallYieldPct;
   const band = price === null ? null : bandAt(values.potDollars, price, values.firstPositionShare, values.v4.rebalanceBandPct);
   return {
@@ -567,7 +567,7 @@ function todayOf(inputs: AnalysisInputs, values: AnalysisFigureValues, lastDayRo
     putsNow: isExpiryDay && (call?.premiumYield ?? 0) < putsStartCallYieldPct / 100,
     putsStartCallYieldPct,
     step: step && { stepPct: step.stepPct, impliedVolatility: step.impliedVolatility, ivDate: step.ivDate },
-    putStrikeCap: step === null || firstBreakEven === null ? null : volFarmerV2PutStrikeCap(firstBreakEven, step.stepPct),
+    putStrikeCap: step === null || firstBreakEven === null ? null : volFarmerV4PutStrikeCapOf(firstBreakEven, step.stepPct),
   };
 }
 

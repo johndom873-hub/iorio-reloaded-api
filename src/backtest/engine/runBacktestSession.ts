@@ -32,9 +32,9 @@ import { BacktestTradingCalendar, loadMarketCalendarRowsFrom } from "./backtestT
 import { BacktestDayDataReader, type IntradayLookCheck, type PrefetchedSymbolDay } from "./backtestDayDataReader.js";
 import { loadTreasuryBillRates } from "./treasuryBillRates.js";
 import { runSteadyStakeLook } from "./backtestSteadyStakeLook.js";
-import { buyBackVolFarmerV3CallsInTheMoney, describeVolFarmerV2Run, lowerVolFarmerV2CostForSpinOff, runVolFarmerV2Look } from "./backtestVolFarmerV2Look.js";
+import { buyBackVolFarmerV4CallsInTheMoney, describeVolFarmerV4Run, lowerVolFarmerV4CostForSpinOff, runVolFarmerV4Look } from "./backtestVolFarmerV4Look.js";
 import { isLastSessionBeforeWeekend } from "../../lib/tradingWeek.js";
-import type { LeapsCallQuoteSource } from "./volFarmerV2Steps.js";
+import type { LeapsCallQuoteSource } from "./volFarmerV4Steps.js";
 
 // The backtest engine's entry point (docs/backtesting/FORMULAS.md, FULL-FIDELITY-DESIGN.md, DATA-FILES.md). Called by the
 // job process (scripts/run-backtest-job.ts) for a backtest job. One session = one or several symbols from its start to
@@ -392,7 +392,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
   // A past session of a retired decision maker is never run again: its stored results stay as they are.
   if (isRetiredBacktestDecisionMaker(settings.decisionMaker)) throw new Error(retiredBacktestDecisionMakerMessage);
   const symbolNames = sessionSymbolsOf(session);
-  // Vol Farmer v4 runs Vol Farmer v2's steps with v3's rebalancing (backtestVolFarmerV2Look.ts) and buys its LEAPS from
+  // Vol Farmer v4 runs Vol Farmer v2's steps with v3's rebalancing (backtestVolFarmerV4Look.ts) and buys its LEAPS from
   // the 10:00 Calls of every listed expiry; the Steady Stake is the other decision maker.
   const isVolFarmerV4 = settings.decisionMaker === "vol_farmer_v4";
   const leapsOn = isVolFarmerV4;
@@ -682,7 +682,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           }
           const valuePerShareOnCycleScale = spinOff.valuePerShare * priceToCycleScale;
           const credited = creditSpinOff(ledger, { symbol: entry.symbol, valuePerShare: valuePerShareOnCycleScale, at });
-          lowerVolFarmerV2CostForSpinOff(ledger, entry.symbol, valuePerShareOnCycleScale);
+          lowerVolFarmerV4CostForSpinOff(ledger, entry.symbol, valuePerShareOnCycleScale);
           if (entry.baseline.bought) baselineCash += (entry.baseline.shares * spinOff.valuePerShare * entry.baseline.splitFactorAtPurchase) / splitFactor;
           notes.push(noteFor(entry, `spin-off: ${formatWholeDollars(credited)} credited, ${spinOff.valuePerShare.toFixed(2)} a share held, each costing as much less${openOptionLegs.length > 0 ? `; ${openOptionLegs.length} open option leg(s) closed at their last marks` : ""}`));
         }
@@ -1052,7 +1052,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       const looksOfDay: DayLookSummary[] = [];
       let filledActionsToday = 0;
       let lookedAfterCapture = false;
-      const runLook = isVolFarmerV4 ? runVolFarmerV2Look : runSteadyStakeLook;
+      const runLook = isVolFarmerV4 ? runVolFarmerV4Look : runSteadyStakeLook;
       // Vol Farmer v4 reads a symbol's snapshot of zeros as missing data, not as no bid (Marcelo 2026-10-28): the symbol sits
       // that look out and is decided at the day's next look whose quotes have an ask above 0.
       const symbolsWaitingForQuotes = new Set<string>();
@@ -1126,7 +1126,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
             .map((leg) => ({ expiry: todayIso, strike: leg.strikePrice! / priceToCycleScale, right: "C" as const }));
           if (heldCalls.length === 0) continue;
           const quoteByContract = twoSidedQuoteByContract(intradayQuotesOfContracts(entry, lastLookTimeEt, heldCalls, range), new Set(heldCalls.map((contract) => roundedStrike(contract.strike))));
-          const bought = buyBackVolFarmerV3CallsInTheMoney({ ledger, todayIso, lookTimeEt: lastLookTimeEt, symbol: entry.symbol, stockPrice: adjustedPrice * splitFactorToday(entry), splitFactorToday: splitFactor, spreadShareCharged: settings.trading.spreadCostChargedPct / 100, quoteOf: (strike) => quoteByContract.get(markKey(todayIso, strike, "C")), priceByLegId, nextActionId, gate: settings.decisionMaker });
+          const bought = buyBackVolFarmerV4CallsInTheMoney({ ledger, todayIso, lookTimeEt: lastLookTimeEt, symbol: entry.symbol, stockPrice: adjustedPrice * splitFactorToday(entry), splitFactorToday: splitFactor, spreadShareCharged: settings.trading.spreadCostChargedPct / 100, quoteOf: (strike) => quoteByContract.get(markKey(todayIso, strike, "C")), priceByLegId, nextActionId, gate: settings.decisionMaker });
           actions.push(...bought.actions);
           notes.push(...bought.notes);
           boughtBack += bought.actions.length;
@@ -1175,7 +1175,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     );
     sessionNotes.push(`Buy and hold of ${symbols.map((entry) => entry.symbol).join(", ")} (comparison only): the starting value in equal parts, whole shares at each symbol's first 10:00 price, never rebalanced; dividends not counted.`);
     if (skippedUnavailableDays.length > 0) sessionNotes.push(`${formatCount(skippedUnavailableDays.length)} day(s) inside the period could not be downloaded for any symbol and were skipped: ${skippedUnavailableDays.join(", ")}.`);
-    const volFarmerV4Note = volFarmerSteps !== null ? describeVolFarmerV2Run(ledger, symbols.map((entry) => entry.symbol), volFarmerSteps.v2.firstPositionPct, "Vol Farmer v4", priceByLegId) : null;
+    const volFarmerV4Note = volFarmerSteps !== null ? describeVolFarmerV4Run(ledger, symbols.map((entry) => entry.symbol), volFarmerSteps.v2.firstPositionPct, "Vol Farmer v4", priceByLegId) : null;
     if (volFarmerV4Note !== null) sessionNotes.push(volFarmerV4Note);
     const bookRecords = buildBookRecords({ ledger, symbols, optionSales, actions, priceByLegId, lastSessionDateIso, calendar, noSaleRecords: { shortfalls } });
     // The book holds every share it sells (the ledger refuses anything else); the platform's cycle derivation reading it

@@ -8,8 +8,8 @@ import { BacktestBarHistory } from "./backtestBarHistory.js";
 import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLookTypes.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
-import { buyBackVolFarmerV3CallsInTheMoney, describeVolFarmerV2Run, previousSessionImpliedVolatility, runVolFarmerV2Look, volFarmerV2TickerShares } from "./backtestVolFarmerV2Look.js";
-import { chooseVolFarmerV2Leaps, contractsAffordable, volFarmerV2BreakEven, volFarmerV2ImpliedMoveStep, volFarmerV2LeapsBudget, volFarmerV2LeapsEntryPriceCap, volFarmerV2PutStrikeCap, volFarmerV2TurnOrder, volFarmerV3MoneyIn, type VolFarmerV2SymbolState } from "./volFarmerV2Steps.js";
+import { buyBackVolFarmerV4CallsInTheMoney, describeVolFarmerV4Run, previousSessionImpliedVolatility, runVolFarmerV4Look, volFarmerV4TickerShares } from "./backtestVolFarmerV4Look.js";
+import { chooseVolFarmerV4Leaps, contractsAffordable, volFarmerV4BreakEven, volFarmerV4ImpliedMoveStep, volFarmerV4LeapsBudget, volFarmerV4LeapsEntryPriceCap, volFarmerV4PutStrikeCapOf, volFarmerV4TurnOrder, volFarmerV4MoneyIn, type VolFarmerV4SymbolState } from "./volFarmerV4Steps.js";
 import { alignOpenOptionLegsToSplitFactor, expirySettlementInstant, settleExpiry } from "./ledger/ledgerEvents.js";
 import { optionCommissionDollars, optionPurchaseFillPrice, optionSaleFillPrice, stockCommissionDollars } from "./ledger/ledgerFills.js";
 import { ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
@@ -39,28 +39,28 @@ const sessionSettingsOf = (volFarmerV4: BacktestVolFarmerV4Settings) => ({ decis
 describe("the v2 formulas", () => {
   it("puts a position's premiums against its shares' cost, each option for at most the shares held", () => {
     // 200 shares at 250.01, Calls on all of them that brought in $540 net: 250.01 − 2.70 = 247.31 a share.
-    expect(volFarmerV2BreakEven({ shares: 200, costPerShare: 250.01, premiums: [{ legId: "c", dollars: 540, shares: 200 }] })).toBeCloseTo(247.31, 10);
-    expect(volFarmerV2BreakEven({ shares: 0, costPerShare: 0, premiums: [{ legId: "p", dollars: 120, shares: 100 }] })).toBeNull();
+    expect(volFarmerV4BreakEven({ shares: 200, costPerShare: 250.01, premiums: [{ legId: "c", dollars: 540, shares: 200 }] })).toBeCloseTo(247.31, 10);
+    expect(volFarmerV4BreakEven({ shares: 0, costPerShare: 0, premiums: [{ legId: "p", dollars: 120, shares: 100 }] })).toBeNull();
     // PCG, 16 May 2022: 100 shares assigned at $12 after Puts of 25, 4, 18, 44 and 1 contracts ($645.94 net). Each Put counts
     // for the 100 shares held of those it covered: 12 − (145.50 ÷ 2,500 + 21.28 ÷ 400 + 167.76 ÷ 1,800 + 300.08 ÷ 4,400 +
     // 11.32 ÷ 100) = 12 − 0.386 = $11.61, not 12 − 645.94 ÷ 100 = $5.54.
     const pcgPuts = ([[25, 0.065], [4, 0.06], [18, 0.1], [44, 0.075], [1, 0.12]] as const).map(([contracts, fill], index) => ({ legId: `p${index}`, dollars: fill * 100 * contracts - 0.68 * contracts, shares: contracts * 100 }));
-    expect(volFarmerV2BreakEven({ shares: 100, costPerShare: 12, premiums: pcgPuts })).toBeCloseTo(11.614, 3);
+    expect(volFarmerV4BreakEven({ shares: 100, costPerShare: 12, premiums: pcgPuts })).toBeCloseTo(11.614, 3);
     // 2,800 shares at $50, $2,800 of Calls on all of them, then 2,300 called away: $49 on the 500 left, not 50 − 2,800 ÷ 500 = $44.40.
-    expect(volFarmerV2BreakEven({ shares: 500, costPerShare: 50, premiums: [{ legId: "c", dollars: 2_800, shares: 2_800 }] })).toBeCloseTo(49, 10);
+    expect(volFarmerV4BreakEven({ shares: 500, costPerShare: 50, premiums: [{ legId: "c", dollars: 2_800, shares: 2_800 }] })).toBeCloseTo(49, 10);
     // A Call on fewer shares than are held counts in full: 300 shares, a Call on 200 for $100: 50 − 100 ÷ 300.
-    expect(volFarmerV2BreakEven({ shares: 300, costPerShare: 50, premiums: [{ legId: "c", dollars: 100, shares: 200 }] })).toBeCloseTo(50 - 100 / 300, 10);
+    expect(volFarmerV4BreakEven({ shares: 300, costPerShare: 50, premiums: [{ legId: "c", dollars: 100, shares: 200 }] })).toBeCloseTo(50 - 100 / 300, 10);
     // A premium total saved before premiums were kept per option counts in full.
-    expect(volFarmerV2BreakEven({ shares: 100, costPerShare: 12, premiums: [{ legId: "", dollars: 645.94, shares: 0 }] })).toBeCloseTo(5.5406, 4);
+    expect(volFarmerV4BreakEven({ shares: 100, costPerShare: 12, premiums: [{ legId: "", dollars: 645.94, shares: 0 }] })).toBeCloseTo(5.5406, 4);
   });
 
   it("caps the Puts' strike a set share below the first break-even", () => {
-    expect(volFarmerV2PutStrikeCap(246, 15)).toBeCloseTo(209.1, 10);
+    expect(volFarmerV4PutStrikeCapOf(246, 15)).toBeCloseTo(209.1, 10);
   });
 
   it("takes the one-month implied move as the Step, from the IV stored for the previous session only", () => {
     // IV 60%: 60 × √(21 ÷ 252) = 17.32% below the first break-even.
-    expect(volFarmerV2ImpliedMoveStep(0.6).stepPct).toBeCloseTo(17.3205, 4);
+    expect(volFarmerV4ImpliedMoveStep(0.6).stepPct).toBeCloseTo(17.3205, 4);
     // IV on Monday 2 March, a bar without one on Tuesday 3rd, an IV of 0 on Wednesday 4th, no bar on Thursday 5th.
     const bars = barsWithImpliedVolatility([["2026-03-02", 0.5], ["2026-03-03", null], ["2026-03-04", 0]]);
     expect(previousSessionImpliedVolatility(bars, "2026-03-02")).toBe(0.5);
@@ -73,33 +73,33 @@ describe("the v2 formulas", () => {
 
   it("buys the LEAPS half a Step below B-E2", () => {
     // B-E2 $100, IV 60%: Step 17.32%, so the LEAPS is bought at $91.34 or lower.
-    expect(volFarmerV2LeapsEntryPriceCap(100, volFarmerV2ImpliedMoveStep(0.6).stepPct / 2)).toBeCloseTo(91.3397, 4);
+    expect(volFarmerV4LeapsEntryPriceCap(100, volFarmerV4ImpliedMoveStep(0.6).stepPct / 2)).toBeCloseTo(91.3397, 4);
   });
 
   it("caps what a LEAPS spends at a share of the account", () => {
     // No cap: all the free cash. MSTR on 27 Oct 2025 with a 10% cap: min($96,142, 10% of $363,289) = $36,328.90, 3 contracts at $10,250.68.
-    expect(volFarmerV2LeapsBudget(96_142, 363_289, 0)).toBe(96_142);
-    expect(volFarmerV2LeapsBudget(96_142, 363_289, 10)).toBeCloseTo(36_328.9, 6);
-    expect(contractsAffordable(volFarmerV2LeapsBudget(96_142, 363_289, 10), 102.5)).toBe(3);
+    expect(volFarmerV4LeapsBudget(96_142, 363_289, 0)).toBe(96_142);
+    expect(volFarmerV4LeapsBudget(96_142, 363_289, 10)).toBeCloseTo(36_328.9, 6);
+    expect(contractsAffordable(volFarmerV4LeapsBudget(96_142, 363_289, 10), 102.5)).toBe(3);
     // Never more than the free cash.
-    expect(volFarmerV2LeapsBudget(20_000, 363_289, 10)).toBe(20_000);
+    expect(volFarmerV4LeapsBudget(20_000, 363_289, 10)).toBe(20_000);
   });
 
   it("gives each ticker its allocation raised by the excess allowance, as Pluto does, and moves the tickers' turn one place a day", () => {
     const twentyFour = ["BABA", "BAC", "CSCO", "CVNA", "EWZ", "F", "GDX", "GLD", "INTC", "IWM", "MRVL", "NKE", "NOK", "ORCL", "PBR", "PCG", "PTON", "SLV", "TLT", "TQQQ", "UBER", "WMT", "XLE", "XLF"];
     // An equal share of 4.1667% raised by 26.3158%: 5.2632% each, $100,000 on $1,900,000, 126.3% together.
-    const equal = volFarmerV2TickerShares(twentyFour, { tickerAllocationPct: {}, excessAllowancePct: 26.3158 });
+    const equal = volFarmerV4TickerShares(twentyFour, { tickerAllocationPct: {}, excessAllowancePct: 26.3158 });
     expect(equal.get("BABA")! * 1_900_000).toBeCloseTo(100_000, 0);
     expect([...equal.values()].reduce((total, share) => total + share, 0)).toBeCloseTo(1.263158, 6);
     // GDX set to 8% and TQQQ to 6%: the other 22 share the 86% left, 3.9091% each.
-    const mixed = volFarmerV2TickerShares(twentyFour, { tickerAllocationPct: { GDX: 8, TQQQ: 6 }, excessAllowancePct: 0 });
+    const mixed = volFarmerV4TickerShares(twentyFour, { tickerAllocationPct: { GDX: 8, TQQQ: 6 }, excessAllowancePct: 0 });
     expect([mixed.get("GDX"), mixed.get("TQQQ")]).toEqual([0.08, 0.06]);
     expect(mixed.get("BABA")).toBeCloseTo(0.86 / 22, 12);
     // One ticker alone: all of the account.
-    expect(volFarmerV2TickerShares(["GDX"], { tickerAllocationPct: {}, excessAllowancePct: 0 }).get("GDX")).toBe(1);
-    expect(volFarmerV2TurnOrder(["XLF", "BAC", "CSCO"], 0)).toEqual(["BAC", "CSCO", "XLF"]);
-    expect(volFarmerV2TurnOrder(["XLF", "BAC", "CSCO"], 1)).toEqual(["CSCO", "XLF", "BAC"]);
-    expect(volFarmerV2TurnOrder(["XLF", "BAC", "CSCO"], 5)).toEqual(["XLF", "BAC", "CSCO"]);
+    expect(volFarmerV4TickerShares(["GDX"], { tickerAllocationPct: {}, excessAllowancePct: 0 }).get("GDX")).toBe(1);
+    expect(volFarmerV4TurnOrder(["XLF", "BAC", "CSCO"], 0)).toEqual(["BAC", "CSCO", "XLF"]);
+    expect(volFarmerV4TurnOrder(["XLF", "BAC", "CSCO"], 1)).toEqual(["CSCO", "XLF", "BAC"]);
+    expect(volFarmerV4TurnOrder(["XLF", "BAC", "CSCO"], 5)).toEqual(["XLF", "BAC", "CSCO"]);
   });
 
   it("buys as many contracts as the cash pays for, commission included", () => {
@@ -119,14 +119,14 @@ describe("the v2 formulas", () => {
     const quotes = [70, 80, 90, 100, 110].map((strike) => quoteAt(strike));
     const deltaOf = (strike: number) => blackScholesDelta(forward, strike, years, 0.04, 0.5, true);
     const nearest = [70, 80, 90, 100, 110].reduce((best, strike) => (Math.abs(deltaOf(strike) - 0.7) < Math.abs(deltaOf(best) - 0.7) ? strike : best));
-    const chosen = chooseVolFarmerV2Leaps({ quotes, expiry: "2027-03-19", stockPrice: 100, yearsToExpiry: years, riskFreeRate: 0.04, absDelta: 0.7, maxSpreadPctOfMid: 50, spreadShareCharged: 0 })!;
+    const chosen = chooseVolFarmerV4Leaps({ quotes, expiry: "2027-03-19", stockPrice: 100, yearsToExpiry: years, riskFreeRate: 0.04, absDelta: 0.7, maxSpreadPctOfMid: 50, spreadShareCharged: 0 })!;
     expect(chosen.strike).toBe(nearest);
     expect(chosen.delta).toBeCloseTo(deltaOf(nearest), 3);
     // The contracts its ask offered come with it, for the purchase's cap.
     expect(chosen.askSize).toBe(nearest);
     // A quote whose spread is past the limit is passed over.
     const wide = quotes.map((quote) => (quote.strike === nearest ? quoteAt(nearest, 0.6) : quote));
-    expect(chooseVolFarmerV2Leaps({ quotes: wide, expiry: "2027-03-19", stockPrice: 100, yearsToExpiry: years, riskFreeRate: 0.04, absDelta: 0.7, maxSpreadPctOfMid: 50, spreadShareCharged: 0 })!.strike).not.toBe(nearest);
+    expect(chooseVolFarmerV4Leaps({ quotes: wide, expiry: "2027-03-19", stockPrice: 100, yearsToExpiry: years, riskFreeRate: 0.04, absDelta: 0.7, maxSpreadPctOfMid: 50, spreadShareCharged: 0 })!.strike).not.toBe(nearest);
   });
 
   it("reads Vol Farmer v4's values from its own section", () => {
@@ -173,13 +173,13 @@ describe("Vol Farmer v4 at the looks", () => {
   const nextActionId = () => `action-${++actionNumber}`;
   function look(ledger: SimulatedLedger, todayIso: string, stockPrice: number, expiry: string, more: Partial<BacktestVolFarmerV4Settings> = {}, leapsAskSize: number | null = 10, bars = barsWithImpliedVolatility([])) {
     const settings = sessionSettingsOf(scenarioVolFarmerV4Settings(more));
-    return runVolFarmerV2Look({ calendar: weekdayCalendar, todayIso, lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf(todayIso, stockPrice, expiry, leapsAskSize), bars }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
+    return runVolFarmerV4Look({ calendar: weekdayCalendar, todayIso, lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf(todayIso, stockPrice, expiry, leapsAskSize), bars }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
   }
   /** A look of tickers sharing one account, each at its price: `prices` holds those at the look, `sessionSymbols` every one of the session. */
   function lookBook(ledger: SimulatedLedger, todayIso: string, prices: Record<string, number>, expiry: string, book: { sessionSymbols: string[]; sessionDayIndex: number; more: Partial<BacktestVolFarmerV4Settings> }) {
     const settings = sessionSettingsOf(scenarioVolFarmerV4Settings(book.more));
     const symbols = Object.entries(prices).map(([tickerSymbol, stockPrice]) => ({ ...lookSymbolOf(todayIso, stockPrice, expiry, 10, "2027-04-16", tickerSymbol), bars: barsWithImpliedVolatility([]) }));
-    return runVolFarmerV2Look({ calendar: weekdayCalendar, todayIso, lookTimeEt: "10:00", symbols, sectorBySymbol: new Map(book.sessionSymbols.map((tickerSymbol) => [tickerSymbol, null])), settings, ledger, priceByLegId: new Map(), nextActionId, sessionDayIndex: book.sessionDayIndex } as unknown as BacktestLookContext);
+    return runVolFarmerV4Look({ calendar: weekdayCalendar, todayIso, lookTimeEt: "10:00", symbols, sectorBySymbol: new Map(book.sessionSymbols.map((tickerSymbol) => [tickerSymbol, null])), settings, ledger, priceByLegId: new Map(), nextActionId, sessionDayIndex: book.sessionDayIndex } as unknown as BacktestLookContext);
   }
   const openOption = (ledger: SimulatedLedger, optionType: "call" | "put", side: "short" | "long" = "short"): LedgerLeg[] => ledger.legs.filter((leg) => leg.legType === "option" && leg.optionType === optionType && leg.side === side && leg.exitAt === null);
   const breakEvenIn = (description: string, position: "first" | "second") => Number(new RegExp(`${position} position \\d+×, break-even now (\\d+\\.\\d+)`).exec(description)![1]);
@@ -208,7 +208,7 @@ describe("Vol Farmer v4 at the looks", () => {
     const afterFall = await look(ledger, "2026-03-16", 80, "2026-03-20");
     expect(afterFall.actions.map((action) => action.kind)).toEqual(["open_cash_secured_put"]);
     const put = afterFall.actions[0]!;
-    const cap = volFarmerV2PutStrikeCap(firstBreakEven, 15);
+    const cap = volFarmerV4PutStrikeCapOf(firstBreakEven, 15);
     expect(put.contract!.strike).toBeLessThanOrEqual(cap + 0.01);
     expect(Math.abs((put.candidateScores as { delta: number }).delta)).toBeLessThanOrEqual(0.2);
     // Half the pot secures floor(50,000 ÷ (strike × 100)) contracts.
@@ -254,7 +254,7 @@ describe("Vol Farmer v4 at the looks", () => {
   function lookV3(ledger: SimulatedLedger, marks: Map<string, number>, todayIso: string, stockPrice: number, expiry: string, more: Partial<BacktestVolFarmerV2Settings> = {}, v3More: Partial<BacktestVolFarmerV3Settings> = {}) {
     markShares(ledger, marks, stockPrice);
     const settings = sessionSettingsOf(scenarioVolFarmerV4Settings({ ...more, rebalanceBandPct: 5, ...v3More }));
-    return runVolFarmerV2Look({ calendar: weekdayCalendar, todayIso, lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf(todayIso, stockPrice, expiry), bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: marks, nextActionId } as unknown as BacktestLookContext);
+    return runVolFarmerV4Look({ calendar: weekdayCalendar, todayIso, lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf(todayIso, stockPrice, expiry), bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: marks, nextActionId } as unknown as BacktestLookContext);
   }
 
   it("Vol Farmer v3: tops the first position up to its target after a fall, its cost averaged into the break-even, and sells the Puts on the pot at the look", async () => {
@@ -272,7 +272,7 @@ describe("Vol Farmer v4 at the looks", () => {
     const pot = ledgerNetLiquidationValue(ledger, marks);
     expect(pot).toBeCloseTo(ledger.cash + 400 * 80, 6);
     // With no option open, the positions' P&L is the account's: the shares' cost, the Call's premium, the shares at 80.
-    const firstPnl = Number(/P&L by position: first (−?)\$([\d,]+)/.exec(describeVolFarmerV2Run(ledger, [symbol], 50, "Vol Farmer v4", marks)!)!.slice(1).join("").replace("−", "-").replace(/,/g, ""));
+    const firstPnl = Number(/P&L by position: first (−?)\$([\d,]+)/.exec(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer v4", marks)!)!.slice(1).join("").replace("−", "-").replace(/,/g, ""));
     expect(Math.abs(firstPnl - (pot - 100_000))).toBeLessThanOrEqual(1);
     const afterFall = await lookV3(ledger, marks, "2026-03-16", 80, "2026-03-20");
     // $32,000 of shares against half the pot (about $46,000): under it by more than 5% of the pot, so back to floor(target
@@ -338,8 +338,8 @@ describe("Vol Farmer v4 at the looks", () => {
     const topUp = afterFall.actions.find((action) => action.kind === "buy_shares")!;
     expect(topUp.quantity).toBe(100);
     expect(topUp.description).toContain(`pays for 1 of the ${wanted} lots`);
-    expect(describeVolFarmerV2Run(ledger, [symbol], 50, "Vol Farmer v4")).toContain(`Vol Farmer v4 cash: 1 cycle(s)`);
-    expect(describeVolFarmerV2Run(ledger, [symbol], 50, "Vol Farmer v4")).toContain(`rebalanced: 1 top-up(s) (1 lots), 0 trim(s) (0 lots), 1 top-up(s) the free cash held short (${wanted - 1} lots)`);
+    expect(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer v4")).toContain(`Vol Farmer v4 cash: 1 cycle(s)`);
+    expect(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer v4")).toContain(`rebalanced: 1 top-up(s) (1 lots), 0 trim(s) (0 lots), 1 top-up(s) the free cash held short (${wanted - 1} lots)`);
   });
 
   it("Vol Farmer v3: tops up no more lots than the cap's room over the money in pays for, none once it is spent", async () => {
@@ -389,7 +389,7 @@ describe("Vol Farmer v4 at the looks", () => {
     const callLeg = openOption(ledger, "call")[0]!;
     const openShares = () => ledger.legs.filter((leg) => leg.legType === "stock" && leg.exitAt === null).reduce((sum, leg) => sum + leg.quantity, 0);
     const buyBack = (stockPrice: number, quote: { bid: number; ask: number } | undefined) =>
-      buyBackVolFarmerV3CallsInTheMoney({ ledger, todayIso: "2026-03-13", lookTimeEt: "15:30", symbol, stockPrice, splitFactorToday: 1, spreadShareCharged: 0, quoteOf: (quoted) => (Math.abs(quoted - strike) < 1e-9 ? quote : undefined), priceByLegId: marks, nextActionId, gate: "vol_farmer_v4" });
+      buyBackVolFarmerV4CallsInTheMoney({ ledger, todayIso: "2026-03-13", lookTimeEt: "15:30", symbol, stockPrice, splitFactorToday: 1, spreadShareCharged: 0, quoteOf: (quoted) => (Math.abs(quoted - strike) < 1e-9 ? quote : undefined), priceByLegId: marks, nextActionId, gate: "vol_farmer_v4" });
     // Under the strike at 15:30: left to the close. In the money with a one-sided quote: left too, and said.
     expect(buyBack(strike - 0.01, { bid: 1.95, ask: 2.05 }).actions).toEqual([]);
     expect(buyBack(strike + 2, undefined).notes[0]).toContain("in the money at 15:30");
@@ -403,7 +403,7 @@ describe("Vol Farmer v4 at the looks", () => {
     expect(openShares()).toBe(400);
     expect(ledger.cash).toBeCloseTo(cashBefore - 2 * 400 - optionCommissionDollars(4), 6);
     // The run's P&L by position counts the buyback against the Call's premium.
-    const callsPnl = Number(/Calls (−?)\$([\d,]+)/.exec(describeVolFarmerV2Run(ledger, [symbol], 50, "Vol Farmer v4", marks)!)!.slice(1).join("").replace("−", "-").replace(/,/g, ""));
+    const callsPnl = Number(/Calls (−?)\$([\d,]+)/.exec(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer v4", marks)!)!.slice(1).join("").replace("−", "-").replace(/,/g, ""));
     expect(Math.abs(callsPnl - (sale.fillPrice! * 400 - optionCommissionDollars(4) - (2 * 400 + optionCommissionDollars(4))))).toBeLessThanOrEqual(1);
 
     // Monday 16 March, an expiry day: the Call is gone, not assigned, and the 400 shares held sell the day's Call; no new cycle.
@@ -422,16 +422,16 @@ describe("Vol Farmer v4 at the looks", () => {
     const strike = opened.actions[0]!.contract!.strike!;
     const cashBefore = ledger.cash;
     // Quoted 1.95 / 2.05 with half the half-spread charged: 2.00 + 0.5 × 0.05 = 2.025 a share, on 4 contracts.
-    const bought = buyBackVolFarmerV3CallsInTheMoney({ ledger, todayIso: "2026-03-13", lookTimeEt: "15:30", symbol, stockPrice: strike + 2, splitFactorToday: 1, spreadShareCharged: 0.5, quoteOf: () => ({ bid: 1.95, ask: 2.05 }), priceByLegId: marks, nextActionId, gate: "vol_farmer_v4" });
+    const bought = buyBackVolFarmerV4CallsInTheMoney({ ledger, todayIso: "2026-03-13", lookTimeEt: "15:30", symbol, stockPrice: strike + 2, splitFactorToday: 1, spreadShareCharged: 0.5, quoteOf: () => ({ bid: 1.95, ask: 2.05 }), priceByLegId: marks, nextActionId, gate: "vol_farmer_v4" });
     expect(bought.actions[0]!.fillPrice).toBeCloseTo(2.025, 9);
     expect(ledger.cash).toBeCloseTo(cashBefore - 2.025 * 400 - optionCommissionDollars(4), 6);
   });
 
   it("Vol Farmer v3: counts the open Puts' cash and the second position's assigned strikes as money in", () => {
-    const state = { potDollars: 0, first: { shares: 400, costPerShare: 100, premiums: [], calls: [], puts: [] }, second: { shares: 100, costPerShare: 90, premiums: [], calls: [], puts: [{ legId: "put-open", shares: 200 }, { legId: "put-closed", shares: 100 }] }, leaps: null, leapsBought: false, leapsToSell: false, leapsTrigger: null, cash: { cycles: 1, firstPositionCashLeft: [], putsCashLeft: [], leapsTriggers: [] } } as VolFarmerV2SymbolState;
+    const state = { potDollars: 0, first: { shares: 400, costPerShare: 100, premiums: [], calls: [], puts: [] }, second: { shares: 100, costPerShare: 90, premiums: [], calls: [], puts: [{ legId: "put-open", shares: 200 }, { legId: "put-closed", shares: 100 }] }, leaps: null, leapsBought: false, leapsToSell: false, leapsTrigger: null, cash: { cycles: 1, firstPositionCashLeft: [], putsCashLeft: [], leapsTriggers: [] } } as VolFarmerV4SymbolState;
     const legs: Record<string, { strike: number; closed: boolean }> = { "put-open": { strike: 85, closed: false }, "put-closed": { strike: 80, closed: true } };
     // 400 × 100 + 100 × 90 + the open Put's 200 × 85; the closed Put holds no cash.
-    expect(volFarmerV3MoneyIn(state, { leg: (legId) => legs[legId] as never })).toBe(40_000 + 9_000 + 17_000);
+    expect(volFarmerV4MoneyIn(state, { leg: (legId) => legs[legId] as never })).toBe(40_000 + 9_000 + 17_000);
   });
 
   it("Vol Farmer v4: trades on its own section only, whatever the retired decision makers' sections hold", async () => {
@@ -439,7 +439,7 @@ describe("Vol Farmer v4 at the looks", () => {
     const lookWithOtherSections = (ledger: SimulatedLedger, marks: Map<string, number>, todayIso: string, stockPrice: number, expiry: string) => {
       markShares(ledger, marks, stockPrice);
       const settings = { ...sessionSettingsOf(scenarioVolFarmerV4Settings({ rebalanceBandPct: 5 })), volFarmer: { ...defaultBacktestVolFarmerSettings, callMaxAbsDelta: 0.9 }, volFarmerV2: { ...scenarioVolFarmerV2Settings, firstPositionPct: 10 }, volFarmerV3: { ...defaultBacktestVolFarmerV3Settings, rebalanceBandPct: 40 } } as unknown as EffectiveBacktestSettings;
-      return runVolFarmerV2Look({ calendar: weekdayCalendar, todayIso, lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf(todayIso, stockPrice, expiry), bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: marks, nextActionId } as unknown as BacktestLookContext);
+      return runVolFarmerV4Look({ calendar: weekdayCalendar, todayIso, lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf(todayIso, stockPrice, expiry), bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: marks, nextActionId } as unknown as BacktestLookContext);
     };
     const traded = async (lookAt: typeof lookWithOtherSections) => {
       const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
@@ -475,7 +475,7 @@ describe("Vol Farmer v4 at the looks", () => {
     const atSale = await putAfterFall("implied_move_at_put_sale", bars);
     expect(atSale.scores.stepPct).toBeCloseTo(90 * Math.sqrt(21 / 252), 10);
     expect(atSale.scores.stepImpliedVolatility).toBe(0.9);
-    expect(atSale.put.contract!.strike).toBeLessThanOrEqual(volFarmerV2PutStrikeCap(atSale.firstBreakEven, atSale.scores.stepPct) + 0.01);
+    expect(atSale.put.contract!.strike).toBeLessThanOrEqual(volFarmerV4PutStrikeCapOf(atSale.firstBreakEven, atSale.scores.stepPct) + 0.01);
     expect(atSale.put.contract!.strike).toBeLessThan(fixed.put.contract!.strike!);
     expect(atSale.put.description).toContain("(Step 26.0%: IV 90.0% × √(21 ÷ 252))");
 
@@ -529,7 +529,7 @@ describe("Vol Farmer v4 at the looks", () => {
     expect(afterCallAway.actions[0]).toMatchObject({ kind: "sell_leaps", quantity: affordable, contract: { strategyKey: "leaps", right: "C" } });
     expect(afterCallAway.actions.filter((action) => action.kind === "sell_leaps")).toHaveLength(1);
     expect(openOption(ledger, "call", "long")).toEqual([]);
-    expect(describeVolFarmerV2Run(ledger, [symbol])).toMatch(new RegExp(`1 LEAPS trigger\\(s\\), 1 bought \\(${affordable}× on 2026-03-23\\)`));
+    expect(describeVolFarmerV4Run(ledger, [symbol])).toMatch(new RegExp(`1 LEAPS trigger\\(s\\), 1 bought \\(${affordable}× on 2026-03-23\\)`));
   });
 
   it("buys and sells a LEAPS 33% of the half-spread past the mid, and values it at what selling it would bring", async () => {
@@ -547,7 +547,7 @@ describe("Vol Farmer v4 at the looks", () => {
     // below.
     const settings = sessionSettingsOf(scenarioVolFarmerV4Settings());
     const priceByLegId = new Map<string, number>();
-    const bought = await runVolFarmerV2Look({ calendar: weekdayCalendar, todayIso: "2026-03-23", lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf("2026-03-23", 55, "2026-03-27", 100), bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId, nextActionId } as unknown as BacktestLookContext);
+    const bought = await runVolFarmerV4Look({ calendar: weekdayCalendar, todayIso: "2026-03-23", lookTimeEt: "10:00", symbols: [{ ...lookSymbolOf("2026-03-23", 55, "2026-03-27", 100), bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId, nextActionId } as unknown as BacktestLookContext);
     const purchase = bought.actions.find((action) => action.kind === "buy_leaps")!;
     const purchaseQuote = purchase.candidateScores as { bid: number; ask: number };
     expect(purchase.fillPrice).toBeCloseTo(pastTheMid(purchaseQuote, 1), 10);
@@ -604,7 +604,7 @@ describe("Vol Farmer v4 at the looks", () => {
     const above = await look(ledger, "2026-03-23", 90, "2026-03-27", more, 100, bars);
     expect(leapsBought(above)).toEqual([]);
     const secondBreakEven = Number(/no LEAPS: the price 90\.00 is at or above B-E2 (\d+\.\d+)/.exec(above.summary)![1]);
-    const expectedCap = volFarmerV2LeapsEntryPriceCap(secondBreakEven, volFarmerV2ImpliedMoveStep(0.6).stepPct / 2);
+    const expectedCap = volFarmerV4LeapsEntryPriceCap(secondBreakEven, volFarmerV4ImpliedMoveStep(0.6).stepPct / 2);
     // Between B-E2 less half the Step and B-E2 it waits, and the note gives the price it waits for.
     const waiting = await look(ledger, "2026-03-24", Math.round((expectedCap + secondBreakEven) * 50) / 100, "2026-03-27", more, 100, bars);
     expect(leapsBought(waiting)).toEqual([]);
@@ -647,7 +647,7 @@ describe("Vol Farmer v4 at the looks", () => {
       const symbolLook = lookSymbolOf(todayIso, stockPrice, expiry);
       const market = { ...symbolLook.market, quotes: symbolLook.market.quotes.map((quote) => (quote.right === "C" && quote.expiry === expiry ? { ...quote, bid: 0.01 } : quote)) };
       const settings = sessionSettingsOf(scenarioVolFarmerV4Settings());
-      return runVolFarmerV2Look({ calendar: weekdayCalendar, todayIso, lookTimeEt: "10:00", symbols: [{ ...symbolLook, market, bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
+      return runVolFarmerV4Look({ calendar: weekdayCalendar, todayIso, lookTimeEt: "10:00", symbols: [{ ...symbolLook, market, bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
     };
 
     // At 80, above B-E2 (the Put was struck at most 85 and kept its premium), no Call fits but no LEAPS is bought.
@@ -699,7 +699,7 @@ describe("Vol Farmer v4 at the looks", () => {
     const tenOClock = lookSymbolOf("2026-03-09", 100, "2026-03-13");
     const later = lookSymbolOf("2026-03-09", 90, "2026-03-13");
     const lookSymbol = { ...tenOClock, bars: barsWithImpliedVolatility([]), intraday: { quotes: later.market.quotes, stockPrice: 90 } } as BacktestLookSymbol;
-    const result = await runVolFarmerV2Look({ calendar: weekdayCalendar, todayIso: "2026-03-09", lookTimeEt: "10:30", symbols: [lookSymbol], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
+    const result = await runVolFarmerV4Look({ calendar: weekdayCalendar, todayIso: "2026-03-09", lookTimeEt: "10:30", symbols: [lookSymbol], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
     expect(result.actions.map((action) => action.kind)).toEqual(["open_covered_call"]);
     // Half the pot at 90: floor(50,000 ÷ 9,000.50) = 5 lots, bought at the look's price.
     expect(result.actions[0]!.description).toContain("with 500 shares bought @ 90.00");
@@ -714,7 +714,7 @@ describe("Vol Farmer v4 at the looks", () => {
     const quotes = input.expiries.flatMap((expiry) => (["C", "P"] as const).flatMap((right) => quotesAt({ todayIso: input.todayIso, stockPrice: input.stockPrice, expiry, strikes: input.strikes, right })));
     const lookSymbol = lookSymbolOf(input.todayIso, input.stockPrice, input.expiries[0]!);
     const market = { ...lookSymbol.market, quotes, previousSessionVolumeByContract: new Map(quotes.map((quote) => [contractKey(quote), 1_000])) };
-    return runVolFarmerV2Look({ calendar: weekdayCalendar, todayIso: input.todayIso, lookTimeEt: "10:00", symbols: [{ ...lookSymbol, market, splitFactorToday: input.splitFactorToday ?? 1, bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
+    return runVolFarmerV4Look({ calendar: weekdayCalendar, todayIso: input.todayIso, lookTimeEt: "10:00", symbols: [{ ...lookSymbol, market, splitFactorToday: input.splitFactorToday ?? 1, bars: barsWithImpliedVolatility([]) }], sectorBySymbol: new Map([[symbol, null]]), settings, ledger, priceByLegId: new Map(), nextActionId } as unknown as BacktestLookContext);
   }
 
   it("trades on through a 3-for-1 split, its cycle started on the scale every contract fits", async () => {
@@ -829,7 +829,7 @@ describe("Vol Farmer v4 at the looks", () => {
       expect(leaps).toBeGreaterThan(opening);
       expect(looked.actions[leaps]!.quantity).toBe(contractsAffordable(leftAfterVfb, looked.actions[leaps]!.fillPrice!));
       expect(looked.actions[leaps]!.description).toContain("of its share of the account");
-      expect(describeVolFarmerV2Run(ledger, ["VFA", "VFB"])).toMatch(/VFA: .*1 look\(s\) at which the account's free cash held it below its cap \(first on 2026-03-23\)/);
+      expect(describeVolFarmerV4Run(ledger, ["VFA", "VFB"])).toMatch(/VFA: .*1 look\(s\) at which the account's free cash held it below its cap \(first on 2026-03-23\)/);
     });
   });
 });

@@ -5,7 +5,7 @@ import { BacktestBarHistory } from "../engine/backtestBarHistory.js";
 import type { BacktestLookSymbol } from "../engine/backtestLookTypes.js";
 import { captureLookTimeEt, lookInstantMs } from "../engine/backtestTickerInputs.js";
 import { BacktestTradingCalendar } from "../engine/backtestTradingCalendar.js";
-import { runVolFarmerV2Look } from "../engine/backtestVolFarmerV2Look.js";
+import { runVolFarmerV4Look } from "../engine/backtestVolFarmerV4Look.js";
 import { creditInterest, expirySettlementInstant, settleExpiry, settleLeapsCall } from "../engine/ledger/ledgerEvents.js";
 import { ledgerLeapsLegsDueForSettlement, ledgerLegsDueForSettlement, ledgerNetLiquidationValue } from "../engine/ledger/ledgerSelectors.js";
 import { createSimulatedLedger, requirePosition, unexitedLegsOf, type LedgerLeg, type SimulatedLedger } from "../engine/ledger/simulatedLedger.js";
@@ -15,7 +15,7 @@ import { syntheticExpiryChain, syntheticLeapsSource } from "./portfolioSynthetic
 // The portfolio simulator's day (D5, Marcelo 2026-11-03): Vol Farmer v4 as the lab runs it, on simulated days. Each day,
 // as the session runner does: options that expired at an earlier close settle on that close (settleExpiry, the LEAPS
 // settleLeapsCall), interest is credited on the cash since the previous day, the account is marked at 10:00 (the day's
-// value, before its orders), then the lab's own v4 look (runVolFarmerV2Look) decides at 10:00 on the day's synthetic chain
+// value, before its orders), then the lab's own v4 look (runVolFarmerV4Look) decides at 10:00 on the day's synthetic chain
 // (portfolioSyntheticChain.ts) with the lab's book: whole lots, the First position and its band, Always hold the stock,
 // the same-day Calls, the Puts and LEAPS, the allowance, the shared free cash and the turn order. One look a day (the
 // lab's 10:00); no splits, dividends or earnings on simulated days.
@@ -167,7 +167,7 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
     for (const ticker of tickers) if (!sharesHeld.has(ticker.symbol)) figuresBySymbol.get(ticker.symbol)!.daysWithoutShares += 1;
 
     // d. The lab's v4 look at 10:00 on the day's synthetic chain. Selling only options expiring today, v4 reads nothing of
-    // a day's quotes but whether a Call expires today (volFarmerV2Steps.ts): on another day the chain is left empty.
+    // a day's quotes but whether a Call expires today (volFarmerV4Steps.ts): on another day the chain is left empty.
     const lookSymbols: BacktestLookSymbol[] = tickers.map((ticker, index) => {
       const day = days[index]!;
       const yearsToExpiry = (expiry: string) => Math.max(0, expirySettlementInstant(expiry).getTime() - at.getTime()) / millisecondsPerYear;
@@ -191,7 +191,7 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
         leapsCallQuotes: syntheticLeapsSource({ todayIso, stockPrice: day.tenOclockPrice, riskFreeRate, volatility: day.impliedVolatility, strikeSpacing: day.strikeSpacing, yearsToExpiry }),
       };
     });
-    const look = await runVolFarmerV2Look({
+    const look = await runVolFarmerV4Look({
       todayIso,
       lookTimeEt: captureLookTimeEt,
       symbols: lookSymbols,

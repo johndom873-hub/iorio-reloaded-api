@@ -1,7 +1,7 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { sharesPerContract } from "../backtest/engine/backtestBook.js";
-import { volFarmerV2BreakEven, type VolFarmerV2Position } from "../backtest/engine/volFarmerV2Steps.js";
+import { volFarmerV4BreakEven, type VolFarmerV4Position } from "../backtest/engine/volFarmerV4Steps.js";
 import { volFarmerV4MemoryFromStored, type VolFarmerV4Memory, type VolFarmerV4OrderKind } from "./volFarmerV4LiveBook.js";
 import type { VolFarmerV4RoundFigures } from "./volFarmerV4LookLoader.js";
 import { loadEnabledPlutoTickerSettings } from "./tickerSettingsStore.js";
@@ -72,13 +72,13 @@ export async function loadVolFarmerV4Screen(connection: Knex = db): Promise<VolF
       if (!leg || leg.strike_price === null || leg.expiry_date === null) return null;
       return { strike: Number(leg.strike_price), expiry: leg.expiry_date, contracts, working: false };
     };
-    const positionOf = (position: VolFarmerV2Position | null): VolFarmerV4ScreenPosition | null =>
+    const positionOf = (position: VolFarmerV4Position | null): VolFarmerV4ScreenPosition | null =>
       position === null
         ? null
         : {
             shares: position.shares,
             costPerShare: position.costPerShare,
-            breakEvenPerShare: volFarmerV2BreakEven(position),
+            breakEvenPerShare: volFarmerV4BreakEven(position),
             calls: position.calls.flatMap((call) => optionOf(call.legId, call.shares) ?? []),
             puts: position.puts.flatMap((put) => optionOf(put.legId, put.shares) ?? []),
           };

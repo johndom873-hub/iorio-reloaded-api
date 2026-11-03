@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { Knex } from "knex";
-import { newVolFarmerV2SymbolState } from "../backtest/engine/volFarmerV2Steps.js";
+import { newVolFarmerV4SymbolState } from "../backtest/engine/volFarmerV4Steps.js";
 
 // Vol Farmer v2's live reads against a private copy of the test tables: its memory, how the orders it sent ended (still
 // working, filled in part, never built) and the status of the legs its memory refers to (a Call assigned at its expiry,
@@ -54,7 +54,7 @@ afterAll(async () => {
 describe("Vol Farmer v4's live reads", () => {
   it("saves and reads back a ticker's memory, without the backtest's cash check", async () => {
     expect(await loadVolFarmerV4Memory(tickerId)).toBeNull();
-    const state = newVolFarmerV2SymbolState();
+    const state = newVolFarmerV4SymbolState();
     state.first = { shares: 300, costPerShare: 50.01, premiums: [{ legId: "action:a1", dollars: 328, shares: 300 }], calls: [{ legId: "action:a1", shares: 300 }], puts: [] };
     state.cash.cycles = 4;
     await saveVolFarmerV4Memory(tickerId, { state, pending: [] }, true);
