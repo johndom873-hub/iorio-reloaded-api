@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import type { Knex } from "knex";
+import type { VolFarmerV3AlwaysHoldTheStock } from "../backtest/backtestTypes.js";
 import { db } from "../db/connection.js";
 import { loadRealizedPnlByActionId, type PlutoActionRealizedPnl } from "../pluto/actionRealizedPnl.js";
 import { loadPlutoBook } from "../pluto/book.js";
@@ -313,18 +314,23 @@ plutoRouter.put("/ticker-settings/:symbol", requireAdmin, async (request: Reques
 });
 
 /**
- * The Tickers tab's save: body { allocations: { SYMBOL: % of Pluto's budget, or null for an equal share }, excessAllowancePct?: % },
- * applied together or not at all (updatePlutoAllocations). One settings event per ticker changed, and one for the allowance.
+ * The Tickers tab's save: body { allocations: { SYMBOL: % of Pluto's budget, or null for an equal share }, alwaysHoldTheStock?:
+ * { SYMBOL: "on", "off", or null for Pluto's setting }, excessAllowancePct?: % }, applied together or not at all
+ * (updatePlutoAllocations). One settings event per ticker field changed, and one for the allowance.
  */
 plutoRouter.put("/allocations", requireAdmin, async (request: Request, response: Response) => {
   const body = request.body as Record<string, unknown> | null;
   if (typeof body !== "object" || body === null || Array.isArray(body) || typeof body.allocations !== "object" || body.allocations === null || Array.isArray(body.allocations)) {
-    response.status(400).json({ error: "Body must be { allocations: { SYMBOL: % or null }, excessAllowancePct?: % }." });
+    response.status(400).json({ error: "Body must be { allocations: { SYMBOL: % or null }, alwaysHoldTheStock?: { SYMBOL: on, off or null }, excessAllowancePct?: % }." });
     return;
   }
-  const unknownField = Object.keys(body).find((field) => field !== "allocations" && field !== "excessAllowancePct");
+  const unknownField = Object.keys(body).find((field) => field !== "allocations" && field !== "alwaysHoldTheStock" && field !== "excessAllowancePct");
   if (unknownField !== undefined) {
     response.status(400).json({ error: `${unknownField} is not an allocation field.` });
+    return;
+  }
+  if (body.alwaysHoldTheStock !== undefined && (typeof body.alwaysHoldTheStock !== "object" || body.alwaysHoldTheStock === null || Array.isArray(body.alwaysHoldTheStock))) {
+    response.status(400).json({ error: "alwaysHoldTheStock must be { SYMBOL: on, off or null }." });
     return;
   }
   if (body.excessAllowancePct !== undefined && (typeof body.excessAllowancePct !== "number" || !Number.isFinite(body.excessAllowancePct))) {
@@ -332,10 +338,18 @@ plutoRouter.put("/allocations", requireAdmin, async (request: Request, response:
     return;
   }
   try {
-    const changes = await updatePlutoAllocations({ allocationPctBySymbol: body.allocations as Record<string, number | null>, ...(body.excessAllowancePct !== undefined ? { excessAllowancePct: body.excessAllowancePct } : {}) }, currentUserId(request));
-    if (changes.allocations.length > 0 || changes.excessAllowance !== null) {
+    const changes = await updatePlutoAllocations(
+      {
+        allocationPctBySymbol: body.allocations as Record<string, number | null>,
+        ...(body.alwaysHoldTheStock !== undefined ? { alwaysHoldTheStockBySymbol: body.alwaysHoldTheStock as Record<string, VolFarmerV3AlwaysHoldTheStock | null> } : {}),
+        ...(body.excessAllowancePct !== undefined ? { excessAllowancePct: body.excessAllowancePct } : {}),
+      },
+      currentUserId(request),
+    );
+    if (changes.allocations.length > 0 || changes.alwaysHoldTheStock.length > 0 || changes.excessAllowance !== null) {
       const who = await currentUserDisplayName(request);
       for (const change of changes.allocations) await recordPlutoEvent("settings_changed", { by: who, symbol: change.symbol, fields: [{ field: "allocationPct", from: change.from, to: change.to }] });
+      for (const change of changes.alwaysHoldTheStock) await recordPlutoEvent("settings_changed", { by: who, symbol: change.symbol, fields: [{ field: "alwaysHoldTheStock", from: change.from, to: change.to }] });
       if (changes.excessAllowance !== null) await recordPlutoEvent("settings_changed", { by: who, fields: [{ field: "excessAllowancePct", from: changes.excessAllowance.from, to: changes.excessAllowance.to }] });
     }
     response.json(changes);

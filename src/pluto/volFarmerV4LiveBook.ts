@@ -17,6 +17,7 @@ import {
 import { formatWholeDollars } from "../lib/formatWholeDollars.js";
 import type { PositionFigures } from "../lib/positionSelectors.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import type { PlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // Vol Farmer v4 on Pluto's live book (Marcelo 2026-10-31; v2's from 2026-10-27): the shared steps (volFarmerV2Steps.ts)
 // run on a book over the ticker's positions with v3's rules, and what they decide becomes orders. Pure;
@@ -42,8 +43,11 @@ import type { PlutoSettings } from "./settingsStore.js";
 /** v4's buyback runs in the trading window's last minutes (Marcelo 2026-11-02): 15:28–15:30 ET on a 15:30 end. */
 export const volFarmerV4BuyBackMinutesBeforeWindowEnd = 2;
 
-/** The steps' rules from Pluto's live settings (the Vol Farmer's Calls, v2's and v3's, every look). */
-export function volFarmerV4RulesOf(settings: PlutoSettings): { farmer: Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid">; v2: BacktestVolFarmerV2Settings; v3: BacktestVolFarmerV3Settings } {
+/**
+ * The steps' rules from Pluto's live settings (the Vol Farmer's Calls, v2's and v3's, every look); with `ticker`, its own
+ * Always hold the stock where it sets one (Marcelo 2026-11-03).
+ */
+export function volFarmerV4RulesOf(settings: PlutoSettings, ticker?: Pick<PlutoTickerSettings, "symbol" | "alwaysHoldTheStock">): { farmer: Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid">; v2: BacktestVolFarmerV2Settings; v3: BacktestVolFarmerV3Settings } {
   return {
     farmer: { callMinAbsDelta: settings.volFarmerV4CallMinAbsDelta, callMaxAbsDelta: settings.volFarmerV4CallMaxAbsDelta, maxSpreadPctOfMid: settings.volFarmerV4MaxSpreadPctOfMid },
     v2: {
@@ -75,6 +79,8 @@ export function volFarmerV4RulesOf(settings: PlutoSettings): { farmer: Pick<Back
       topUpCapPctOfPot: settings.volFarmerV4TopUpCapPct,
       // The steps never read it: the round buys back in the window's last minutes (volFarmerV4Round.ts), as the lab does after its last look.
       callsInTheMoneyAtLastLook: settings.volFarmerV4CallsInTheMoneyAtLastLook,
+      alwaysHoldTheStock: settings.volFarmerV4AlwaysHoldTheStock,
+      tickerAlwaysHoldTheStock: ticker !== undefined && ticker.alwaysHoldTheStock !== null ? { [ticker.symbol]: ticker.alwaysHoldTheStock } : {},
     },
   };
 }

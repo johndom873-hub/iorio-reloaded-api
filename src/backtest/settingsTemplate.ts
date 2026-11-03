@@ -230,17 +230,28 @@ const rowDefinitionsBeforeVolFarmerV4: readonly RowDefinition[] = [
     ],
   },
   {
+    path: "volFarmerV3.alwaysHoldTheStock",
+    label: "Always hold the stock",
+    unit: "choice",
+    editable: true,
+    note: "on: a flat ticker's shares are bought at the next look after a call-away, and topped up on any day, even with no Call sold that day; off: shares are bought only on a day a Call is sold with them, so a flat ticker waits for its next expiry day; trims sell on any day either way; a ticker's own value under Tickers overrides it",
+    choices: [
+      { value: "on", label: "On: bought on any day" },
+      { value: "off", label: "Off: only with a Call" },
+    ],
+  },
+  {
     path: "volFarmerV3.optionsExpiry",
     label: "Calls and Puts expire",
     unit: "choice",
     editable: true,
-    note: "the next expiry after today, as Vol Farmer v2 sells; or today's close, sold at the 10:00 look on the days an expiry falls (the Steady Stake's), so they cover no night. A day without one rebalances, and a cycle opens by buying its shares alone",
+    note: "the next expiry after today, as Vol Farmer v2 sells; or today's close, sold at the 10:00 look on the days an expiry falls (the Steady Stake's), so they cover no night. A day without one sells no option; it buys shares only as Always hold the stock says",
     choices: [
       { value: "next", label: "On the next expiry" },
       { value: "today", label: "At today's close, on expiry days" },
     ],
   },
-  { path: "volFarmerV3.optionsMaxDaysToExpiry", label: "Next expiry within", unit: "days", editable: true, note: "with Calls and Puts on the next expiry: the most calendar days it may be away for the look to sell on it; further away, the look sells none and only rebalances, and a cycle opens by buying its shares alone. Monday's look with the next expiry on Friday (4 days) and 2: no option until Wednesday's look. 45: every next expiry (1 to 45)" },
+  { path: "volFarmerV3.optionsMaxDaysToExpiry", label: "Next expiry within", unit: "days", editable: true, note: "with Calls and Puts on the next expiry: the most calendar days it may be away for the look to sell on it; further away, the look sells none, and buys shares only as Always hold the stock says. Monday's look with the next expiry on Friday (4 days) and 2: no option until Wednesday's look. 45: every next expiry (1 to 45)" },
   {
     path: "volFarmerV3.callStrikeFloor",
     label: "Calls struck at least",
@@ -706,6 +717,7 @@ const volFarmerV4SourcePaths: readonly string[] = [
   "volFarmerV3.topUpCapPctOfPot",
   "volFarmerV3.callsInTheMoneyAtLastLook",
   "volFarmerV3.firstPositionAfterCalledAway",
+  "volFarmerV3.alwaysHoldTheStock",
   "volFarmerV3.optionsExpiry",
   "volFarmerV3.optionsMaxDaysToExpiry",
   "volFarmerV3.callStrikeFloor",
@@ -891,7 +903,7 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
   {
     group: "Vol Farmer v3",
     section: "vol_farmer_v3",
-    rows: ["volFarmerV3.rebalanceBandPct", "volFarmerV3.rebalances", "volFarmerV3.firstPositionAfterCalledAway", "volFarmerV3.optionsExpiry", "volFarmerV3.optionsMaxDaysToExpiry", "volFarmerV3.callStrikeFloor", "volFarmerV3.putsSold", "volFarmerV3.putStrikeCap", "volFarmerV3.trimsSell", "volFarmerV3.topUpCapPctOfPot", "volFarmerV3.callsInTheMoneyAtLastLook"].map((path) => ({
+    rows: ["volFarmerV3.rebalanceBandPct", "volFarmerV3.rebalances", "volFarmerV3.firstPositionAfterCalledAway", "volFarmerV3.alwaysHoldTheStock", "volFarmerV3.optionsExpiry", "volFarmerV3.optionsMaxDaysToExpiry", "volFarmerV3.callStrikeFloor", "volFarmerV3.putsSold", "volFarmerV3.putStrikeCap", "volFarmerV3.trimsSell", "volFarmerV3.topUpCapPctOfPot", "volFarmerV3.callsInTheMoneyAtLastLook"].map((path) => ({
       path,
       appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v3"] }], explanation: "Applies only with Vol Farmer v3 as decision maker." },
     })),

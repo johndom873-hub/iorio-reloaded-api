@@ -153,36 +153,78 @@ describe("Vol Farmer v3's holding", () => {
     expect(waits.first).toBeNull();
   });
 
-  it("selling options that expire today: a day without one buys no shares, an expiry day buys them with that day's Call", () => {
+  it("selling options that expire today, always holding the stock: a day without one buys a new cycle's shares alone, an expiry day sells that day's Call", () => {
+    // Tuesday 27 October lists only the 6 November expiry: the flat ticker's first position buys floor(50,000 ÷ 10,000.50) =
+    // 4 lots at 100, with no Call.
+    const state = newVolFarmerV2SymbolState();
+    const quiet = recordingBook(100_000, true);
+    run(state, 100, quiet.book, { optionsExpiry: "today" });
+    expect(quiet.orders.bought.map((order) => order.shares)).toEqual([400]);
+    expect(quiet.orders.calls).toEqual([]);
+    expect(state.first?.shares).toBe(400);
+    // An expiry day: the Call expires at today's close.
+    const expiryDay = recordingBook();
+    run(state, 100, expiryDay.book, { optionsExpiry: "today" }, "2026-10-27");
+    expect(expiryDay.orders.calls.map((sale) => sale.candidate.expiry)).toEqual(["2026-10-27"]);
+    expect(expiryDay.orders.calls[0]!.candidate.dte).toBe(0);
+  });
+
+  it("always holding the stock, a day no Call is sold tops the holding up and rebuilds a first position the second outlived", () => {
+    // 200 shares at 100 ($20,000) against half the $100,000 pot ($50,000 ± $5,000): topped up to 4 lots the same day.
+    const under = { ...newVolFarmerV2SymbolState(), first: positionOf(200, 100) };
+    const underBook = recordingBook();
+    run(under, 100, underBook.book, { optionsExpiry: "today" });
+    expect(underBook.orders.bought.map((order) => order.shares)).toEqual([200]);
+    // The second position alone (300 shares at 100 = $30,000), rebuild set, both positions as one: 50,000 − 30,000 = $20,000,
+    // floor(20,000 ÷ 10,000.50) = 1 lot bought alone.
+    const outlived = { ...newVolFarmerV2SymbolState(), second: positionOf(300, 120) };
+    const outlivedBook = recordingBook();
+    expect(run(outlived, 100, outlivedBook.book, { optionsExpiry: "today", firstPositionAfterCalledAway: "rebuild", rebalances: "both_positions" })).toContain("the first position rebuilt");
+    expect(outlivedBook.orders.bought.map((order) => order.shares)).toEqual([100]);
+  });
+
+  it("a ticker's own Always hold the stock overrides the session's", () => {
+    const flatBook = (alwaysHoldTheStock: "on" | "off", own: Record<string, "on" | "off">) => {
+      const book = recordingBook(100_000, true);
+      run(newVolFarmerV2SymbolState(), 100, book.book, { optionsExpiry: "today", alwaysHoldTheStock, tickerAlwaysHoldTheStock: own });
+      return book.orders.bought.map((order) => order.shares);
+    };
+    expect(flatBook("on", { VFT: "off" })).toEqual([]);
+    expect(flatBook("off", { VFT: "on" })).toEqual([400]);
+    // Another ticker's value leaves this one on the session's.
+    expect(flatBook("off", { OTHER: "on" })).toEqual([]);
+  });
+
+  it("selling options that expire today, Always hold the stock off: a day without one buys no shares, an expiry day buys them with that day's Call", () => {
     // Tuesday 27 October lists only the 6 November expiry: the flat ticker waits, no shares bought without a Call.
     const state = newVolFarmerV2SymbolState();
     const quiet = recordingBook(100_000, true);
-    expect(run(state, 100, quiet.book, { optionsExpiry: "today" })).toContain("no cycle opened: no Call is sold today, and shares are bought only with one (until an expiry day)");
+    expect(run(state, 100, quiet.book, { optionsExpiry: "today", alwaysHoldTheStock: "off" })).toContain("no cycle opened: no Call is sold today, and with Always hold the stock off shares are bought only with one (until an expiry day)");
     expect([quiet.orders.bought, quiet.orders.calls, state.first]).toEqual([[], [], null]);
     // An expiry day: floor(50,000 ÷ 10,000.50) = 4 lots bought with their Call, expiring at today's close.
     const expiryDay = recordingBook(100_000, true);
-    run(state, 100, expiryDay.book, { optionsExpiry: "today" }, "2026-10-27");
+    run(state, 100, expiryDay.book, { optionsExpiry: "today", alwaysHoldTheStock: "off" }, "2026-10-27");
     expect(expiryDay.orders.calls.map((sale) => [sale.candidate.expiry, sale.contracts, sale.startsCycle])).toEqual([["2026-10-27", 4, true]]);
     expect(expiryDay.orders.calls[0]!.candidate.dte).toBe(0);
     expect(state.first?.shares).toBe(400);
   });
 
-  it("a day no Call is sold: the holding is trimmed but never topped up, and a first position the second outlived is not rebuilt", () => {
+  it("Always hold the stock off, a day no Call is sold: the holding is trimmed but never topped up, and a first position the second outlived is not rebuilt", () => {
     // 200 shares at 100 ($20,000) against half the $100,000 pot ($50,000 ± $5,000): a top-up waits for a day a Call is sold.
     const under = { ...newVolFarmerV2SymbolState(), first: positionOf(200, 100) };
     const underBook = recordingBook();
-    expect(run(under, 100, underBook.book, { optionsExpiry: "today" })).toContain("no top-up: first position $20,000 against a target of $50,000");
+    expect(run(under, 100, underBook.book, { optionsExpiry: "today", alwaysHoldTheStock: "off" })).toContain("no top-up: first position $20,000 against a target of $50,000");
     expect(underBook.orders.bought).toEqual([]);
     expect(under.first?.shares).toBe(200);
     // 800 shares ($80,000): trimmed back to floor(50,000 ÷ 10,000.50) = 4 lots the same day.
     const over = { ...newVolFarmerV2SymbolState(), first: positionOf(800, 100) };
     const overBook = recordingBook();
-    run(over, 100, overBook.book, { optionsExpiry: "today" });
+    run(over, 100, overBook.book, { optionsExpiry: "today", alwaysHoldTheStock: "off" });
     expect(overBook.orders.sold.map((order) => order.shares)).toEqual([400]);
     // The second position alone, rebuild set: nothing bought.
     const outlived = { ...newVolFarmerV2SymbolState(), second: positionOf(300, 120) };
     const outlivedBook = recordingBook();
-    expect(run(outlived, 100, outlivedBook.book, { optionsExpiry: "today", firstPositionAfterCalledAway: "rebuild" })).toContain("no first position rebuilt");
+    expect(run(outlived, 100, outlivedBook.book, { optionsExpiry: "today", firstPositionAfterCalledAway: "rebuild", alwaysHoldTheStock: "off" })).toContain("no first position rebuilt");
     expect([outlivedBook.orders.bought, outlived.first]).toEqual([[], null]);
   });
 
@@ -229,11 +271,16 @@ describe("Vol Farmer v3's holding", () => {
     const near = recordingBook();
     run(state, 100, near.book, { optionsMaxDaysToExpiry: 10 });
     expect(near.orders.calls.map((sale) => sale.contracts)).toEqual([4]);
-    // A flat ticker buys nothing until the expiry comes within the days.
+    // Always holding the stock, a flat ticker opens with shares alone, its Call waiting for the expiry to come within the days.
     const flat = newVolFarmerV2SymbolState();
     const opening = recordingBook(100_000, true);
-    expect(run(flat, 100, opening.book, { optionsMaxDaysToExpiry: 7 })).toContain("no cycle opened: no Call is sold today, and shares are bought only with one (until the next expiry is 7 days or fewer away)");
-    expect([opening.orders.bought, opening.orders.calls]).toEqual([[], []]);
+    expect(run(flat, 100, opening.book, { optionsMaxDaysToExpiry: 7 })).toContain("with no Call until the next expiry is 7 days or fewer away");
+    expect([opening.orders.bought.map((order) => order.shares), opening.orders.calls]).toEqual([[400], []]);
+    // With it off, a flat ticker buys nothing until the expiry comes within the days.
+    const waiting = newVolFarmerV2SymbolState();
+    const waitingBook = recordingBook(100_000, true);
+    expect(run(waiting, 100, waitingBook.book, { optionsMaxDaysToExpiry: 7, alwaysHoldTheStock: "off" })).toContain("no cycle opened: no Call is sold today, and with Always hold the stock off shares are bought only with one (until the next expiry is 7 days or fewer away)");
+    expect([waitingBook.orders.bought, waitingBook.orders.calls]).toEqual([[], []]);
   });
 
   it("sells the Puts with every Call when set, struck below the price when uncapped", () => {

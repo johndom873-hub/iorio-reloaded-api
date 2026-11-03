@@ -61,6 +61,14 @@ describe("Vol Farmer v4's allocations and excess allowance", () => {
     expect(request({ tickerAllocationPct: { AAOI: 60, HOOD: 50 } })).toEqual({ ok: false, error: "volFarmerV4.tickerAllocationPct: the set allocations add up to 110%, at most 100%." });
     expect(request({ tickerAllocationPct: { INTC: 10 } })).toEqual({ ok: false, error: "volFarmerV4.tickerAllocationPct.INTC: INTC is not one of the session's symbols." });
   });
+
+  it("keeps the session's Always hold the stock and each ticker's own, refusing other values and a symbol not in the session", () => {
+    expect(request({ alwaysHoldTheStock: "off", tickerAlwaysHoldTheStock: { HOOD: "on" } })).toMatchObject({ ok: true, value: { overrides: { volFarmerV4: { alwaysHoldTheStock: "off", tickerAlwaysHoldTheStock: { HOOD: "on" } } } } });
+    expect(request({ alwaysHoldTheStock: true })).toEqual({ ok: false, error: "volFarmerV4.alwaysHoldTheStock must be one of on, off." });
+    expect(request({ tickerAlwaysHoldTheStock: [] })).toEqual({ ok: false, error: "volFarmerV4.tickerAlwaysHoldTheStock must be an object of symbols." });
+    expect(request({ tickerAlwaysHoldTheStock: { HOOD: "sometimes" } })).toEqual({ ok: false, error: "volFarmerV4.tickerAlwaysHoldTheStock.HOOD must be one of on, off." });
+    expect(request({ tickerAlwaysHoldTheStock: { INTC: "off" } })).toEqual({ ok: false, error: "volFarmerV4.tickerAlwaysHoldTheStock.INTC: INTC is not one of the session's symbols." });
+  });
 });
 
 describe("validateCreateBacktestSessionRequest", () => {

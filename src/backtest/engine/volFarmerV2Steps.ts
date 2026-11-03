@@ -1,7 +1,7 @@
 import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
 import { blackScholesDelta, impliedVolatilityFromPrice } from "../../lib/impliedVolatilitySurface.js";
 import { daysToExpiry, describeOptionContract, describeOrderSize } from "../../lib/optionContractLabel.js";
-import type { BacktestVolFarmerSettings, BacktestVolFarmerV2Settings, BacktestVolFarmerV3Settings } from "../backtestTypes.js";
+import { alwaysHoldsTheStock, type BacktestVolFarmerSettings, type BacktestVolFarmerV2Settings, type BacktestVolFarmerV3Settings } from "../backtestTypes.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { baselineQuoteRejection, describeRejections, roundedStrike, selectBaselineCandidates, type BaselineCandidate, type BaselineCommissionCapped, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
@@ -61,9 +61,8 @@ import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchas
 // called away rebuilt, and before step 2:
 //   1b. the first position holding shares with no Call open, its value V = its shares × S, its target T = P ×
 //       firstPositionPct ÷ 100: when |V − T| > P × rebalanceBandPct ÷ 100, whole lots are bought with the free cash
-//       (no more than it pays for; only on a day a Call is sold, Marcelo 2026-11-03: no shares are ever bought without
-//       one), or sold, to floor(T ÷ (100 × S + the stock commission)) lots, never below one. A
-//       purchase adds what it cost to what the shares cost (break-even, first above); a sale leaves the break-even as it
+//       (no more than it pays for; with Always hold the stock off, Marcelo 2026-11-03, only on a day a Call is sold),
+//       or sold, to floor(T ÷ (100 × S + the stock commission)) lots, never below one. A purchase adds what it cost to what the shares cost (break-even, first above); a sale leaves the break-even as it
 //       was, the lots sold taking their share of the cost and of each premium. Example: 400 shares that cost $40,000
 //       with $1,000 of premiums ($97.50) buy 100 at $80: (48,000 − 1,000) ÷ 500 = $94.00; 100 of them sold at $110 leave
 //       (38,400 − 800) ÷ 400 = $94.00.
@@ -782,17 +781,41 @@ export function runVolFarmerV2Turn(input: VolFarmerV2LookInput): VolFarmerV2Turn
 
 /**
  * A day the steps sell no option (selling those that expire today, on a day none does; or the next expiry further away
- * than optionsMaxDaysToExpiry): no shares are bought without a Call sold with them (Marcelo 2026-11-03), so a flat ticker
- * (or a first position the second outlived) waits for the first day it sells options, `until` saying which, and the
- * holding is only trimmed. Answers what it did, or null.
+ * than optionsMaxDaysToExpiry). With Always hold the stock on (Marcelo 2026-11-03), the holding is rebalanced, and a flat
+ * ticker's first position (or one the second outlived, rebuilt) buys its lots with no Call, as a cycle opens; its Calls
+ * come on the first day it sells options, `until` saying which. With it off, no shares are bought without a Call sold
+ * with them: a flat ticker (or a first position the second outlived) waits for that day, and the holding is only trimmed.
+ * Answers what it did, or null.
  */
 function holdWithoutOptions(input: VolFarmerV2LookInput, until: string): string | null {
-  const { state, v3, book } = input;
+  const { state, market, v2, v3, book } = input;
+  if (!book.buyShares) throw new Error("Vol Farmer v3 needs a book that trades shares.");
+  const alwaysHold = alwaysHoldsTheStock(v3, market.symbol);
   const rebuild = v3.firstPositionAfterCalledAway === "rebuild" && state.first === null && state.second !== null && state.second.shares > 0;
   if ((state.first === null && state.second === null && state.leaps === null && book.isFlat()) || rebuild) {
-    return `${rebuild ? "no first position rebuilt" : "no cycle opened"}: no Call is sold today, and shares are bought only with one (until ${until})`;
+    if (!alwaysHold) return `${rebuild ? "no first position rebuilt" : "no cycle opened"}: no Call is sold today, and with Always hold the stock off shares are bought only with one (until ${until})`;
+    const { stockPrice, priceToCycleScale } = market;
+    const sharesPerContractOnCycleScale = Math.round(sharesPerContract / priceToCycleScale);
+    const pot = book.potForNewCycle();
+    const secondValue = rebuild && v3.rebalances === "both_positions" ? state.second!.shares * priceToCycleScale * stockPrice : 0;
+    const firstPositionDollars = (pot * v2.firstPositionPct) / 100 - secondValue;
+    const lotCost = stockPrice * sharesPerContract + market.stockCommissionDollars(sharesPerContract);
+    const lots = Math.min(Math.floor(firstPositionDollars / lotCost + 1e-9), Math.floor(book.freeCash() / lotCost + 1e-9));
+    if (lots < 1) return `no first position bought: ${formatWholeDollars(Math.max(0, firstPositionDollars))} pays for no lot of ${formatWholeDollars(lotCost)} with the free cash`;
+    const spent = lots * sharesPerContract * stockPrice + market.stockCommissionDollars(lots * sharesPerContract);
+    const shares = lots * sharesPerContractOnCycleScale;
+    const description = `${market.symbol} Buy ${lots * sharesPerContract} shares @ ${stockPrice.toFixed(2)} (${rebuild ? "the first position rebuilt" : "a new cycle's first position"}: ${v2.firstPositionPct}% of the ${formatWholeDollars(pot)} pot${secondValue > 0 ? " less the second position's shares" : ""}, with no Call until ${until})`;
+    book.buyShares({ position: "first", shares, description, chosenBecause: "vol farmer v3: no option sold today, the first position's shares bought alone", candidateScores: { potValue: pot, targetValue: firstPositionDollars, stockPrice, lotsAfter: lots } });
+    if (!rebuild) {
+      Object.assign(state, { ...newVolFarmerV2SymbolState(), cash: state.cash, potDollars: pot });
+      state.cash.cycles += 1;
+    }
+    state.cash.firstPositionCashLeft.push(firstPositionDollars - spent);
+    state.first = { shares, costPerShare: spent / shares, premiums: [], calls: [], puts: [] };
+    book.notePositionPnl?.({ position: "first", kind: "shares", dollars: -spent });
+    return description;
   }
-  if (state.first !== null && state.first.shares > 0 && state.first.calls.length === 0) return rebalanceHolding(input, v3, until);
+  if (state.first !== null && state.first.shares > 0 && state.first.calls.length === 0) return rebalanceHolding(input, v3, alwaysHold ? undefined : until);
   return null;
 }
 
@@ -801,8 +824,8 @@ function holdWithoutOptions(input: VolFarmerV2LookInput, until: string): string 
  * with `rebalances` "both_positions" the second position's too) back to its target once its value is off it by more than
  * the band: whole lots bought into the first position with the free cash, or sold, to floor(T ÷ a lot's cost) lots. A sale
  * takes the position with the higher break-even first, only its lots with no Call open, the first keeping one lot; a
- * second position sold out ends as one called away does. `noCallUntil`: a day no Call is sold, so only trims (no share
- * is bought without a Call). Answers what it traded, or why it bought nothing; null when the holding is within the band
+ * second position sold out ends as one called away does. `noCallUntil`: a day no Call is sold with Always hold the stock
+ * off, so only trims (no share is bought without a Call). Answers what it traded, or why it bought nothing; null when the holding is within the band
  * or a lot away.
  */
 function rebalanceHolding(input: VolFarmerV2LookInput, v3: BacktestVolFarmerV3Settings, noCallUntil?: string): string | null {
@@ -829,7 +852,7 @@ function rebalanceHolding(input: VolFarmerV2LookInput, v3: BacktestVolFarmerV3Se
   const candidateScores = { potValue: pot, targetValue: target, sharesValueBefore: value, stockPrice, breakEvenFirst: breakEvenAsTraded(first), ...(second === null ? {} : { breakEvenSecond: breakEvenAsTraded(second) }), lotsBefore: heldLots };
 
   if (targetLots > heldLots) {
-    if (noCallUntil !== undefined) return `no top-up: ${against}, but no Call is sold today, and shares are bought only with one (until ${noCallUntil})`;
+    if (noCallUntil !== undefined) return `no top-up: ${against}, but no Call is sold today, and with Always hold the stock off shares are bought only with one (until ${noCallUntil})`;
     const targetWanted = targetLots - heldLots;
     const capPct = v3.topUpCapPctOfPot ?? 0;
     const cap = capPct > 0 ? (pot * capPct) / 100 : null;

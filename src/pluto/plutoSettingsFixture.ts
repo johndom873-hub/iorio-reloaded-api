@@ -36,4 +36,5 @@ export const plutoVolFarmerV4SettingsFixture = {
   volFarmerV4TrimsSell: "higher_break_even_first",
   volFarmerV4TopUpCapPct: 0,
   volFarmerV4CallsInTheMoneyAtLastLook: "assigned",
+  volFarmerV4AlwaysHoldTheStock: "on",
 } as const satisfies Partial<PlutoSettings>;

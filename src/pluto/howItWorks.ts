@@ -8,7 +8,7 @@ import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
 import { cancelMarginMinutes, closeMarginMinutes, hhmmMinutesBefore } from "./sessionSchedule.js";
 import { volFarmerV4BuyBackMinutesBeforeWindowEnd } from "./volFarmerV4LiveBook.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
-import { tickerPotFraction } from "./tickerSettingsStore.js";
+import { loadEnabledPlutoTickerSettings, tickerPotFraction, type PlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // The numbers Pluto's "How it works" tab quotes (approved mockups https://claude.ai/artifact/TYdARe8Sa6RuF5Lb1E1s2b and,
 // for the buyback, https://claude.ai/artifact/HwdnZHFFzJpktyUBJkjBVR; Vol Farmer v4, the CC + Put Ladder's part retired
@@ -88,6 +88,10 @@ export interface PlutoHowItWorks {
     topUpCapPct: number;
     /** Calls in the money at the window's end: assigned at the close, or bought back every day or before weekends only (Marcelo 2026-11-02). */
     callsInTheMoneyAtLastLook: PlutoSettings["volFarmerV4CallsInTheMoneyAtLastLook"];
+    /** Always hold the stock, Pluto's setting (Marcelo 2026-11-03): "on" buys shares on any day, "off" only with a Call. */
+    alwaysHoldTheStock: PlutoSettings["volFarmerV4AlwaysHoldTheStock"];
+    /** The enabled tickers whose own Always hold the stock is the other value, alphabetical. */
+    alwaysHoldTheStockOtherwise: string[];
     /** The buyback's minutes before the window's end, from buyBackStartsEt (HH:MM ET); a buyback still working is cancelled at buyBackCancelledAtEt on a regular day. */
     buyBackMinutesBeforeWindowEnd: number;
     buyBackStartsEt: string;
@@ -132,7 +136,7 @@ export interface PlutoHowItWorks {
 const percent = (fraction: number) => Math.round(fraction * 1_000_000) / 10_000;
 
 /** Pure: the tab's numbers from Pluto's settings, the platform's unfilled-order sweep and the code's constants. */
-export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfilledOrderCancelMinutes: number }): PlutoHowItWorks {
+export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfilledOrderCancelMinutes: number; tickers: readonly Pick<PlutoTickerSettings, "symbol" | "alwaysHoldTheStock">[] }): PlutoHowItWorks {
   const pot = volFarmerV4ExampleAccountValue * tickerPotFraction(volFarmerV4ExampleAllocationPct, settings);
   const volFarmerV4Step = settings.volFarmerV4StepRule === "implied_move_at_put_sale" ? volFarmerV2ImpliedMoveStep(volFarmerV4ExampleImpliedVolatility).stepPct : settings.volFarmerV4StepBelowFirstBreakEvenPct;
   // A lot's cost at a price, as the steps count it (the shares and their commission).
@@ -199,6 +203,11 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       trimsSell: settings.volFarmerV4TrimsSell,
       topUpCapPct: settings.volFarmerV4TopUpCapPct,
       callsInTheMoneyAtLastLook: settings.volFarmerV4CallsInTheMoneyAtLastLook,
+      alwaysHoldTheStock: settings.volFarmerV4AlwaysHoldTheStock,
+      alwaysHoldTheStockOtherwise: figures.tickers
+        .filter((ticker) => ticker.alwaysHoldTheStock !== null && ticker.alwaysHoldTheStock !== settings.volFarmerV4AlwaysHoldTheStock)
+        .map((ticker) => ticker.symbol)
+        .sort(),
       buyBackMinutesBeforeWindowEnd: volFarmerV4BuyBackMinutesBeforeWindowEnd,
       buyBackStartsEt: hhmmMinutesBefore(settings.windowEndEt, volFarmerV4BuyBackMinutesBeforeWindowEnd),
       buyBackCancelledAtEt: hhmmMinutesBefore(regularCloseEt, cancelMarginMinutes),
@@ -235,6 +244,6 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
 }
 
 export async function loadPlutoHowItWorks(): Promise<PlutoHowItWorks> {
-  const [settings, unfilledOrderCancelMinutes] = await Promise.all([loadPlutoSettings(), loadOrderUnfilledCancelMinutes()]);
-  return buildPlutoHowItWorks(settings, { unfilledOrderCancelMinutes });
+  const [settings, unfilledOrderCancelMinutes, tickers] = await Promise.all([loadPlutoSettings(), loadOrderUnfilledCancelMinutes(), loadEnabledPlutoTickerSettings()]);
+  return buildPlutoHowItWorks(settings, { unfilledOrderCancelMinutes, tickers });
 }

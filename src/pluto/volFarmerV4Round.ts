@@ -435,7 +435,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
     .map((expiry) => `${expiry.slice(0, 4)}-${expiry.slice(4, 6)}-${expiry.slice(6, 8)}`)
     .filter((expiry) => expiry >= clock.todayIso)
     .sort();
-  const { farmer, v2, v3 } = volFarmerV4RulesOf(settings);
+  const { farmer, v2, v3 } = volFarmerV4RulesOf(settings, ticker);
   // The expiry v4 sells, without the previous session's volume: the 20% volume rule is lifted on it for the day.
   const soldExpiry = volFarmerV4SoldExpiry(chain.expirations, clock.todayIso, v3.optionsExpiry);
   const volumeLimitLiftedExpiries = expiriesWithoutPreviousSessionVolume(soldExpiry === null ? [] : [soldExpiry], previousSessionVolumeByContract);

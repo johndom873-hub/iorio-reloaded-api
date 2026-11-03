@@ -3,6 +3,7 @@ import { db } from "../db/connection.js";
 import {
   volFarmerV2StepRules,
   volFarmerV3CallsInTheMoneyAtLastLookChoices,
+  volFarmerV3AlwaysHoldTheStockChoices,
   volFarmerV3CallStrikeFloorChoices,
   volFarmerV3FirstPositionAfterCalledAwayChoices,
   volFarmerV3OptionsExpiryChoices,
@@ -11,6 +12,7 @@ import {
   volFarmerV3RebalancesChoices,
   volFarmerV3TrimsSellChoices,
   type VolFarmerV3CallsInTheMoneyAtLastLook,
+  type VolFarmerV3AlwaysHoldTheStock,
   type VolFarmerV3CallStrikeFloor,
   type VolFarmerV3FirstPositionAfterCalledAway,
   type VolFarmerV3OptionsExpiry,
@@ -93,6 +95,8 @@ export interface PlutoSettings {
   volFarmerV4TopUpCapPct: number;
   /** A Call expiring today still in the money in the window's last minutes: assigned at the close, or bought back (every day, or before weekends only). */
   volFarmerV4CallsInTheMoneyAtLastLook: VolFarmerV3CallsInTheMoneyAtLastLook;
+  /** Every ticker's Always hold the stock unless it sets its own (pluto_ticker_settings.always_hold_the_stock). */
+  volFarmerV4AlwaysHoldTheStock: VolFarmerV3AlwaysHoldTheStock;
   updatedAt: string;
   updatedByUserId: string | null;
 }
@@ -144,6 +148,7 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   volFarmerV4TrimsSell: { column: "vol_farmer_v4_trims_sell", kind: "text", oneOf: volFarmerV3TrimsSellChoices },
   volFarmerV4TopUpCapPct: { column: "vol_farmer_v4_top_up_cap_pct", kind: "number", min: 0, max: 1000 },
   volFarmerV4CallsInTheMoneyAtLastLook: { column: "vol_farmer_v4_calls_in_the_money_at_last_look", kind: "text", oneOf: volFarmerV3CallsInTheMoneyAtLastLookChoices },
+  volFarmerV4AlwaysHoldTheStock: { column: "vol_farmer_v4_always_hold_the_stock", kind: "text", oneOf: volFarmerV3AlwaysHoldTheStockChoices },
 };
 
 export type PlutoSettingsField = keyof typeof plutoSettingsColumns;

@@ -1,10 +1,12 @@
 import type { Knex } from "knex";
+import type { VolFarmerV3AlwaysHoldTheStock } from "../backtest/backtestTypes.js";
 import { db } from "../db/connection.js";
 import { loadPlutoSettings } from "./settingsStore.js";
 import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, tickerPotFraction } from "./tickerSettingsStore.js";
 
-// Each shortlisted ticker's allocation and pot as Pluto's Tickers tab shows them (Marcelo 2026-10-28): what the CC + Put
-// Ladder's settings read used to carry, kept for Vol Farmer v4 when the Ladder retired (2026-11-02).
+// Each shortlisted ticker's allocation, pot and Always hold the stock as Pluto's Tickers tab shows them (Marcelo
+// 2026-10-28; Always hold the stock 2026-11-03): what the CC + Put Ladder's settings read used to carry, kept for Vol
+// Farmer v4 when the Ladder retired (2026-11-02).
 
 export interface PlutoTickerAllocation {
   symbol: string;
@@ -20,6 +22,10 @@ export interface PlutoTickerAllocation {
   potDollars: number | null;
   /** Pluto's capital budget in dollars at last night's account value; null when none is recorded. */
   capitalBudgetDollars: number | null;
+  /** The ticker's own Always hold the stock (Marcelo 2026-11-03); null = Pluto's setting, alwaysHoldTheStockEffective. */
+  alwaysHoldTheStock: VolFarmerV3AlwaysHoldTheStock | null;
+  /** What the ticker follows: its own value, else Pluto's volFarmerV4AlwaysHoldTheStock. */
+  alwaysHoldTheStockEffective: VolFarmerV3AlwaysHoldTheStock;
 }
 
 /** The allocation and pot of each of `symbols` (upper case); the shared reads are made once. */
@@ -38,7 +44,8 @@ export async function loadPlutoTickerAllocations(symbols: readonly string[], con
       const enabled = enabledTickers.some((ticker) => ticker.symbol === symbol);
       const effectivePct = effectiveBySymbol.get(symbol);
       const potDollars = enabled && effectivePct !== undefined && accountValue !== null ? accountValue * tickerPotFraction(effectivePct, settings) : null;
-      return { symbol, enabled, allocationPct: tickerSettings?.allocationPct ?? null, potDollars, capitalBudgetDollars };
+      const alwaysHoldTheStock = tickerSettings?.alwaysHoldTheStock ?? null;
+      return { symbol, enabled, allocationPct: tickerSettings?.allocationPct ?? null, potDollars, capitalBudgetDollars, alwaysHoldTheStock, alwaysHoldTheStockEffective: alwaysHoldTheStock ?? settings.volFarmerV4AlwaysHoldTheStock };
     }),
   );
 }

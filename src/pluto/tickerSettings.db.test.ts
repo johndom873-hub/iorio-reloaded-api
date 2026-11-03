@@ -77,7 +77,7 @@ describe("ticker settings routes", () => {
   it("reads a ticker with nothing set as all defaults, and 404s an unknown symbol", async () => {
     const read = await call("GET", `/ticker-settings/${enabledSymbol.toLowerCase()}`);
     expect(read.status).toBe(200);
-    expect(read.json).toEqual({ symbol: enabledSymbol, tickerId: tickerIds[0], allocationPct: null, updatedAt: null, updatedByUserId: null });
+    expect(read.json).toEqual({ symbol: enabledSymbol, tickerId: tickerIds[0], allocationPct: null, alwaysHoldTheStock: null, updatedAt: null, updatedByUserId: null });
     expect((await call("GET", "/ticker-settings/NOSUCHTICKERX")).status).toBe(404);
     expect((await call("PUT", "/ticker-settings/NOSUCHTICKERX", { allocationPct: 10 })).status).toBe(404);
   });
@@ -178,7 +178,7 @@ describe("the Tickers tab's allocations save", () => {
     try {
       const saved = await call("PUT", "/allocations", { allocations: { [enabledSymbol]: 20, [otherSymbol]: 5 }, excessAllowancePct: 26.3158 });
       expect(saved.status).toBe(200);
-      expect(saved.json).toEqual({ allocations: [{ symbol: enabledSymbol, from: enabledBefore, to: 20 }, { symbol: otherSymbol, from: otherBefore, to: 5 }], excessAllowance: { from: allowanceBefore, to: 26.3158 } });
+      expect(saved.json).toEqual({ allocations: [{ symbol: enabledSymbol, from: enabledBefore, to: 20 }, { symbol: otherSymbol, from: otherBefore, to: 5 }], alwaysHoldTheStock: [], excessAllowance: { from: allowanceBefore, to: 26.3158 } });
       expect([await allocationOf(enabledSymbol), await allocationOf(otherSymbol), await allowanceNow()]).toEqual([20, 5, 26.3158]);
       const tickerAudit = await testDb("pluto_ticker_settings_audit").whereIn("ticker_id", tickerIds).where({ field: "allocationPct" }).orderBy("id", "desc").limit(2).select("new_value");
       expect(tickerAudit.map((row) => row.new_value).sort()).toEqual(["20", "5"]);
@@ -200,6 +200,38 @@ describe("the Tickers tab's allocations save", () => {
       await testDb("pluto_ticker_settings").where({ ticker_id: tickerIds[0] }).update({ allocation_pct: enabledBefore });
       await testDb("pluto_ticker_settings").where({ ticker_id: tickerIds[1] }).update({ allocation_pct: otherBefore });
       await testDb("pluto_settings").where({ id: 1 }).update({ excess_allowance_pct: allowanceBefore });
+      await testDb("pluto_events").where({ type: "settings_changed" }).whereRaw("payload->>'by' = ?", ["Ticker Settings Tester"]).del();
+    }
+  });
+
+  it("saves a ticker's Always hold the stock with the allocations, audited with one event each; null follows Pluto's again, and the Tickers tab shows what it follows", async () => {
+    const holdingOf = async (symbol: string) => (await call("GET", `/ticker-settings/${symbol}`)).json.alwaysHoldTheStock as string | null;
+    const [enabledBefore, holdingBefore] = [await allocationOf(enabledSymbol), await holdingOf(enabledSymbol)];
+    const plutoHolding = (await testDb("pluto_settings").where({ id: 1 }).first("vol_farmer_v4_always_hold_the_stock")).vol_farmer_v4_always_hold_the_stock as string;
+    try {
+      const saved = await call("PUT", "/allocations", { allocations: {}, alwaysHoldTheStock: { [enabledSymbol]: "off" } });
+      expect(saved.status).toBe(200);
+      expect(saved.json).toEqual({ allocations: [], alwaysHoldTheStock: [{ symbol: enabledSymbol, from: holdingBefore, to: "off" }], excessAllowance: null });
+      expect(await holdingOf(enabledSymbol)).toBe("off");
+      expect(await allocationOf(enabledSymbol)).toBe(enabledBefore);
+      const audit = await testDb("pluto_ticker_settings_audit").where({ ticker_id: tickerIds[0], field: "alwaysHoldTheStock" }).orderBy("id", "desc").first("old_value", "new_value");
+      expect(audit).toEqual({ old_value: holdingBefore, new_value: "off" });
+      const event = await testDb("pluto_events").where({ type: "settings_changed" }).whereRaw("payload->>'symbol' = ?", [enabledSymbol]).orderBy("id", "desc").first("payload");
+      expect(event.payload).toEqual({ by: "Ticker Settings Tester", symbol: enabledSymbol, fields: [{ field: "alwaysHoldTheStock", from: holdingBefore, to: "off" }] });
+      const shown = ((await call("GET", "/ticker-allocations")).json as unknown as { symbol: string; alwaysHoldTheStock: string | null; alwaysHoldTheStockEffective: string }[]).find((row) => row.symbol === enabledSymbol);
+      expect(shown).toMatchObject({ alwaysHoldTheStock: "off", alwaysHoldTheStockEffective: "off" });
+      // Saving the same value again changes nothing; null puts it back on Pluto's setting.
+      expect((await call("PUT", "/allocations", { allocations: {}, alwaysHoldTheStock: { [enabledSymbol]: "off" } })).json.alwaysHoldTheStock).toEqual([]);
+      expect((await call("PUT", "/allocations", { allocations: {}, alwaysHoldTheStock: { [enabledSymbol]: null } })).json.alwaysHoldTheStock).toEqual([{ symbol: enabledSymbol, from: "off", to: null }]);
+      const followed = ((await call("GET", "/ticker-allocations")).json as unknown as { symbol: string; alwaysHoldTheStock: string | null; alwaysHoldTheStockEffective: string }[]).find((row) => row.symbol === enabledSymbol);
+      expect(followed).toMatchObject({ alwaysHoldTheStock: null, alwaysHoldTheStockEffective: plutoHolding });
+      // A bad value, a bad map or a refused allocation changes nothing.
+      expect((await call("PUT", "/allocations", { allocations: {}, alwaysHoldTheStock: { [enabledSymbol]: "sometimes" } })).status).toBe(400);
+      expect((await call("PUT", "/allocations", { allocations: {}, alwaysHoldTheStock: [] })).status).toBe(400);
+      expect((await call("PUT", "/allocations", { allocations: { [enabledSymbol]: 0 }, alwaysHoldTheStock: { [enabledSymbol]: "off" } })).status).toBe(400);
+      expect(await holdingOf(enabledSymbol)).toBeNull();
+    } finally {
+      await testDb("pluto_ticker_settings").where({ ticker_id: tickerIds[0] }).update({ always_hold_the_stock: holdingBefore });
       await testDb("pluto_events").where({ type: "settings_changed" }).whereRaw("payload->>'by' = ?", ["Ticker Settings Tester"]).del();
     }
   });

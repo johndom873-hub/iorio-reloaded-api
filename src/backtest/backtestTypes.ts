@@ -498,6 +498,21 @@ export interface BacktestVolFarmerV3Settings {
    * before a weekend (a Friday, or the Thursday before a Friday holiday), left to be assigned on the other days.
    */
   callsInTheMoneyAtLastLook: VolFarmerV3CallsInTheMoneyAtLastLook;
+  /**
+   * Always hold the stock (Marcelo 2026-11-03): "on", a day no option is sold still buys shares, a flat ticker's first
+   * position (or one the second outlived, rebuilt) bought alone with its Calls from the next day it sells options, and
+   * top-ups go as trims do; "off", shares are bought only on a day a Call is sold with them, so a flat ticker waits for that
+   * day, a top-up too, and only trims go. Snapshots without it ran "on", except those saved from 3 Nov 2026 08:41 SGT until
+   * the setting came, which were given "off".
+   */
+  alwaysHoldTheStock: VolFarmerV3AlwaysHoldTheStock;
+  /** A ticker's own Always hold the stock, for the session's symbols; a symbol not set follows alwaysHoldTheStock. */
+  tickerAlwaysHoldTheStock: Record<string, VolFarmerV3AlwaysHoldTheStock>;
+}
+
+/** Whether `symbol` always holds the stock: its own value, else the session's ("on" where a snapshot has neither). */
+export function alwaysHoldsTheStock(v3: Pick<BacktestVolFarmerV3Settings, "alwaysHoldTheStock" | "tickerAlwaysHoldTheStock">, symbol: string): boolean {
+  return (v3.tickerAlwaysHoldTheStock?.[symbol] ?? v3.alwaysHoldTheStock ?? "on") === "on";
 }
 
 export const volFarmerV3OptionsExpiryChoices = ["next", "today"] as const;
@@ -516,8 +531,10 @@ export const volFarmerV3FirstPositionAfterCalledAwayChoices = ["wait", "rebuild"
 export type VolFarmerV3FirstPositionAfterCalledAway = (typeof volFarmerV3FirstPositionAfterCalledAwayChoices)[number];
 export const volFarmerV3CallsInTheMoneyAtLastLookChoices = ["assigned", "bought_back", "bought_back_before_weekends"] as const;
 export type VolFarmerV3CallsInTheMoneyAtLastLook = (typeof volFarmerV3CallsInTheMoneyAtLastLookChoices)[number];
+export const volFarmerV3AlwaysHoldTheStockChoices = ["on", "off"] as const;
+export type VolFarmerV3AlwaysHoldTheStock = (typeof volFarmerV3AlwaysHoldTheStockChoices)[number];
 
-export const defaultBacktestVolFarmerV3Settings: BacktestVolFarmerV3Settings = { rebalanceBandPct: 5, rebalances: "first_position", firstPositionAfterCalledAway: "wait", optionsExpiry: "next", optionsMaxDaysToExpiry: 45, callStrikeFloor: "break_even", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned" };
+export const defaultBacktestVolFarmerV3Settings: BacktestVolFarmerV3Settings = { rebalanceBandPct: 5, rebalances: "first_position", firstPositionAfterCalledAway: "wait", optionsExpiry: "next", optionsMaxDaysToExpiry: 45, callStrikeFloor: "break_even", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned", alwaysHoldTheStock: "on", tickerAlwaysHoldTheStock: {} };
 
 /**
  * Vol Farmer v4 (decision maker "vol_farmer_v4", Marcelo 2026-10-31; the lab's default): Vol Farmer v3 on values of its own,
@@ -529,12 +546,12 @@ export const defaultBacktestVolFarmerV3Settings: BacktestVolFarmerV3Settings = {
  */
 export type BacktestVolFarmerV4Settings = Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid"> & BacktestVolFarmerV2Settings & BacktestVolFarmerV3Settings;
 
-export const defaultBacktestVolFarmerV4Settings: BacktestVolFarmerV4Settings = { callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, firstPositionPct: 80, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 20, rebalanceBandPct: 20, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned" };
+export const defaultBacktestVolFarmerV4Settings: BacktestVolFarmerV4Settings = { callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, firstPositionPct: 80, putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepBelowFirstBreakEvenPct: 15, stepRule: "implied_move_at_put_sale", leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAccountPct: 10, leapsSpreadCostChargedPct: 33, looks: "first_look", tickerAllocationPct: {}, excessAllowancePct: 20, rebalanceBandPct: 20, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45, callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first", topUpCapPctOfPot: 0, callsInTheMoneyAtLastLook: "assigned", alwaysHoldTheStock: "on", tickerAlwaysHoldTheStock: {} };
 
 /** The shared steps' values (volFarmerV2Steps.ts) for a Vol Farmer v4 session, from its own section: the Calls' limits, v2's values and v3's. */
 export function volFarmerStepSettingsOf(settings: Pick<EffectiveBacktestSettings, "volFarmerV4">): { farmer: Pick<BacktestVolFarmerSettings, "callMinAbsDelta" | "callMaxAbsDelta" | "maxSpreadPctOfMid">; v2: BacktestVolFarmerV2Settings; v3: BacktestVolFarmerV3Settings } {
-  const { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid, rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, callsInTheMoneyAtLastLook, ...v2 } = settings.volFarmerV4;
-  return { farmer: { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid }, v2, v3: { rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, callsInTheMoneyAtLastLook } };
+  const { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid, rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, callsInTheMoneyAtLastLook, alwaysHoldTheStock, tickerAlwaysHoldTheStock, ...v2 } = settings.volFarmerV4;
+  return { farmer: { callMinAbsDelta, callMaxAbsDelta, maxSpreadPctOfMid }, v2, v3: { rebalanceBandPct, rebalances, firstPositionAfterCalledAway, optionsExpiry, optionsMaxDaysToExpiry, callStrikeFloor, putsSold, putStrikeCap, trimsSell, topUpCapPctOfPot, callsInTheMoneyAtLastLook, alwaysHoldTheStock, tickerAlwaysHoldTheStock } };
 }
 
 /**

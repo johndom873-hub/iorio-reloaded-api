@@ -158,7 +158,7 @@ function round(stressed = false, todayIso = "2026-10-27", clock: { now?: Date; w
   return runVolFarmerV4Round({ passId: "p1", settings: roundSettings as never, api: {} as never, marketWatch: marketWatch as never, trackWatch: () => {}, now: clock.now ?? new Date(`${todayIso}T15:00:00Z`), todayIso, totalCashValue: 500_000, settledCashValue: harness.settledCashValue, settledCashIsTotalCash: harness.settledCashIsTotalCash, netLiquidationValue: 1_000_000, cancelByMs: null, windowEndAtMs: clock.windowEndAtMs ?? null, symbols: [], stressed });
 }
 
-const v4Ticker = (symbol: string) => ({ tickerId: `t-${symbol}`, symbol, allocationPct: null });
+const v4Ticker = (symbol: string) => ({ tickerId: `t-${symbol}`, symbol, allocationPct: null, alwaysHoldTheStock: null as "on" | "off" | null });
 
 const position = (shares: number, costPerShare: number) => ({ shares, costPerShare, premiums: [], calls: [], puts: [] });
 const stockLeg = (id: string, quantity: number) => ({ id, legType: "stock", side: "long", quantity, optionType: null, strikePrice: null, expiryDate: null, multiplier: 1, entryPrice: 100, entryAt: new Date(), exitPrice: null, exitAt: null });
@@ -415,17 +415,46 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
     expect(summary.sent).toBe(0);
   });
 
-  it("on a day no option ends, buys no shares, a flat ticker's first position nor a top-up, and says why", async () => {
+  it("always holding the stock, on a day no option ends, buys a flat ticker's first position alone at the mid of Pluto's quote, waits while it works, then holds the shares at their fill", async () => {
     roundSettings = v4Settings;
+    const summary = await round();
+    // 80% of the $250,000 pot: floor(200,000 ÷ 10,000.50) = 19 lots, bought at the mid of 99.98 / 100.02.
+    expect(harness.actions).toEqual([expect.objectContaining({ kind: "buy_shares", symbol: "VFT", quantity: 1_900, limitPrice: 100, executionStrategy: "vol_farmer_v4", outcome: "validated" })]);
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "shares_buy", symbol: "VFT", plan: expect.objectContaining({ quantity: 1_900, limitPrice: 100, notional: 190_000 }) })]);
+    expect(summary).toMatchObject({ planned: 1, sent: 1 });
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringContaining("VFT Buy 1900 shares @ 100.00 (a new cycle's first position: 80% of the $250,000 pot, with no Call until an expiry day)")]);
+    let memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
+    expect(memory.pending).toEqual([expect.objectContaining({ ref: "action:action-1", kind: "buy_shares", shares: 1_900, startsCycle: true, plannedSpentDollars: 190_009.5 })]);
+    expect(memory.state.first).toMatchObject({ shares: 1_900 });
+
+    // Still working: the ticker waits, nothing else is planned.
+    await round();
+    expect(harness.executed).toHaveLength(1);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual(["waits for its purchase of 1900 shares to end"]);
+
+    // Filled at 99.99: the shares cost what they filled at, commission included; within the band, nothing more to do.
+    harness.outcomes.set("action-1", filledPurchase(1_900, 99.99));
+    harness.positionsByTickerId.set("t-VFT", [{ strategyKey: "unstructured", status: "open", legs: [stockLeg("s1", 1_900)] }]);
+    await round();
+    memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
+    expect(memory.pending).toEqual([]);
+    expect(memory.state.first!.shares).toBe(1_900);
+    expect(memory.state.first!.costPerShare).toBeCloseTo(99.995, 10);
+    expect(harness.executed).toHaveLength(1);
+  });
+
+  it("with the ticker's own Always hold the stock off, on a day no option ends, buys no shares, a flat ticker's first position nor a top-up, and says why", async () => {
+    roundSettings = v4Settings;
+    harness.enabled = harness.enabled.map((ticker) => (ticker.symbol === "VFT" ? { ...ticker, alwaysHoldTheStock: "off" } : ticker));
     const summary = await round();
     expect([harness.actions, harness.executed]).toEqual([[], []]);
     expect(summary).toMatchObject({ planned: 0, sent: 0 });
-    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual(["no cycle opened: no Call is sold today, and shares are bought only with one (until an expiry day)"]);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual(["no cycle opened: no Call is sold today, and with Always hold the stock off shares are bought only with one (until an expiry day)"]);
 
     holdingFirstPosition(1_000);
     await round();
     expect(harness.executed).toEqual([]);
-    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringMatching(/^no top-up: first position \$100,000 against a target of \$200,000 .*, but no Call is sold today, and shares are bought only with one \(until an expiry day\)$/)]);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringMatching(/^no top-up: first position \$100,000 against a target of \$200,000 .*, but no Call is sold today, and with Always hold the stock off shares are bought only with one \(until an expiry day\)$/)]);
   });
 
   it("sends a share order alone: a top-up's Call is undone, and sold once the shares are bought", async () => {

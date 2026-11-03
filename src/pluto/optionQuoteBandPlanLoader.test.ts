@@ -7,7 +7,7 @@ import { createOptionQuoteBandConsumer, createOptionQuoteBandPlanner, type Optio
 
 const todayIso = "2026-10-20";
 const now = new Date("2026-10-20T16:00:00Z");
-const ticker: PlutoTickerSettings = { symbol: "LADR", tickerId: "t1", allocationPct: null, updatedAt: null, updatedByUserId: null };
+const ticker: PlutoTickerSettings = { symbol: "LADR", tickerId: "t1", allocationPct: null, alwaysHoldTheStock: null, updatedAt: null, updatedByUserId: null };
 
 function dependencies(overrides: Partial<OptionQuoteBandPlannerDependencies> = {}): OptionQuoteBandPlannerDependencies {
   return {

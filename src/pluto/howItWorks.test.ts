@@ -18,7 +18,7 @@ const settings: PlutoSettings = {
   crashLoopRestartsPerHour: 3, telegramVerbosity: "actions",
   updatedAt: "2026-10-15T00:00:00.000Z", updatedByUserId: null,
 };
-const figures = { unfilledOrderCancelMinutes: 15 };
+const figures = { unfilledOrderCancelMinutes: 15, tickers: [{ symbol: "HOOD", alwaysHoldTheStock: "off" as const }, { symbol: "AAOI", alwaysHoldTheStock: null }, { symbol: "COIN", alwaysHoldTheStock: "on" as const }] };
 
 describe("buildPlutoHowItWorks", () => {
   it("quotes every number the tab shows, at today's defaults and constants", () => {
@@ -36,7 +36,7 @@ describe("buildPlutoHowItWorks", () => {
       leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAllocationPct: 10,
       rebalanceBandPct: 20, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45,
       callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first",
-      topUpCapPct: 0, callsInTheMoneyAtLastLook: "assigned", buyBackMinutesBeforeWindowEnd: 2, buyBackStartsEt: "15:28", buyBackCancelledAtEt: "15:58",
+      topUpCapPct: 0, callsInTheMoneyAtLastLook: "assigned", alwaysHoldTheStock: "on", alwaysHoldTheStockOtherwise: ["HOOD"], buyBackMinutesBeforeWindowEnd: 2, buyBackStartsEt: "15:28", buyBackCancelledAtEt: "15:58",
     });
     // Pot 240,000; 80% = 192,000: floor(192,000 ÷ 10,000.50) = 19 lots. The band ± 20% of the pot, 48,000. At $70 the lots are
     // worth 133,000, under 144,000: topped up to floor(192,000 ÷ 7,000.50) = 27; at $130, 247,000 over 240,000: trimmed to

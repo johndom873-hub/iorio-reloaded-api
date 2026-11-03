@@ -18,6 +18,7 @@ import {
   volFarmerV3PutStrikeCapChoices,
   volFarmerV3TrimsSellChoices,
   volFarmerV3CallsInTheMoneyAtLastLookChoices,
+  volFarmerV3AlwaysHoldTheStockChoices,
   volFarmerV3FirstPositionAfterCalledAwayChoices,
   volFarmerV3OptionsExpiryChoices,
   volFarmerV3RebalancesChoices,
@@ -319,6 +320,11 @@ export function validateVolFarmerV3Settings(values: Record<string, unknown>, sec
   const topUpCapPctOfPot = values.topUpCapPctOfPot;
   if (typeof topUpCapPctOfPot !== "number" || !Number.isFinite(topUpCapPctOfPot) || topUpCapPctOfPot < 0 || topUpCapPctOfPot > 1000) return `${section}.topUpCapPctOfPot must be a number from 0 to 1000.`;
   if (!(volFarmerV3CallsInTheMoneyAtLastLookChoices as readonly unknown[]).includes(values.callsInTheMoneyAtLastLook)) return `${section}.callsInTheMoneyAtLastLook must be one of ${volFarmerV3CallsInTheMoneyAtLastLookChoices.join(", ")}.`;
+  if (!(volFarmerV3AlwaysHoldTheStockChoices as readonly unknown[]).includes(values.alwaysHoldTheStock)) return `${section}.alwaysHoldTheStock must be one of ${volFarmerV3AlwaysHoldTheStockChoices.join(", ")}.`;
+  const tickerAlwaysHoldTheStock = values.tickerAlwaysHoldTheStock;
+  if (!isPlainObject(tickerAlwaysHoldTheStock)) return `${section}.tickerAlwaysHoldTheStock must be an object of symbols.`;
+  const notAChoice = Object.entries(tickerAlwaysHoldTheStock).find(([, value]) => !(volFarmerV3AlwaysHoldTheStockChoices as readonly unknown[]).includes(value));
+  if (notAChoice) return `${section}.tickerAlwaysHoldTheStock.${notAChoice[0]} must be one of ${volFarmerV3AlwaysHoldTheStockChoices.join(", ")}.`;
   return null;
 }
 
@@ -432,10 +438,12 @@ export function validateCreateBacktestSessionRequest(body: unknown, context: Bac
   // values were the CC + Put Ladder's.
   if (body.symbolSettings !== undefined && body.symbolSettings !== null) return { ok: false, error: "symbolSettings were the CC + Put Ladder's per-ticker values, retired on 2 Nov 2026." };
   if (typeof startingValue !== "number") return { ok: false, error: "The starting account value must be a number above 0." };
-  // Vol Farmer v4's set allocations name the session's tickers.
+  // Vol Farmer v4's set allocations and own Always hold the stock name the session's tickers.
   if (effective.decisionMaker === "vol_farmer_v4") {
     const stranger = Object.keys({ ...defaultBacktestVolFarmerV4Settings, ...effective.volFarmerV4 }.tickerAllocationPct).find((symbol) => !symbols.includes(symbol));
     if (stranger !== undefined) return { ok: false, error: `volFarmerV4.tickerAllocationPct.${stranger}: ${stranger} is not one of the session's symbols.` };
+    const strangerHolding = Object.keys({ ...defaultBacktestVolFarmerV4Settings, ...effective.volFarmerV4 }.tickerAlwaysHoldTheStock).find((symbol) => !symbols.includes(symbol));
+    if (strangerHolding !== undefined) return { ok: false, error: `volFarmerV4.tickerAlwaysHoldTheStock.${strangerHolding}: ${strangerHolding} is not one of the session's symbols.` };
   }
   return { ok: true, value: { ...base, startingValue, bookMode: "shared_account", symbolSettings: null, symbolResolution: null, settingsSource: null, potsFromStartingValue: null }, warnings };
 }
