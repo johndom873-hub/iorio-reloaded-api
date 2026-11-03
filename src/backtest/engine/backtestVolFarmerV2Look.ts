@@ -13,7 +13,7 @@ import { noteBaselineForwardAnchors, roundedStrike, type BaselineCommissions, ty
 import { buyBackCoveredCallKeepingShares, buyLeapsCall, buyShares, expirySettlementInstant, openCashSecuredPut, openCoveredCall, sellLeapsCall, sellShares } from "./ledger/ledgerEvents.js";
 import { optionCommissionDollars, optionPurchaseFillPrice, stockCommissionDollars } from "./ledger/ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
-import { cycleSplitFactorFor, cycleStartSplitFactor, isSymbolFlat, legsOfPosition, positionsOfSymbol, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
+import { cycleSplitFactorFor, cycleStartSplitFactor, isSymbolFlat, legsOfPosition, positionOrdinalOf, positionsOfSymbol, requirePosition, unexitedLegsOf, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { newVolFarmerV2SymbolState, runVolFarmerV2Turn, volFarmerV2BreakEven, volFarmerV2TurnOrder, type VolFarmerV2Book, type VolFarmerV2CashCut, type VolFarmerV2Market, type VolFarmerV2Position, type VolFarmerV2PositionCashFlow, type VolFarmerV2SymbolState, type VolFarmerV3SharesOrder } from "./volFarmerV2Steps.js";
 
 // Vol Farmer v4 in the backtest: Vol Farmer v2's shared steps (volFarmerV2Steps.ts, where the rules are) with v3's
@@ -240,8 +240,13 @@ function breakEvenLevelAfterLook(ledger: SimulatedLedger, lookSymbol: BacktestLo
   return { symbol, splitFactor: lookSymbol.splitFactorToday, firstBreakEven, secondBreakEven };
 }
 
+/** The symbol's option legs not yet exited, position by position in the ledger's order, each position's legs in the ledger's order. */
 function openOptionLegsOf(ledger: SimulatedLedger, symbol: string): LedgerLeg[] {
-  return positionsOfSymbol(ledger, symbol).flatMap((position) => legsOfPosition(ledger, position.id).filter((leg) => leg.exitAt === null && leg.legType === "option" && leg.expiryDate !== null && leg.strikePrice !== null));
+  return unexitedLegsOf(ledger)
+    .filter((leg) => leg.legType === "option" && leg.expiryDate !== null && leg.strikePrice !== null && requirePosition(ledger, leg.positionId).symbol === symbol)
+    .map((leg, order) => ({ leg, order, ordinal: positionOrdinalOf(ledger, leg.positionId) }))
+    .sort((a, b) => a.ordinal - b.ordinal || a.order - b.order)
+    .map((entry) => entry.leg);
 }
 
 /** The LEAPS purchases the free cash held back, per ledger and symbol: how many, and the first one's day (the run's cash note). */

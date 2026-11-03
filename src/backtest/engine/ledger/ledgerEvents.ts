@@ -64,9 +64,18 @@ function closePosition(position: LedgerPosition, at: Date, closeReason: LedgerCl
   position.closeReason = closeReason;
 }
 
+/** The share sources' links already recorded, per ledger: the links appended since the last read are taken in (a ledger whose array was replaced is read afresh). */
+const shareSourceKeysByLedger = new WeakMap<SimulatedLedger, { sources: SimulatedLedger["shareSources"]; count: number; keys: Set<string> }>();
+
 function recordShareSource(ledger: SimulatedLedger, positionId: string, sourcePositionId: string): void {
   if (positionId === sourcePositionId) return;
-  if (ledger.shareSources.some((source) => source.positionId === positionId && source.sourcePositionId === sourcePositionId)) return;
+  let index = shareSourceKeysByLedger.get(ledger);
+  if (!index || index.sources !== ledger.shareSources || index.count > ledger.shareSources.length) {
+    index = { sources: ledger.shareSources, count: 0, keys: new Set() };
+    shareSourceKeysByLedger.set(ledger, index);
+  }
+  for (; index.count < ledger.shareSources.length; index.count++) index.keys.add(`${ledger.shareSources[index.count]!.positionId} ${ledger.shareSources[index.count]!.sourcePositionId}`);
+  if (index.keys.has(`${positionId} ${sourcePositionId}`)) return;
   ledger.shareSources.push({ positionId, sourcePositionId });
 }
 

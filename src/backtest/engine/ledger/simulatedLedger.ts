@@ -187,6 +187,8 @@ interface LedgerRowIndex {
   indexedPositionCount: number;
   indexedLegCount: number;
   positionById: Map<string, LedgerPosition>;
+  /** A position's place in ledger.positions. */
+  positionOrdinalById: Map<string, number>;
   legById: Map<string, LedgerLeg>;
   legsByPositionId: Map<string, LedgerLeg[]>;
   positionsBySymbol: Map<string, LedgerPosition[]>;
@@ -197,12 +199,15 @@ const rowIndexByLedger = new WeakMap<SimulatedLedger, LedgerRowIndex>();
 function rowIndexOf(ledger: SimulatedLedger): LedgerRowIndex {
   let index = rowIndexByLedger.get(ledger);
   if (!index || index.positions !== ledger.positions || index.legs !== ledger.legs) {
-    index = { positions: ledger.positions, legs: ledger.legs, indexedPositionCount: 0, indexedLegCount: 0, positionById: new Map(), legById: new Map(), legsByPositionId: new Map(), positionsBySymbol: new Map() };
+    index = { positions: ledger.positions, legs: ledger.legs, indexedPositionCount: 0, indexedLegCount: 0, positionById: new Map(), positionOrdinalById: new Map(), legById: new Map(), legsByPositionId: new Map(), positionsBySymbol: new Map() };
     rowIndexByLedger.set(ledger, index);
   }
   for (; index.indexedPositionCount < ledger.positions.length; index.indexedPositionCount++) {
     const position = ledger.positions[index.indexedPositionCount]!;
-    if (!index.positionById.has(position.id)) index.positionById.set(position.id, position);
+    if (!index.positionById.has(position.id)) {
+      index.positionById.set(position.id, position);
+      index.positionOrdinalById.set(position.id, index.indexedPositionCount);
+    }
     const ofSymbol = index.positionsBySymbol.get(position.symbol);
     if (ofSymbol) ofSymbol.push(position);
     else index.positionsBySymbol.set(position.symbol, [position]);
@@ -227,6 +232,13 @@ export function requireLeg(ledger: SimulatedLedger, legId: string): LedgerLeg {
   const leg = rowIndexOf(ledger).legById.get(legId);
   if (!leg) throw new Error(`No leg ${legId} in the ledger.`);
   return leg;
+}
+
+/** The position's place in ledger.positions (the order positionsOfSymbol lists them in). */
+export function positionOrdinalOf(ledger: SimulatedLedger, positionId: string): number {
+  const ordinal = rowIndexOf(ledger).positionOrdinalById.get(positionId);
+  if (ordinal === undefined) throw new Error(`No position ${positionId} in the ledger.`);
+  return ordinal;
 }
 
 export function legsOfPosition(ledger: SimulatedLedger, positionId: string): LedgerLeg[] {
