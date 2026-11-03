@@ -8,7 +8,7 @@ import { BacktestTradingCalendar } from "../engine/backtestTradingCalendar.js";
 import { runVolFarmerV2Look } from "../engine/backtestVolFarmerV2Look.js";
 import { creditInterest, expirySettlementInstant, settleExpiry, settleLeapsCall } from "../engine/ledger/ledgerEvents.js";
 import { ledgerLeapsLegsDueForSettlement, ledgerLegsDueForSettlement, ledgerNetLiquidationValue } from "../engine/ledger/ledgerSelectors.js";
-import { createSimulatedLedger, requirePosition, type LedgerLeg, type SimulatedLedger } from "../engine/ledger/simulatedLedger.js";
+import { createSimulatedLedger, requirePosition, unexitedLegsOf, type LedgerLeg, type SimulatedLedger } from "../engine/ledger/simulatedLedger.js";
 import type { ObservedChainDay } from "./portfolioObservedChain.js";
 import { syntheticExpiryChain, syntheticLeapsSource } from "./portfolioSyntheticChain.js";
 
@@ -147,8 +147,7 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
     // c. Every open leg marked at 10:00, as the runner marks it at the quotes' mid: shares at the price, a sold Call or Put
     // on the day's chain (the 30-day IV × u), a LEAPS on the 30-day IV.
     const sharesHeld = new Set<string>();
-    for (const leg of ledger.legs) {
-      if (leg.exitAt !== null) continue;
+    for (const leg of unexitedLegsOf(ledger)) {
       const position = requirePosition(ledger, leg.positionId);
       const tickerIndex = tickerIndexBySymbol.get(position.symbol)!;
       const day = days[tickerIndex]!;
@@ -222,8 +221,7 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
   const lastIso = dates.at(-1)!;
   const closeAt = expirySettlementInstant(lastIso);
   const closePriceByLegId = new Map(priceByLegId);
-  for (const leg of ledger.legs) {
-    if (leg.exitAt !== null) continue;
+  for (const leg of unexitedLegsOf(ledger)) {
     const position = requirePosition(ledger, leg.positionId);
     const close = closeBySymbolAndDate.get(`${position.symbol} ${lastIso}`)!;
     if (leg.legType === "stock") closePriceByLegId.set(leg.id, close);
@@ -238,7 +236,7 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
   const isLeaps = (positionId: string | null) => positionId !== null && requirePosition(ledger, positionId).strategyKey === "leaps";
   let leapsDollars = 0;
   for (const entry of ledger.cashJournal) if (isLeaps(entry.positionId)) leapsDollars += entry.amount;
-  for (const leg of ledger.legs) if (leg.exitAt === null && isLeaps(leg.positionId)) leapsDollars += (closePriceByLegId.get(leg.id) ?? leg.entryPrice) * leg.quantity * leg.multiplier * (leg.side === "short" ? -1 : 1);
+  for (const leg of unexitedLegsOf(ledger)) if (isLeaps(leg.positionId)) leapsDollars += (closePriceByLegId.get(leg.id) ?? leg.entryPrice) * leg.quantity * leg.multiplier * (leg.side === "short" ? -1 : 1);
   const sharesDollars = accountValues[dates.length]! - startingValue - callsDollars - putsDollars - leapsDollars - interestDollars;
   return { accountValues, premiumDollars: figures.reduce((sum, entry) => sum + entry.premiumDollars, 0), interestDollars, byTicker: figures, sources: { callsDollars, putsDollars, leapsDollars, interestDollars, sharesDollars } };
 }
