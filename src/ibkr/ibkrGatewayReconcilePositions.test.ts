@@ -1238,6 +1238,11 @@ describe("reconcileHeldPositions — fixes from the 2026-10-16 P&L review", () =
 });
 
 describe("reconcileHeldPositions — what a leftover-stock position is blamed on", () => {
+  /** Test symbols repeat across runs and these rows name no position, so earlier runs' rows are excluded by time. */
+  async function leftoverStockAnomaliesSince(symbol: string, since: Date) {
+    return testDb("platform_anomalies").where({ anomaly_type: "unexplained_leftover_stock" }).where("detail", "like", `${symbol}:%`).where("detected_at", ">=", since);
+  }
+
   async function leftoverReasonAfterPutClosed(minutesAgo: number): Promise<string> {
     const ticker = await createTicker();
     const stockConId = (nextConId += 1);
@@ -1253,6 +1258,29 @@ describe("reconcileHeldPositions — what a leftover-stock position is blamed on
 
   it("shares appearing hours after the last closed put are not blamed on it", async () => {
     expect(await leftoverReasonAfterPutClosed(120)).toBe("unknown");
+  });
+
+  it("stock blamed on an assignment raises no anomaly on later passes, once the assignment is older than the cause window", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const startedAt = new Date();
+    await insertAssignedPutPosition(ticker.id, 50, 0.5, new Date(Date.now() - 10 * 60_000));
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 49.5)]);
+    await testDb("positions").where({ ticker_id: ticker.id, strategy_key: "cash_secured_put" }).update({ closed_at: new Date(Date.now() - 120 * 60_000) });
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 49.5)]);
+
+    expect((await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!.unstructured_reason).toBe("csp_assigned_stock");
+    expect(await leftoverStockAnomaliesSince(ticker.symbol, startedAt)).toHaveLength(0);
+  });
+
+  it("stock with no known cause raises the anomaly on every pass while its reason stays unknown", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const startedAt = new Date();
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 49.5)]);
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 49.5)]);
+
+    expect(await leftoverStockAnomaliesSince(ticker.symbol, startedAt)).toHaveLength(2);
   });
 
   async function sharePurchase(symbol: string, status: string, minutesAgo: number): Promise<void> {

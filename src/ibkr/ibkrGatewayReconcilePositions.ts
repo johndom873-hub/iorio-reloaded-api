@@ -869,12 +869,14 @@ async function syncHeldStructures(bySymbol: Map<string, IbkrHeldPosition[]>, hel
         // which nothing in this app should ever produce — always an unknown-cause anomaly.
         const hasCallLeg = nonPutLegs.some((p) => p.contract.secType === SecType.OPT);
         const reason = hasCallLeg ? "unknown" : await determineLeftoverStockReason(symbol);
-        const synced = await upsertUnstructuredPosition(
+        const storedReason = await upsertUnstructuredPosition(
           symbol,
           nonPutLegs.map((leg) => ({ held: leg, side: leg.quantity > 0 ? ("long" as const) : ("short" as const) })),
           reason,
         );
-        if (synced && reason === "unknown") {
+        // Judged on the position's stored reason, not this pass's: every cause is matched only within
+        // leftoverStockCauseWindowMinutes, so later passes find none for stock whose cause was recorded at creation.
+        if (storedReason !== null && (hasCallLeg || storedReason === "unknown")) {
           await logPlatformAnomaly(
             hasCallLeg ? "naked_call_detected" : "unexplained_leftover_stock",
             `${symbol}: reconciliation flagged unstructured with no known cause`,
@@ -1213,14 +1215,15 @@ async function upsertPositionLeg(
 }
 
 // Held legs that don't pair into a covered call or a cash-secured put
-// (bare leftover stock, or a naked call). Returns false when nothing was
-// written because the legs still belong to a position whose structure
-// change is not yet confirmed (see judgeStructureChange).
+// (bare leftover stock, or a naked call). Returns the position's stored
+// unstructured_reason, or null when nothing was written because the legs
+// still belong to a position whose structure change is not yet confirmed
+// (see judgeStructureChange) or the ticker is unknown.
 async function upsertUnstructuredPosition(
   symbol: string,
   legs: { held: IbkrHeldPosition; side: "long" | "short" }[],
   unstructuredReason: string,
-): Promise<boolean> {
+): Promise<string | null> {
   const conIds = legs.map((leg) => String(leg.held.contract.conId));
   const existingLegs = await db("position_legs").whereIn("ibkr_contract_id", conIds).whereNull("exit_at");
   const existingPositionIds = [...new Set(existingLegs.map((leg) => leg.position_id as string))];
@@ -1242,7 +1245,7 @@ async function upsertUnstructuredPosition(
       console.log(
         `Reconciliation #${currentPassId}: ${symbol} — position ${foreign.id} (${foreign.strategy_key}) still owns held leg(s) but its structure change is ${verdict}; leaving it alone this pass.`,
       );
-      return false;
+      return null;
     }
     verdicts.set(foreign.id, { verdict, optionLegs });
   }
@@ -1260,11 +1263,12 @@ async function upsertUnstructuredPosition(
   }
 
   let tickerId: string;
+  let storedReason = unstructuredReason;
   if (!positionId) {
     const ticker = await db("tickers").where({ symbol }).first();
     if (!ticker) {
       console.warn(`reconcileHeldPositions: no tickers row for ${symbol} — skipping sync until it's added via the Screener.`);
-      return false;
+      return null;
     }
     tickerId = ticker.id;
     const [newPosition] = await db("positions")
@@ -1280,6 +1284,8 @@ async function upsertUnstructuredPosition(
     tickerId = existingPosition.ticker_id;
     if (existingPosition.unstructured_reason === "unknown" && unstructuredReason !== "unknown") {
       await db("positions").where({ id: positionId }).update({ unstructured_reason: unstructuredReason });
+    } else if (existingPosition.unstructured_reason) {
+      storedReason = existingPosition.unstructured_reason;
     }
   }
 
@@ -1291,7 +1297,7 @@ async function upsertUnstructuredPosition(
     const conId = String(leg.held.contract.conId);
     await upsertPositionLeg(positionId!, leg.held, leg.side, undefined, false, handoffCostByConId.get(conId));
   }
-  return true;
+  return storedReason;
 }
 
 // One covered-call position per distinct short call contract (added
