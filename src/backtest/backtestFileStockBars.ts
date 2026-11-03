@@ -3,7 +3,8 @@ import { easternIsoDate, easternMinutesOfDay } from "../lib/easternIsoDate.js";
 import type { StoredDailyBar } from "./engine/backtestBarHistory.js";
 
 // IBKR's stock prices inside a symbol's data file (docs/backtesting/DATA-FILES.md, "IBKR stock bars"): daily bars with
-// the daily implied volatility from 2000 (or the listing), and 30-minute bars from the first year the file has option data.
+// the daily implied volatility from 2000 (or the listing), and 30-minute bars from 2006 (or the listing's year; files fetched
+// before 2026-11-03 from their first option year until extended back).
 // The backtests take every stock price from them, never from the option quotes (Marcelo 2026-10-14). Node writes them
 // after a download and on Update: the last month's bars over the stored ones when both agree to the cent on the days they
 // share, else the whole set at once, so every bar carries the same split adjustment (IBKR adjusts for splits as of the
@@ -13,6 +14,11 @@ export const fileStockBarsVersion = "1";
 /** The first day of the daily bars a file keeps; IBKR returns less for a listing it holds from later. */
 export const fileDailyBarsStartDate = "2000-01-01";
 export const fileIntradayBarMinutes = 30;
+/**
+ * The first day the 30-minute bars reach (refreshFileStockBars.ts; older files once extended back): the portfolio
+ * simulator's history, from IBKR's first implied volatility (2006), needs each day's 10:00 price.
+ */
+export const fileIntradayBarsExtendedStartDate = "2006-01-01";
 
 /** One 30-minute bar as IBKR sent it: its start instant and prices on IBKR's split-adjusted scale. */
 export interface FileIntradayBar {
@@ -104,6 +110,36 @@ export function addOlderFileDailyBars(database: DatabaseSync, daily: readonly St
     throw error;
   }
   return older.length;
+}
+
+/**
+ * Adds the 30-minute bars dated before the file's first 30-minute bar, in one transaction, and returns how many: the
+ * stored bars and the meta keys stay as they were. Only for bars on the stored bars' split adjustment: the caller has
+ * compared them on the bars both have (refreshFileStockBars.ts, extendIntradayBarsBack).
+ */
+export function addOlderFileIntradayBars(database: DatabaseSync, intraday: readonly FileIntradayBar[]): number {
+  const firstStoredDate = hasTable(database, "ibkr_intraday_bars") ? (database.prepare("SELECT min(trading_date) AS first FROM ibkr_intraday_bars").get() as { first: string | null }).first : null;
+  if (firstStoredDate === null) throw new Error("The file has no IBKR 30-minute bars to add older ones before: Update it first.");
+  const older = intraday.filter((bar) => easternIsoDate(bar.barStart) < firstStoredDate);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const insertIntraday = database.prepare("INSERT INTO ibkr_intraday_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    for (const bar of older) insertIntraday.run(easternIsoDate(bar.barStart), easternMinutesOfDay(bar.barStart), bar.barStart.toISOString(), bar.open, bar.high, bar.low, bar.close, bar.volume);
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+  return older.length;
+}
+
+/** The file's 30-minute closes from `fromDateIso` through `toDateIso`, by intradayBarKey; empty when it has none. */
+export function readFileIntradayCloses(database: DatabaseSync, fromDateIso: string, toDateIso: string): Map<string, number | null> {
+  if (!hasTable(database, "ibkr_intraday_bars")) return new Map();
+  const rows = database
+    .prepare("SELECT trading_date AS tradingDate, start_minutes_et AS startMinutesEt, close FROM ibkr_intraday_bars WHERE trading_date BETWEEN ? AND ?")
+    .all(fromDateIso, toDateIso) as unknown as { tradingDate: string; startMinutesEt: number; close: number | null }[];
+  return new Map(rows.map((row) => [intradayBarKey(row.tradingDate, row.startMinutesEt), row.close]));
 }
 
 /** The key of a 30-minute bar: its Eastern date and start, minutes ET ("2026-10-26 570"). */

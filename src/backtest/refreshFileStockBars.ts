@@ -12,10 +12,13 @@ import { openBacktestDataFileForWriting, openBacktestDataFileReadOnly } from "./
 import {
   addFileStockBars,
   addOlderFileDailyBars,
+  addOlderFileIntradayBars,
   fileDailyBarsStartDate,
+  fileIntradayBarsExtendedStartDate,
   fileStockBarsVersion,
   intradayBarKey,
   readFileDailyBars,
+  readFileIntradayCloses,
   readFileStockBarsTail,
   summarizeFileStockBars,
   writeFileStockBars,
@@ -28,9 +31,13 @@ import { ibkrEndDateTime } from "./marketStressBars.js";
 // Fetches a symbol's IBKR stock bars into its data file (backtestFileStockBars.ts): read-only historical requests through
 // the Gateway, one at a time with a pause between them (IBKR paces historical data). The last month (3 requests) is
 // written over the stored bars when the two agree to the cent on every day they share; otherwise, or when the file's bars
-// cannot take it, every bar is fetched again (2 requests and one a year) and replaces them. With extendDailyBarsBack the
+// cannot take it, every bar is fetched again (2 requests, and one a year of 30-minute bars from 2006 or the first daily
+// bar's year, for the portfolio simulator's 10:00 prices) and replaces them. With extendDailyBarsBack the
 // daily bars reaching fileDailyBarsStartDate (2 requests) are asked for instead of the last month, and the days before the
-// file's first one are added when IBKR's closes equal every stored one to the cent.
+// file's first one are added when IBKR's closes equal every stored one to the cent. With extendIntradayBarsBack the
+// 30-minute bars are asked for year by year from fileIntradayBarsExtendedStartDate (or the file's first daily bar's year)
+// through the file's first 30-minute bar's year, and the bars before it added on the same check: for files fetched when
+// the 30-minute bars started in the first option year.
 
 const requestTimeoutMilliseconds = 120_000;
 
@@ -43,8 +50,8 @@ export class FileStockBarsCancelledError extends Error {
 
 export interface FileStockBarsRefresh {
   symbol: string;
-  /** "tail": the last month written over the stored bars; "older_daily_bars": the daily bars before the file's first one added (extendDailyBarsBack); "full": every bar fetched again and replaced. */
-  kind: "tail" | "older_daily_bars" | "full";
+  /** "tail": the last month written over the stored bars; "older_daily_bars" / "older_intraday_bars": the bars before the file's first one added (extendDailyBarsBack / extendIntradayBarsBack); "full": every bar fetched again and replaced. */
+  kind: "tail" | "older_daily_bars" | "older_intraday_bars" | "full";
   /** Why every bar was fetched again; null after a tail. */
   fullRefreshReason: string | null;
   dailyBars: number;
@@ -81,7 +88,7 @@ export function optionsStartBeforeStockPrices(symbol: string, firstOptionDay: st
 }
 
 export interface FileStockBarsRefreshOptions {
-  /** The file's first option day: the 30-minute bars start in its year, and it must not come before IBKR's first daily bar. */
+  /** The file's first option day: it must not come before IBKR's first daily bar. */
   firstOptionDay: string;
   /** The last session stored (a running session's bars are not). */
   lastDateToStore: string;
@@ -99,6 +106,12 @@ export interface FileStockBarsRefreshOptions {
    * daily bars reached back 20 years.
    */
   extendDailyBarsBack?: boolean;
+  /**
+   * Asks for the 30-minute bars from fileIntradayBarsExtendedStartDate (or the year of the file's first daily bar) through
+   * the year of its first 30-minute bar instead of the last month, one request a year, and adds the bars before the file's
+   * first one when IBKR's closes equal every stored one of that year to the cent; else fetches every bar again, from there.
+   */
+  extendIntradayBarsBack?: boolean;
 }
 
 /** The tail: the last month of daily bars, implied volatility and 30-minute bars, one request each. */
@@ -139,6 +152,20 @@ export function reasonTailDiffers(stored: StoredFileStockBarsTail, daily: readon
     ? `${differingDaily[0].tradingDate} close ${stored.dailyCloseByDate.get(differingDaily[0].tradingDate)} stored, ${differingDaily[0].close} now`
     : `${keyOf(differingIntraday[0]!)} minutes ET close ${stored.intradayCloseByKey.get(keyOf(differingIntraday[0]!))} stored, ${differingIntraday[0]!.close} now`;
   return `IBKR's prices changed on ${differingDaily.length} of ${sharedDaily.length} shared days and ${differingIntraday.length} of ${sharedIntraday.length} shared 30-minute bars (${example}): a split or other adjustment since the last fetch`;
+}
+
+/**
+ * Null when IBKR's 30-minute bars share at least one bar with the file's and every shared close is the same to the cent,
+ * so their older bars can be added before the file's; else why they cannot.
+ */
+export function reasonIntradayBarsDiffer(storedCloseByKey: ReadonlyMap<string, number | null>, intraday: readonly FileIntradayBar[]): string | null {
+  const keyOf = (bar: FileIntradayBar) => intradayBarKey(easternIsoDate(bar.barStart), easternMinutesOfDay(bar.barStart));
+  const shared = intraday.filter((bar) => storedCloseByKey.has(keyOf(bar)));
+  if (shared.length === 0) return "IBKR's 30-minute bars share no bar with the file's";
+  const differing = shared.filter((bar) => !sameToTheCent(bar.close, storedCloseByKey.get(keyOf(bar))));
+  if (differing.length === 0) return null;
+  const example = differing[0]!;
+  return `IBKR's prices changed on ${differing.length} of ${shared.length} shared 30-minute bars (${keyOf(example)} minutes ET close ${storedCloseByKey.get(keyOf(example))} stored, ${example.close} now): a split or other adjustment since the last fetch`;
 }
 
 /**
@@ -236,10 +263,46 @@ export async function refreshFileStockBars(connection: IbkrConnection, symbol: s
     }
   };
 
+  /** One year of 30-minute bars: the year ends at midnight Eastern of 1 January (06:00 UTC is past it in winter time and the market is closed); the running year is asked for up to now. */
+  const fetchIntradayYear = async (year: number): Promise<FileIntradayBar[]> => {
+    const yearEnd = new Date(Math.min(Date.UTC(year + 1, 0, 1, 6, 0, 0), now.getTime()));
+    const bars = await request(`IBKR 30-minute bars, ${year}`, () =>
+      fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.MINUTES_THIRTY, "1 Y", options.nextRequestId(), WhatToShow.TRADES, { endDateTime: ibkrEndDateTime(yearEnd), timeoutMs: requestTimeoutMilliseconds }),
+    );
+    return bars.map(toFileIntradayBar).filter((bar) => {
+      const tradingDate = easternIsoDate(bar.barStart);
+      return tradingDate.startsWith(String(year)) && isStored(tradingDate);
+    });
+  };
+  const fetchedIntradayYears = new Map<number, FileIntradayBar[]>();
+
   const stored = readStoredTail(symbol, options.lastDateToStore);
   let fullRefreshReason = reasonToFetchEveryBar(stored, options.firstOptionDay, options.lastDateToStore);
   let everyDailyBar: Awaited<ReturnType<typeof fetchDailyBars>> | null = null;
-  if (stored && fullRefreshReason === null && options.extendDailyBarsBack) {
+  const extendedFirstYear = Math.max(Number(fileIntradayBarsExtendedStartDate.slice(0, 4)), Number((stored?.dailyFirstDate ?? fileIntradayBarsExtendedStartDate).slice(0, 4)));
+  if (stored && fullRefreshReason === null && options.extendIntradayBarsBack) {
+    checkOptionsAfterStockPrices(stored.dailyFirstDate);
+    const storedFirstYear = Number(stored.intradayFirstDate.slice(0, 4));
+    if (storedFirstYear <= extendedFirstYear) return { symbol, kind: "older_intraday_bars", fullRefreshReason: null, impliedVolatilityError: null, ...writeAndSummarize(() => {}) };
+    const years = Array.from({ length: Math.max(0, storedFirstYear - extendedFirstYear + 1) }, (_, index) => extendedFirstYear + index);
+    totalRequests = years.length;
+    for (const year of years) fetchedIntradayYears.set(year, await fetchIntradayYear(year));
+    const storedCloses = (() => {
+      const database = openBacktestDataFileReadOnly(symbol);
+      if (!database) return new Map<string, number | null>();
+      try {
+        return readFileIntradayCloses(database, stored.intradayFirstDate, `${storedFirstYear}-12-31`);
+      } finally {
+        database.close();
+      }
+    })();
+    fullRefreshReason = reasonIntradayBarsDiffer(storedCloses, fetchedIntradayYears.get(storedFirstYear) ?? []);
+    if (fullRefreshReason === null) {
+      const older = years.flatMap((year) => fetchedIntradayYears.get(year)!);
+      const summary = writeAndSummarize((database) => addOlderFileIntradayBars(database, older));
+      return { symbol, kind: "older_intraday_bars", fullRefreshReason: null, impliedVolatilityError: null, ...summary };
+    }
+  } else if (stored && fullRefreshReason === null && options.extendDailyBarsBack) {
     checkOptionsAfterStockPrices(stored.dailyFirstDate);
     totalRequests = 2;
     everyDailyBar = await fetchDailyBars(everyDailyBarDuration, everyDailyBarSpan, checkOptionsAfterStockPrices);
@@ -267,25 +330,18 @@ export async function refreshFileStockBars(connection: IbkrConnection, symbol: s
     }
   }
 
+  // The 30-minute bars from 2006, or the first daily bar's year (a later listing), through the last session's year.
   const lastYear = Number(options.lastDateToStore.slice(0, 4));
-  const firstIntradayYear = Number(options.firstOptionDay.slice(0, 4));
-  const intradayYears = Array.from({ length: Math.max(0, lastYear - firstIntradayYear + 1) }, (_, index) => firstIntradayYear + index);
-  totalRequests = requestsDone + (everyDailyBar ? 0 : 2) + intradayYears.length;
+  const intradayYearsFrom = (firstYear: number) => Array.from({ length: Math.max(0, lastYear - firstYear + 1) }, (_, index) => firstYear + index).filter((year) => !fetchedIntradayYears.has(year));
+  totalRequests = requestsDone + (everyDailyBar ? 0 : 2) + intradayYearsFrom(extendedFirstYear).length;
   const { daily, impliedVolatilityError } = everyDailyBar ?? (await fetchDailyBars(everyDailyBarDuration, everyDailyBarSpan, checkOptionsAfterStockPrices));
+  const firstDailyYear = Number(daily.map((bar) => bar.tradingDate).sort()[0]!.slice(0, 4));
+  const firstIntradayYear = Math.max(Number(fileIntradayBarsExtendedStartDate.slice(0, 4)), firstDailyYear);
+  const intradayYears = Array.from({ length: Math.max(0, lastYear - firstIntradayYear + 1) }, (_, index) => firstIntradayYear + index);
+  totalRequests = requestsDone + intradayYears.filter((year) => !fetchedIntradayYears.has(year)).length;
 
   const intraday: FileIntradayBar[] = [];
-  for (const year of intradayYears) {
-    // The year ends at midnight Eastern of 1 January; 06:00 UTC is past it in winter time and the market is closed. The
-    // running year is asked for up to now.
-    const yearEnd = new Date(Math.min(Date.UTC(year + 1, 0, 1, 6, 0, 0), now.getTime()));
-    const bars = await request(`IBKR 30-minute bars, ${year}`, () =>
-      fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.MINUTES_THIRTY, "1 Y", options.nextRequestId(), WhatToShow.TRADES, { endDateTime: ibkrEndDateTime(yearEnd), timeoutMs: requestTimeoutMilliseconds }),
-    );
-    for (const bar of bars.map(toFileIntradayBar)) {
-      const tradingDate = easternIsoDate(bar.barStart);
-      if (tradingDate.startsWith(String(year)) && isStored(tradingDate)) intraday.push(bar);
-    }
-  }
+  for (const year of intradayYears) intraday.push(...(fetchedIntradayYears.get(year) ?? (await fetchIntradayYear(year))));
   if (intraday.length === 0) throw new Error(`IBKR returned no 30-minute bars for ${symbol} from ${firstIntradayYear}.`);
 
   const summary = writeAndSummarize((database) => writeFileStockBars(database, { daily, intraday, fetchedAt: now }));
@@ -296,7 +352,13 @@ export function describeFileStockBarsRefresh(result: FileStockBarsRefresh): stri
   const parts = [
     `${result.symbol}: ${result.dailyBars} daily bars ${result.dailyFirstDate} → ${result.dailyLastDate} (${result.impliedVolatilityDays} with implied volatility)`,
     `${result.intradayBars} 30-minute bars ${result.intradayFirstDate} → ${result.intradayLastDate}`,
-    result.kind === "tail" ? "last month added" : result.kind === "older_daily_bars" ? "older daily bars added before the stored ones" : `every bar fetched again: ${result.fullRefreshReason}`,
+    result.kind === "tail"
+      ? "last month added"
+      : result.kind === "older_daily_bars"
+        ? "older daily bars added before the stored ones"
+        : result.kind === "older_intraday_bars"
+          ? "older 30-minute bars added before the stored ones"
+          : `every bar fetched again: ${result.fullRefreshReason}`,
   ];
   if (result.impliedVolatilityError) parts.push(`implied volatility failed: ${result.impliedVolatilityError}`);
   return parts.join("; ");

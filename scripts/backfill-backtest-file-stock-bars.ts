@@ -15,19 +15,24 @@ import { describeFileStockBarsRefresh, refreshFileStockBars } from "../src/backt
 // that ends); a queued one is not, its job refreshes the bars again when it ends. One read-only historical request at a
 // time through the Gateway the local API uses, 10 s apart; a timeout or a pacing answer stops the run (IBKR's
 // historical-data pacing has caused hour-long outages). With --extend-daily-bars-back each file gets the daily bars from
-// 2000 before its first one instead of the last month (refreshFileStockBars' extendDailyBarsBack).
+// 2000 before its first one instead of the last month (refreshFileStockBars' extendDailyBarsBack); with
+// --extend-intraday-bars-back the 30-minute bars from 2006 (or its first daily bar's year) before its first one, one
+// request a year (extendIntradayBarsBack: the portfolio simulator's 10:00 prices).
 //
-// Usage: npm run backtest:backfill-file-stock-bars [-- [--extend-daily-bars-back] SYMBOL ...]
+// Usage: npm run backtest:backfill-file-stock-bars [-- [--extend-daily-bars-back | --extend-intraday-bars-back] SYMBOL ...]
 
 const pauseBetweenRequestsMilliseconds = 10_000;
 const pause = () => new Promise<void>((resolve) => setTimeout(resolve, pauseBetweenRequestsMilliseconds));
 const extendDailyBarsBackFlag = "--extend-daily-bars-back";
+const extendIntradayBarsBackFlag = "--extend-intraday-bars-back";
 
 async function main(): Promise<void> {
   const flags = process.argv.slice(2).filter((argument) => argument.startsWith("--"));
-  const unknownFlag = flags.find((flag) => flag !== extendDailyBarsBackFlag);
-  if (unknownFlag) throw new Error(`Unknown option ${unknownFlag}; the only one is ${extendDailyBarsBackFlag}.`);
+  const unknownFlag = flags.find((flag) => flag !== extendDailyBarsBackFlag && flag !== extendIntradayBarsBackFlag);
+  if (unknownFlag) throw new Error(`Unknown option ${unknownFlag}; the options are ${extendDailyBarsBackFlag} and ${extendIntradayBarsBackFlag}.`);
   const extendDailyBarsBack = flags.includes(extendDailyBarsBackFlag);
+  const extendIntradayBarsBack = flags.includes(extendIntradayBarsBackFlag);
+  if (extendDailyBarsBack && extendIntradayBarsBack) throw new Error(`${extendDailyBarsBackFlag} and ${extendIntradayBarsBackFlag} are separate runs: give one.`);
   const requested = process.argv.slice(2).filter((argument) => !argument.startsWith("--")).map(normalizeBacktestSymbol);
   const symbols = requested.length > 0 ? requested : listBacktestDataFileSymbols();
   const lastDateToStore = lastFinishedBacktestSessionDate(new Date());
@@ -57,6 +62,7 @@ async function main(): Promise<void> {
           pause,
           onRequest: (label, done, total) => console.log(`${symbol}: ${label} (${done + 1} of ${total})`),
           extendDailyBarsBack,
+          extendIntradayBarsBack,
         });
         console.log(describeFileStockBarsRefresh(result));
         const schedule = await refreshSplitScheduleForSymbol(symbol);
