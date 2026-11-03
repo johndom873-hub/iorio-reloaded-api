@@ -1,6 +1,5 @@
 import { standardNormalCdf } from "./blackScholesPop.js";
 import { exactInputCachesAreEnabled } from "./exactInputCaches.js";
-import { RecentEntriesCache } from "./recentEntriesCache.js";
 import { median } from "./statistics.js";
 
 // Implied-volatility surface for the IORIO Signal Engine (Phase 1 input to
@@ -143,20 +142,45 @@ const impliedVolatilityUpperBound = 5;
 
 /**
  * Answers already solved, by their exact inputs: one scoring solves a contract's volatility for the expiry shift, the
- * filters and the model, and a look scored ahead is scored again for real. About the latest day's worth are kept (the 10:00 quotes come back at every look).
- * Only where the exact-input caches are on (exactInputCaches.ts): live prices move with every tick.
+ * filters and the model, and a look scored ahead is scored again for real. Only where the exact-input caches are on
+ * (exactInputCaches.ts): live prices move with every tick. A table of 2^17 slots, each holding one answer with its six
+ * inputs, found by a hash of the inputs' bits: a slot is reused by the next inputs that hash to it, and an answer is
+ * given only when all six inputs are equal to the slot's (a string key per call cost as much as the solve it saved).
  */
-const solvedImpliedVolatilities = new RecentEntriesCache<string, number | null>(100_000);
+const solvedSlotBits = 17;
+const solvedSlotCount = 1 << solvedSlotBits;
+const solvedInputs = new Float64Array(solvedSlotCount * 6);
+/** The answer, NaN for none (null); a slot not yet filled holds NaN inputs, which equal nothing. */
+const solvedAnswers = new Float64Array(solvedSlotCount);
+solvedInputs.fill(Number.NaN);
+const hashScratch = new Float64Array(1);
+const hashScratchWords = new Uint32Array(hashScratch.buffer);
+
+function solvedSlotOf(inputs: readonly [number, number, number, number, number, number]): number {
+  let hash = 0x811c9dc5;
+  for (const value of inputs) {
+    hashScratch[0] = value;
+    hash = Math.imul(hash ^ hashScratchWords[0]!, 0x01000193);
+    hash = Math.imul(hash ^ hashScratchWords[1]!, 0x01000193);
+  }
+  hash ^= hash >>> 15;
+  return (hash >>> 0) & (solvedSlotCount - 1);
+}
 
 /** Bisection; null when the price lies outside what volatilities in [1%, 500%] can produce (below intrinsic, or absurdly high). */
 export function impliedVolatilityFromPrice(price: number, forward: number, strike: number, yearsToExpiry: number, riskFreeRate: number, isCall: boolean): number | null {
   if (!(price > 0) || !(yearsToExpiry > 0) || !(forward > 0) || !(strike > 0)) return null;
   if (!exactInputCachesAreEnabled()) return solveImpliedVolatility(price, forward, strike, yearsToExpiry, riskFreeRate, isCall);
-  const key = `${price}|${forward}|${strike}|${yearsToExpiry}|${riskFreeRate}|${isCall ? "C" : "P"}`;
-  const solved = solvedImpliedVolatilities.get(key);
-  if (solved !== undefined) return solved;
+  const inputs = [price, forward, strike, yearsToExpiry, riskFreeRate, isCall ? 1 : 0] as const;
+  const slot = solvedSlotOf(inputs);
+  const at = slot * 6;
+  if (solvedInputs[at] === price && solvedInputs[at + 1] === forward && solvedInputs[at + 2] === strike && solvedInputs[at + 3] === yearsToExpiry && solvedInputs[at + 4] === riskFreeRate && solvedInputs[at + 5] === inputs[5]) {
+    const answer = solvedAnswers[slot]!;
+    return Number.isNaN(answer) ? null : answer;
+  }
   const volatility = solveImpliedVolatility(price, forward, strike, yearsToExpiry, riskFreeRate, isCall);
-  solvedImpliedVolatilities.set(key, volatility);
+  solvedInputs.set(inputs, at);
+  solvedAnswers[slot] = volatility ?? Number.NaN;
   return volatility;
 }
 
