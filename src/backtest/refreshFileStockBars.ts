@@ -263,11 +263,18 @@ export async function refreshFileStockBars(connection: IbkrConnection, symbol: s
     }
   };
 
-  /** One year of 30-minute bars: the year ends at midnight Eastern of 1 January (06:00 UTC is past it in winter time and the market is closed); the running year is asked for up to now. */
+  /**
+   * One year of 30-minute bars: the year ends at midnight Eastern of 1 January (06:00 UTC is past it in winter time and the
+   * market is closed); the running year is asked for up to now. A year the stock never traded (a trading suspension) has
+   * none: IBKR answers it with error 162 "HMDS query returned no data", not an empty list.
+   */
   const fetchIntradayYear = async (year: number): Promise<FileIntradayBar[]> => {
     const yearEnd = new Date(Math.min(Date.UTC(year + 1, 0, 1, 6, 0, 0), now.getTime()));
     const bars = await request(`IBKR 30-minute bars, ${year}`, () =>
-      fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.MINUTES_THIRTY, "1 Y", options.nextRequestId(), WhatToShow.TRADES, { endDateTime: ibkrEndDateTime(yearEnd), timeoutMs: requestTimeoutMilliseconds }),
+      fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.MINUTES_THIRTY, "1 Y", options.nextRequestId(), WhatToShow.TRADES, { endDateTime: ibkrEndDateTime(yearEnd), timeoutMs: requestTimeoutMilliseconds }).catch((error: unknown) => {
+        if (error instanceof Error && /HMDS query returned no data/i.test(error.message)) return [] as PriceBar[];
+        throw error;
+      }),
     );
     return bars.map(toFileIntradayBar).filter((bar) => {
       const tradingDate = easternIsoDate(bar.barStart);

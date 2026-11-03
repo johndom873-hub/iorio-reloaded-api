@@ -298,6 +298,21 @@ describe("refreshing a data file's IBKR bars", () => {
     expect(requestLabels).toEqual(["IBKR 30-minute bars, 2025", "IBKR 30-minute bars, 2026", "IBKR daily bars, from 2000-01-01", "IBKR implied volatility, from 2000-01-01"]);
   });
 
+  it("takes a year IBKR answers with no data (a trading suspension) as a year without 30-minute bars", async () => {
+    ibkrHoldsOlderDays = true;
+    const noData = new Error("Historical data error for TEST (code 162): Historical Market Data Service error message:HMDS query returned no data: TEST@SMART Trades");
+    // 2025's request ends at 1 January 2026, 06:00 UTC.
+    fetchHistoricalBarsRaw.mockImplementation((...args: Parameters<typeof fakeIbkr>) => (args[2] === "30 mins" && args[6]?.endDateTime?.startsWith("20260101") === true ? Promise.reject(noData) : fakeIbkr(...args)));
+    const result = await refresh("2026-10-26");
+    expect(result).toMatchObject({ kind: "full", dailyFirstDate: "2025-07-01", intradayFirstDate: "2026-01-02", intradayBars: 2 * historyDates.length });
+    expect(requestLabels).toEqual(["IBKR daily bars, from 2000-01-01", "IBKR implied volatility, from 2000-01-01", "IBKR 30-minute bars, 2025", "IBKR 30-minute bars, 2026"]);
+  });
+
+  it("still fails on any other 30-minute bars error", async () => {
+    fetchHistoricalBarsRaw.mockImplementation((...args: Parameters<typeof fakeIbkr>) => (args[2] === "30 mins" ? Promise.reject(new Error("Historical data timeout for TEST")) : fakeIbkr(...args)));
+    await expect(refresh("2026-10-26")).rejects.toThrow("Historical data timeout for TEST");
+  });
+
   it("keeps the 30-minute bars reaching back to the extended year when every bar is fetched again later", async () => {
     await fileWithOlderDailyBars("2026-09-30");
     await refresh("2026-09-30", { extendIntradayBarsBack: true });
