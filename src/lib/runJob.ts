@@ -87,6 +87,21 @@ export class JobAlreadyRunningError extends Error {
   }
 }
 
+/**
+ * A failure that keeps what the run found before it failed: runJob records `details` with the failure, which otherwise
+ * stores only the message. Alerts as any thrown failure does (throttled, cut at the first "): ").
+ */
+export class JobFailedWithDetailsError extends Error {
+  constructor(
+    message: string,
+    readonly details: Record<string, unknown>,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = "JobFailedWithDetailsError";
+  }
+}
+
 // Errors runJob has already reported to Telegram, so the script-level catch (runScript.ts)
 // does not send a second alert for the same failure.
 const alertedErrors = new WeakSet<object>();
@@ -100,7 +115,7 @@ function markErrorAlerted(error: unknown): void {
 }
 
 /** An AggregateError (a refused connection) has an empty message: fall back to its code or name so an alert is never blank. */
-function describeThrown(error: Error): string {
+export function describeThrown(error: Error): string {
   const code = (error as { code?: unknown }).code;
   return error.message || (typeof code === "string" ? code : "") || error.name;
 }
@@ -267,8 +282,19 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
         ? thrown
         : new Error(typeof thrown === "object" && thrown !== null && "message" in thrown ? String((thrown as { message: unknown }).message) : String(thrown));
     const message = describeThrown(error);
-    // The alert below must go out even when the database is the thing that failed.
-    await db("job_runs").where({ id: run.id }).update({ status: "failure", finished_at: db.fn.now(), error_message: message }).catch((writeError) => console.error(`${jobName}: could not record the failure in job_runs — ${writeError instanceof Error ? writeError.message : writeError}`));
+    const details = error instanceof JobFailedWithDetailsError ? error.details : null;
+    // The alert below must go out even when the database is the thing that failed; details that will not serialise are dropped, not the row.
+    await db("job_runs")
+      .where({ id: run.id })
+      .update({ status: "failure", finished_at: db.fn.now(), error_message: message, details })
+      .catch(async (writeError) => {
+        console.error(`${jobName}: could not record the failure in job_runs — ${writeError instanceof Error ? writeError.message : writeError}`);
+        if (details === null) return;
+        await db("job_runs")
+          .where({ id: run.id })
+          .update({ status: "failure", finished_at: db.fn.now(), error_message: message })
+          .catch((retryError) => console.error(`${jobName}: could not record the failure in job_runs — ${retryError instanceof Error ? retryError.message : retryError}`));
+      });
     await publishNotification({ type: "job_completed", jobName, status: "failure" }).catch(() => {});
     await sendFailureAlert(jobName, `⚠️ ${jobName} failed: ${telegramFailureSummary(message)}`, options);
     markErrorAlerted(error);

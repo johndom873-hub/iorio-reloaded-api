@@ -1,11 +1,10 @@
-import { EventName } from "@stoqey/ib";
 import { restartIbkrGatewayOnVps } from "./restartIbkrGatewayOnVps.js";
 import { describeLiveGatewayManualLoginHeadline, parseGatewayControlResultKind } from "./gatewayControlResult.js";
 import { checkWorkerOnVps } from "./checkWorkerOnVps.js";
-import { connectToIbkrGateway, type IbkrConnection } from "./connectIbkr.js";
+import { connectToIbkrGateway, type IbkrConnection, type IbkrConnectionNotice } from "./connectIbkr.js";
 import { checkPositionReconciliation } from "./checkPositionReconciliation.js";
 import { lookupLatestDailyBar } from "./fetchTickerOverview.js";
-import { runJob } from "../lib/runJob.js";
+import { describeThrown, JobFailedWithDetailsError, runJob } from "../lib/runJob.js";
 import { environment } from "../config/env.js";
 import { db } from "../db/connection.js";
 import { reportMarketQuoteLoopLiveness } from "../lib/marketQuoteLoopLiveness.js";
@@ -93,6 +92,21 @@ export async function previousHealthCheckProbeFailed(): Promise<boolean> {
   return probe?.failed === true || String(row.error_message ?? "").includes("reqHistoricalData failed");
 }
 
+// Once a session restart has not brought historical data back on live, more session restarts do not either (2026-11-03:
+// 44 of them over 12 hours; a fresh login fixed it). Live cannot log in again by itself (the phone approves it), so the
+// check stops restarting and keeps failing with this text until the probe passes. A constant text, so the throttled alert
+// goes out once and then reminds hourly. Paper is left as it is: its recovery falls back to a cold restart, a fresh login.
+export const liveFreshLoginNeededMessage =
+  "IBKR historical data is still down after a Gateway session restart: the live Gateway needs a fresh login (a cold restart of its container on the VPS, approved on the phone). Not restarting again until the SPY probe passes.";
+
+export async function previousHealthCheckFoundFreshLoginNeeded(): Promise<boolean> {
+  // Skips the current run's own "running" row, as previousHealthCheckProbeFailed does.
+  const row = await db("job_runs").where({ job_name: "ibkr_health_check" }).whereNot({ status: "running" }).orderBy("started_at", "desc").first("details", "error_message");
+  if (!row) return false;
+  const probe = (row.details as { probe?: { freshLoginNeeded?: boolean } } | null)?.probe;
+  return probe?.freshLoginNeeded === true || String(row.error_message ?? "").includes("restart didn't recover reqHistoricalData");
+}
+
 function requireEnvironmentVariable(variableName: string): string {
   const value = process.env[variableName];
   if (!value) {
@@ -101,30 +115,12 @@ function requireEnvironmentVariable(variableName: string): string {
   return value;
 }
 
-// Investigated 2026-09-09 (weeks-long recurrence of the reqHistoricalData
-// hang below): IBKR broadcasts market-data-farm connectivity state (e.g.
-// "HMDS data farm connection is broken/OK") as informational error events on
-// reqId -1, which connectToIbkrGateway already logs via console.log — but
-// Heroku's log buffer is too short-lived to have this by the time anyone
-// looks. Captured here into job_runs.details instead, on every connection
-// this job opens (initial + any post-restart reconnect), so the next
-// recurrence gives a real farm-status trail instead of another guess. Ruled
-// out 2026-09-09: the "settings may be corrupted, recovering from backup"
-// dialog every restart's captured logs show is NOT diagnostic — it appears
-// identically on the routine scheduled daily auto-restart too, unrelated to
-// any hang.
-export interface FarmStatusMessage {
-  at: string;
-  code: number;
-  message: string;
-}
-
-export function captureFarmStatusMessages(connection: IbkrConnection, into: FarmStatusMessage[]): void {
-  connection.ib.on(EventName.error, (error: Error, code: number, reqId: number) => {
-    if (reqId !== -1) return;
-    into.push({ at: new Date().toISOString(), code, message: error.message });
-  });
-}
+// IBKR's farm status ("HMDS data farm connection is broken/OK", 2105/2106, ...) is captured into job_runs.details on
+// every connection this job opens (initial + any post-restart reconnect), so a recurrence leaves a farm-status trail
+// instead of another guess. They arrive with the handshake, so connectToIbkrGateway hands them over (onNotice). Ruled
+// out 2026-09-09: the "settings may be corrupted, recovering from backup" dialog every restart's captured logs show is
+// NOT diagnostic — it appears identically on the routine scheduled daily auto-restart too, unrelated to any hang.
+export type FarmStatusMessage = IbkrConnectionNotice;
 
 // Checks Gateway health by actually completing an IBKR API handshake
 // (connectToIbkrGateway's nextValidId round-trip), not just a TCP probe.
@@ -145,8 +141,7 @@ export type ConnectAttempt = { connection: IbkrConnection; errorMessage: null } 
 
 export async function tryConnect(farmStatusMessages: FarmStatusMessage[]): Promise<ConnectAttempt> {
   try {
-    const connection = await connectToIbkrGateway();
-    captureFarmStatusMessages(connection, farmStatusMessages);
+    const connection = await connectToIbkrGateway({ onNotice: (notice) => farmStatusMessages.push(notice) });
     return { connection, errorMessage: null };
   } catch (error) {
     return { connection: null, errorMessage: error instanceof Error ? error.message : String(error) };
@@ -273,9 +268,26 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
       return attempt.connection;
     }
 
-    try {
+    // What the run has found so far: returned in details on success, and kept with a failure too (JobFailedWithDetailsError).
     let gatewayOutput = "healthy";
-    let probe: { failed: boolean; reason: string | null; restarted: boolean } = { failed: false, reason: null, restarted: false };
+    let probe: { failed: boolean; reason: string | null; restarted: boolean; freshLoginNeeded?: boolean } = { failed: false, reason: null, restarted: false };
+    let workerCheck: { active: boolean; restarted: boolean } | null = null;
+    let competingLiveSession: Awaited<ReturnType<typeof probeCompetingLiveSession>> | null = null;
+    let problems: string[] | null = null;
+    const buildDetails = () => ({
+      output: gatewayOutput,
+      handshakeErrors,
+      probe,
+      worker: workerCheck ? { active: workerCheck.active, restarted: workerCheck.restarted } : null,
+      reconciliationProblems: problems,
+      competingLiveSession,
+      marketQuoteLoopProblem,
+      opsMonitorProblem,
+      workerHeartbeatProblem,
+      farmStatusMessages,
+    });
+
+    try {
     let connection = await connectTracked("first");
     if (!connection) {
       await wait(unreachableRetryDelayMs);
@@ -355,6 +367,11 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
           );
         } else {
           const reason = historicalDataCheck.errorMessage ?? "unknown error";
+          if (environment.ibkrTradingMode === "live" && (await previousHealthCheckFoundFreshLoginNeeded())) {
+            probe = { failed: true, reason, restarted: false, freshLoginNeeded: true };
+            gatewayOutput = `healthy handshake; reqHistoricalData probe failed (${reason}) after a session restart already failed to recover it — waiting for a fresh login`;
+            throw new Error(liveFreshLoginNeededMessage);
+          }
           const otherRunningJob = await findOtherRunningJobName();
           const previousProbeFailed = await previousHealthCheckProbeFailed();
           if (otherRunningJob) {
@@ -377,18 +394,19 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
     }
 
     const workerSshPrivateKey = Buffer.from(requireEnvironmentVariable("IORIO_WORKER_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64"), "base64");
-    const workerCheck = await checkWorkerOnVps({
+    const workerResult = await checkWorkerOnVps({
       sshHost: environment.ibkrTunnelSshHost,
       sshPort: environment.ibkrTunnelSshPort,
       sshUsername: environment.ibkrTunnelSshUsername,
       sshPrivateKey: workerSshPrivateKey,
     });
-    workerProbe = workerCheck;
+    workerProbe = workerResult;
+    workerCheck = workerResult;
 
-    if (workerCheck.restarted) {
-      if (!workerCheck.active) {
+    if (workerResult.restarted) {
+      if (!workerResult.active) {
         closeConnection(connection);
-        throw new Error(`iorio-worker.service was inactive and the restart didn't recover it: ${workerCheck.output.trim()}`);
+        throw new Error(`iorio-worker.service was inactive and the restart didn't recover it: ${workerResult.output.trim()}`);
       }
       notifications.push(`⚠️ iorio-worker.service was inactive — restarted successfully, now active.`);
     }
@@ -397,7 +415,7 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
     // clears (probeCompetingLiveSession.ts), so restart once per episode; if 10197 survives the fresh
     // login, a real session on the live username is the likelier cause and the alert says so instead of
     // restarting again. Alerts are state-based (once, hourly reminders, "flowing again").
-    let competingLiveSession = await probeCompetingLiveSession(connection.ib, 999_002, HISTORICAL_DATA_PROBE_SYMBOL);
+    competingLiveSession = await probeCompetingLiveSession(connection.ib, 999_002, HISTORICAL_DATA_PROBE_SYMBOL);
     let blockedMessage = blockedAfterReloginMessage;
     let recoveredByRestart = false;
     if (competingLiveSession === "blocked" && !(await competingLiveSessionSurvivedRestart())) {
@@ -419,28 +437,21 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
     });
     if (recoveredByRestart && !sentRecovery) notifications.push("✅ Real-time market data is flowing again after the Gateway re-login (IBKR 10197: stale session).");
 
-    const problems = await runReconciliationSafely(connection);
+    const reconciliationProblems = await runReconciliationSafely(connection);
+    problems = reconciliationProblems;
     closeConnection(connection);
-    await classifyReconciliationProblems(problems)
+    await classifyReconciliationProblems(reconciliationProblems)
       .then(reportPositionReconciliation)
       .catch((error) => console.warn(`position reconciliation alert failed: ${error instanceof Error ? error.message : error}`));
 
     await checkWorkerHeartbeat();
     return {
-      details: {
-        output: gatewayOutput,
-        handshakeErrors,
-        probe,
-        worker: { active: workerCheck.active, restarted: workerCheck.restarted },
-        reconciliationProblems: problems,
-        competingLiveSession,
-        marketQuoteLoopProblem,
-        opsMonitorProblem,
-        workerHeartbeatProblem,
-        farmStatusMessages,
-      },
+      details: buildDetails(),
       notify: notifications.length > 0 ? notifications.join("\n\n") : undefined,
     };
+    } catch (error) {
+      await checkWorkerHeartbeat();
+      throw new JobFailedWithDetailsError(error instanceof Error ? describeThrown(error) : String(error), buildDetails(), { cause: error });
     } finally {
       for (const opened of openedConnections) {
         if (closedConnections.has(opened)) continue;

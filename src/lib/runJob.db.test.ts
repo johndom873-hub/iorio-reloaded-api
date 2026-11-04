@@ -41,7 +41,7 @@ vi.mock("./notificationChannel.js", () => ({
 }));
 
 const { db } = await import("../db/connection.js");
-const { runJob, wasErrorAlerted, JobAlreadyRunningError, findPrecedingProblemStreak, telegramFailureSummary } = await import("./runJob.js");
+const { runJob, wasErrorAlerted, JobAlreadyRunningError, JobFailedWithDetailsError, findPrecedingProblemStreak, telegramFailureSummary } = await import("./runJob.js");
 const testDb: Knex = db;
 
 const jobNamePrefix = "runjob_test_";
@@ -159,6 +159,21 @@ describe("runJob: a thrown error", () => {
     const jobName = newJobName();
     await expect(runJob(jobName, async () => Promise.reject(new Error("down")), { failureAlertReminderIntervalMs: 3_600_000 })).rejects.toThrow("down");
     expect(recorded.directMessages).toEqual([`⚠️ ${jobName} failed: down`]);
+  });
+
+  it("keeps the details a JobFailedWithDetailsError carries, alerting and rethrowing as any thrown failure", async () => {
+    const jobName = newJobName();
+    const failure = new JobFailedWithDetailsError("Gateway restart failed (exit 1): docker log line", { probe: { failed: true, restarted: true } });
+    await expect(runJob(jobName, async () => Promise.reject(failure), { failureAlertReminderIntervalMs: 3_600_000 })).rejects.toBe(failure);
+    expect(await latestRow(jobName)).toMatchObject({ status: "failure", error_message: "Gateway restart failed (exit 1): docker log line", details: { probe: { failed: true, restarted: true } } });
+    expect(recorded.throttledAlerts.map((alert) => alert.message)).toEqual([`⚠️ ${jobName} failed: Gateway restart failed (exit 1) (see job_runs for full output)`]);
+    expect(wasErrorAlerted(failure)).toBe(true);
+  });
+
+  it("records a JobFailedWithDetailsError's failure without its details when they cannot be serialised", async () => {
+    const jobName = newJobName();
+    await expect(runJob(jobName, async () => Promise.reject(new JobFailedWithDetailsError("down", { total: 10n })))).rejects.toThrow("down");
+    expect(await latestRow(jobName)).toMatchObject({ status: "failure", error_message: "down", details: null });
   });
 
   it("alerts even when the failure cannot be written to job_runs", async () => {

@@ -49,7 +49,8 @@ vi.mock("../lib/positionReconciliationAlert.js", () => ({ reportPositionReconcil
 vi.mock("../lib/marketQuoteLoopLiveness.js", () => ({ reportMarketQuoteLoopLiveness: mocks.reportMarketQuoteLoopLiveness }));
 vi.mock("../lib/opsMonitorLiveness.js", () => ({ reportOpsMonitorLiveness: mocks.reportOpsMonitorLiveness }));
 vi.mock("../lib/workerHeartbeatLiveness.js", () => ({ reportWorkerHeartbeat: mocks.reportWorkerHeartbeat }));
-vi.mock("../lib/runJob.js", () => ({
+vi.mock("../lib/runJob.js", async () => ({
+  ...(await vi.importActual<typeof import("../lib/runJob.js")>("../lib/runJob.js")),
   runJob: async (jobName: string, jobFunction: () => Promise<unknown>, options: unknown) => {
     mocks.runJobCalls.push({ jobName, options });
     mocks.runJobOutcome.result = await jobFunction();
@@ -75,11 +76,11 @@ vi.mock("../db/connection.js", () => ({
 }));
 
 const {
-  captureFarmStatusMessages,
   checkHistoricalData,
   classifyReconciliationProblems,
   findOtherRunningJobName,
   isCompetingSessionHistoricalDataError,
+  liveFreshLoginNeededMessage,
   postRestartConnectRetryDelayMs,
   previousHealthCheckCouldNotReconcile,
   previousHealthCheckProbeFailed,
@@ -89,8 +90,16 @@ const {
   unreachableRetryDelayMs,
 } = await import("./checkIbkrHealthJob.js");
 const { blockedAfterReloginMessage, blockedRestartDeferredMessage } = await import("../lib/competingLiveSessionAlert.js");
+const { JobFailedWithDetailsError } = await import("../lib/runJob.js");
 
-import type { IbkrConnection } from "./connectIbkr.js";
+import type { IbkrConnection, IbkrConnectionNotice } from "./connectIbkr.js";
+
+/** The onNotice the job passed to connectToIbkrGateway on its nth connect (0-based). */
+function noticeHandlerOfConnect(connectIndex: number): (notice: IbkrConnectionNotice) => void {
+  const options = mocks.connectToIbkrGateway.mock.calls[connectIndex]?.[0] as { onNotice?: (notice: IbkrConnectionNotice) => void } | undefined;
+  if (!options?.onNotice) throw new Error(`connect ${connectIndex} was not given an onNotice`);
+  return options.onNotice;
+}
 
 const competingSessionHistoricalError = "Historical data error for SPY (code 162): Trading TWS session is connected from a different IP address";
 const historicalTimeoutError = "Historical data timeout for SPY";
@@ -114,10 +123,10 @@ interface JobOutput {
   details: {
     output: string;
     handshakeErrors: string[];
-    probe: { failed: boolean; reason: string | null; restarted: boolean };
-    worker: { active: boolean; restarted: boolean };
-    reconciliationProblems: string[];
-    competingLiveSession: string;
+    probe: { failed: boolean; reason: string | null; restarted: boolean; freshLoginNeeded?: boolean };
+    worker: { active: boolean; restarted: boolean } | null;
+    reconciliationProblems: string[] | null;
+    competingLiveSession: string | null;
     marketQuoteLoopProblem: string | null;
     opsMonitorProblem: string | null;
     workerHeartbeatProblem: string | null;
@@ -250,28 +259,23 @@ describe("previousHealthCheckProbeFailed", () => {
   });
 });
 
-describe("captureFarmStatusMessages and tryConnect", () => {
-  it("records only reqId -1 broadcast errors, stamped with the current time", () => {
-    const connection = createFakeConnection();
-    const captured: Array<{ at: string; code: number; message: string }> = [];
-    captureFarmStatusMessages(connection, captured);
-    connection.emitter.emit(EventName.error, new Error("HMDS data farm connection is broken:ushmds"), 2105, -1);
-    connection.emitter.emit(EventName.error, new Error("real request error"), 200, 42);
-    expect(captured).toEqual([{ at: fixedNow.toISOString(), code: 2105, message: "HMDS data farm connection is broken:ushmds" }]);
-  });
-
+describe("tryConnect", () => {
   it("returns the error message instead of throwing when the connection cannot be opened", async () => {
     mocks.connectToIbkrGateway.mockRejectedValue(new Error("tunnel refused"));
     await expect(tryConnect([])).resolves.toEqual({ connection: null, errorMessage: "tunnel refused" });
   });
 
-  it("returns the connection with farm capture attached to the caller's buffer", async () => {
+  it("collects the connection's notices into the caller's buffer, including those sent with the handshake", async () => {
     const connection = createFakeConnection();
-    mocks.connectToIbkrGateway.mockResolvedValue(connection);
-    const buffer: Array<{ at: string; code: number; message: string }> = [];
+    const handshakeNotice = { at: fixedNow.toISOString(), code: 2106, message: "HMDS data farm connection is OK:ushmds" };
+    mocks.connectToIbkrGateway.mockImplementation(async (options: { onNotice: (notice: IbkrConnectionNotice) => void }) => {
+      options.onNotice(handshakeNotice);
+      return connection;
+    });
+    const buffer: IbkrConnectionNotice[] = [];
     await expect(tryConnect(buffer)).resolves.toEqual({ connection, errorMessage: null });
-    connection.emitter.emit(EventName.error, new Error("farm ok"), 2106, -1);
-    expect(buffer).toHaveLength(1);
+    noticeHandlerOfConnect(0)({ at: fixedNow.toISOString(), code: 2105, message: "HMDS data farm connection is broken:ushmds" });
+    expect(buffer).toEqual([handshakeNotice, { at: fixedNow.toISOString(), code: 2105, message: "HMDS data farm connection is broken:ushmds" }]);
   });
 });
 
@@ -545,20 +549,19 @@ describe("runIbkrHealthCheckJob: handshake failure", () => {
     mocks.jobRunsDatabaseState.previousRunRow = { details: { probe: { failed: true } }, error_message: null };
     mocks.lookupLatestDailyBar
       .mockImplementationOnce(async () => {
-        firstConnection.emitter.emit(EventName.error, new Error("HMDS data farm connection is broken"), 2103, -1);
+        noticeHandlerOfConnect(0)({ at: fixedNow.toISOString(), code: 2105, message: "HMDS data farm connection is broken:ushmds" });
         throw new Error(historicalTimeoutError);
       })
       .mockImplementationOnce(async () => {
-        reconnected.emitter.emit(EventName.error, new Error("HMDS data farm connection is OK"), 2106, -1);
-        reconnected.emitter.emit(EventName.error, new Error("ignored request error"), 162, 7);
+        noticeHandlerOfConnect(1)({ at: fixedNow.toISOString(), code: 2106, message: "HMDS data farm connection is OK:ushmds" });
         return null;
       });
 
     await runIbkrHealthCheckJob();
 
     expect(lastJobOutput().details.farmStatusMessages).toEqual([
-      { at: fixedNow.toISOString(), code: 2103, message: "HMDS data farm connection is broken" },
-      { at: fixedNow.toISOString(), code: 2106, message: "HMDS data farm connection is OK" },
+      { at: fixedNow.toISOString(), code: 2105, message: "HMDS data farm connection is broken:ushmds" },
+      { at: fixedNow.toISOString(), code: 2106, message: "HMDS data farm connection is OK:ushmds" },
     ]);
   });
 });
@@ -644,11 +647,75 @@ describe("runIbkrHealthCheckJob: historical data probe failures with a healthy h
     expect(mocks.restartIbkrGatewayOnVps).not.toHaveBeenCalled();
   });
 
-  it("fails when the scheduled restart does not fix historical data", async () => {
+  it("fails when the scheduled restart does not fix historical data, keeping the run's details with the failure", async () => {
     mocks.jobRunsDatabaseState.previousRunRow = { details: { probe: { failed: true } }, error_message: null };
-    await expect(runIbkrHealthCheckJob()).rejects.toThrow(
+    const error = await runIbkrHealthCheckJob().catch((caught: unknown) => caught);
+    expect((error as Error).message).toContain(
       `IBKR Gateway handshake succeeded but reqHistoricalData failed on two consecutive runs (${historicalTimeoutError}) and restart didn't recover reqHistoricalData either (${historicalTimeoutError})`,
     );
+    expect(mocks.restartIbkrGatewayOnVps).toHaveBeenCalledTimes(1);
+    expect(error).toBeInstanceOf(JobFailedWithDetailsError);
+    const details = (error as InstanceType<typeof JobFailedWithDetailsError>).details as JobOutput["details"];
+    expect(details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: true });
+    expect(details.handshakeErrors).toEqual([]);
+    expect(details.farmStatusMessages).toEqual([]);
+    expect(details.worker).toBeNull();
+  });
+
+  describe("live, after a session restart has already failed to recover historical data", () => {
+    beforeEach(() => {
+      mocks.environment.ibkrTradingMode = "live";
+    });
+
+    it.each([
+      ["the previous run's restart failed", { details: { probe: { failed: true, restarted: true } }, error_message: `IBKR Gateway handshake succeeded but reqHistoricalData failed on two consecutive runs (x) and restart didn't recover reqHistoricalData either (x)` }],
+      ["the previous run was already waiting for a fresh login", { details: { probe: { failed: true, freshLoginNeeded: true } }, error_message: liveFreshLoginNeededMessage }],
+    ])("does not restart again when %s, and fails with the constant fresh-login text and its details", async (_label, previousRunRow) => {
+      mocks.jobRunsDatabaseState.previousRunRow = previousRunRow;
+      mocks.lookupLatestDailyBar.mockImplementation(async () => {
+        noticeHandlerOfConnect(0)({ at: fixedNow.toISOString(), code: 2105, message: "HMDS data farm connection is broken:ushmds" });
+        throw new Error(historicalTimeoutError);
+      });
+
+      const error = await runIbkrHealthCheckJob().catch((caught: unknown) => caught);
+
+      expect(mocks.restartIbkrGatewayOnVps).not.toHaveBeenCalled();
+      expect((error as Error).message).toBe(liveFreshLoginNeededMessage);
+      const details = (error as InstanceType<typeof JobFailedWithDetailsError>).details as JobOutput["details"];
+      expect(details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: false, freshLoginNeeded: true });
+      expect(details.farmStatusMessages).toEqual([{ at: fixedNow.toISOString(), code: 2105, message: "HMDS data farm connection is broken:ushmds" }]);
+      expect(mocks.reportWorkerHeartbeat).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the fresh-login text whole in the Telegram summary", async () => {
+      const { telegramFailureSummary } = await vi.importActual<typeof import("../lib/runJob.js")>("../lib/runJob.js");
+      expect(telegramFailureSummary(liveFreshLoginNeededMessage)).toBe(liveFreshLoginNeededMessage);
+    });
+
+    it("still restarts on live after two plain probe failures (no failed restart yet)", async () => {
+      mocks.jobRunsDatabaseState.previousRunRow = { details: { probe: { failed: true } }, error_message: null };
+      mocks.lookupLatestDailyBar.mockReset();
+      mocks.lookupLatestDailyBar.mockRejectedValueOnce(new Error(historicalTimeoutError)).mockResolvedValueOnce(null);
+      await runIbkrHealthCheckJob();
+      expect(mocks.restartIbkrGatewayOnVps).toHaveBeenCalledTimes(1);
+      expect(lastJobOutput().details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: true });
+    });
+
+    it("passes normally once the probe works again, whatever the previous run said", async () => {
+      mocks.jobRunsDatabaseState.previousRunRow = { details: { probe: { failed: true, freshLoginNeeded: true } }, error_message: liveFreshLoginNeededMessage };
+      mocks.lookupLatestDailyBar.mockReset();
+      mocks.lookupLatestDailyBar.mockResolvedValue(null);
+      await runIbkrHealthCheckJob();
+      expect(mocks.restartIbkrGatewayOnVps).not.toHaveBeenCalled();
+      expect(lastJobOutput().details.probe).toEqual({ failed: false, reason: null, restarted: false });
+    });
+  });
+
+  it("restarts on paper even after a failed restart (its recovery falls back to a cold restart, a fresh login)", async () => {
+    mocks.jobRunsDatabaseState.previousRunRow = { details: { probe: { failed: true, restarted: true } }, error_message: "x and restart didn't recover reqHistoricalData either (x)" };
+    mocks.lookupLatestDailyBar.mockReset();
+    mocks.lookupLatestDailyBar.mockRejectedValueOnce(new Error(historicalTimeoutError)).mockResolvedValueOnce(null);
+    await runIbkrHealthCheckJob();
     expect(mocks.restartIbkrGatewayOnVps).toHaveBeenCalledTimes(1);
   });
 });
