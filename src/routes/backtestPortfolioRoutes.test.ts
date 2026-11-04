@@ -154,6 +154,31 @@ describe("portfolio simulator routes", () => {
     const text = await (await fetch(`${baseUrl}/backtest/portfolio/projection/stream?book=${book}`)).text();
     expect(text).toContain('event: failure\ndata: {"error":"XLE: no data file."}');
   });
+
+  it("stops the projection when the screen closes the stream before its end", async () => {
+    let signalOfRun: AbortSignal | undefined;
+    const stopped = new Promise<void>((resolve) => {
+      projectPortfolioMock.mockImplementationOnce((_book: unknown, onProgress: (done: number, total: number) => void, _connection: unknown, signal: AbortSignal) => {
+        signalOfRun = signal;
+        onProgress(1, 500);
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            resolve();
+            reject(new Error("stopped"));
+          });
+        });
+      });
+    });
+    const client = new AbortController();
+    const book = encodeURIComponent(JSON.stringify({ tickers: [{ symbol: "XLE" }], accountDollars: 1_000_000 }));
+    const response = await fetch(`${baseUrl}/backtest/portfolio/projection/stream?book=${book}`, { signal: client.signal });
+    const reader = response.body!.getReader();
+    await reader.read();
+    expect(signalOfRun?.aborted).toBe(false);
+    client.abort();
+    await stopped;
+    expect(signalOfRun?.aborted).toBe(true);
+  });
 });
 
 describe("saved portfolio routes", () => {

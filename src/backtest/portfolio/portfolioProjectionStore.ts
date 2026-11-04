@@ -135,8 +135,8 @@ export interface PortfolioProjection {
   savedAt: string | null;
 }
 
-/** The book's projection, read back when the same one was saved before (portfolioProjectionCache.ts); `onProgress` after each path. */
-export async function projectPortfolio(request: PortfolioProjectionRequest, onProgress?: (done: number, total: number) => void, connection: Knex = db): Promise<PortfolioProjection> {
+/** The book's projection, read back when the same one was saved before (portfolioProjectionCache.ts); `onProgress` after each path; `signal` stops it. */
+export async function projectPortfolio(request: PortfolioProjectionRequest, onProgress?: (done: number, total: number) => void, connection: Knex = db, signal?: AbortSignal): Promise<PortfolioProjection> {
   if (!(horizonYearsChoices as readonly number[]).includes(request.horizonYears)) throw new PortfolioRequestError(`horizonYears must be one of ${horizonYearsChoices.join(", ")}.`);
   const prepared = await prepareProjection(request, connection);
   if (prepared.spy.dividendShares === null) throw new PortfolioRequestError("SPY's dividends were never fetched: npm run backtest:fetch-dividends -- SPY.");
@@ -175,7 +175,7 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
   const key = savedProjectionKey({ input, pathCount: request.pathCount, marketDates: market.dates }, portfolioProjectionCodeHash());
   const saved = readSavedProjection<PortfolioProjection>(dataDirectory, key);
   if (saved !== null) return withOwnDrawdowns({ ...saved.projection, savedAt: saved.savedAt }, prepared, request.horizonYears);
-  const outcomes = await runProjectionInParallel(input, paths, onProgress);
+  const outcomes = await runProjectionInParallel(input, paths, onProgress, undefined, signal);
   const windows = replayWindows
     .map((window) => ({ ...window, days: Int32Array.from(market.dates.flatMap((date, at) => (date >= window.from && date <= window.to ? [at] : []))) }))
     .filter((window) => window.days.length > 0 && window.days[0]! > 0 && market.dates.at(-1)! >= window.to);

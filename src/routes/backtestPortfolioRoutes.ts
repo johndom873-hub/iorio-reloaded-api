@@ -31,14 +31,19 @@ function parseQueryBook<Parsed>(query: unknown, response: Response, parse: (body
 
 /**
  * Runs `work` behind an event stream: "progress" {done, total, label} at most every 250 ms and at the end, any events the
- * work sends itself (`send`), then "result" or "failure".
+ * work sends itself (`send`), then "result" or "failure". `signal` aborts when the client closes the stream before the end,
+ * so a projection's workers stop with it.
  */
-async function streamWork<Result>(response: Response, work: (onProgress: (done: number, total: number, label?: string) => void, send: (event: string, data: unknown) => void) => Promise<Result>): Promise<void> {
+async function streamWork<Result>(response: Response, work: (onProgress: (done: number, total: number, label?: string) => void, send: (event: string, data: unknown) => void, signal: AbortSignal) => Promise<Result>): Promise<void> {
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
   response.setHeader("Connection", "keep-alive");
   response.flushHeaders();
   response.on("error", () => {});
+  const stopped = new AbortController();
+  response.on("close", () => {
+    if (!response.writableEnded) stopped.abort();
+  });
   const send = (event: string, data: unknown) => {
     if (!response.writableEnded) response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
@@ -52,7 +57,7 @@ async function streamWork<Result>(response: Response, work: (onProgress: (done: 
         lastSent = Date.now();
         send("progress", label === undefined ? { done, total } : { done, total, label });
       }
-    }, send);
+    }, send, stopped.signal);
     send("result", result);
   } catch (error) {
     send("failure", { error: error instanceof Error ? error.message : String(error) });
@@ -78,13 +83,13 @@ export function registerPortfolioSimulatorRoutes(router: Router): void {
   // The book, drift and path count as JSON in ?book=.
   router.get("/portfolio/projection/stream", async (request, response) => {
     const book = parseQueryBook(request.query.book, response, parsePortfolioProjectionRequest);
-    if (book !== null) await streamWork(response, (onProgress) => projectPortfolio(book, onProgress));
+    if (book !== null) await streamWork(response, (onProgress, _send, signal) => projectPortfolio(book, onProgress, undefined, signal));
   });
 
   // The book as JSON in ?book=. "suggestions" events carry the list so far: on the library, then after each exact projection.
   router.get("/portfolio/suggestions/stream", async (request, response) => {
     const book = parseQueryBook(request.query.book, response, parsePortfolioBookRequest);
-    if (book !== null) await streamWork(response, (onProgress, send) => suggestPortfolioChangesFromLibrary(book, { onProgress, onSuggestions: (suggestions) => send("suggestions", suggestions) }));
+    if (book !== null) await streamWork(response, (onProgress, send, signal) => suggestPortfolioChangesFromLibrary(book, { onProgress, onSuggestions: (suggestions) => send("suggestions", suggestions), signal }));
   });
 
   router.get("/portfolio/library", async (_request, response) => {

@@ -25,16 +25,32 @@ export function projectionWorkerCount(pathCount: number): number {
   return Math.max(1, Math.min(4, os.availableParallelism() - 1, pathCount));
 }
 
-function runWorker<Result>(request: ProjectionWorkerRequest, onPathDone: () => void): Promise<Result> {
+/** A projection stopped through its signal (the screen closed its stream): its workers are terminated. */
+export class ProjectionStoppedError extends Error {
+  constructor() {
+    super("The projection was stopped.");
+    this.name = "ProjectionStoppedError";
+  }
+}
+
+function runWorker<Result>(request: ProjectionWorkerRequest, onPathDone: () => void, signal?: AbortSignal): Promise<Result> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new ProjectionStoppedError());
     const worker = new Worker(workerModuleUrl(), { execArgv: workerExecArgv() });
+    const stop = () => {
+      void worker.terminate();
+      reject(new ProjectionStoppedError());
+    };
+    signal?.addEventListener("abort", stop, { once: true });
     worker.on("message", (message: { kind: "progress" } | { kind: "done"; outcomes?: PathOutcome[]; values?: Float32Array } | { kind: "failed"; error: string }) => {
       if (message.kind === "progress") return onPathDone();
+      signal?.removeEventListener("abort", stop);
       void worker.terminate();
       if (message.kind === "done") resolve((request.returns === "values" ? message.values : message.outcomes) as Result);
       else reject(new Error(`Projection worker failed: ${message.error}`));
     });
     worker.once("error", (error) => {
+      signal?.removeEventListener("abort", stop);
       void worker.terminate();
       reject(error);
     });
@@ -43,7 +59,7 @@ function runWorker<Result>(request: ProjectionWorkerRequest, onPathDone: () => v
 }
 
 /** The paths in contiguous chunks, one per worker, each chunk's result in path order; `onProgress` after each path. */
-async function runInChunks<Result>(input: ProjectionInput, paths: readonly DayPath[], returns: ProjectionWorkerRequest["returns"], workerCount: number, onProgress?: (done: number, total: number) => void): Promise<Result[]> {
+async function runInChunks<Result>(input: ProjectionInput, paths: readonly DayPath[], returns: ProjectionWorkerRequest["returns"], workerCount: number, onProgress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<Result[]> {
   const chunkSize = Math.ceil(paths.length / workerCount);
   let done = 0;
   const chunks: Promise<Result>[] = [];
@@ -52,16 +68,16 @@ async function runInChunks<Result>(input: ProjectionInput, paths: readonly DayPa
       runWorker<Result>({ input, paths: paths.slice(start, start + chunkSize), firstPathIndex: start, returns }, () => {
         done += 1;
         onProgress?.(done, paths.length);
-      }),
+      }, signal),
     );
   }
   return Promise.all(chunks);
 }
 
-/** Every path's outcome, in path order; `onProgress` after each path with how many are done. `workerCount` for timing only. */
-export async function runProjectionInParallel(input: ProjectionInput, paths: readonly DayPath[], onProgress?: (done: number, total: number) => void, workerCount = projectionWorkerCount(paths.length)): Promise<PathOutcome[]> {
+/** Every path's outcome, in path order; `onProgress` after each path with how many are done. `workerCount` for timing only; `signal` stops it (ProjectionStoppedError). */
+export async function runProjectionInParallel(input: ProjectionInput, paths: readonly DayPath[], onProgress?: (done: number, total: number) => void, workerCount = projectionWorkerCount(paths.length), signal?: AbortSignal): Promise<PathOutcome[]> {
   if (paths.length === 0) return [];
-  return (await runInChunks<PathOutcome[]>(input, paths, "outcomes", workerCount, onProgress)).flat();
+  return (await runInChunks<PathOutcome[]>(input, paths, "outcomes", workerCount, onProgress, signal)).flat();
 }
 
 /** Every path's daily account values as a share of the starting value (runPathValues), path after path; `onProgress` after each path. */

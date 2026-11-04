@@ -73,6 +73,8 @@ export interface SuggestionHooks {
   onProgress?(done: number, total: number, label: string): void;
   /** The suggestions so far: on the library first, then after each exact projection. */
   onSuggestions?(suggestions: PortfolioSuggestions): void;
+  /** Stops the exact projections (the screen closed its stream). */
+  signal?: AbortSignal;
 }
 
 export async function suggestPortfolioChangesFromLibrary(request: PortfolioBookRequest, hooks: SuggestionHooks = {}, connection: Knex = db): Promise<PortfolioSuggestions> {
@@ -128,7 +130,7 @@ export async function suggestPortfolioChangesFromLibrary(request: PortfolioBookR
   const exactFiguresOf = async (allocationsPct: Record<string, number> | null, label: string): Promise<PathFigures> => {
     hooks.onProgress?.(done, total, label);
     const tickers = allocationsPct === null ? request.tickers : Object.entries(allocationsPct).map(([symbol, allocation]) => ({ symbol, allocationPct: allocation }));
-    const projection = await projectPortfolio({ ...request, tickers, drift: "neutral", pathCount: confirmationPathCount }, undefined, connection);
+    const projection = await projectPortfolio({ ...request, tickers, drift: "neutral", pathCount: confirmationPathCount }, undefined, connection, hooks.signal);
     done += 1;
     return { cagr: Float64Array.from(projection.pathFigures.cagr), maxDrawdown: Float64Array.from(projection.pathFigures.maxDrawdown) };
   };
