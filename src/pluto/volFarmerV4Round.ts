@@ -2,7 +2,7 @@ import { db } from "../db/connection.js";
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
 import { sharesPerContract } from "../backtest/engine/backtestBook.js";
 import { baselineQuoteRejection } from "../backtest/engine/baselineSaleSteps.js";
-import { newVolFarmerV4SymbolState, runVolFarmerV4Turn, volFarmerV4TurnOrder, type VolFarmerV4Market, type VolFarmerV4SymbolState } from "../backtest/engine/volFarmerV4Steps.js";
+import { newVolFarmerV4SymbolState, runVolFarmerV4Turn, volFarmerV4BreakEven, volFarmerV4TurnOrder, type VolFarmerV4Market, type VolFarmerV4SymbolState } from "../backtest/engine/volFarmerV4Steps.js";
 import type { BacktestVolFarmerV3Settings, VolFarmerV3CallsInTheMoneyAtLastLook } from "../backtest/backtestTypes.js";
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { liveExpiryStrikes } from "../ibkr/liveOptionChainLookups.js";
@@ -43,6 +43,7 @@ import { tickerCooldownStatus } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, tickerPotFraction, type PlutoTickerSettings } from "./tickerSettingsStore.js";
 import {
+  adoptVolFarmerV4CallsSoldOutside,
   adoptVolFarmerV4Holdings,
   createVolFarmerV4LiveBook,
   pendingVolFarmerV4CallBuyBack,
@@ -315,6 +316,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
 
   // 1. The orders sent at earlier rounds that are done replace their plan with their fills.
   let memory = await loadVolFarmerV4Memory(tickerId);
+  let settledAnOrder = false;
   if (memory !== null && memory.pending.length > 0) {
     const outcomes = await loadVolFarmerV4OrderOutcomes(memory.pending.map((order) => order.actionId));
     const stillWorking: VolFarmerV4PendingOrder[] = [];
@@ -322,6 +324,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
       const outcome = outcomes.get(order.actionId) ?? unfilledVolFarmerV4Outcome;
       if (outcome.working) stillWorking.push(order);
       else {
+        settledAnOrder = true;
         const settled = settleVolFarmerV4Order(memory.state, order, outcome);
         if (settled !== null) note(settled);
       }
@@ -361,6 +364,26 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
         breakEvenPerShare: adoption.state.first!.costPerShare,
         callContracts: contractsOf(adoption.state.first!.calls),
         putContracts: contractsOf(adoption.state.second?.puts ?? []),
+      });
+    }
+  }
+
+  // A Call sold outside Pluto (by hand, while the ticker was off) covers shares the memory counts as open: taken in, with no Call
+  // of Pluto's still working (a part-filled one has a leg the memory holds as its order) and no order of Pluto's settled at this
+  // round (its legs may not be closed in the ledger yet).
+  if (!adopted && !settledAnOrder && !memory.pending.some((order) => order.kind === "covered_call" || order.kind === "buy_back_call")) {
+    const callContractsTakenIn = adoptVolFarmerV4CallsSoldOutside(memory.state, positions);
+    if (callContractsTakenIn > 0) {
+      note(`${callContractsTakenIn} open ${callContractsTakenIn === 1 ? "Call" : "Calls"} Pluto did not sell now cover its shares`);
+      const first = memory.state.first;
+      await recordPlutoEvent("holdings_adopted", {
+        passId: input.passId,
+        symbol,
+        strategy: "vol_farmer_v4",
+        shares: (first?.shares ?? 0) + (memory.state.second?.shares ?? 0),
+        breakEvenPerShare: first === null ? 0 : (volFarmerV4BreakEven(first) ?? 0),
+        callContracts: callContractsTakenIn,
+        putContracts: 0,
       });
     }
   }

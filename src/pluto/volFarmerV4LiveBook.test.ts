@@ -8,6 +8,7 @@ import { addVolFarmerV4Shares, newVolFarmerV4SymbolState, removeVolFarmerV4Share
 import { plutoSafetyLimitsSettingsFixture, plutoVolFarmerV4SettingsFixture } from "./plutoSettingsFixture.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import {
+  adoptVolFarmerV4CallsSoldOutside,
   adoptVolFarmerV4Holdings,
   createVolFarmerV4LiveBook,
   pendingVolFarmerV4CallBuyBack,
@@ -103,6 +104,27 @@ describe("adopting a ticker's holdings", () => {
     expect(adopted.state.first).toEqual({ shares: 500, costPerShare: 105.42, premiums: [], calls: [{ legId: "c1", shares: 400 }, { legId: "c2", shares: 100 }], puts: [] });
     expect(volFarmerV4BreakEven(adopted.state.first!)).toBe(105.42);
     expect(adopted.state.second).toEqual({ shares: 0, costPerShare: 0, premiums: [], calls: [], puts: [{ legId: "p1", shares: 200 }] });
+  });
+
+  it("takes in an open short Call the memory does not know, leaving the ones it knows and the ones closed", () => {
+    const state = newVolFarmerV4SymbolState();
+    state.first = { shares: 600, costPerShare: 100, premiums: [], calls: [{ legId: "c-known", shares: 100 }], puts: [] };
+    const positions = [
+      position([leg("s1", { legType: "stock", side: "long", quantity: 600, optionType: null, strikePrice: null, expiryDate: null, multiplier: 1 }), leg("c-known", { quantity: 1 }), leg("c-hand", { quantity: 4 }), leg("c-closed", { quantity: 1, exitAt: new Date("2026-10-21T14:00:00Z") }), leg("p-hand", { optionType: "put", quantity: 1 }), leg("leaps", { side: "long", quantity: 1 })]),
+    ];
+    expect(adoptVolFarmerV4CallsSoldOutside(state, positions)).toBe(4);
+    expect(state.first!.calls).toEqual([{ legId: "c-known", shares: 100 }, { legId: "c-hand", shares: 400 }]);
+    // Taken in once: the memory knows it now.
+    expect(adoptVolFarmerV4CallsSoldOutside(state, positions)).toBe(0);
+  });
+
+  it("takes a Call in on the second position when the first holds no shares, and none when neither holds any", () => {
+    const state = newVolFarmerV4SymbolState();
+    state.second = { shares: 200, costPerShare: 90, premiums: [], calls: [], puts: [] };
+    const positions = [position([leg("c-hand", { quantity: 2 })])];
+    expect(adoptVolFarmerV4CallsSoldOutside(state, positions)).toBe(2);
+    expect(state.second.calls).toEqual([{ legId: "c-hand", shares: 200 }]);
+    expect(adoptVolFarmerV4CallsSoldOutside(newVolFarmerV4SymbolState(), positions)).toBe(0);
   });
 
   it("waits while the ticker holds only Puts, or its cycle's break-even is unknown", () => {

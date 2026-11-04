@@ -339,6 +339,24 @@ export function adoptVolFarmerV4Holdings(input: { positions: readonly PositionFi
   return { state };
 }
 
+/**
+ * The ticker's open short Calls that the memory does not know, a Call sold outside Pluto (by hand, while the ticker was disabled): they
+ * cover the first position's shares (the second's when the first holds none), so the steps do not sell Calls on lots already covered.
+ * Example: 400 shares in the memory, no Call in it, and a 4-contract Call open in the account: the Call is taken in and no lot is uncovered.
+ * Returns the contracts taken in.
+ */
+export function adoptVolFarmerV4CallsSoldOutside(state: VolFarmerV4SymbolState, positions: readonly PositionFigures[]): number {
+  const holder = state.first !== null && state.first.shares > 0 ? state.first : state.second !== null && state.second.shares > 0 ? state.second : null;
+  if (holder === null) return 0;
+  const knownLegIds = new Set([state.first, state.second].flatMap((position) => (position === null ? [] : position.calls.map((call) => call.legId))));
+  const unknownCalls = positions
+    .filter((position) => position.status === "open")
+    .flatMap((position) => position.legs)
+    .filter((leg) => leg.exitAt === null && leg.legType === "option" && leg.side === "short" && leg.optionType === "call" && !knownLegIds.has(leg.id));
+  for (const leg of unknownCalls) holder.calls.push({ legId: leg.id, shares: leg.quantity * leg.multiplier });
+  return unknownCalls.reduce((sum, leg) => sum + leg.quantity, 0);
+}
+
 /** What the live book reads of the ticker once its pending orders are settled. */
 export interface VolFarmerV4LiveSnapshot {
   /** Every leg the memory refers to and the ticker's open option legs, by id. */

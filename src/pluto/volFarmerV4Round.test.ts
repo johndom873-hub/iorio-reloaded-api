@@ -307,6 +307,21 @@ describe("runVolFarmerV4Round", () => {
     expect(harness.executed).toEqual([]);
   });
 
+  it("takes in a Call sold by hand on shares the memory holds uncovered, and sells no second Call on those lots", async () => {
+    holdingFirstPosition(400);
+    const soldByHand = { id: "c-hand", legType: "option", side: "short", quantity: 4, optionType: "call", strikePrice: 110, expiryDate: "2026-11-06", multiplier: 100, entryPrice: 0.6, entryAt: new Date(), exitPrice: null, exitAt: null };
+    harness.positionsByTickerId.set("t-VFT", [{ strategyKey: "covered_call", status: "open", legs: [stockLeg("s1", 400), soldByHand] }]);
+    const summary = await round();
+    expect(harness.executed).toEqual([]);
+    expect((harness.memory.get("t-VFT") as VolFarmerV4Memory).state.first).toMatchObject({ shares: 400, calls: [{ legId: "c-hand", shares: 400 }] });
+    expect(summary.notes).toContainEqual(expect.stringContaining("VFT: 4 open Calls Pluto did not sell now cover its shares"));
+    expect(harness.events.filter((event) => event.type === "holdings_adopted").map((event) => event.detail)).toEqual([expect.objectContaining({ symbol: "VFT", shares: 400, callContracts: 4, putContracts: 0 })]);
+    // The next round knows the Call: nothing to take in again.
+    await round();
+    expect(harness.events.filter((event) => event.type === "holdings_adopted")).toHaveLength(1);
+    expect(harness.executed).toEqual([]);
+  });
+
   it("waits on a ticker that holds only Puts", async () => {
     harness.positions = [{ strategyKey: "cash_secured_put", status: "open", legs: [{ id: "p1", legType: "option", side: "short", quantity: 2, optionType: "put", strikePrice: 90, expiryDate: "2026-10-30", multiplier: 100, entryPrice: 1, entryAt: new Date(), exitPrice: null, exitAt: null }] }];
     const summary = await round();
