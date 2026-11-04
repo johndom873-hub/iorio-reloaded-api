@@ -3,14 +3,21 @@ import { parsePortfolioProjectionRequest, portfolioPots, projectPortfolio } from
 import { portfolioLibraryStatus } from "../backtest/portfolio/portfolioLibraryStatus.js";
 import { suggestPortfolioChangesFromLibrary } from "../backtest/portfolio/portfolioLibrarySuggestions.js";
 import { listPortfolioTickers, parsePortfolioBookRequest, simulatePortfolio } from "../backtest/portfolio/portfolioSimulatorStore.js";
-import { queuePortfolioLibraryJob } from "../backtest/jobs/backtestJobStore.js";
+import { BacktestRequestError, queuePortfolioLibraryJob } from "../backtest/jobs/backtestJobStore.js";
+import { createSavedPortfolio, deleteSavedPortfolio, listSavedPortfolios, parseSavedPortfolioInput, updateSavedPortfolio } from "../backtest/portfolio/savedPortfolioStore.js";
 
 // The portfolio simulator's routes (under /backtest, the lab only): every analysed ticker for the book's picker, how a
 // book's tickers move together, its pot table and suggested allocations, its projection streamed over SSE (minutes: every
 // path is the book run through v4's own days), its one-change suggestions streamed over SSE (on the library at once, then
-// the best confirmed exactly), and the suggestions' library: its state and a rebuild.
+// the best confirmed exactly), the suggestions' library: its state and a rebuild, and the saved portfolios.
 
 const streamHeartbeatMs = 15_000;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function portfolioIdOf(value: unknown): string {
+  if (typeof value !== "string" || !uuidPattern.test(value)) throw new BacktestRequestError("No such portfolio.", 404);
+  return value;
+}
 
 /** The request as JSON in ?book= (EventSource sends no body), parsed; a 400 with the message when it isn't one. */
 function parseQueryBook<Parsed>(query: unknown, response: Response, parse: (body: unknown) => Parsed): Parsed | null {
@@ -87,5 +94,23 @@ export function registerPortfolioSimulatorRoutes(router: Router): void {
   // Queues a rebuild (one at a time; it waits for the downloads).
   router.post("/portfolio/library/rebuild", async (_request, response) => {
     response.status(202).json({ jobId: await queuePortfolioLibraryJob() });
+  });
+
+  router.get("/portfolio/portfolios", async (_request, response) => {
+    response.json({ portfolios: await listSavedPortfolios() });
+  });
+
+  // {name, tickers, accountDollars}: Save as, or the first Save of a new portfolio.
+  router.post("/portfolio/portfolios", async (request, response) => {
+    response.status(201).json(await createSavedPortfolio(parseSavedPortfolioInput(request.body)));
+  });
+
+  router.put("/portfolio/portfolios/:id", async (request, response) => {
+    response.json(await updateSavedPortfolio(portfolioIdOf(request.params.id), parseSavedPortfolioInput(request.body)));
+  });
+
+  router.delete("/portfolio/portfolios/:id", async (request, response) => {
+    await deleteSavedPortfolio(portfolioIdOf(request.params.id));
+    response.status(204).end();
   });
 }

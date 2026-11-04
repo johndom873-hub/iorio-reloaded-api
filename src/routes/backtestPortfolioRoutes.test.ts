@@ -30,6 +30,15 @@ vi.mock("../backtest/portfolio/portfolioProjectionStore.js", async (importOrigin
   portfolioPots: (...args: unknown[]) => portfolioPotsMock(...args),
 }));
 
+const savedPortfolioMocks = { list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn() };
+vi.mock("../backtest/portfolio/savedPortfolioStore.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../backtest/portfolio/savedPortfolioStore.js")>()),
+  listSavedPortfolios: (...args: unknown[]) => savedPortfolioMocks.list(...args),
+  createSavedPortfolio: (...args: unknown[]) => savedPortfolioMocks.create(...args),
+  updateSavedPortfolio: (...args: unknown[]) => savedPortfolioMocks.update(...args),
+  deleteSavedPortfolio: (...args: unknown[]) => savedPortfolioMocks.remove(...args),
+}));
+
 const { registerPortfolioSimulatorRoutes } = await import("./backtestPortfolioRoutes.js");
 const { BacktestRequestError } = await import("../backtest/jobs/backtestJobStore.js");
 let server: Server;
@@ -144,5 +153,34 @@ describe("portfolio simulator routes", () => {
     const book = encodeURIComponent(JSON.stringify({ tickers: [{ symbol: "XLE" }], accountDollars: 1_000_000, pathCount: 4 }));
     const text = await (await fetch(`${baseUrl}/backtest/portfolio/projection/stream?book=${book}`)).text();
     expect(text).toContain('event: failure\ndata: {"error":"XLE: no data file."}');
+  });
+});
+
+describe("saved portfolio routes", () => {
+  const portfolioId = "0b9a3c1e-5f0d-4c2b-9a51-3d2f6e7a8b90";
+  const send = (method: string, route: string, body?: unknown) => fetch(`${baseUrl}/backtest${route}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+
+  it("lists, creates (201), saves over and deletes (204) with the request checked", async () => {
+    savedPortfolioMocks.list.mockResolvedValueOnce([{ id: portfolioId, name: "Fits $1M" }]);
+    expect(await (await send("GET", "/portfolio/portfolios")).json()).toEqual({ portfolios: [{ id: portfolioId, name: "Fits $1M" }] });
+    savedPortfolioMocks.create.mockResolvedValueOnce({ id: portfolioId });
+    const created = await send("POST", "/portfolio/portfolios", { name: " Fits $1M ", tickers: [{ symbol: "XLE" }], accountDollars: 1_000_000 });
+    expect(created.status).toBe(201);
+    expect(savedPortfolioMocks.create).toHaveBeenCalledWith({ name: "Fits $1M", tickers: [{ symbol: "XLE", allocationPct: null }], accountDollars: 1_000_000 });
+    savedPortfolioMocks.update.mockResolvedValueOnce({ id: portfolioId });
+    expect((await send("PUT", `/portfolio/portfolios/${portfolioId}`, { name: "B", tickers: [], accountDollars: 5 })).status).toBe(200);
+    expect(savedPortfolioMocks.update).toHaveBeenCalledWith(portfolioId, { name: "B", tickers: [], accountDollars: 5 });
+    savedPortfolioMocks.remove.mockResolvedValueOnce(undefined);
+    expect((await send("DELETE", `/portfolio/portfolios/${portfolioId}`)).status).toBe(204);
+  });
+
+  it("answers 400 for a bad request, 404 for an id that isn't one and passes the store's 409 on", async () => {
+    expect((await send("POST", "/portfolio/portfolios", { name: "", tickers: [], accountDollars: 1 })).status).toBe(400);
+    expect((await send("PUT", "/portfolio/portfolios/not-an-id", { name: "A", tickers: [], accountDollars: 1 })).status).toBe(404);
+    expect((await send("DELETE", "/portfolio/portfolios/not-an-id")).status).toBe(404);
+    savedPortfolioMocks.create.mockRejectedValueOnce(new BacktestRequestError('A portfolio named "A" already exists. Choose another name.', 409));
+    const duplicate = await send("POST", "/portfolio/portfolios", { name: "A", tickers: [], accountDollars: 1 });
+    expect(duplicate.status).toBe(409);
+    expect(await duplicate.json()).toEqual({ error: 'A portfolio named "A" already exists. Choose another name.' });
   });
 });
