@@ -37,7 +37,13 @@ export class AlphaVantageRefusedError extends Error {}
 export async function fetchAlphaVantageDividends(symbol: string, apiKey: string): Promise<FileDividend[]> {
   const response = await fetch(`https://www.alphavantage.co/query?function=DIVIDENDS&symbol=${encodeURIComponent(symbol)}&apikey=${encodeURIComponent(apiKey)}`);
   if (!response.ok) throw new Error(`Alpha Vantage answered ${response.status} for ${symbol}.`);
-  return dividendsFromAlphaVantage(await response.json());
+  try {
+    return dividendsFromAlphaVantage(await response.json());
+  } catch (error) {
+    // Its limit message quotes the key: kept out of the logs.
+    if (error instanceof AlphaVantageRefusedError) throw new AlphaVantageRefusedError(error.message.replaceAll(apiKey, "<key>"));
+    throw error;
+  }
 }
 
 /** Replaces the file's dividends with `dividends` and records when, in one transaction. */
