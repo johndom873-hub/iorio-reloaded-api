@@ -36,9 +36,6 @@ const harness = vi.hoisted(() => ({
   stepImpliedVolatility: null as number | null,
   quotes: [] as unknown[],
   /** No after-close capture for the previous session: its volumes are unknown. */
-  previousSessionVolumeMissing: false,
-  /** Strikes whose contracts the previous session's capture lists with no volume. */
-  noVolumeStrikes: [] as number[],
   bookCounts: { workingOrders: 0, ordersToday: 0, openPositions: 0 },
   committed: 0,
   actions: [] as Record<string, unknown>[],
@@ -105,7 +102,6 @@ vi.mock("./optionQuoteBandPlanLoader.js", () => ({
   defaultOptionQuoteBandPlannerDependencies: {
     loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 960, riskFreeRate: 0.04 }),
     loadForwardAnchors: async () => new Map(),
-    loadPreviousSessionVolume: async () => (harness.previousSessionVolumeMissing ? null : new Map((harness.quotes as SymbolFileQuote[]).map((quote) => [contractKey(quote), harness.noVolumeStrikes.includes(quote.strike) ? 0 : 1_000]))),
   },
 }));
 vi.mock("./optionQuoteBandQuotes.js", () => ({ loadOptionQuoteBandQuotes: async () => [], loadFinishedOptionQuoteBandCycle: async () => ({ cycleNumber: 1, startedAt: new Date(0), finishedAt: new Date(0) }) }));
@@ -147,7 +143,7 @@ function quotesAt(right: "C" | "P", expiry = "2026-11-06", days = 10): SymbolFil
   const years = days / 365;
   return Array.from({ length: 101 }, (_, index) => 40 + index).map((strike) => {
     const mid = blackScholesPriceOnForward(100 * Math.exp(0.04 * years), strike, years, 0.04, 0.5, right === "C");
-    return { expiry, strike, right, bid: Math.round(mid * 0.98 * 10_000) / 10_000, ask: Math.round(mid * 1.02 * 10_000) / 10_000, bidSize: null, askSize: null };
+    return { expiry, strike, right, bid: Math.round(mid * 0.98 * 10_000) / 10_000, ask: Math.round(mid * 1.02 * 10_000) / 10_000, bidSize: 1_000, askSize: 1_000 };
   });
 }
 
@@ -212,8 +208,6 @@ beforeEach(() => {
   harness.breakEven = null;
   harness.stepImpliedVolatility = null;
   harness.quotes = [...quotesAt("C"), ...quotesAt("P")];
-  harness.previousSessionVolumeMissing = false;
-  harness.noVolumeStrikes = [];
   harness.bookCounts = { workingOrders: 0, ordersToday: 0, openPositions: 0 };
   harness.committed = 0;
   harness.actions.length = 0;
@@ -252,19 +246,22 @@ describe("runVolFarmerV4Round", () => {
     expect(harness.lastRounds.get("t-VFT")).toEqual({ notes: [expect.stringContaining("VFT Sell $105 Call")], figures: { potDollars: 250_000, committedDollars: 30_000, freeCashDollars: 400_000, leapsCapDollars: 25_000, putsDollars: 125_000 } });
   });
 
-  it("without the previous session's volume, sells the expiry it sells with the 20% rule lifted for the day, and says so", async () => {
+  it("caps a Call sale at the bid size of its quote (Marcelo 2026-11-05), whatever the contract traded the day before", async () => {
+    holdingFirstPosition(1_000);
+    harness.quotes = [...quotesAt("C").map((quote) => ({ ...quote, bidSize: 3 })), ...quotesAt("P")];
     harness.chain = { expirations: ["20261106"], strikesByExpiry: new Map([["20261106", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
-    harness.previousSessionVolumeMissing = true;
     await round();
-    expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", strategyKey: "covered_call", plan: expect.objectContaining({ quantity: 12 }) })]);
-    expect(harness.lastRounds.get("t-VFT")!.notes[0]).toBe("no previous-session volume for 6 Nov (10DTE): the 20% volume rule is off for it today");
+    // 10 lots are uncovered; the bid shows 3 contracts.
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", strategyKey: "covered_call", plan: expect.objectContaining({ quantity: 3 }) })]);
   });
 
-  it("with the previous session's volume, keeps the 20% rule and says nothing of it", async () => {
+  it("sells no Call on a quote with no bid size, and says the bid size left it out", async () => {
+    holdingFirstPosition(1_000);
+    harness.quotes = [...quotesAt("C").map((quote) => ({ ...quote, bidSize: null })), ...quotesAt("P")];
     harness.chain = { expirations: ["20261106"], strikesByExpiry: new Map([["20261106", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
-    await round();
-    expect(harness.executed).toHaveLength(1);
-    expect(harness.lastRounds.get("t-VFT")!.notes.some((note) => note.includes("20% volume rule is off"))).toBe(false);
+    const summary = await round();
+    expect(harness.executed).toEqual([]);
+    expect(summary.notes).toContainEqual(expect.stringMatching(/no Call .*bid size \d+/));
   });
 
   it("counts an order still working as planned, and opens afresh once it ended unfilled", async () => {
@@ -323,16 +320,6 @@ describe("runVolFarmerV4Round", () => {
     await round();
     expect(harness.events.filter((event) => event.type === "holdings_adopted")).toHaveLength(1);
     expect(harness.executed).toEqual([]);
-  });
-
-  it("sells a Call quoted without the volume for one contract: the volume rule is off for the sold expiry's Calls that day, and the round says so", async () => {
-    holdingFirstPosition(1_000);
-    // The previous session's capture lists every Call with no volume (the price gapped away from where the volume was); the quote loop quoted them anyway.
-    harness.noVolumeStrikes = Array.from({ length: 101 }, (_, index) => 40 + index);
-    harness.chain = { expirations: ["20261106"], strikesByExpiry: new Map([["20261106", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
-    const summary = await round();
-    expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", strategyKey: "covered_call", plan: expect.objectContaining({ quantity: 10 }) })]);
-    expect(summary.notes).toContainEqual(expect.stringContaining("no Call in the delta range had the volume yesterday: the 20% volume rule is off for the Calls of"));
   });
 
   it("waits on a ticker that holds only Puts", async () => {
@@ -586,7 +573,7 @@ describe("runVolFarmerV4Round: the buyback in the window's last minutes", () => 
     harness.memory.set("t-VFT", { state: { potDollars: 250_000, first: { ...position(1_900, 100), calls: [{ legId: "c1", shares: 1_900 }] }, second: null, leaps: null, leapsBought: false, leapsToSell: false, leapsTrigger: null, cash: { cycles: 1, firstPositionCashLeft: [], putsCashLeft: [], leapsTriggers: [] } }, pending: [] });
     harness.positionsByTickerId.set("t-VFT", [{ strategyKey: "covered_call", status: "open", legs: [stockLeg("s1", 1_900), callLeg("c1", strike, todayIso)] }]);
     harness.chain = { expirations: [todayIso.replaceAll("-", "")], strikesByExpiry: new Map([[todayIso.replaceAll("-", ""), Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
-    harness.quotes = [{ expiry: todayIso, strike, right: "C", bid: 1.05, ask: 1.15, bidSize: null, askSize: null }];
+    harness.quotes = [{ expiry: todayIso, strike, right: "C", bid: 1.05, ask: 1.15, bidSize: 1_000, askSize: 1_000 }];
   }
   const buyBacks = () => harness.executed.filter((order) => order.kind === "call_buy_back");
 
@@ -708,26 +695,22 @@ describe("volFarmerV4NoCallQuotedReason", () => {
   // Wed 28 Oct 2026: the next listed expiry is Fri 30 Oct (2DTE).
   const base = { todayIso: "2026-10-28", expirations: ["20261106", "20261030", "20261028"], strikesByExpiry: new Map([["20261030", [95, 105]], ["20261106", [105]], ["20261028", [105]]]), optionsExpiry: "next" as const };
 
-  it("without the previous session's volume (a ticker enabled after the capture), the expiry is quoted whole: no volume reason", () => {
-    expect(volFarmerV4NoCallQuotedReason({ ...base, previousSessionVolumeByContract: null, bandCycleFinished: false })).toBe("no 30 Oct (2DTE) option is quoted yet today");
-    expect(volFarmerV4NoCallQuotedReason({ ...base, previousSessionVolumeByContract: null, bandCycleFinished: true })).toBe("no 30 Oct (2DTE) Call is near v4's Call |delta| range at this price, so none is quoted");
+  it("tells quotes not in yet and the |delta| band apart", () => {
+    expect(volFarmerV4NoCallQuotedReason({ ...base, bandCycleFinished: false })).toBe("no 30 Oct (2DTE) option is quoted yet today");
+    // A finished cycle without a Call after today: none was near the range at this price (a Call quoted at an earlier cycle has left the band).
+    expect(volFarmerV4NoCallQuotedReason({ ...base, bandCycleFinished: true })).toBe("no 30 Oct (2DTE) Call is near v4's Call |delta| range at this price, so none is quoted");
   });
 
-  it("tells the 20% volume rule, quotes not in yet, and the |delta| band apart", () => {
-    const volume = new Map([["2026-10-30|105|C", 4], ["2026-10-30|95|P", 50]]);
-    expect(volFarmerV4NoCallQuotedReason({ ...base, previousSessionVolumeByContract: volume, bandCycleFinished: false })).toBe("no 30 Oct (2DTE) Call traded enough in the previous session to sell one (the 20% volume rule needs a volume of 5 or more)");
-    const traded = new Map([["2026-10-30|105|C", 40]]);
-    expect(volFarmerV4NoCallQuotedReason({ ...base, previousSessionVolumeByContract: traded, bandCycleFinished: false })).toBe("no 30 Oct (2DTE) option is quoted yet today");
-    // A finished cycle without a Call after today: none was near the range at this price (a Call quoted at an earlier cycle has left the band).
-    expect(volFarmerV4NoCallQuotedReason({ ...base, previousSessionVolumeByContract: traded, bandCycleFinished: true })).toBe("no 30 Oct (2DTE) Call is near v4's Call |delta| range at this price, so none is quoted");
+  it("tells a chain that lists no Call strike of the expiry", () => {
+    expect(volFarmerV4NoCallQuotedReason({ ...base, strikesByExpiry: new Map([["20261030", []]]), bandCycleFinished: true })).toBe("no 30 Oct (2DTE) Call strike is listed in the stored chain");
   });
 
   it("keeps the plain note when the chain lists no expiry after today", () => {
-    expect(volFarmerV4NoCallQuotedReason({ ...base, expirations: ["20261028"], previousSessionVolumeByContract: null, bandCycleFinished: false })).toBe("no Call expiry listed after today");
+    expect(volFarmerV4NoCallQuotedReason({ ...base, expirations: ["20261028"], bandCycleFinished: false })).toBe("no Call expiry listed after today");
   });
 
   it("selling today's expiry: words it, or that none ends today", () => {
-    expect(volFarmerV4NoCallQuotedReason({ ...base, optionsExpiry: "today", previousSessionVolumeByContract: null, bandCycleFinished: false })).toBe("no 28 Oct (0DTE) option is quoted yet today");
-    expect(volFarmerV4NoCallQuotedReason({ ...base, optionsExpiry: "today", todayIso: "2026-10-29", previousSessionVolumeByContract: null, bandCycleFinished: false })).toBe("no Call expiry ends today");
+    expect(volFarmerV4NoCallQuotedReason({ ...base, optionsExpiry: "today", bandCycleFinished: false })).toBe("no 28 Oct (0DTE) option is quoted yet today");
+    expect(volFarmerV4NoCallQuotedReason({ ...base, optionsExpiry: "today", todayIso: "2026-10-29", bandCycleFinished: false })).toBe("no Call expiry ends today");
   });
 });

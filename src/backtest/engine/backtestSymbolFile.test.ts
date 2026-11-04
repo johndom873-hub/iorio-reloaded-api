@@ -173,7 +173,7 @@ describe("the quotes at the looks inside a day", () => {
       expect(afterTen.get("10:30")).toHaveLength(10);
       const atTheMoneyCall = (lookTime: string) => afterTen.get(lookTime)!.find((quote) => quote.strike === 100 && quote.right === "C")!;
       expect(atTheMoneyCall("11:00").bid!).toBeGreaterThan(atTheMoneyCall("10:30").bid!);
-      expect(atTheMoneyCall("10:30")).toMatchObject({ expiry: "2026-03-13", strike: 100, right: "C", bidSize: null, askSize: null });
+      expect(atTheMoneyCall("10:30")).toMatchObject({ expiry: "2026-03-13", strike: 100, right: "C", bidSize: expect.any(Number), askSize: expect.any(Number) });
       expect(atTheMoneyCall("10:30").ask!).toBeGreaterThan(atTheMoneyCall("10:30").bid!);
       expect([...file.loadIntradayQuotes("2026-03-02", "10:00", "10:30", 0, 1_000).keys()]).toEqual(["10:30"]);
       expect([...file.loadIntradayQuotes("2026-03-02", "09:30", "15:30", 0, 1_000).keys()]).toEqual(["10:00", "10:30", "11:00"]);

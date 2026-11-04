@@ -10,5 +10,5 @@ export function latestCycleQuotes(bandQuotes: readonly OptionQuoteBandQuote[], b
   if (bandCycle === null) return { quotes: [], stale: false };
   const latest = bandQuotes.filter((quote) => quote.quotedAt.getTime() >= bandCycle.startedAt.getTime() && quote.errorCode === null);
   const fresh = latest.filter((quote) => now.getTime() - quote.quotedAt.getTime() <= maxQuoteAgeMinutes * 60_000);
-  return { quotes: fresh.map((quote) => ({ expiry: quote.expiry, strike: quote.strike, right: quote.right, bid: quote.bid, ask: quote.ask, bidSize: null, askSize: null })), stale: latest.length > 0 && fresh.length === 0 };
+  return { quotes: fresh.map((quote) => ({ expiry: quote.expiry, strike: quote.strike, right: quote.right, bid: quote.bid, ask: quote.ask, bidSize: quote.bidSize, askSize: quote.askSize })), stale: latest.length > 0 && fresh.length === 0 };
 }

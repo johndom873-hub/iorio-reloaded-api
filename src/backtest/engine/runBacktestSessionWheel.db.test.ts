@@ -348,19 +348,20 @@ describe("a session of several symbols on one book", () => {
     expect(detail.session).toMatchObject({ status: "succeeded", symbols: ["WTB", "WTA"] });
     expectAccountToReconcile(session);
 
-    // Tuesday 7 April, the session's second day: the tickers take their turn alphabetically moved one place, WTB first.
+    // Monday 6 April, the session's first day (a sale needs the quote's bid size, not the previous session's volume, so it opens
+    // at once): the tickers take their turn alphabetically, WTA first.
     const filled = filledActionsOf(session);
-    expect(filled.filter((action) => action.tradingDate === "2026-04-07").map((action) => [action.symbol, action.kind])).toEqual([
-      ["WTB", "open_covered_call"],
+    expect(filled.filter((action) => action.tradingDate === "2026-04-06").map((action) => [action.symbol, action.kind])).toEqual([
       ["WTA", "open_covered_call"],
+      ["WTB", "open_covered_call"],
     ]);
     // Each ticker's first position: First position % of its pot, its share of the account (half, raised by the excess
     // allowance) at the look, in whole lots, short of it by less than one lot.
     const { firstPositionPct, excessAllowancePct } = defaultBacktestVolFarmerV4Settings;
-    const firstPositionBudget = dayOf(session, "2026-04-07").accountValue * 0.5 * (1 + excessAllowancePct / 100) * (firstPositionPct / 100);
+    const firstPositionBudget = dayOf(session, "2026-04-06").accountValue * 0.5 * (1 + excessAllowancePct / 100) * (firstPositionPct / 100);
     for (const symbol of ["WTA", "WTB"]) {
       const shareFills = session.fills.filter((fill) => fill.symbol === symbol && fill.instrument === "stock" && fill.side === "buy");
-      expect(shareFills.map((fill) => fill.tradingDate)).toEqual(["2026-04-07"]);
+      expect(shareFills.map((fill) => fill.tradingDate)).toEqual(["2026-04-06"]);
       const cost = shareFills.reduce((sum, fill) => sum + fill.quantity * fill.price + fill.commissionDollars, 0);
       expect(cost).toBeLessThanOrEqual(firstPositionBudget);
       expect(cost).toBeGreaterThan(firstPositionBudget - 100 * shareFills[0]!.price);

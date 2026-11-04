@@ -24,9 +24,13 @@ import type { LineUsageMeter } from "./lineUsageMeter.js";
 const bidTickTypes = new Set([1, 66]);
 const askTickTypes = new Set([2, 67]);
 const lastTickTypes = new Set([4, 68]);
+const bidSizeTickTypes = new Set([0, 69]);
+const askSizeTickTypes = new Set([3, 70]);
 const optionImpliedVolatilityTickType = 24;
 /** How long a stock asked for its IV waits for tick 24 after its two-sided quote. */
 export const impliedVolatilityGraceMs = 1_500;
+/** How long an option waits for its bid and ask sizes after its two-sided quote (Vol Farmer v4 caps a sale at the bid size); settled without them after it. */
+export const quoteSizeGraceMs = 1_000;
 
 export interface WindowContract {
   key: string;
@@ -43,6 +47,9 @@ export interface WindowQuote {
   bid: number | null;
   ask: number | null;
   last: number | null;
+  /** Contracts at the bid and the ask, options only; null when the size did not arrive before the quote settled. */
+  bidSize: number | null;
+  askSize: number | null;
   /** IBKR's 30-day implied volatility of a stock asked for it (0.35 = 35%); null otherwise or when it did not arrive. */
   impliedVolatility: number | null;
   errorCode: number | null;
@@ -85,6 +92,8 @@ interface Pending {
   bid: number | null;
   ask: number | null;
   last: number | null;
+  bidSize: number | null;
+  askSize: number | null;
   impliedVolatility: number | null;
   noDataOnASide: boolean;
   timer: ReturnType<typeof setTimeout>;
@@ -123,6 +132,7 @@ export function runRollingQuoteWindow(contracts: WindowContract[], options: Roll
       }
       pending.clear();
       options.ib.removeListener(EventName.tickPrice, onTickPrice);
+      options.ib.removeListener(EventName.tickSize, onTickSize);
       options.ib.removeListener(EventName.tickGeneric, onTickGeneric);
       options.ib.removeListener(EventName.error, onError);
       options.ib.removeListener(EventName.disconnected, onDisconnected);
@@ -143,7 +153,7 @@ export function runRollingQuoteWindow(contracts: WindowContract[], options: Roll
       else if (timedOut) outcomes.timedOut += 1;
       else if (entry.bid !== null && entry.ask !== null) outcomes.twoSided += 1;
       else outcomes.noData += 1;
-      options.onSettled(entry.contract, { bid: entry.bid, ask: entry.ask, last: entry.last, impliedVolatility: entry.impliedVolatility, errorCode, timedOut, settledAt: now() });
+      options.onSettled(entry.contract, { bid: entry.bid, ask: entry.ask, last: entry.last, bidSize: entry.bidSize, askSize: entry.askSize, impliedVolatility: entry.impliedVolatility, errorCode, timedOut, settledAt: now() });
       pump();
     }
 
@@ -152,7 +162,7 @@ export function runRollingQuoteWindow(contracts: WindowContract[], options: Roll
       while (pending.size < options.concurrency && queue.length > 0) {
         const contract = queue.shift()!;
         const reqId = options.allocateReqId();
-        const entry: Pending = { contract, bid: null, ask: null, last: null, impliedVolatility: null, noDataOnASide: false, timer: setTimeout(() => settle(reqId, null, true), options.timeoutMs), graceTimer: null };
+        const entry: Pending = { contract, bid: null, ask: null, last: null, bidSize: null, askSize: null, impliedVolatility: null, noDataOnASide: false, timer: setTimeout(() => settle(reqId, null, true), options.timeoutMs), graceTimer: null };
         pending.set(reqId, entry);
         options.meter?.subscribed(reqId);
         options.ib.reqMktData(reqId, buildIbkrContract(contract), wantsImpliedVolatility(contract) ? "106" : "", false, false);
@@ -180,11 +190,25 @@ export function runRollingQuoteWindow(contracts: WindowContract[], options: Roll
     }
 
     function settleQuotedUnlessWaitingForImpliedVolatility(reqId: number, entry: Pending): void {
+      if (entry.contract.legType === "option" && (entry.bidSize === null || entry.askSize === null)) {
+        // The sizes tick right after the prices; wait a moment for them, then settle with what arrived.
+        if (entry.graceTimer === null) entry.graceTimer = setTimeout(() => settle(reqId, null, false), quoteSizeGraceMs);
+        return;
+      }
       if (!wantsImpliedVolatility(entry.contract) || entry.impliedVolatility !== null) {
         settle(reqId, null, false);
         return;
       }
       if (entry.graceTimer === null) entry.graceTimer = setTimeout(() => settle(reqId, null, false), impliedVolatilityGraceMs);
+    }
+
+    function onTickSize(reqId: number, tickType: number | undefined, size: number | undefined): void {
+      const entry = pending.get(reqId);
+      if (!entry || entry.contract.legType !== "option" || tickType === undefined || size === undefined) return;
+      if (bidSizeTickTypes.has(tickType)) entry.bidSize = size >= 0 ? size : null;
+      else if (askSizeTickTypes.has(tickType)) entry.askSize = size >= 0 ? size : null;
+      else return;
+      if (entry.bid !== null && entry.ask !== null && entry.bidSize !== null && entry.askSize !== null) settle(reqId, null, false);
     }
 
     function onTickGeneric(reqId: number, tickType: number, value: number): void {
@@ -222,6 +246,7 @@ export function runRollingQuoteWindow(contracts: WindowContract[], options: Roll
       return;
     }
     options.ib.on(EventName.tickPrice, onTickPrice);
+    options.ib.on(EventName.tickSize, onTickSize);
     options.ib.on(EventName.tickGeneric, onTickGeneric);
     options.ib.on(EventName.error, onError);
     options.ib.once(EventName.disconnected, onDisconnected);

@@ -258,10 +258,6 @@ export interface VolFarmerV4Market {
   quotesLeftUnreadByRight?: { C: number; P: number };
   forwardAnchors: ReadonlyMap<string, BaselineForwardAnchor>;
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
-  /** Pluto only (Marcelo 2026-10-30): expiries without the previous session's volume, sold without the volume limit for the day. */
-  volumeLimitLiftedExpiries?: ReadonlySet<string>;
-  /** Pluto only: expiries whose Calls are sold without the volume limit for the day, no Call in the delta range having the volume for it. */
-  volumeLimitLiftedCallExpiries?: ReadonlySet<string>;
   /** Years from the look to today's close: a same-day expiry's time. */
   yearsToTodaysClose: number;
   /** Years from the look to an expiry's settlement: the LEAPS' time. */
@@ -578,8 +574,7 @@ export function runVolFarmerV4Turn(input: VolFarmerV4LookInput): VolFarmerV4Turn
       stockPrice,
       riskFreeRate,
       previousSessionVolumeByContract: market.previousSessionVolumeByContract,
-      ...(market.volumeLimitLiftedExpiries ? { volumeLimitLiftedExpiries: market.volumeLimitLiftedExpiries } : {}),
-      ...(market.volumeLimitLiftedCallExpiries ? { volumeLimitLiftedCallExpiries: market.volumeLimitLiftedCallExpiries } : {}),
+      capsAtBidSize: true,
       settings: { minAbsDelta: limits.minAbsDelta, maxAbsDelta: limits.maxAbsDelta, minDte: dte, maxDte: dte, maxSpreadPctOfMid: farmer.maxSpreadPctOfMid },
       spreadShareCharged: market.spreadShareCharged,
       isHeld: (contract) => limits.heldExcluded && heldContracts.has(contractKeyOf(contract)),
@@ -636,7 +631,7 @@ export function runVolFarmerV4Turn(input: VolFarmerV4LookInput): VolFarmerV4Turn
     const call = lotsTarget < 1 ? null : pickByVolume(calls, () => lotsTarget, (candidate) => candidate.volumeCap);
     if (lotsTarget >= 1) noteCommissionCapped("first", commissionCapped, call);
     if (call === null) {
-      say(`${notOpened}: no Call at or above the shares' cost ${shareCost.toFixed(2)} (${describeRejections(rejections) || "none listed"})`);
+      say(`${notOpened}: no Call at or above the shares' cost ${shareCost.toFixed(2)} (${describeRejections(rejections, "bid size") || "none listed"})`);
       return;
     }
     const lots = Math.min(lotsTarget, call.volumeCap);
@@ -701,7 +696,7 @@ export function runVolFarmerV4Turn(input: VolFarmerV4LookInput): VolFarmerV4Turn
     const call = pickByVolume(calls, () => lots, capLeft);
     noteCommissionCapped(name, commissionCapped, call);
     if (call === null) {
-      say(`${name} position: no Call ${callsSought(breakEven, "its")} (${describeRejections(rejections) || "none listed"})`);
+      say(`${name} position: no Call ${callsSought(breakEven, "its")} (${describeRejections(rejections, "bid size") || "none listed"})`);
       continue;
     }
     const contracts = Math.min(lots, capLeft(call));
@@ -747,7 +742,7 @@ export function runVolFarmerV4Turn(input: VolFarmerV4LookInput): VolFarmerV4Turn
       if (unsecured !== null) {
         book.noteCashCut?.({ order: "put", candidate: unsecured, wantedContracts: potContracts(unsecured), filledContracts: 0, unsoldContracts: Math.min(potContracts(unsecured), unsecured.volumeCap), freeCash });
         say(`no Put: ${trigger}, but the free cash (${formatWholeDollars(freeCash)}) secures no contract of the ${unsecured.strike} Put${stepNote}`);
-      } else if (put === null) say(`no Put: ${trigger}, but none qualifies at or below ${strikeCap.toFixed(2)}${stepNote} (${describeRejections(rejections) || "none listed"})`);
+      } else if (put === null) say(`no Put: ${trigger}, but none qualifies at or below ${strikeCap.toFixed(2)}${stepNote} (${describeRejections(rejections, "bid size") || "none listed"})`);
       else {
         const contracts = Math.min(wanted(put), put.volumeCap);
         if (contracts < 1) say(`no Put: ${trigger}, but the volume limit allows none`);

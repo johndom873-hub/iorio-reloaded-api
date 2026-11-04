@@ -30,13 +30,13 @@ afterAll(async () => {
 
 describe("the option quote band's tables", () => {
   it("keeps each contract's latest quote of the day, with the cycle's stock price", async () => {
-    const quote = { tickerId, tradingDateIso: todayIso, expiry: "2026-11-20", strike: 90, right: "P" as const, bid: 1.2, ask: 1.3, stockPrice: 100.5, errorCode: null, quotedAt: new Date("2026-10-20T15:00:00Z"), cycleNumber: 1 };
+    const quote = { tickerId, tradingDateIso: todayIso, expiry: "2026-11-20", strike: 90, right: "P" as const, bid: 1.2, ask: 1.3, bidSize: 40, askSize: 25, stockPrice: 100.5, errorCode: null, quotedAt: new Date("2026-10-20T15:00:00Z"), cycleNumber: 1 };
     await upsertOptionQuoteBandQuotes([quote, { ...quote, strike: 85, bid: 0.6, ask: 0.7 }]);
-    await upsertOptionQuoteBandQuotes([{ ...quote, bid: 1.1, ask: 1.2, stockPrice: 101, quotedAt: new Date("2026-10-20T15:03:00Z"), cycleNumber: 2 }]);
+    await upsertOptionQuoteBandQuotes([{ ...quote, bid: 1.1, ask: 1.2, bidSize: 40, askSize: 25, stockPrice: 101, quotedAt: new Date("2026-10-20T15:03:00Z"), cycleNumber: 2 }]);
     const quotes = await loadOptionQuoteBandQuotes(tickerId, todayIso);
     expect(quotes.sort((a, b) => a.strike - b.strike)).toEqual([
-      { expiry: "2026-11-20", strike: 85, right: "P", bid: 0.6, ask: 0.7, stockPrice: 100.5, errorCode: null, quotedAt: new Date("2026-10-20T15:00:00Z"), cycleNumber: 1 },
-      { expiry: "2026-11-20", strike: 90, right: "P", bid: 1.1, ask: 1.2, stockPrice: 101, errorCode: null, quotedAt: new Date("2026-10-20T15:03:00Z"), cycleNumber: 2 },
+      { expiry: "2026-11-20", strike: 85, right: "P", bid: 0.6, ask: 0.7, bidSize: 40, askSize: 25, stockPrice: 100.5, errorCode: null, quotedAt: new Date("2026-10-20T15:00:00Z"), cycleNumber: 1 },
+      { expiry: "2026-11-20", strike: 90, right: "P", bid: 1.1, ask: 1.2, bidSize: 40, askSize: 25, stockPrice: 101, errorCode: null, quotedAt: new Date("2026-10-20T15:03:00Z"), cycleNumber: 2 },
     ]);
     expect(await loadOptionQuoteBandQuotes(tickerId, "2026-10-19")).toEqual([]);
   });
@@ -49,15 +49,6 @@ describe("the option quote band's tables", () => {
     expect(anchors.get("2026-11-20")!.spotPrice).toBe(101);
     expect(anchors.get("2026-11-20")!.forward).toBeCloseTo(101 * Math.exp(0.04 * (31 / 365)), 6);
     expect((await defaultOptionQuoteBandPlannerDependencies.loadForwardAnchors(tickerId, "2026-10-21")).size).toBe(0);
-  });
-
-  it("reads the previous open session's volumes (Friday's on a Monday)", async () => {
-    await testDb("option_session_volumes").insert([
-      { ticker_id: tickerId, session_date: "2026-10-16", expiry: "2026-11-20", strike: 90, option_right: "P", volume: 120 },
-      { ticker_id: tickerId, session_date: "2026-10-19", expiry: "2026-11-20", strike: 90, option_right: "P", volume: 300 },
-    ]);
-    expect(await defaultOptionQuoteBandPlannerDependencies.loadPreviousSessionVolume(tickerId, "2026-10-19")).toEqual(new Map([["2026-11-20|90|P", 120]]));
-    expect(await defaultOptionQuoteBandPlannerDependencies.loadPreviousSessionVolume(tickerId, todayIso)).toEqual(new Map([["2026-11-20|90|P", 300]]));
   });
 });
 
@@ -86,7 +77,7 @@ describe("the band's finished cycles", () => {
 
   it("starts Pluto's rounds and the opening look: today's finished cycle, with an error-free quote of it for the data to be in", async () => {
     expect(await loadTodaysFinishedBandCycles(at)).toEqual([{ symbol: "CYCL", finishedAtMs: new Date("2026-10-20T15:05:40Z").getTime() }]);
-    const quote = { tickerId: cycleTickerId, tradingDateIso: todayIso, expiry: "2026-11-20", strike: 50, right: "C" as const, bid: 1, ask: 1.1, stockPrice: 49, errorCode: null, quotedAt: new Date("2026-10-20T15:04:00Z"), cycleNumber: 300 };
+    const quote = { tickerId: cycleTickerId, tradingDateIso: todayIso, expiry: "2026-11-20", strike: 50, right: "C" as const, bid: 1, ask: 1.1, bidSize: 40, askSize: 25, stockPrice: 49, errorCode: null, quotedAt: new Date("2026-10-20T15:04:00Z"), cycleNumber: 300 };
     // Only a quote from before the finished cycle: not in.
     await upsertOptionQuoteBandQuotes([quote]);
     expect(await hasTodaysBandQuotes(at)).toBe(false);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasPreviousSessionVolumeForOneContract, optionRequoteBand, selectOptionRequoteContracts, type OptionRequoteContract } from "./optionRequoteBand.js";
+import { optionRequoteBand, selectOptionRequoteContracts, type OptionRequoteContract } from "./optionRequoteBand.js";
 
 const ladderRange = { minAbsDelta: 0.05, maxAbsDelta: 0.3 };
 const spotForward = (stockPrice: number, rate: number) => (_expiry: string, years: number) => stockPrice * Math.exp(rate * years);
@@ -16,14 +16,6 @@ describe("optionRequoteBand", () => {
 
   it("never goes below 0", () => {
     expect(optionRequoteBand({ minAbsDelta: 0.01, maxAbsDelta: 0.3 }, true).minAbsDelta).toBe(0);
-  });
-});
-
-describe("hasPreviousSessionVolumeForOneContract", () => {
-  it("needs a previous-session volume of at least 5 (one contract at 20%)", () => {
-    expect(hasPreviousSessionVolumeForOneContract(5)).toBe(true);
-    expect(hasPreviousSessionVolumeForOneContract(4)).toBe(false);
-    expect(hasPreviousSessionVolumeForOneContract(null)).toBe(false);
   });
 });
 

@@ -1,9 +1,8 @@
-import type { BacktestSymbolFile, SymbolFileEndOfDayRow } from "../engine/backtestSymbolFile.js";
+import type { BacktestSymbolFile } from "../engine/backtestSymbolFile.js";
 import { noteBaselineForwardAnchors, selectBaselineCandidates, type BaselineCommissions, type BaselineForwardAnchor } from "../engine/baselineSaleSteps.js";
 import { captureLookTimeEt, lookInstantMs } from "../engine/backtestTickerInputs.js";
 import { expirySettlementInstant } from "../engine/ledger/ledgerEvents.js";
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib/commissionEstimate.js";
-import { contractKey } from "../../lib/optionContractKey.js";
 import { sessionsHeldAmong } from "../../lib/tradingSessionsHeld.js";
 
 // The Calls Vol Farmer v4 could sell on each expiry day (F5 for v4, approved by Marcelo 2026-11-01), read from the data
@@ -52,15 +51,8 @@ export interface SameDayCallDay {
   qualifying: number;
   /** F5's pick: the best of them by premium yield; null when none passes. */
   best: SameDayCall | null;
-  /** F4's L: the most lots any of them has volume for; 0 when none passes. */
+  /** F4's L: the most lots any of them has bid size for; 0 when none passes. */
   mostLotsByVolume: number;
-}
-
-export function volumeByContract(rows: readonly SymbolFileEndOfDayRow[] | null): Map<string, number> | null {
-  if (rows === null) return null;
-  const volumes = new Map<string, number>();
-  for (const row of rows) if (row.volume !== null) volumes.set(contractKey(row), row.volume);
-  return volumes;
 }
 
 /** One expiry day. `openDays`: the sessions the premium yields are annualized over (tradingSessionsHeld.ts). */
@@ -83,7 +75,9 @@ export function scanSameDayCalls(file: BacktestSymbolFile, day: SameDayCallScanD
     yearsToTodaysClose,
     stockPrice: spot,
     riskFreeRate: day.riskFreeRate,
-    previousSessionVolumeByContract: volumeByContract(day.previousDate === null ? null : file.loadEndOfDay(day.previousDate)),
+    // v4's volume limit is the bid size of the 10:00 quote (Marcelo 2026-11-05), not a share of the previous session's volume.
+    previousSessionVolumeByContract: null,
+    capsAtBidSize: true,
     settings: { minAbsDelta: settings.callMinAbsDelta, maxAbsDelta: settings.callMaxAbsDelta, minDte: 0, maxDte: 0, maxSpreadPctOfMid: settings.maxSpreadPctOfMid },
     spreadShareCharged: settings.spreadShareCharged,
     isHeld: () => false,

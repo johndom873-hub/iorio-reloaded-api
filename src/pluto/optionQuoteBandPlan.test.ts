@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import type { OptionQuoteBandQuote } from "./optionQuoteBandQuotes.js";
-import { bandQuoteOwnImpliedVolatility, expiriesWithoutPreviousSessionVolume, lastSeenImpliedVolatilities, nextListedExpiryAfter, optionQuoteBandDayUniverse, planOptionQuoteBand, type OptionQuoteBandClock } from "./optionQuoteBandPlan.js";
+import { bandQuoteOwnImpliedVolatility, lastSeenImpliedVolatilities, nextListedExpiryAfter, optionQuoteBandExpiryContracts, planOptionQuoteBand, type OptionQuoteBandClock } from "./optionQuoteBandPlan.js";
 
 const clock: OptionQuoteBandClock = { todayIso: "2026-10-20", closeMinutesEt: 16 * 60, riskFreeRate: 0.04 };
 const expiry = "2026-11-20";
@@ -14,44 +14,32 @@ const callDeltaRange = { minAbsDelta: 0.05, maxAbsDelta: 0.3 };
 /** A quote at 50% IV with the stock at `stockPrice`, the forward moved with it (100.10 × price ÷ 100). */
 function quoteAt(strike: number, right: "C" | "P", stockPrice: number, impliedVolatility = 0.5): OptionQuoteBandQuote {
   const mid = blackScholesPriceOnForward(100.1 * (stockPrice / 100), strike, years, clock.riskFreeRate, impliedVolatility, right === "C");
-  return { expiry, strike, right, bid: mid - 0.02, ask: mid + 0.02, stockPrice, errorCode: null, quotedAt: new Date("2026-10-20T15:00:00Z"), cycleNumber: 1 };
+  return { expiry, strike, right, bid: mid - 0.02, ask: mid + 0.02, bidSize: 100, askSize: 100, stockPrice, errorCode: null, quotedAt: new Date("2026-10-20T15:00:00Z"), cycleNumber: 1 };
 }
 
-describe("optionQuoteBandDayUniverse", () => {
+describe("optionQuoteBandExpiryContracts", () => {
   const chain = { expirations: ["20261020", "20261120", "20261231", "20261023"], strikesByExpiry: new Map([["20261020", [100]], ["20261120", [90, 110]], ["20261231", [100]], ["20261023", [95]]]) };
-  const volume = new Map([["2026-11-20|90|P", 5], ["2026-11-20|110|C", 4], ["2026-11-20|90|C", 500], ["2026-10-23|95|C", 40], ["2026-10-20|100|C", 900]]);
 
-  it("the ladder: keeps the 1–45 DTE expiries' contracts that the previous session's volume can sell one of (5 or more under the 20% rule)", () => {
-    // 20 Oct is 0 DTE and 31 Dec is 72 DTE: outside. Of 20 Nov: the $90 Put (5 → 1 contract) and $90 Call (500), not the $110 Call (4 → 0) or the unquoted ones; 23 Oct's $95 Call (40).
-    expect(optionQuoteBandDayUniverse({ ...chain, sessionIso: clock.todayIso, expiryRule: ladderExpiryRule, previousSessionVolumeByContract: volume })).toEqual([
+  it("keeps every strike of both rights of the expiries in the rule's range, whatever their volume", () => {
+    // 20 Oct is 0 DTE and 31 Dec is 72 DTE: outside the 1–45 DTE range; 20 Nov and 23 Oct are in, with all their contracts.
+    expect(optionQuoteBandExpiryContracts({ ...chain, sessionIso: clock.todayIso, expiryRule: ladderExpiryRule })).toEqual([
       { expiry, strike: 90, right: "C" },
       { expiry, strike: 90, right: "P" },
+      { expiry, strike: 110, right: "C" },
+      { expiry, strike: 110, right: "P" },
       { expiry: "2026-10-23", strike: 95, right: "C" },
+      { expiry: "2026-10-23", strike: 95, right: "P" },
     ]);
   });
 
-  it("Vol Farmer v2: only the next listed expiry after the session, whatever the ladder's range", () => {
+  it("Vol Farmer v4: only the next listed expiry after the session, whatever the range", () => {
     // On Tue 20 Oct: 20 Oct expires that session, so the next listed expiry is Fri 23 Oct (the chain lists it last).
-    expect(optionQuoteBandDayUniverse({ ...chain, sessionIso: clock.todayIso, expiryRule: { kind: "next_listed_expiry" }, previousSessionVolumeByContract: volume })).toEqual([{ expiry: "2026-10-23", strike: 95, right: "C" }]);
+    expect(optionQuoteBandExpiryContracts({ ...chain, sessionIso: clock.todayIso, expiryRule: { kind: "next_listed_expiry" } })).toEqual([
+      { expiry: "2026-10-23", strike: 95, right: "C" },
+      { expiry: "2026-10-23", strike: 95, right: "P" },
+    ]);
     expect(nextListedExpiryAfter(chain.expirations, "2026-10-20")).toBe("2026-10-23");
     expect(nextListedExpiryAfter(chain.expirations, "2026-12-31")).toBeNull();
-  });
-
-  it("takes an expiry the previous session's capture has no volume for whole: the 20% rule is lifted on it for the day", () => {
-    // The capture covered 20 Nov only (as for a strategy switched to 23 Oct after it): 23 Oct is taken whole, 20 Nov keeps the rule.
-    const novemberOnly = new Map([["2026-11-20|90|P", 5], ["2026-11-20|110|C", 4]]);
-    expect(optionQuoteBandDayUniverse({ ...chain, sessionIso: clock.todayIso, expiryRule: ladderExpiryRule, previousSessionVolumeByContract: novemberOnly })).toEqual([
-      { expiry, strike: 90, right: "P" },
-      { expiry: "2026-10-23", strike: 95, right: "C" },
-      { expiry: "2026-10-23", strike: 95, right: "P" },
-    ]);
-    // Nothing captured (a ticker enabled after the capture, or a failed capture): every expiry whole.
-    expect(optionQuoteBandDayUniverse({ ...chain, sessionIso: clock.todayIso, expiryRule: { kind: "next_listed_expiry" }, previousSessionVolumeByContract: null })).toEqual([
-      { expiry: "2026-10-23", strike: 95, right: "C" },
-      { expiry: "2026-10-23", strike: 95, right: "P" },
-    ]);
-    expect(expiriesWithoutPreviousSessionVolume(["2026-10-23", "2026-11-20"], novemberOnly)).toEqual(new Set(["2026-10-23"]));
-    expect(expiriesWithoutPreviousSessionVolume(["2026-10-23"], null)).toEqual(new Set(["2026-10-23"]));
   });
 });
 
@@ -95,23 +83,6 @@ describe("planOptionQuoteBand", () => {
     expect(strikesOf(later.contracts, "C")).toEqual(callStrikes.filter((strike) => callAbsDeltaAt(strike) >= 0.03 && callAbsDeltaAt(strike) <= 0.4));
     // The ladder's Puts have no |delta| range: the $60 Put (|delta| about 0.01) is quoted; the $100 Put, at the price, is not.
     expect(strikesOf(later.contracts, "P")).toEqual([60, 70, 80, 85, 90, 95]);
-  });
-
-  it("quotes the Calls the volume rule left out when no Call in the delta range has the volume for one contract, and only then", () => {
-    const farCall = { expiry, strike: 160, right: "C" as const };
-    const nearCalls = [100, 105, 110, 120].map((strike) => ({ expiry, strike, right: "C" as const }));
-    const puts = universe.filter((contract) => contract.right === "P");
-    const quoted = (contracts: { strike: number; right: "C" | "P" }[]) => strikesOf(contracts, "C");
-    // DRAM on 4 Nov: the price fell away from yesterday's volume, which sits on strikes far above it.
-    const gapped = planOptionQuoteBand({ universe: [...puts, farCall], callsWithoutVolume: nearCalls, todaysQuotes: [quoteAt(60, "P", 100)], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 100, callDeltaRange });
-    expect(quoted(gapped.contracts)).toEqual([100, 105, 110, 120].filter((strike) => callAbsDeltaAt(strike) >= 0.03 && callAbsDeltaAt(strike) <= 0.4));
-    expect(quoted(gapped.contracts).length).toBeGreaterThan(0);
-    // A Call with the volume inside the range keeps the rule: the ones without it stay out.
-    const covered = planOptionQuoteBand({ universe: [...puts, { expiry, strike: 120, right: "C" as const }], callsWithoutVolume: nearCalls.filter((contract) => contract.strike !== 120), todaysQuotes: [quoteAt(60, "P", 100)], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 100, callDeltaRange });
-    expect(quoted(covered.contracts)).toEqual([120]);
-    // A Call whose delta is not known yet (never quoted today) may be inside the range: no lift until it has been quoted.
-    const unknown = planOptionQuoteBand({ universe: [...puts, { expiry, strike: 120, right: "C" as const }], callsWithoutVolume: nearCalls.filter((contract) => contract.strike !== 120), todaysQuotes: [quoteAt(60, "P", 100)], overnightImpliedVolatilityByContract: new Map(), anchors, clock, now, stockPrice: 100, callDeltaRange });
-    expect(quoted(unknown.contracts)).toEqual([120]);
   });
 
   it("quotes every Call whose IV is unknown and every Put below the price, and follows the live price", () => {

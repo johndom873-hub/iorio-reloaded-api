@@ -64,6 +64,9 @@ export interface QuoteLoopOptionQuote {
   bid: number | null;
   ask: number | null;
   last: number | null;
+  /** Contracts at the bid and the ask when the quote settled; null when the size did not arrive. */
+  bidSize: number | null;
+  askSize: number | null;
   errorCode: number | null;
   quotedAt: Date;
 }
@@ -330,7 +333,7 @@ export class MarketQuoteLoop {
       onSettled: (windowContract, windowQuote) => {
         const contract = contractsByKey.get(windowContract.key);
         if (!contract) return;
-        const quote: QuoteLoopOptionQuote = { contract, bid: windowQuote.bid, ask: windowQuote.ask, last: windowQuote.last, errorCode: windowQuote.errorCode, quotedAt: windowQuote.settledAt };
+        const quote: QuoteLoopOptionQuote = { contract, bid: windowQuote.bid, ask: windowQuote.ask, last: windowQuote.last, bidSize: windowQuote.bidSize, askSize: windowQuote.askSize, errorCode: windowQuote.errorCode, quotedAt: windowQuote.settledAt };
         for (const consumer of consumersByKey.get(windowContract.key) ?? []) {
           quotesByConsumer.get(consumer)!.push(quote);
           if (!consumer.onQuote) continue;

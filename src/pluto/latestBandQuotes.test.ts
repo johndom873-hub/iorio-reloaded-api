@@ -11,7 +11,7 @@ const years = yearsBetweenIsoDates(todayIso, expiry);
 /** A band quote priced at 50% IV with the stock at $50, 4% wide. */
 function bandQuote(strike: number, right: "C" | "P", cycleNumber = 7): OptionQuoteBandQuote {
   const mid = blackScholesPriceOnForward(50 * Math.exp(0.04 * years), strike, years, 0.04, 0.5, right === "C");
-  return { expiry, strike, right, bid: Math.round(mid * 0.98 * 100) / 100, ask: Math.round(mid * 1.02 * 100) / 100, stockPrice: 50, errorCode: null, quotedAt: now, cycleNumber };
+  return { expiry, strike, right, bid: Math.round(mid * 0.98 * 100) / 100, ask: Math.round(mid * 1.02 * 100) / 100, bidSize: 100, askSize: 100, stockPrice: 50, errorCode: null, quotedAt: now, cycleNumber };
 }
 const bandQuotes = [50, 52.5, 55, 57.5, 60, 62.5].flatMap((strike) => [bandQuote(strike, "C"), bandQuote(100 - strike, "P")]);
 /** The cycle the quotes above belong to: it began quoting 30 seconds before they were stamped. */

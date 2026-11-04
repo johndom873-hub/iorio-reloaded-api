@@ -62,7 +62,7 @@ export function syntheticOptionQuotes(todayIso: string, stockPrice: number, expi
         const halfSpread = Math.max(0.01, price * 0.02);
         const bid = Math.round((price - halfSpread) * 100) / 100;
         const ask = Math.round((price + halfSpread) * 100) / 100;
-        quotes.push({ expiry, strike, right, bid: bid > 0 ? bid : 0, ask: Math.max(ask, 0.01), bidSize: 10, askSize: 10 });
+        quotes.push({ expiry, strike, right, bid: bid > 0 ? bid : 0, ask: Math.max(ask, 0.01), bidSize: 10_000, askSize: 10_000 });
       }
     }
   }

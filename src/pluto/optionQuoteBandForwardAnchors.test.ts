@@ -4,7 +4,7 @@ import { forwardAnchorsFromBandQuotes } from "./optionQuoteBandForwardAnchors.js
 
 const clock = { todayIso: "2026-10-27", yearsToTodaysClose: 0.0005, riskFreeRate: 0.04 };
 const at = (minute: number) => new Date(`2026-10-27T15:${String(minute).padStart(2, "0")}:00Z`);
-const quote = (expiry: string, strike: number, right: "C" | "P", bid: number, ask: number, stockPrice: number, minute = 0, cycleNumber = 1): OptionQuoteBandQuote => ({ expiry, strike, right, bid, ask, stockPrice, errorCode: null, quotedAt: at(minute), cycleNumber });
+const quote = (expiry: string, strike: number, right: "C" | "P", bid: number, ask: number, stockPrice: number, minute = 0, cycleNumber = 1): OptionQuoteBandQuote => ({ expiry, strike, right, bid, ask, bidSize: 100, askSize: 100, stockPrice, errorCode: null, quotedAt: at(minute), cycleNumber });
 
 describe("forwardAnchorsFromBandQuotes", () => {
   it("takes put-call parity where the band has a Call and a Put at a strike near the money", () => {

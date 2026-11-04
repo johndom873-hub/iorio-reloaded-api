@@ -115,10 +115,11 @@ export interface BaselineCandidateInput {
   riskFreeRate: number;
   /** The previous session's volume by contractKey; null when unknown (nothing passes the volume limit). */
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
-  /** Pluto only (Marcelo 2026-10-30): expiries without the previous session's volume, on which the volume limit is lifted for the day; the lab always has the volumes. */
-  volumeLimitLiftedExpiries?: ReadonlySet<string>;
-  /** Pluto only: expiries whose Calls (not Puts) are sold without the volume limit for the day, no Call in the delta range having the volume for it. */
-  volumeLimitLiftedCallExpiries?: ReadonlySet<string>;
+  /**
+   * Vol Farmer v4 (Marcelo 2026-11-05): a contract's volume cap is the bid size of its quote at the look, in place of 20% of the previous
+   * session's volume; a quote with no bid size, or a size of 0, allows none. Example: a bid of 211 contracts allows a sale of up to 211.
+   */
+  capsAtBidSize?: boolean;
   settings: Pick<BacktestBaselineSettings, "minAbsDelta" | "maxAbsDelta" | "minDte" | "maxDte" | "maxSpreadPctOfMid">;
   /** λ: the share of the half-spread a fill gives up. */
   spreadShareCharged: number;
@@ -225,7 +226,7 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
     const ask = quote.ask!;
     const mid = (bid + ask) / 2;
     const volume = input.previousSessionVolumeByContract?.get(contractKey(quote)) ?? null;
-    const volumeCap = input.volumeLimitLiftedExpiries?.has(quote.expiry) || (isCall && input.volumeLimitLiftedCallExpiries?.has(quote.expiry)) ? Number.POSITIVE_INFINITY : volume === null ? 0 : Math.floor(volume * baselineMaxVolumeShare);
+    const volumeCap = input.capsAtBidSize ? Math.floor(quote.bidSize ?? 0) : volume === null ? 0 : Math.floor(volume * baselineMaxVolumeShare);
     if (volumeCap < 1) {
       rejections.tooLittleVolume++;
       continue;
@@ -285,8 +286,8 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
 }
 
 /** "spread 40, volume 12": the rules that left contracts out, most first. */
-export function describeRejections(rejections: BaselineRejections): string {
-  const labels: Record<keyof BaselineRejections, string> = { outsideExpiryRange: "expiry", noUsableQuote: "quote", spreadTooWide: "spread", tooLittleVolume: "volume", noImpliedVolatility: "IV", outsideDeltaRange: "delta", noTimeValue: "time value", alreadyHeld: "held", belowCost: "below cost", aboveCeiling: "above ceiling", belowMinimumYield: "yield", spansEarnings: "earnings", noForecast: "no forecast", belowVolatilityEdge: "IV not above forecast", commissionOverCap: "commission over cap" };
+export function describeRejections(rejections: BaselineRejections, volumeRuleLabel = "volume"): string {
+  const labels: Record<keyof BaselineRejections, string> = { outsideExpiryRange: "expiry", noUsableQuote: "quote", spreadTooWide: "spread", tooLittleVolume: volumeRuleLabel, noImpliedVolatility: "IV", outsideDeltaRange: "delta", noTimeValue: "time value", alreadyHeld: "held", belowCost: "below cost", aboveCeiling: "above ceiling", belowMinimumYield: "yield", spansEarnings: "earnings", noForecast: "no forecast", belowVolatilityEdge: "IV not above forecast", commissionOverCap: "commission over cap" };
   return (Object.entries(rejections) as [keyof BaselineRejections, number][])
     .filter(([, count]) => count > 0)
     .sort(([, a], [, b]) => b - a)

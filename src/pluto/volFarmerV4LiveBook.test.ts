@@ -43,7 +43,7 @@ const leg = (id: string, fields: Partial<PositionFigures["legs"][number]>): Posi
 function quotesAt(stockPrice: number, expiry: string, years: number, right: "C" | "P"): SymbolFileQuote[] {
   return Array.from({ length: 101 }, (_, index) => 40 + index).map((strike) => {
     const mid = blackScholesPriceOnForward(stockPrice * Math.exp(0.04 * years), strike, years, 0.04, 0.5, right === "C");
-    return { expiry, strike, right, bid: Math.round(mid * 0.98 * 10_000) / 10_000, ask: Math.round(mid * 1.02 * 10_000) / 10_000, bidSize: null, askSize: null };
+    return { expiry, strike, right, bid: Math.round(mid * 0.98 * 10_000) / 10_000, ask: Math.round(mid * 1.02 * 10_000) / 10_000, bidSize: 1_000, askSize: 1_000 };
   });
 }
 

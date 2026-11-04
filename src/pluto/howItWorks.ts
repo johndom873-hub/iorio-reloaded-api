@@ -1,4 +1,4 @@
-import { baselineMaxVolumeShare, baselineMinimumBid } from "../backtest/engine/baselineSaleSteps.js";
+import { baselineMinimumBid } from "../backtest/engine/baselineSaleSteps.js";
 import { volFarmerV4ImpliedMoveStep, volFarmerV4LeapsBudget, volFarmerV4PutStrikeCapOf, volFarmerV4CallMaxCommissionShareOfPremium } from "../backtest/engine/volFarmerV4Steps.js";
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { regularCloseEt } from "../lib/marketSessionStatus.js";
@@ -59,12 +59,11 @@ export interface PlutoHowItWorks {
     tickerCooldownMinutes: number;
   };
   volFarmerV4: {
-    /** The Calls' |delta| range, spread limit and bid minimum, and the share of the previous session's volume an order may take. */
+    /** The Calls' |delta| range, spread limit and bid minimum; a sale is also capped at the bid size of its quote (no number to quote). */
     callMinAbsDelta: number;
     callMaxAbsDelta: number;
     maxSpreadPctOfMid: number;
     minimumBid: number;
-    maxVolumeSharePct: number;
     /** No Call is sold whose commission is more than this % of its premium. */
     callMaxCommissionPctOfPremium: number;
     /** % of the pot the first position's shares are bought with; the Puts sell on the rest. */
@@ -186,7 +185,6 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       callMaxAbsDelta: settings.volFarmerV4CallMaxAbsDelta,
       maxSpreadPctOfMid: settings.volFarmerV4MaxSpreadPctOfMid,
       minimumBid: baselineMinimumBid,
-      maxVolumeSharePct: percent(baselineMaxVolumeShare),
       callMaxCommissionPctOfPremium: percent(volFarmerV4CallMaxCommissionShareOfPremium),
       firstPositionPct: settings.volFarmerV4FirstPositionPct,
       putsStartCallYieldPct: settings.volFarmerV4PutsStartCallYieldPct,

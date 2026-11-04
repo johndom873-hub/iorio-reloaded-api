@@ -17,7 +17,7 @@ function dependencies(windows: WindowContract[][], stop: () => void): MarketQuot
     runQuoteWindow: async (contracts: WindowContract[], options: RollingQuoteWindowOptions) => {
       windows.push(contracts);
       for (const contract of contracts) {
-        options.onSettled(contract, { bid: contract.legType === "stock" ? 99.9 : 1, ask: contract.legType === "stock" ? 100.1 : 1.1, last: contract.legType === "stock" ? 100 : null, impliedVolatility: contract.withImpliedVolatility ? 0.3 : null, errorCode: null, timedOut: false, settledAt: now });
+        options.onSettled(contract, { bid: contract.legType === "stock" ? 99.9 : 1, ask: contract.legType === "stock" ? 100.1 : 1.1, last: contract.legType === "stock" ? 100 : null, bidSize: null, askSize: null, impliedVolatility: contract.withImpliedVolatility ? 0.3 : null, errorCode: null, timedOut: false, settledAt: now });
       }
       return { settled: contracts.length, disconnected: false, aborted: false };
     },

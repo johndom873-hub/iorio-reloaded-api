@@ -1,7 +1,6 @@
 import { blackScholesDelta, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import { daysToExpiry } from "../lib/optionContractLabel.js";
 import { contractKey } from "../lib/optionContractKey.js";
-import { baselineMaxVolumeShare } from "../backtest/engine/baselineSaleSteps.js";
 
 // Which of a ticker's contracts to quote at a look (Marcelo 2026-10-15, design: the "follow the delta band" rule):
 // the Calls whose delta at the look's price, from each contract's last-seen implied volatility, is inside the strategy's
@@ -27,11 +26,6 @@ export function optionRequoteBand(callDeltaRange: OptionRequoteBand, firstLookOf
   const below = firstLookOfDay ? 0.03 : 0.02;
   const above = firstLookOfDay ? 0.15 : 0.1;
   return { minAbsDelta: Math.max(0, callDeltaRange.minAbsDelta - below), maxAbsDelta: callDeltaRange.maxAbsDelta + above };
-}
-
-/** Enough previous-session volume for one contract under the 20% rule (5 or more). */
-export function hasPreviousSessionVolumeForOneContract(previousSessionVolume: number | null): boolean {
-  return previousSessionVolume !== null && Math.floor(previousSessionVolume * baselineMaxVolumeShare) >= 1;
 }
 
 export interface OptionRequoteContract {

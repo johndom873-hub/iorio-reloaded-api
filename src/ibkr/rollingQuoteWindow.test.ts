@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type { IBApi } from "@stoqey/ib";
 import { EventName } from "@stoqey/ib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { impliedVolatilityGraceMs, runRollingQuoteWindow, type WindowContract, type WindowQuote } from "./rollingQuoteWindow.js";
+import { impliedVolatilityGraceMs, quoteSizeGraceMs, runRollingQuoteWindow, type WindowContract, type WindowQuote } from "./rollingQuoteWindow.js";
 
 class FakeIb extends EventEmitter {
   reqMktData = vi.fn();
@@ -25,6 +25,12 @@ function harness(contracts: WindowContract[], concurrency: number, timeoutMs = 4
   return { ib, settled, abort, result };
 }
 
+/** An option's bid and ask sizes, as IBKR ticks them right after the prices (tick types 0 and 3). */
+const emitSizes = (ib: FakeIb, reqId: number, bidSize = 10, askSize = 20) => {
+  ib.emit(EventName.tickSize, reqId, 0, bidSize);
+  ib.emit(EventName.tickSize, reqId, 3, askSize);
+};
+
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
@@ -41,6 +47,7 @@ describe("runRollingQuoteWindow", () => {
     expect(settled[0]).toMatchObject({ contract: stockWithIv, quote: { bid: 49.9, ask: 50.1, impliedVolatility: 0.42 } });
     ib.emit(EventName.tickPrice, ib.reqIdAt(1), 1, 1, {});
     ib.emit(EventName.tickPrice, ib.reqIdAt(1), 2, 1.1, {});
+    emitSizes(ib, ib.reqIdAt(1));
     await expect(result).resolves.toMatchObject({ settled: 2 });
     expect(settled[1]!.quote.impliedVolatility).toBeNull();
     expect(ib.listenerCount(EventName.tickGeneric)).toBe(0);
@@ -57,11 +64,42 @@ describe("runRollingQuoteWindow", () => {
     expect(settled[0]!.quote).toMatchObject({ bid: 49.9, ask: 50.1, impliedVolatility: null, timedOut: false });
   });
 
+  it("waits for an option's bid and ask sizes after its two-sided quote, and reports them (sizes before the second price count too)", async () => {
+    const { ib, settled, result } = harness([option(90), option(95)], 2);
+    ib.emit(EventName.tickPrice, ib.reqIdAt(0), 1, 1.1, {});
+    ib.emit(EventName.tickPrice, ib.reqIdAt(0), 2, 1.2, {});
+    expect(settled).toHaveLength(0); // two-sided, still waiting for the sizes
+    ib.emit(EventName.tickSize, ib.reqIdAt(0), 0, 211);
+    expect(settled).toHaveLength(0);
+    ib.emit(EventName.tickSize, ib.reqIdAt(0), 3, 93);
+    expect(settled[0]).toMatchObject({ contract: option(90), quote: { bid: 1.1, ask: 1.2, bidSize: 211, askSize: 93, timedOut: false } });
+    ib.emit(EventName.tickSize, ib.reqIdAt(1), 69, 4); // a delayed bid size
+    ib.emit(EventName.tickSize, ib.reqIdAt(1), 70, 359);
+    ib.emit(EventName.tickPrice, ib.reqIdAt(1), 1, 0.08, {});
+    ib.emit(EventName.tickPrice, ib.reqIdAt(1), 2, 0.09, {});
+    expect(settled[1]).toMatchObject({ quote: { bidSize: 4, askSize: 359 } });
+    await expect(result).resolves.toMatchObject({ settled: 2, outcomes: { twoSided: 2 } });
+    expect(ib.listenerCount(EventName.tickSize)).toBe(0);
+  });
+
+  it("settles an option without its sizes once the grace after its two-sided quote has passed, the sizes null", async () => {
+    const { ib, settled, result } = harness([option(90)], 1);
+    ib.emit(EventName.tickPrice, ib.reqIdAt(0), 1, 1.1, {});
+    ib.emit(EventName.tickPrice, ib.reqIdAt(0), 2, 1.2, {});
+    ib.emit(EventName.tickSize, ib.reqIdAt(0), 0, 50); // the ask size never comes
+    await vi.advanceTimersByTimeAsync(quoteSizeGraceMs - 1);
+    expect(settled).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toMatchObject({ settled: 1, outcomes: { twoSided: 1 } });
+    expect(settled[0]!.quote).toMatchObject({ bid: 1.1, ask: 1.2, bidSize: 50, askSize: null, timedOut: false });
+  });
+
   it("keeps at most `concurrency` lines open and refills a slot the moment a contract settles", async () => {
     const { ib, settled, result } = harness([option(90), option(95), option(100), stock], 2);
     expect(ib.reqMktData).toHaveBeenCalledTimes(2);
     ib.emit(EventName.tickPrice, ib.reqIdAt(0), 1, 1.1, {});
     ib.emit(EventName.tickPrice, ib.reqIdAt(0), 2, 1.2, {});
+    emitSizes(ib, ib.reqIdAt(0));
     expect(ib.cancelMktData).toHaveBeenCalledWith(ib.reqIdAt(0));
     expect(ib.reqMktData).toHaveBeenCalledTimes(3); // slot refilled immediately
     expect(settled[0]).toMatchObject({ contract: option(90), quote: { bid: 1.1, ask: 1.2, errorCode: null, timedOut: false } });
@@ -69,6 +107,7 @@ describe("runRollingQuoteWindow", () => {
       ib.emit(EventName.tickPrice, ib.reqIdAt(index), 4, 5, {});
       ib.emit(EventName.tickPrice, ib.reqIdAt(index), 1, 4.9, {});
       ib.emit(EventName.tickPrice, ib.reqIdAt(index), 2, 5.1, {});
+      emitSizes(ib, ib.reqIdAt(index));
     }
     await expect(result).resolves.toEqual({ settled: 4, disconnected: false, aborted: false, outcomes: { twoSided: 4, noData: 0, errored: 0, timedOut: 0 } });
     expect(settled.map((entry) => entry.contract.key)).toEqual(["t1|2026-10-16|90|P", "t1|2026-10-16|95|P", "t1|2026-10-16|100|P", "t1|stock"]);
@@ -123,6 +162,7 @@ describe("runRollingQuoteWindow", () => {
     expect(meter.subscribed).toHaveBeenCalledWith(100);
     ib.emit(EventName.tickPrice, 100, 1, 1.1, {});
     ib.emit(EventName.tickPrice, 100, 2, 1.2, {});
+    emitSizes(ib, 100);
     expect(meter.answered).toHaveBeenCalledWith(100);
     expect(meter.released).toHaveBeenCalledWith(100);
     expect(meter.subscribed).toHaveBeenCalledWith(101);

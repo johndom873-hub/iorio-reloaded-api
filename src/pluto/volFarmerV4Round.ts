@@ -32,9 +32,7 @@ import { isLastSessionBeforeWeekend } from "../lib/tradingWeek.js";
 import { loadInFlightNotionals, loadInFlightNotionalsBySymbol, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
 import { executePlutoOrder, watchPlutoOrder, type ExecuteInput } from "./executor.js";
 import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
-import { contractKey } from "../lib/optionContractKey.js";
-import { hasPreviousSessionVolumeForOneContract } from "./optionRequoteBand.js";
-import { expiriesWithoutPreviousSessionVolume, nextListedExpiryAfter, optionQuoteBandDayUniverse, volFarmerV4ExpiryRule } from "./optionQuoteBandPlan.js";
+import { nextListedExpiryAfter, optionQuoteBandExpiryContracts, volFarmerV4ExpiryRule } from "./optionQuoteBandPlan.js";
 import { loadFinishedOptionQuoteBandCycle, loadOptionQuoteBandQuotes } from "./optionQuoteBandQuotes.js";
 import { latestCycleQuotes } from "./latestBandQuotes.js";
 import { loadOpenPositionFigures } from "./openPositionFigures.js";
@@ -95,18 +93,12 @@ export function volFarmerV4SoldExpiry(expirations: readonly string[], todayIso: 
   return expirations.includes(todayIso.replaceAll("-", "")) ? todayIso : null;
 }
 
-/**
- * Why the option quote band has no Call of the expiry v4 sells (it quotes that expiry, optionQuoteBandPlan.ts). An expiry
- * without the previous session's volume is quoted whole (the 20% rule is lifted on it), so only a captured expiry can lack
- * a Call that traded enough. Example: a 30 Oct (2DTE) Call that traded 4 contracts the day before is under the 5 one
- * contract needs.
- */
+/** Why the option quote band has no Call of the expiry v4 sells (it quotes that expiry, optionQuoteBandPlan.ts). */
 export function volFarmerV4NoCallQuotedReason(input: {
   todayIso: string;
   /** The stored chain's expiries, YYYYMMDD. */
   expirations: readonly string[];
   strikesByExpiry: ReadonlyMap<string, readonly number[]>;
-  previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
   /** Whether the band has finished a cycle on the ticker today. */
   bandCycleFinished: boolean;
   optionsExpiry: BacktestVolFarmerV3Settings["optionsExpiry"];
@@ -114,8 +106,8 @@ export function volFarmerV4NoCallQuotedReason(input: {
   const soldExpiry = volFarmerV4SoldExpiry(input.expirations, input.todayIso, input.optionsExpiry);
   if (soldExpiry === null) return input.optionsExpiry === "next" ? "no Call expiry listed after today" : "no Call expiry ends today";
   const expiry = describeExpiry(soldExpiry, input.todayIso);
-  const universe = optionQuoteBandDayUniverse({ expirations: input.expirations, strikesByExpiry: input.strikesByExpiry, sessionIso: input.todayIso, expiryRule: volFarmerV4ExpiryRule({ volFarmerV4OptionsExpiry: input.optionsExpiry }), previousSessionVolumeByContract: input.previousSessionVolumeByContract });
-  if (!universe.some((contract) => contract.right === "C")) return `no ${expiry} Call traded enough in the previous session to sell one (the 20% volume rule needs a volume of 5 or more)`;
+  const universe = optionQuoteBandExpiryContracts({ expirations: input.expirations, strikesByExpiry: input.strikesByExpiry, sessionIso: input.todayIso, expiryRule: volFarmerV4ExpiryRule({ volFarmerV4OptionsExpiry: input.optionsExpiry }) });
+  if (!universe.some((contract) => contract.right === "C")) return `no ${expiry} Call strike is listed in the stored chain`;
   if (!input.bandCycleFinished) return `no ${expiry} option is quoted yet today`;
   return `no ${expiry} Call is near v4's Call |delta| range at this price, so none is quoted`;
 }
@@ -391,13 +383,12 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   }
 
   // 3. The market and the book at this round.
-  const [prices, previousClose, bandQuotes, bandCycle, forwardAnchors, previousSessionVolumeByContract, stepImpliedVolatility, chain, inFlight, tickerExposure] = await Promise.all([
+  const [prices, previousClose, bandQuotes, bandCycle, forwardAnchors, stepImpliedVolatility, chain, inFlight, tickerExposure] = await Promise.all([
     fetchPricesPoolFirst([{ key: "stock", legType: "stock", symbol }]),
     loadPreviousClose(tickerId, clock.todayIso),
     loadOptionQuoteBandQuotes(tickerId, clock.todayIso),
     loadFinishedOptionQuoteBandCycle(tickerId, clock.todayIso),
     defaultOptionQuoteBandPlannerDependencies.loadForwardAnchors(tickerId, clock.todayIso),
-    defaultOptionQuoteBandPlannerDependencies.loadPreviousSessionVolume(tickerId, clock.todayIso),
     loadVolFarmerV4StepImpliedVolatility(tickerId, clock.todayIso),
     loadStoredOptionChain(tickerId),
     loadInFlightNotionals(symbol),
@@ -461,17 +452,11 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
     .filter((expiry) => expiry >= clock.todayIso)
     .sort();
   const { farmer, v2, v3 } = volFarmerV4RulesOf(settings, ticker);
-  // The expiry v4 sells, without the previous session's volume: the 20% volume rule is lifted on it for the day.
   const soldExpiry = volFarmerV4SoldExpiry(chain.expirations, clock.todayIso, v3.optionsExpiry);
-  const volumeLimitLiftedExpiries = expiriesWithoutPreviousSessionVolume(soldExpiry === null ? [] : [soldExpiry], previousSessionVolumeByContract);
-  if (pass === "cycles_calls_puts" && soldExpiry !== null && volumeLimitLiftedExpiries.has(soldExpiry)) note(`no previous-session volume for ${describeExpiry(soldExpiry, clock.todayIso)}: the 20% volume rule is off for it today`);
-  // A Call quoted without the volume for one contract (the quote loop quotes them only when no Call in the delta range has it) lifts the rule on the sold expiry's Calls.
-  const callsLiftedExpiries = new Set(soldExpiry !== null && !volumeLimitLiftedExpiries.has(soldExpiry) && quotes.some((quote) => quote.right === "C" && quote.expiry === soldExpiry && !hasPreviousSessionVolumeForOneContract(previousSessionVolumeByContract?.get(contractKey(quote)) ?? null)) ? [soldExpiry] : []);
-  if (pass === "cycles_calls_puts" && soldExpiry !== null && callsLiftedExpiries.has(soldExpiry)) note(`no Call in the delta range had the volume yesterday: the 20% volume rule is off for the Calls of ${describeExpiry(soldExpiry, clock.todayIso)} today`);
   const soldExpiryCallQuoted = soldExpiry !== null && quotes.some((quote) => quote.right === "C" && quote.expiry === soldExpiry);
   const noCallQuotedReason = soldExpiryCallQuoted
     ? undefined
-    : volFarmerV4NoCallQuotedReason({ todayIso: clock.todayIso, expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, previousSessionVolumeByContract, bandCycleFinished: bandCycle !== null, optionsExpiry: v3.optionsExpiry });
+    : volFarmerV4NoCallQuotedReason({ todayIso: clock.todayIso, expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, bandCycleFinished: bandCycle !== null, optionsExpiry: v3.optionsExpiry });
   // On an expiry day the steps sell on it even before (or without) a Call of it quoted, as the lab's day does; they word
   // the Calls they find none of, and this says why.
   if (pass === "cycles_calls_puts" && v3.optionsExpiry === "today" && soldExpiry !== null && noCallQuotedReason !== undefined) note(noCallQuotedReason);
@@ -482,9 +467,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
     riskFreeRate: clock.riskFreeRate,
     quotes,
     forwardAnchors,
-    previousSessionVolumeByContract,
-    volumeLimitLiftedExpiries,
-    volumeLimitLiftedCallExpiries: callsLiftedExpiries,
+    previousSessionVolumeByContract: null,
     yearsToTodaysClose: yearsToSessionClose(now, clock.closeMinutesEt),
     yearsToExpiry: (expiry) => yearsBetweenIsoDates(clock.todayIso, expiry),
     leapsCallQuotes: {

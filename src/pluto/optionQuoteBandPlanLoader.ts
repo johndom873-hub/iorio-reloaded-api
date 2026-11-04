@@ -7,7 +7,7 @@ import { addCalendarDays } from "../lib/calendarDays.js";
 import type { MarketQuoteConsumer } from "../lib/marketQuoteLoop.js";
 import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { loadOptionQuoteBandQuotes, recordFinishedOptionQuoteBandCycles, upsertOptionQuoteBandQuotes, type OptionQuoteBandCycleWrite, type OptionQuoteBandQuote, type OptionQuoteBandQuoteWrite } from "./optionQuoteBandQuotes.js";
-import { optionQuoteBandCallsWithoutVolume, optionQuoteBandDayUniverse, planOptionQuoteBand, volFarmerV4ExpiryRule, type OptionQuoteBandExpiryRule, type OptionQuoteBandPlan, type OptionQuoteBandClock, type OptionQuoteBandScope, type OptionQuoteBandUniverseContract } from "./optionQuoteBandPlan.js";
+import { optionQuoteBandExpiryContracts, planOptionQuoteBand, volFarmerV4ExpiryRule, type OptionQuoteBandExpiryRule, type OptionQuoteBandPlan, type OptionQuoteBandClock, type OptionQuoteBandScope, type OptionQuoteBandUniverseContract } from "./optionQuoteBandPlan.js";
 import { forwardAnchorsFromBandQuotes } from "./optionQuoteBandForwardAnchors.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState } from "./stateStore.js";
@@ -36,8 +36,6 @@ export interface OptionQuoteBandPlanner {
 
 interface TickerDay {
   universe: OptionQuoteBandUniverseContract[];
-  /** The Calls the 20% volume rule left out: quoted on a day no Call in the delta range has the volume for it. */
-  callsWithoutVolume: OptionQuoteBandUniverseContract[];
   overnightImpliedVolatilityByContract: Map<string, number>;
   /** Empty until the band has quotes today (read again each cycle until then). */
   anchors: Map<string, BaselineForwardAnchor>;
@@ -52,7 +50,6 @@ export interface OptionQuoteBandPlannerDependencies {
   loadPaused(): Promise<boolean>;
   loadEnabledTickers(): Promise<PlutoTickerSettings[]>;
   loadChain(tickerId: string): Promise<StoredOptionChain>;
-  loadPreviousSessionVolume(tickerId: string, tradingDateIso: string): Promise<Map<string, number> | null>;
   loadOvernightImpliedVolatility(tickerId: string, tradingDateIso: string): Promise<Map<string, number>>;
   /** Today's forwards by expiry from the band's own quotes (forward and the stock price at the quote); empty before the band has quotes. */
   loadForwardAnchors(tickerId: string, tradingDateIso: string): Promise<Map<string, BaselineForwardAnchor>>;
@@ -65,11 +62,6 @@ export const defaultOptionQuoteBandPlannerDependencies: OptionQuoteBandPlannerDe
   loadPaused: async () => (await loadPlutoState()).paused,
   loadEnabledTickers: () => loadEnabledPlutoTickerSettings(),
   loadChain: loadStoredOptionChain,
-  loadPreviousSessionVolume: async (tickerId, tradingDateIso) => {
-    const openDays = await loadOpenDaysBetween(addCalendarDays(tradingDateIso, -14), addCalendarDays(tradingDateIso, -1));
-    const previousSession = openDays[openDays.length - 1];
-    return previousSession === undefined ? null : loadSessionVolumeByContract(tickerId, previousSession);
-  },
   loadOvernightImpliedVolatility: (tickerId, tradingDateIso) => loadLastSeenImpliedVolatilityByContract(tickerId, tradingDateIso),
   loadForwardAnchors: async (tickerId, tradingDateIso) => {
     const [quotes, sessions, riskFreeRate] = await Promise.all([loadOptionQuoteBandQuotes(tickerId, tradingDateIso), loadTradingSessionsBetween(tradingDateIso, tradingDateIso), getRiskFreeRate()]);
@@ -103,16 +95,13 @@ export function createOptionQuoteBandPlanner(dependencies: OptionQuoteBandPlanne
       cached.callDeltaRange = scope.callDeltaRange;
       return cached;
     }
-    const [chain, volume, overnight, anchors] = await Promise.all([
+    const [chain, overnight, anchors] = await Promise.all([
       dependencies.loadChain(ticker.tickerId),
-      dependencies.loadPreviousSessionVolume(ticker.tickerId, tradingDateIso),
       dependencies.loadOvernightImpliedVolatility(ticker.tickerId, tradingDateIso),
       dependencies.loadForwardAnchors(ticker.tickerId, tradingDateIso),
     ]);
-    // An expiry without the previous session's volume is quoted whole: the 20% rule is lifted on it for the day.
-    const universeInput = { expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, sessionIso: tradingDateIso, expiryRule: scope.expiryRule, previousSessionVolumeByContract: volume };
-    const universe = optionQuoteBandDayUniverse(universeInput);
-    const entry: TickerDay = { universe, callsWithoutVolume: optionQuoteBandCallsWithoutVolume(universeInput), overnightImpliedVolatilityByContract: overnight, anchors, expiryRule: scope.expiryRule, callDeltaRange: scope.callDeltaRange };
+    const universe = optionQuoteBandExpiryContracts({ expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, sessionIso: tradingDateIso, expiryRule: scope.expiryRule });
+    const entry: TickerDay = { universe, overnightImpliedVolatilityByContract: overnight, anchors, expiryRule: scope.expiryRule, callDeltaRange: scope.callDeltaRange };
     day!.byTicker.set(ticker.tickerId, entry);
     return entry;
   };
@@ -174,7 +163,7 @@ export function createOptionQuoteBandConsumer(
       return [...plans.values()].flatMap((entry) => entry.plan.contracts.map((contract) => ({ tickerId: entry.tickerId, symbol: entry.symbol, expiry: contract.expiry, strike: contract.strike, right: contract.right })));
     },
     onQuote(quote, cycle) {
-      buffer.push({ tickerId: quote.contract.tickerId, tradingDateIso: cycle.tradingDateIso, expiry: quote.contract.expiry, strike: quote.contract.strike, right: quote.contract.right, bid: quote.bid, ask: quote.ask, stockPrice: cycle.spotByTicker.get(quote.contract.tickerId) ?? null, errorCode: quote.errorCode, quotedAt: quote.quotedAt, cycleNumber: cycle.cycleNumber });
+      buffer.push({ tickerId: quote.contract.tickerId, tradingDateIso: cycle.tradingDateIso, expiry: quote.contract.expiry, strike: quote.contract.strike, right: quote.contract.right, bid: quote.bid, ask: quote.ask, bidSize: quote.bidSize, askSize: quote.askSize, stockPrice: cycle.spotByTicker.get(quote.contract.tickerId) ?? null, errorCode: quote.errorCode, quotedAt: quote.quotedAt, cycleNumber: cycle.cycleNumber });
       if (buffer.length < bandQuoteWriteBatchSize) return;
       void flush().catch((error) => {
         lastCycleWithFailedWrite = cycle.cycleNumber;

@@ -215,7 +215,7 @@ export class SymbolFileSliceReads {
     const throughMinute = lookMinuteOf(throughLookTime);
     for (let lookMinute = this.intraday.nextLookMinuteAfter(dayNumber, lookMinuteOf(afterLookTime)); lookMinute !== null && lookMinute <= throughMinute; lookMinute = this.intraday.nextLookMinuteAfter(dayNumber, lookMinute)) {
       const quotes: SymbolFileQuote[] = [];
-      for (const [key, data] of this.intraday.slicesOf(dayNumber, lookMinute, quoteWindowDays)) for (const quote of quotesOfSlice(data, expiryOfKey(key), intradayQuoteColumns, false, null, lowestStrike, highestStrike)) quotes.push(quote);
+      for (const [key, data] of this.intraday.slicesOf(dayNumber, lookMinute, quoteWindowDays)) for (const quote of quotesOfSlice(data, expiryOfKey(key), intradayQuoteColumns, true, null, lowestStrike, highestStrike)) quotes.push(quote);
       if (quotes.length > 0) quotesByLookTime.set(lookTimeOfMinute(lookMinute), quotes);
     }
     return quotesByLookTime;
@@ -225,7 +225,7 @@ export class SymbolFileSliceReads {
     const dayNumber = dayNumberOf(tradingDate);
     if (dayNumberOf(contract.expiry) - dayNumber > quoteWindowDays) return [];
     const data = this.intraday.sliceAt(dayNumber, lookMinuteOf(lookTime), contract.expiry);
-    return data === null ? [] : quotesOfSlice(data, contract.expiry, intradayQuoteColumns, false, contract.right, lowestStrike, highestStrike);
+    return data === null ? [] : quotesOfSlice(data, contract.expiry, intradayQuoteColumns, true, contract.right, lowestStrike, highestStrike);
   }
 
   hasIntradayQuoteWithin(tradingDate: string, lookTime: string, lowestStrike: number, highestStrike: number): boolean {
@@ -299,7 +299,7 @@ export function dayDataTableOfSlices(slices: readonly StoredSlice[], kinds: read
   return { rowCount, columns: lookTimes ? [{ kind: "string", indices: lookTimes }, ...columns] : columns };
 }
 
-/** The positions the reader thread's quote tables read (bid, ask, sizes), its intraday tables (bid, ask) and its end-of-day tables (close, volume, bid, ask). */
+/** The positions the reader thread's quote tables read (bid, ask, sizes), its intraday tables (bid, ask, sizes: Vol Farmer v4 caps a sale at the bid size, 2026-11-05) and its end-of-day tables (close, volume, bid, ask). */
 export const dayDataQuoteValueColumns = [sliceColumn.bid, sliceColumn.ask, sliceColumn.bidSize, sliceColumn.askSize] as const;
-export const dayDataIntradayValueColumns = [sliceColumn.bid, sliceColumn.ask] as const;
+export const dayDataIntradayValueColumns = [sliceColumn.bid, sliceColumn.ask, sliceColumn.bidSize, sliceColumn.askSize] as const;
 export const dayDataEndOfDayValueColumns = [sliceColumn.close, sliceColumn.volume, sliceColumn.endOfDayBid, sliceColumn.endOfDayAsk] as const;

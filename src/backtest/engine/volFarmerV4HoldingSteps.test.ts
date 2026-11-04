@@ -17,7 +17,7 @@ function marketOf(stockPrice: number, expiry = "2026-11-06"): VolFarmerV4Market 
   const quotesOf = (right: "C" | "P"): SymbolFileQuote[] =>
     Array.from({ length: 101 }, (_, index) => 40 + index).map((strike) => {
       const mid = blackScholesPriceOnForward(stockPrice * Math.exp(0.04 * years), strike, years, 0.04, 0.5, right === "C");
-      return { expiry, strike, right, bid: Math.round(mid * 0.98 * 10_000) / 10_000, ask: Math.round(mid * 1.02 * 10_000) / 10_000, bidSize: null, askSize: null };
+      return { expiry, strike, right, bid: Math.round(mid * 0.98 * 10_000) / 10_000, ask: Math.round(mid * 1.02 * 10_000) / 10_000, bidSize: 1_000, askSize: 1_000 };
     });
   const quotes = [...quotesOf("C"), ...quotesOf("P")];
   return {

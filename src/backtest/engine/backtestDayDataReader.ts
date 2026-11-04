@@ -111,7 +111,7 @@ export class PrefetchedSymbolDay {
   intradayQuotes(afterLookTime: string, throughLookTime: string, lowestStrike: number, highestStrike: number): Map<string, SymbolFileQuote[]> | null {
     const table = this.payload.intraday;
     if (table === null || afterLookTime !== this.payload.intradayAfterLookTime) return null;
-    const [lookTime, expiry, strike, right, bid, ask] = table.columns.map((column) => cellReader(this.payload.strings, column));
+    const [lookTime, expiry, strike, right, bid, ask, bidSize, askSize] = table.columns.map((column) => cellReader(this.payload.strings, column));
     const quotesByLookTime = new Map<string, SymbolFileQuote[]>();
     for (let row = 0; row < table.rowCount; row++) {
       const rowLookTime = lookTime!(row) as string;
@@ -119,7 +119,7 @@ export class PrefetchedSymbolDay {
       if (!(rowLookTime <= throughLookTime) || !(rowStrike >= lowestStrike && rowStrike <= highestStrike)) continue;
       let quotes = quotesByLookTime.get(rowLookTime);
       if (!quotes) quotesByLookTime.set(rowLookTime, (quotes = []));
-      quotes.push({ expiry: expiry!(row) as string, strike: rowStrike, right: right!(row) as "C" | "P", bid: bid!(row) as number | null, ask: ask!(row) as number | null, bidSize: null, askSize: null });
+      quotes.push({ expiry: expiry!(row) as string, strike: rowStrike, right: right!(row) as "C" | "P", bid: bid!(row) as number | null, ask: ask!(row) as number | null, bidSize: bidSize!(row) as number | null, askSize: askSize!(row) as number | null });
     }
     return quotesByLookTime;
   }

@@ -5,7 +5,7 @@ import type { QuoteLoopCycle, QuoteLoopOptionQuote } from "./marketQuoteLoop.js"
 
 const leg: HeldShortLeg = { legId: "leg-1", positionId: "pos-1", tickerId: "t1", symbol: "AAA", strategyKey: "cash_secured_put", expiry: "2026-11-06", strike: 100, right: "P" };
 const cycle = (spot: number): QuoteLoopCycle => ({ tradingDateIso: "2026-10-27", cycleNumber: 1, now: new Date("2026-10-27T15:00:00Z"), spotByTicker: new Map([["t1", spot]]), impliedVolatilityByTicker: new Map() });
-const putQuote = (bid: number, ask: number): QuoteLoopOptionQuote => ({ contract: { tickerId: "t1", symbol: "AAA", expiry: leg.expiry, strike: leg.strike, right: "P" }, bid, ask, last: null, errorCode: null, quotedAt: new Date("2026-10-27T15:00:00Z") });
+const putQuote = (bid: number, ask: number): QuoteLoopOptionQuote => ({ contract: { tickerId: "t1", symbol: "AAA", expiry: leg.expiry, strike: leg.strike, right: "P" }, bid, ask, last: null, bidSize: 10, askSize: 10, errorCode: null, quotedAt: new Date("2026-10-27T15:00:00Z") });
 
 function setup(state: AssignmentRiskAlertState) {
   const deps: AssignmentRiskConsumerDependencies = {
