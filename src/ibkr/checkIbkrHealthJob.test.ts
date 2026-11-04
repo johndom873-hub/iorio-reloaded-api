@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => {
     jobRunsDatabaseState,
     environment: { ibkrTunnelSshHost: "vps.example", ibkrTunnelSshPort: 2222, ibkrTunnelSshUsername: "healthcheck", ibkrTradingMode: "paper" as "paper" | "live" },
     restartIbkrGatewayOnVps: vi.fn(),
+    reconnectIbkrGatewayDataOnVps: vi.fn(),
     checkWorkerOnVps: vi.fn(),
     connectToIbkrGateway: vi.fn(),
     checkPositionReconciliation: vi.fn(),
@@ -32,6 +33,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("../config/env.js", () => ({ environment: mocks.environment }));
 vi.mock("./restartIbkrGatewayOnVps.js", () => ({ restartIbkrGatewayOnVps: mocks.restartIbkrGatewayOnVps }));
+vi.mock("./reconnectIbkrGatewayDataOnVps.js", () => ({ reconnectIbkrGatewayDataOnVps: mocks.reconnectIbkrGatewayDataOnVps }));
 vi.mock("./checkWorkerOnVps.js", () => ({ checkWorkerOnVps: mocks.checkWorkerOnVps }));
 vi.mock("./connectIbkr.js", () => ({ connectToIbkrGateway: mocks.connectToIbkrGateway }));
 vi.mock("./checkPositionReconciliation.js", () => ({ checkPositionReconciliation: mocks.checkPositionReconciliation }));
@@ -80,6 +82,7 @@ const {
   classifyReconciliationProblems,
   findOtherRunningJobName,
   isCompetingSessionHistoricalDataError,
+  historicalDataRecoveredByDataReconnectMessage,
   liveFreshLoginNeededMessage,
   postRestartConnectRetryDelayMs,
   previousHealthCheckCouldNotReconcile,
@@ -123,7 +126,7 @@ interface JobOutput {
   details: {
     output: string;
     handshakeErrors: string[];
-    probe: { failed: boolean; reason: string | null; restarted: boolean; freshLoginNeeded?: boolean };
+    probe: { failed: boolean; reason: string | null; restarted: boolean; freshLoginNeeded?: boolean; dataReconnect?: string };
     worker: { active: boolean; restarted: boolean } | null;
     reconciliationProblems: string[] | null;
     competingLiveSession: string | null;
@@ -165,6 +168,9 @@ beforeEach(() => {
   mocks.runJobOutcome.result = undefined;
   vi.stubEnv("IBKR_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64", Buffer.from("gateway-key").toString("base64"));
   vi.stubEnv("IORIO_WORKER_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64", Buffer.from("worker-key").toString("base64"));
+  vi.stubEnv("IBKR_HEALTHCHECK_RECONNECT_DATA_SSH_PRIVATE_KEY_BASE64", Buffer.from("reconnect-data-key").toString("base64"));
+  // By default the data reconnect does not run (the restart-path tests below); its own tests override this.
+  mocks.reconnectIbkrGatewayDataOnVps.mockResolvedValue({ exitCode: 1, output: "GATEWAY_CONTROL_RESULT=command_server_not_enabled\n" });
   mocks.lookupLatestDailyBar.mockResolvedValue(null);
   mocks.checkWorkerOnVps.mockResolvedValue({ active: true, restarted: false, output: "active" });
   mocks.probeCompetingLiveSession.mockResolvedValue("flowing");
@@ -621,7 +627,7 @@ describe("runIbkrHealthCheckJob: historical data probe failures with a healthy h
     expect(mocks.restartIbkrGatewayOnVps).toHaveBeenCalledTimes(1);
     expect(firstConnection.disconnect).toHaveBeenCalledTimes(1);
     const output = lastJobOutput();
-    expect(output.details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: true });
+    expect(output.details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: true, dataReconnect: "not run (command_server_not_enabled)" });
     expect(output.details.output).toBe(
       `unhealthy (handshake succeeded but reqHistoricalData failed on two consecutive runs (${historicalTimeoutError})), restarted, recovered — restart script output: GATEWAY_CONTROL_RESULT=recovered`,
     );
@@ -656,10 +662,92 @@ describe("runIbkrHealthCheckJob: historical data probe failures with a healthy h
     expect(mocks.restartIbkrGatewayOnVps).toHaveBeenCalledTimes(1);
     expect(error).toBeInstanceOf(JobFailedWithDetailsError);
     const details = (error as InstanceType<typeof JobFailedWithDetailsError>).details as JobOutput["details"];
-    expect(details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: true });
+    expect(details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: true, dataReconnect: "not run (command_server_not_enabled)" });
     expect(details.handshakeErrors).toEqual([]);
     expect(details.farmStatusMessages).toEqual([]);
     expect(details.worker).toBeNull();
+  });
+
+  describe("the data reconnect before any restart (IBC RECONNECTDATA)", () => {
+    const reconnected = { exitCode: 0, output: "=== gateway-control reconnect-data paper ===\nGATEWAY_CONTROL_RESULT=data_reconnected\n" };
+
+    beforeEach(() => {
+      mocks.jobRunsDatabaseState.previousRunRow = { details: { probe: { failed: true } }, error_message: null };
+      mocks.reconnectIbkrGatewayDataOnVps.mockResolvedValue(reconnected);
+    });
+
+    it("recovers with the data reconnect alone: no restart, the same connection, an info message", async () => {
+      const connection = createFakeConnection();
+      mocks.connectToIbkrGateway.mockReset();
+      mocks.connectToIbkrGateway.mockResolvedValue(connection);
+      mocks.lookupLatestDailyBar.mockReset();
+      mocks.lookupLatestDailyBar.mockRejectedValueOnce(new Error(historicalTimeoutError)).mockResolvedValueOnce(null);
+
+      await runIbkrHealthCheckJob();
+
+      expect(mocks.reconnectIbkrGatewayDataOnVps).toHaveBeenCalledTimes(1);
+      expect(mocks.reconnectIbkrGatewayDataOnVps.mock.calls[0]![0]).toMatchObject({ sshHost: "vps.example", sshPort: 2222, sshUsername: "healthcheck", sshPrivateKey: Buffer.from("reconnect-data-key") });
+      expect(mocks.restartIbkrGatewayOnVps).not.toHaveBeenCalled();
+      expect(mocks.connectToIbkrGateway).toHaveBeenCalledTimes(1);
+      const output = lastJobOutput();
+      expect(output.details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: false, dataReconnect: "recovered" });
+      expect(output.details.output).toContain("data farms reconnected, recovered");
+      expect(output.notify).toBe(historicalDataRecoveredByDataReconnectMessage);
+      expect(connection.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it("falls back to the session restart when historical data still fails after the reconnect", async () => {
+      mocks.lookupLatestDailyBar.mockReset();
+      mocks.lookupLatestDailyBar.mockRejectedValueOnce(new Error(historicalTimeoutError)).mockRejectedValueOnce(new Error(historicalTimeoutError)).mockResolvedValueOnce(null);
+      await runIbkrHealthCheckJob();
+      expect(mocks.restartIbkrGatewayOnVps).toHaveBeenCalledTimes(1);
+      expect(lastJobOutput().details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: true, dataReconnect: `still failing (${historicalTimeoutError})` });
+      expect(lastJobOutput().notify).toBe("ℹ️ IBKR Historical Data initialised (Gateway restarted after the SPY probe failed twice; probe OK now).");
+    });
+
+    it.each([
+      ["the SSH call fails", () => mocks.reconnectIbkrGatewayDataOnVps.mockRejectedValue(new Error("Timed out running the IBKR Gateway data reconnect on VPS.")), "not run (Timed out running the IBKR Gateway data reconnect on VPS.)"],
+      ["the command server refuses it", () => mocks.reconnectIbkrGatewayDataOnVps.mockResolvedValue({ exitCode: 1, output: "command server replied: ERROR\nGATEWAY_CONTROL_RESULT=command_rejected\n" }), "not run (command_rejected)"],
+      ["its key is not configured", () => vi.stubEnv("IBKR_HEALTHCHECK_RECONNECT_DATA_SSH_PRIVATE_KEY_BASE64", ""), "not run (Missing required environment variable: IBKR_HEALTHCHECK_RECONNECT_DATA_SSH_PRIVATE_KEY_BASE64)"],
+    ])("falls back to the session restart when %s, recording why", async (_label, arrange, expectedOutcome) => {
+      arrange();
+      mocks.lookupLatestDailyBar.mockReset();
+      mocks.lookupLatestDailyBar.mockRejectedValueOnce(new Error(historicalTimeoutError)).mockResolvedValueOnce(null);
+      await runIbkrHealthCheckJob();
+      expect(mocks.restartIbkrGatewayOnVps).toHaveBeenCalledTimes(1);
+      expect(lastJobOutput().details.probe.dataReconnect).toBe(expectedOutcome);
+    });
+
+    it("is not tried on a first failure or while another job is running", async () => {
+      mocks.jobRunsDatabaseState.previousRunRow = undefined;
+      await runIbkrHealthCheckJob();
+      mocks.jobRunsDatabaseState.previousRunRow = { details: { probe: { failed: true } }, error_message: null };
+      mocks.jobRunsDatabaseState.otherRunningJobRow = { job_name: "daily_market_data_capture" };
+      await runIbkrHealthCheckJob();
+      expect(mocks.reconnectIbkrGatewayDataOnVps).not.toHaveBeenCalled();
+      expect(mocks.restartIbkrGatewayOnVps).not.toHaveBeenCalled();
+    });
+
+    it("on live, while waiting for a fresh login, still tries it and passes when it recovers (no restart, no fresh-login alert)", async () => {
+      mocks.environment.ibkrTradingMode = "live";
+      mocks.jobRunsDatabaseState.previousRunRow = { details: { probe: { failed: true, freshLoginNeeded: true } }, error_message: liveFreshLoginNeededMessage };
+      mocks.lookupLatestDailyBar.mockReset();
+      mocks.lookupLatestDailyBar.mockRejectedValueOnce(new Error(historicalTimeoutError)).mockResolvedValueOnce(null);
+      await runIbkrHealthCheckJob();
+      expect(mocks.restartIbkrGatewayOnVps).not.toHaveBeenCalled();
+      expect(lastJobOutput().details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: false, dataReconnect: "recovered" });
+      expect(lastJobOutput().notify).toBe(historicalDataRecoveredByDataReconnectMessage);
+    });
+
+    it("on live, while waiting for a fresh login, keeps the fresh-login failure when the reconnect does not fix it", async () => {
+      mocks.environment.ibkrTradingMode = "live";
+      mocks.jobRunsDatabaseState.previousRunRow = { details: { probe: { failed: true, freshLoginNeeded: true } }, error_message: liveFreshLoginNeededMessage };
+      const error = await runIbkrHealthCheckJob().catch((caught: unknown) => caught);
+      expect((error as Error).message).toBe(liveFreshLoginNeededMessage);
+      expect(mocks.restartIbkrGatewayOnVps).not.toHaveBeenCalled();
+      const details = (error as InstanceType<typeof JobFailedWithDetailsError>).details as JobOutput["details"];
+      expect(details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: false, freshLoginNeeded: true, dataReconnect: `still failing (${historicalTimeoutError})` });
+    });
   });
 
   describe("live, after a session restart has already failed to recover historical data", () => {
@@ -682,7 +770,7 @@ describe("runIbkrHealthCheckJob: historical data probe failures with a healthy h
       expect(mocks.restartIbkrGatewayOnVps).not.toHaveBeenCalled();
       expect((error as Error).message).toBe(liveFreshLoginNeededMessage);
       const details = (error as InstanceType<typeof JobFailedWithDetailsError>).details as JobOutput["details"];
-      expect(details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: false, freshLoginNeeded: true });
+      expect(details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: false, freshLoginNeeded: true, dataReconnect: "not run (command_server_not_enabled)" });
       expect(details.farmStatusMessages).toEqual([{ at: fixedNow.toISOString(), code: 2105, message: "HMDS data farm connection is broken:ushmds" }]);
       expect(mocks.reportWorkerHeartbeat).toHaveBeenCalledTimes(1);
     });
@@ -698,7 +786,7 @@ describe("runIbkrHealthCheckJob: historical data probe failures with a healthy h
       mocks.lookupLatestDailyBar.mockRejectedValueOnce(new Error(historicalTimeoutError)).mockResolvedValueOnce(null);
       await runIbkrHealthCheckJob();
       expect(mocks.restartIbkrGatewayOnVps).toHaveBeenCalledTimes(1);
-      expect(lastJobOutput().details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: true });
+      expect(lastJobOutput().details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: true, dataReconnect: "not run (command_server_not_enabled)" });
     });
 
     it("passes normally once the probe works again, whatever the previous run said", async () => {

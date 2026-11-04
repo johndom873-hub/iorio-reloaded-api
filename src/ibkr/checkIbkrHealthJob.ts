@@ -1,4 +1,5 @@
 import { restartIbkrGatewayOnVps } from "./restartIbkrGatewayOnVps.js";
+import { reconnectIbkrGatewayDataOnVps } from "./reconnectIbkrGatewayDataOnVps.js";
 import { describeLiveGatewayManualLoginHeadline, parseGatewayControlResultKind } from "./gatewayControlResult.js";
 import { checkWorkerOnVps } from "./checkWorkerOnVps.js";
 import { connectToIbkrGateway, type IbkrConnection, type IbkrConnectionNotice } from "./connectIbkr.js";
@@ -73,6 +74,7 @@ export function isCompetingSessionHistoricalDataError(errorMessage: string): boo
 const runningJobLookbackMs = 2 * 60 * 60 * 1000;
 
 const historicalDataRecoveredMessage = "ℹ️ IBKR Historical Data initialised (Gateway restarted after the SPY probe failed twice; probe OK now).";
+export const historicalDataRecoveredByDataReconnectMessage = "ℹ️ IBKR Historical Data initialised (data farms reconnected after the SPY probe failed twice, no restart; probe OK now).";
 
 export async function findOtherRunningJobName(): Promise<string | null> {
   const row = await db("job_runs")
@@ -113,6 +115,39 @@ function requireEnvironmentVariable(variableName: string): string {
     throw new Error(`Missing required environment variable: ${variableName}`);
   }
   return value;
+}
+
+export interface DataReconnectOutcome {
+  recovered: boolean;
+  /** For job_runs.details: "recovered", "still failing (<probe error>)", or why the reconnect itself did not run. */
+  outcome: string;
+  /** The VPS script's output, or the SSH error. */
+  output: string;
+}
+
+/**
+ * IBC's RECONNECTDATA on the VPS (gateway-control.sh reconnect-data), then the SPY probe again on the same connection,
+ * which a data reconnect leaves open. Never throws: anything that keeps it from fixing historical data is an outcome,
+ * and the caller falls back to a session restart.
+ */
+export async function reconnectDataAndReprobe(connection: IbkrConnection): Promise<DataReconnectOutcome> {
+  let output: string;
+  try {
+    const result = await reconnectIbkrGatewayDataOnVps({
+      sshHost: environment.ibkrTunnelSshHost,
+      sshPort: environment.ibkrTunnelSshPort,
+      sshUsername: environment.ibkrTunnelSshUsername,
+      sshPrivateKey: Buffer.from(requireEnvironmentVariable("IBKR_HEALTHCHECK_RECONNECT_DATA_SSH_PRIVATE_KEY_BASE64"), "base64"),
+    });
+    output = result.output.trim();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { recovered: false, outcome: `not run (${message})`, output: message };
+  }
+  const resultKind = parseGatewayControlResultKind(output);
+  if (resultKind !== "data_reconnected") return { recovered: false, outcome: `not run (${resultKind ?? "no result line"})`, output };
+  const reprobe = await checkHistoricalData(connection);
+  return reprobe.healthy ? { recovered: true, outcome: "recovered", output } : { recovered: false, outcome: `still failing (${reprobe.errorMessage ?? "unknown error"})`, output };
 }
 
 // IBKR's farm status ("HMDS data farm connection is broken/OK", 2105/2106, ...) is captured into job_runs.details on
@@ -270,7 +305,7 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
 
     // What the run has found so far: returned in details on success, and kept with a failure too (JobFailedWithDetailsError).
     let gatewayOutput = "healthy";
-    let probe: { failed: boolean; reason: string | null; restarted: boolean; freshLoginNeeded?: boolean } = { failed: false, reason: null, restarted: false };
+    let probe: { failed: boolean; reason: string | null; restarted: boolean; freshLoginNeeded?: boolean; dataReconnect?: string } = { failed: false, reason: null, restarted: false };
     let workerCheck: { active: boolean; restarted: boolean } | null = null;
     let competingLiveSession: Awaited<ReturnType<typeof probeCompetingLiveSession>> | null = null;
     let problems: string[] | null = null;
@@ -368,10 +403,18 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
         } else {
           const reason = historicalDataCheck.errorMessage ?? "unknown error";
           if (environment.ibkrTradingMode === "live" && (await previousHealthCheckFoundFreshLoginNeeded())) {
-            probe = { failed: true, reason, restarted: false, freshLoginNeeded: true };
-            gatewayOutput = `healthy handshake; reqHistoricalData probe failed (${reason}) after a session restart already failed to recover it — waiting for a fresh login`;
-            throw new Error(liveFreshLoginNeededMessage);
-          }
+            // The data reconnect costs nothing and may still fix it without the phone; a restart is not tried again.
+            const dataReconnect = await reconnectDataAndReprobe(connection);
+            if (dataReconnect.recovered) {
+              probe = { failed: true, reason, restarted: false, dataReconnect: dataReconnect.outcome };
+              gatewayOutput = `healthy handshake; reqHistoricalData failed (${reason}) while waiting for a fresh login; data farms reconnected, recovered — ${dataReconnect.output}`;
+              notifications.push(historicalDataRecoveredByDataReconnectMessage);
+            } else {
+              probe = { failed: true, reason, restarted: false, freshLoginNeeded: true, dataReconnect: dataReconnect.outcome };
+              gatewayOutput = `healthy handshake; reqHistoricalData probe failed (${reason}) after a session restart already failed to recover it — waiting for a fresh login`;
+              throw new Error(liveFreshLoginNeededMessage);
+            }
+          } else {
           const otherRunningJob = await findOtherRunningJobName();
           const previousProbeFailed = await previousHealthCheckProbeFailed();
           if (otherRunningJob) {
@@ -381,13 +424,23 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
             probe = { failed: true, reason, restarted: false };
             gatewayOutput = `healthy handshake; reqHistoricalData probe failed once (${reason}) — no restart until it fails on the next run too`;
           } else {
-            probe = { failed: true, reason, restarted: true };
-            closeConnection(connection);
-            // Happens daily around 12:20/12:40 UTC and a restart fixes it, so a confirmed recovery is info, not a warning.
-            connection = await restartAndReconnect(
-              `handshake succeeded but reqHistoricalData failed on two consecutive runs (${reason})`,
-              historicalDataRecoveredMessage,
-            );
+            // Happens daily around 12:20/12:40 UTC. The data farms are reconnected first: no restart, so the API connections
+            // and the Gateway's daily restart time (which a session restart moves) stay as they are. A restart only if that fails.
+            const dataReconnect = await reconnectDataAndReprobe(connection);
+            if (dataReconnect.recovered) {
+              probe = { failed: true, reason, restarted: false, dataReconnect: dataReconnect.outcome };
+              gatewayOutput = `healthy handshake; reqHistoricalData failed on two consecutive runs (${reason}); data farms reconnected, recovered — ${dataReconnect.output}`;
+              notifications.push(historicalDataRecoveredByDataReconnectMessage);
+            } else {
+              probe = { failed: true, reason, restarted: true, dataReconnect: dataReconnect.outcome };
+              closeConnection(connection);
+              // A restart that fixes it is info, not a warning.
+              connection = await restartAndReconnect(
+                `handshake succeeded but reqHistoricalData failed on two consecutive runs (${reason})`,
+                historicalDataRecoveredMessage,
+              );
+            }
+          }
           }
         }
       }

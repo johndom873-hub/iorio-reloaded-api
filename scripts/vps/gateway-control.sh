@@ -10,6 +10,10 @@
 #                                 reuses the session (no re-login, no 2FA). Needs the IBC command server.
 #   recover <paper|live>          The health check's action: restart-session first. Only paper may fall back to a
 #                                 cold restart (no 2FA there); live never does, it reports needs_manual_login.
+#   reconnect-data <paper|live>   IBC's RECONNECTDATA (the Gateway's Ctrl-Alt-F): drops and reconnects the data farms
+#                                 (market data, historical, contract definitions) in about a second. No restart, no
+#                                 API disconnect, and the daily restart time is left alone (RESTART moves it). The
+#                                 health check's first try when historical data stops answering.
 #
 # The last line printed is always GATEWAY_CONTROL_RESULT=<kind>, for the caller to parse.
 set -uo pipefail
@@ -20,6 +24,8 @@ readonly login_wait_seconds=60
 readonly restart_down_wait_seconds=60
 readonly restart_up_wait_seconds=240
 readonly cold_restart_wait_seconds=90
+# The farms report back within about a second of RECONNECTDATA (paper, 2026-11-04); a few more let historical data settle.
+readonly reconnect_data_settle_seconds=5
 
 ENVIRONMENT=""
 CONTAINER=""
@@ -131,6 +137,26 @@ restart_session() {
   print_result session_restarted
 }
 
+reconnect_data() {
+  if ! api_answers "$API_PORT"; then
+    print_result refused_api_not_answering
+    return 0
+  fi
+  local reply
+  if ! reply=$(docker exec "$CONTAINER" bash -c "(echo RECONNECTDATA; sleep 1; echo EXIT) | socat - TCP:127.0.0.1:${command_server_port}" 2>&1); then
+    print_result command_server_not_enabled
+    return 1
+  fi
+  # IBC answers "OK" to an accepted command (then "OK Goodbye" to EXIT), "ERROR ..." otherwise.
+  if [[ "$(echo "$reply" | head -1)" != OK* ]]; then
+    echo "command server replied: $(echo "$reply" | head -1)"
+    print_result command_rejected
+    return 1
+  fi
+  sleep "$reconnect_data_settle_seconds"
+  print_result data_reconnected
+}
+
 cold_restart_and_wait() {
   echo "restarting ${CONTAINER} (cold)"
   if ! docker restart "$CONTAINER" >/dev/null; then
@@ -170,7 +196,7 @@ main() {
   case "$ENVIRONMENT" in
     paper) CONTAINER="iorio-ibkr-ib-gateway-paper-1"; API_PORT=4002 ;;
     live) CONTAINER="iorio-ibkr-ib-gateway-live-1"; API_PORT=4001 ;;
-    *) echo "usage: gateway-control.sh <fresh-login|restart-session|recover> <paper|live>" >&2; exit 2 ;;
+    *) echo "usage: gateway-control.sh <fresh-login|restart-session|recover|reconnect-data> <paper|live>" >&2; exit 2 ;;
   esac
 
   echo "=== gateway-control ${action} ${ENVIRONMENT}: $(date -u +%FT%TZ) ==="
@@ -178,7 +204,8 @@ main() {
     fresh-login) fresh_login ;;
     restart-session) restart_session ;;
     recover) recover ;;
-    *) echo "usage: gateway-control.sh <fresh-login|restart-session|recover> <paper|live>" >&2; exit 2 ;;
+    reconnect-data) reconnect_data ;;
+    *) echo "usage: gateway-control.sh <fresh-login|restart-session|recover|reconnect-data> <paper|live>" >&2; exit 2 ;;
   esac
 }
 
