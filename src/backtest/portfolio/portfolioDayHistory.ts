@@ -1,4 +1,4 @@
-import { seededRandom } from "./portfolioPaths.js";
+import { seededRandom } from "../../lib/seededRandom.js";
 import { thirtyDayIvElevation } from "./portfolioObservedChain.js";
 
 // The portfolio simulator's daily history and paths (D1, D2, approved by Marcelo 2026-11-03; the 10:00 price from IBKR's

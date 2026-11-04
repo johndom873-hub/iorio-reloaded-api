@@ -1,4 +1,5 @@
-// The portfolio simulator's price and IV history (P5 and P6, approved by Marcelo 2026-11-03), weekly:
+// The portfolio simulator's weekly price and IV history (P5 and P6, approved by Marcelo 2026-11-03), from which a book's
+// correlation, worst weeks together and groups are read:
 // - A week runs Monday to Sunday; its close is the last daily close in it and its IV the last IBKR 30-day IV in it. A
 //   ticker's week return is its close ÷ the previous week's close − 1.
 // - The history runs on SPY's weeks from 2006 (IBKR's IV starts in 2006-01). A ticker's own weeks are those it traded with
@@ -6,17 +7,13 @@
 //   (β from its own weeks: cov ÷ var of SPY), and its IV is SPY's IV × (its median IV ÷ SPY's median IV), as is any week its
 //   own IV is missing. Example: a ticker with β 1.5, average week 0.4% against SPY's 0.2%, in a week SPY fell 3%: 0.4% +
 //   1.5 × (−3% − 0.2%) = −4.4%, plus the leftover week drawn.
-// - IV is capped at the highest weekly IV in the ticker's backtest (the premium formula is linear in IV and was measured
-//   only up to that IV).
+// - IV is capped at `ivCap` when one is given.
 // - Neutral drift (P6): every week of a ticker moves by the same amount so its average week becomes T-bill now + β ×
 //   (SPY's average week − the T-bill's average week). Example: NVDA's weeks averaged 41.9% a year since 2006; with β 1.62,
 //   T-bill now 3.99% and SPY's 10.13% against the T-bill's 1.51%, neutral counts 3.99 + 1.62 × 8.62 = 17.95% a year.
-// - The paths are blocks of 4 consecutive history weeks drawn at random with replacement, the same dates for every
-//   ticker, from a seeded generator so a book gets the same paths every time.
 
 export const weeksPerYear = 52.1775;
 export const historyStartIso = "2006-01-01";
-export const pathBlockWeeks = 4;
 
 export interface DailyCloseAndIv {
   tradingDate: string;
@@ -157,27 +154,4 @@ export function tickerHistoryOf(symbol: string, bars: readonly WeeklyBar[], mark
   const historyMean = mean(Array.from(returns));
   const neutralShift = riskFreeNowWeek + beta * (market.spyMeanWeek - riskFreeMeanWeek) - historyMean;
   return { symbol, returns, ownWeek, ivs, ivsUncapped, residuals: Float64Array.from(residuals.length > 0 ? residuals : [0]), beta, ownWeeks, neutralShift, ivCap };
-}
-
-/** Mulberry32: a small seeded generator, the same numbers for the same seed. */
-export function seededRandom(seed: number): () => number {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let value = state;
-    value = Math.imul(value ^ (value >>> 15), value | 1);
-    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** One path's history weeks: `horizonWeeks` indexes, in blocks of `blockWeeks` drawn from weeks 1…count−1 (week 0 has no previous IV). */
-export function drawPathWeeks(random: () => number, historyWeeks: number, horizonWeeks: number, blockWeeks = pathBlockWeeks): Int32Array {
-  const path = new Int32Array(horizonWeeks);
-  let filled = 0;
-  while (filled < horizonWeeks) {
-    const start = 1 + Math.floor(random() * (historyWeeks - blockWeeks));
-    for (let offset = 0; offset < blockWeeks && filled < horizonWeeks; offset++) path[filled++] = start + offset;
-  }
-  return path;
 }

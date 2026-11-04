@@ -15,7 +15,8 @@ import { describeUnmatchedOptions, refreshSplitScheduleForSymbol, type SplitSche
 import { runAnalysisJob } from "../analysis/runAnalysisJob.js";
 import { backfillDailyHistoryForBacktest, backtestHistoryStartDate, describeBacktestHistoryBackfill, isIbkrNoSuchContractError } from "../backfillDailyHistory.js";
 import { formatDownloadProgressLabel, jobHeartbeatIntervalMilliseconds, lastFinishedBacktestSessionDate } from "./backtestJobRules.js";
-import { finishSessionOfJob, kickAnalysisQueue, kickBacktestQueue, kickDownloadQueue, loadBacktestJobRow, requeuePausedDownload, type BacktestJobRow } from "./backtestJobStore.js";
+import { finishSessionOfJob, kickAnalysisQueue, kickBacktestQueue, kickDownloadQueue, kickPortfolioLibraryQueue, loadBacktestJobRow, queuePortfolioLibraryJob, requeuePausedDownload, type BacktestJobRow } from "./backtestJobStore.js";
+import { buildPortfolioLibrary } from "../portfolio/portfolioLibrary.js";
 import { thetaDataDownloaderScriptName } from "./spawnBacktestJobProcess.js";
 import { describeDownloadGaps, parseDownloaderLine } from "./thetaDataDownloaderProtocol.js";
 
@@ -301,6 +302,14 @@ async function refreshDetectedSplits(job: BacktestJobRow): Promise<SplitSchedule
   }
 }
 
+/** The suggestions' library (portfolioLibrary.ts): every data-file ticker's lone runs, the unchanged ones kept. */
+async function runPortfolioLibraryJob(control: JobProcessControl): Promise<JobOutcome> {
+  const manifest = await buildPortfolioLibrary({ reportProgress: (done, total, label) => control.reportProgress(done, total, label), isCancelled: () => control.cancelRequested });
+  if (control.cancelRequested) return { status: "cancelled", error: null };
+  const failed = Object.entries(manifest.failed);
+  return failed.length === 0 ? { status: "succeeded", error: null } : { status: "succeeded", error: `Built without ${failed.map(([symbol, reason]) => `${symbol} (${reason})`).join("; ")}.` };
+}
+
 async function runBacktestJob(job: BacktestJobRow, control: JobProcessControl): Promise<JobOutcome> {
   if (!job.session_id) return { status: "failed", error: "This backtest job has no session." };
   try {
@@ -340,7 +349,7 @@ export async function executeBacktestJob(jobId: string): Promise<void> {
 
   let outcome: JobOutcome = { status: "failed", error: "The job ended without an outcome." };
   try {
-    outcome = job.kind === "download" ? await runDownloadJob(job, control) : job.kind === "analysis" ? await runAnalysisJob(job.id, control) : await runBacktestJob(job, control);
+    outcome = job.kind === "download" ? await runDownloadJob(job, control) : job.kind === "analysis" ? await runAnalysisJob(job.id, control) : job.kind === "portfolio_library" ? await runPortfolioLibraryJob(control) : await runBacktestJob(job, control);
   } catch (error) {
     console.error(`Backtest job ${jobId} failed:`, error);
     outcome = control.cancelRequested ? { status: "cancelled", error: null } : { status: "failed", error: errorMessage(error) };
@@ -351,7 +360,13 @@ export async function executeBacktestJob(jobId: string): Promise<void> {
     process.off("SIGINT", onSignal);
   }
   console.log(`Backtest job ${jobId}: ${control.ownershipLost ? "stopped (no longer this process's job)" : outcome.status}${outcome.error ? ` — ${outcome.error}` : ""}.`);
-  if (job.kind === "download") await kickDownloadQueue();
+  if (job.kind === "download") {
+    await kickDownloadQueue();
+    // An updated data file makes the suggestions' library out of date: a rebuild waits until no download is left.
+    if (outcome.status === "succeeded" && !control.ownershipLost) await queuePortfolioLibraryJob();
+    else await kickPortfolioLibraryQueue();
+  }
+  if (job.kind === "portfolio_library") await kickPortfolioLibraryQueue();
   if (job.kind === "backtest") await kickBacktestQueue();
   if (job.kind === "analysis") await kickAnalysisQueue();
 }

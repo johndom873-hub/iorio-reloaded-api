@@ -154,12 +154,12 @@ export async function listOverviewJobViews(): Promise<BacktestJobView[]> {
 }
 
 /**
- * The Backtests list (the ticker analyses included, Marcelo 2026-10-15): the latest overviewJobsPerKind, finished or not, latest
+ * The Backtests list (the ticker analyses included, Marcelo 2026-10-15, and the suggestions' library rebuilds): the latest overviewJobsPerKind, finished or not, latest
  * activity first. An analysis's own backtest is left out: the analysis's row shows its progress and cancelling it cancels the backtest.
  */
 async function listOverviewBacktestJobRows(): Promise<BacktestJobRow[]> {
   const rows: BacktestJobRow[] = await selectJobRows()
-    .whereIn("j.kind", ["backtest", "analysis"])
+    .whereIn("j.kind", ["backtest", "analysis", "portfolio_library"])
     .where((query) => query.whereNull("j.session_id").orWhereNotExists((analyses) => analyses.select(db.raw("1")).from("backtest_ticker_analyses as a").whereRaw("a.session_id = j.session_id")))
     .orderByRaw(`${latestActivitySql} DESC, j.created_at DESC`)
     .limit(overviewJobsPerKind);
@@ -427,6 +427,56 @@ export async function kickAnalysisQueue(): Promise<string[]> {
   return startedJobIds;
 }
 
+/** The symbol column of a library job (backtest_jobs.symbol is required; a library covers every ticker). */
+export const portfolioLibraryJobSymbol = "PORTFOLIO";
+
+/**
+ * Queues a rebuild of the suggestions' library (portfolioLibrary.ts) unless one is already queued, and starts it when it
+ * may. Returns the queued job's id.
+ */
+export async function queuePortfolioLibraryJob(connection: Knex = db): Promise<string> {
+  const jobId = await connection.transaction(async (transaction) => {
+    await transaction.raw("SELECT pg_advisory_xact_lock(hashtext('backtest_portfolio_library_queue'))");
+    const queued: { id: string } | undefined = await transaction("backtest_jobs").where({ kind: "portfolio_library", status: "queued" }).first("id");
+    if (queued) return queued.id;
+    const [row] = await transaction("backtest_jobs").insert({ kind: "portfolio_library", symbol: portfolioLibraryJobSymbol, status: "queued", queued_at: transaction.raw("clock_timestamp()") }).returning("id");
+    return row.id as string;
+  });
+  await kickPortfolioLibraryQueue();
+  return jobId;
+}
+
+/** The latest library rebuild's job, as the jobs lists show it; null when there has been none. */
+export async function loadLatestPortfolioLibraryJobView(): Promise<BacktestJobView | null> {
+  const row = await selectJobRows().where("j.kind", "portfolio_library").orderBy("j.created_at", "desc").first();
+  return row ? toBacktestJobView(row as BacktestJobRow) : null;
+}
+
+/**
+ * Starts the queued library rebuild when none runs and no download is queued or running (a rebuild then reads every
+ * updated file once, not after each). Kicked when one is queued, when a download or a rebuild ends, by the overview and
+ * when the API starts. Returns the started job's id, or null.
+ */
+export async function kickPortfolioLibraryQueue(): Promise<string | null> {
+  const startedJobId = await db.transaction(async (transaction) => {
+    await transaction.raw("SELECT pg_advisory_xact_lock(hashtext('backtest_portfolio_library_queue'))");
+    const fresh = transaction.raw("now() - (?::int * interval '1 millisecond')", [staleHeartbeatMilliseconds]);
+    const running = await transaction("backtest_jobs").where({ kind: "portfolio_library", status: "running" }).where("heartbeat_at", ">", fresh).first("id");
+    if (running) return null;
+    const downloads = await transaction("backtest_jobs")
+      .where({ kind: "download" })
+      .where((query) => query.where({ status: "queued" }).orWhere((runningQuery) => runningQuery.where({ status: "running" }).where("heartbeat_at", ">", fresh)))
+      .first("id");
+    if (downloads) return null;
+    const next: { id: string } | undefined = await transaction("backtest_jobs").where({ kind: "portfolio_library", status: "queued" }).orderBy(["queued_at", "created_at", "id"]).first("id");
+    if (!next) return null;
+    await claimJob(transaction, next.id, { resetProgress: true });
+    return next.id;
+  });
+  if (startedJobId !== null) await spawnClaimedJob(startedJobId);
+  return startedJobId;
+}
+
 /**
  * Cancel: a queued or stopped job is cancelled here (and what is left of a stopped one's process is stopped); a running
  * one is asked to stop and its process ends it as cancelled.
@@ -467,6 +517,7 @@ export async function resumeBacktestJob(jobId: string): Promise<BacktestJobView>
   if (displayStatus === "queued" || displayStatus === "running") throw new BacktestRequestError("This job is already running or waiting to start.", 409);
   if (job.kind === "backtest" && !job.session_id) throw new BacktestRequestError("This backtest job has no session.", 409);
   if (job.kind === "analysis") throw new BacktestRequestError("An analysis is not resumed: run Update Analysis again.", 409);
+  if (job.kind === "portfolio_library") throw new BacktestRequestError("A library build is not resumed: rebuild the library again (it keeps the tickers it finished).", 409);
   if (job.kind === "backtest") {
     const session: { settings_snapshot: BacktestSettings; overrides: BacktestSettingsOverrides | null } | undefined = await db("backtest_sessions").where({ id: job.session_id }).first("settings_snapshot", "overrides");
     if (session && isRetiredBacktestDecisionMaker(applyBacktestOverrides(session.settings_snapshot, session.overrides ?? {}).decisionMaker)) throw new BacktestRequestError(retiredBacktestDecisionMakerMessage, 409);

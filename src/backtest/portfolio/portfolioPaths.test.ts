@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { betaOf, drawPathWeeks, marketHistoryOf, mondayOf, seededRandom, tickerHistoryOf, weeklyBarsOf, type WeeklyBar } from "./portfolioPaths.js";
+import { betaOf, marketHistoryOf, mondayOf, tickerHistoryOf, weeklyBarsOf, type WeeklyBar } from "./portfolioPaths.js";
 
 describe("weeks", () => {
   it("finds a date's Monday", () => {
@@ -67,17 +67,5 @@ describe("tickerHistoryOf (P5, P6)", () => {
     const average = shifted.reduce((sum, value) => sum + value, 0) / shifted.length;
     expect(history.beta).toBeCloseTo(1, 6);
     expect(average).toBeCloseTo(0.001 + 1 * (market.spyMeanWeek - 0.0002), 10);
-  });
-});
-
-describe("paths", () => {
-  it("draws the same weeks for the same seed, in 4-week blocks inside the history", () => {
-    const first = drawPathWeeks(seededRandom(42), 100, 10);
-    const second = drawPathWeeks(seededRandom(42), 100, 10);
-    expect(Array.from(first)).toEqual(Array.from(second));
-    expect(first[1]).toBe(first[0]! + 1);
-    expect(first[3]).toBe(first[0]! + 3);
-    expect(Math.min(...first)).toBeGreaterThanOrEqual(1);
-    expect(Math.max(...first)).toBeLessThan(100);
   });
 });

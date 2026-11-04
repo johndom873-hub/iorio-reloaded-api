@@ -156,6 +156,23 @@ export async function runProjectionPaths(input: ProjectionInput, paths: readonly
   return outcomes;
 }
 
+/**
+ * Each path's account value every simulated day as a share of the starting value, one path after another (the
+ * suggestions' library, portfolioLibrary.ts); `onPathDone` after each.
+ */
+export async function runPathValues(input: ProjectionInput, paths: readonly DayPath[], firstPathIndex: number, onPathDone?: () => void): Promise<Float32Array> {
+  const horizonDays = Math.round(input.horizonYears * tradingDaysPerYear);
+  const dates = simulatedSessionsAfter(input.asOfIso, horizonDays);
+  const expiriesByTicker = input.tickers.map((ticker) => nextExpiriesOf(dates, ticker.expiryWeekdays));
+  const values = new Float32Array(paths.length * horizonDays);
+  for (let offset = 0; offset < paths.length; offset++) {
+    const result = await simulatePath(input, paths[offset]!, firstPathIndex + offset, dates, expiriesByTicker);
+    for (let day = 0; day < horizonDays; day++) values[offset * horizonDays + day] = result.accountValues[day]! / input.accountDollars;
+    onPathDone?.();
+  }
+  return values;
+}
+
 export interface ReplayWindow {
   name: string;
   /** The window's history days (indexes into the market's dates), in order. */

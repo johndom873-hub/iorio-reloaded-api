@@ -1,10 +1,14 @@
 import type { Response, Router } from "express";
 import { parsePortfolioProjectionRequest, portfolioPots, projectPortfolio } from "../backtest/portfolio/portfolioProjectionStore.js";
-import { listPortfolioTickers, parsePortfolioBookRequest, simulatePortfolio, suggestPortfolioChanges } from "../backtest/portfolio/portfolioSimulatorStore.js";
+import { portfolioLibraryStatus } from "../backtest/portfolio/portfolioLibraryStatus.js";
+import { suggestPortfolioChangesFromLibrary } from "../backtest/portfolio/portfolioLibrarySuggestions.js";
+import { listPortfolioTickers, parsePortfolioBookRequest, simulatePortfolio } from "../backtest/portfolio/portfolioSimulatorStore.js";
+import { queuePortfolioLibraryJob } from "../backtest/jobs/backtestJobStore.js";
 
 // The portfolio simulator's routes (under /backtest, the lab only): every analysed ticker for the book's picker, how a
 // book's tickers move together, its pot table and suggested allocations, its projection streamed over SSE (minutes: every
-// path is the book run through v4's own days), and its one-change suggestions streamed over SSE.
+// path is the book run through v4's own days), its one-change suggestions streamed over SSE (on the library at once, then
+// the best confirmed exactly), and the suggestions' library: its state and a rebuild.
 
 const streamHeartbeatMs = 15_000;
 
@@ -18,8 +22,11 @@ function parseQueryBook<Parsed>(query: unknown, response: Response, parse: (body
   }
 }
 
-/** Runs `work` behind an event stream: "progress" {done, total} at most every 250 ms and at the end, then "result" or "failure". */
-async function streamWork<Result>(response: Response, work: (onProgress: (done: number, total: number) => void) => Promise<Result>): Promise<void> {
+/**
+ * Runs `work` behind an event stream: "progress" {done, total, label} at most every 250 ms and at the end, any events the
+ * work sends itself (`send`), then "result" or "failure".
+ */
+async function streamWork<Result>(response: Response, work: (onProgress: (done: number, total: number, label?: string) => void, send: (event: string, data: unknown) => void) => Promise<Result>): Promise<void> {
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
   response.setHeader("Connection", "keep-alive");
@@ -33,12 +40,12 @@ async function streamWork<Result>(response: Response, work: (onProgress: (done: 
   }, streamHeartbeatMs);
   try {
     let lastSent = 0;
-    const result = await work((done, total) => {
+    const result = await work((done, total, label) => {
       if (done === total || Date.now() - lastSent > 250) {
         lastSent = Date.now();
-        send("progress", { done, total });
+        send("progress", label === undefined ? { done, total } : { done, total, label });
       }
-    });
+    }, send);
     send("result", result);
   } catch (error) {
     send("failure", { error: error instanceof Error ? error.message : String(error) });
@@ -67,9 +74,18 @@ export function registerPortfolioSimulatorRoutes(router: Router): void {
     if (book !== null) await streamWork(response, (onProgress) => projectPortfolio(book, onProgress));
   });
 
-  // The book as JSON in ?book=.
+  // The book as JSON in ?book=. "suggestions" events carry the list so far: on the library, then after each exact projection.
   router.get("/portfolio/suggestions/stream", async (request, response) => {
     const book = parseQueryBook(request.query.book, response, parsePortfolioBookRequest);
-    if (book !== null) await streamWork(response, (onProgress) => suggestPortfolioChanges(book, onProgress));
+    if (book !== null) await streamWork(response, (onProgress, send) => suggestPortfolioChangesFromLibrary(book, { onProgress, onSuggestions: (suggestions) => send("suggestions", suggestions) }));
+  });
+
+  router.get("/portfolio/library", async (_request, response) => {
+    response.json(await portfolioLibraryStatus());
+  });
+
+  // Queues a rebuild (one at a time; it waits for the downloads).
+  router.post("/portfolio/library/rebuild", async (_request, response) => {
+    response.status(202).json({ jobId: await queuePortfolioLibraryJob() });
   });
 }

@@ -25,13 +25,13 @@ export function projectionWorkerCount(pathCount: number): number {
   return Math.max(1, Math.min(4, os.availableParallelism() - 1, pathCount));
 }
 
-function runWorker(request: ProjectionWorkerRequest, onPathDone: () => void): Promise<PathOutcome[]> {
+function runWorker<Result>(request: ProjectionWorkerRequest, onPathDone: () => void): Promise<Result> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(workerModuleUrl(), { execArgv: workerExecArgv() });
-    worker.on("message", (message: { kind: "progress" } | { kind: "done"; outcomes: PathOutcome[] } | { kind: "failed"; error: string }) => {
+    worker.on("message", (message: { kind: "progress" } | { kind: "done"; outcomes?: PathOutcome[]; values?: Float32Array } | { kind: "failed"; error: string }) => {
       if (message.kind === "progress") return onPathDone();
       void worker.terminate();
-      if (message.kind === "done") resolve(message.outcomes);
+      if (message.kind === "done") resolve((request.returns === "values" ? message.values : message.outcomes) as Result);
       else reject(new Error(`Projection worker failed: ${message.error}`));
     });
     worker.once("error", (error) => {
@@ -42,19 +42,37 @@ function runWorker(request: ProjectionWorkerRequest, onPathDone: () => void): Pr
   });
 }
 
-/** Every path's outcome, in path order; `onProgress` after each path with how many are done. `workerCount` for timing only. */
-export async function runProjectionInParallel(input: ProjectionInput, paths: readonly DayPath[], onProgress?: (done: number, total: number) => void, workerCount = projectionWorkerCount(paths.length)): Promise<PathOutcome[]> {
-  if (paths.length === 0) return [];
+/** The paths in contiguous chunks, one per worker, each chunk's result in path order; `onProgress` after each path. */
+async function runInChunks<Result>(input: ProjectionInput, paths: readonly DayPath[], returns: ProjectionWorkerRequest["returns"], workerCount: number, onProgress?: (done: number, total: number) => void): Promise<Result[]> {
   const chunkSize = Math.ceil(paths.length / workerCount);
   let done = 0;
-  const chunks: Promise<PathOutcome[]>[] = [];
+  const chunks: Promise<Result>[] = [];
   for (let start = 0; start < paths.length; start += chunkSize) {
     chunks.push(
-      runWorker({ input, paths: paths.slice(start, start + chunkSize), firstPathIndex: start }, () => {
+      runWorker<Result>({ input, paths: paths.slice(start, start + chunkSize), firstPathIndex: start, returns }, () => {
         done += 1;
         onProgress?.(done, paths.length);
       }),
     );
   }
-  return (await Promise.all(chunks)).flat();
+  return Promise.all(chunks);
+}
+
+/** Every path's outcome, in path order; `onProgress` after each path with how many are done. `workerCount` for timing only. */
+export async function runProjectionInParallel(input: ProjectionInput, paths: readonly DayPath[], onProgress?: (done: number, total: number) => void, workerCount = projectionWorkerCount(paths.length)): Promise<PathOutcome[]> {
+  if (paths.length === 0) return [];
+  return (await runInChunks<PathOutcome[]>(input, paths, "outcomes", workerCount, onProgress)).flat();
+}
+
+/** Every path's daily account values as a share of the starting value (runPathValues), path after path; `onProgress` after each path. */
+export async function runPathValuesInParallel(input: ProjectionInput, paths: readonly DayPath[], onProgress?: (done: number, total: number) => void, workerCount = projectionWorkerCount(paths.length)): Promise<Float32Array> {
+  if (paths.length === 0) return new Float32Array(0);
+  const chunks = await runInChunks<Float32Array>(input, paths, "values", workerCount, onProgress);
+  const values = new Float32Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    values.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return values;
 }

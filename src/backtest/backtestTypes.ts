@@ -4,7 +4,7 @@ import type { KellyEdgeBasis } from "../pluto/postModelGates.js";
 
 // The backtesting API contract (docs/backtesting/). The app mirrors these types in src/api/backtest.ts.
 
-export type BacktestJobKind = "download" | "backtest" | "analysis";
+export type BacktestJobKind = "download" | "backtest" | "analysis" | "portfolio_library";
 export type BacktestJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 /** What the screen shows: a running job with a heartbeat older than 60 s is "stopped". */
 export type BacktestJobDisplayStatus = BacktestJobStatus | "stopped";

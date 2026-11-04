@@ -4,7 +4,7 @@ import { effectiveAllocationPctBySymbol } from "../../lib/tickerAllocation.js";
 import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
 import { requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { stockCommissionDollars } from "../engine/ledger/ledgerFills.js";
-import { loadTreasuryBillRates } from "../engine/treasuryBillRates.js";
+import { loadTreasuryBillRates, type TreasuryBillRates } from "../engine/treasuryBillRates.js";
 import { tickerBusinessChangeOf, type TickerBusinessChange } from "../tickerBusinessChanges.js";
 import { loadBacktestLabSettings } from "../labSettingsStore.js";
 import { dayHistoryStartIso, drawDayPaths, marketDayHistoryOf, sharedLeftoverDays, tickerDayHistoryOf, tradingDaysPerYear } from "./portfolioDayHistory.js";
@@ -12,6 +12,7 @@ import { floorAllocationPctOf, maxAllocationPct, potDollarsOf, potFiguresOf, sug
 import { runReplayPaths, type ProjectionInput } from "./portfolioDayProjection.js";
 import { portfolioProjectionCodeHash, readSavedProjection, savedProjectionKey, saveProjection } from "./portfolioProjectionCache.js";
 import { runProjectionInParallel } from "./portfolioProjectionPool.js";
+import { loadProjectionContext, projectionSeed, type ProjectionContext } from "./portfolioProjectionContext.js";
 import { loadTickerProjectionSource, type TickerProjectionSource } from "./portfolioProjectionInputs.js";
 import { summarizeProjection, type ProjectionSummary } from "./portfolioProjectionSummary.js";
 import { PortfolioRequestError, horizonYearsChoices, parsePortfolioBookRequest, type HorizonYears, type PortfolioBookRequest } from "./portfolioSimulatorStore.js";
@@ -21,7 +22,7 @@ import { PortfolioRequestError, horizonYearsChoices, parsePortfolioBookRequest, 
 // over the paths, and each ticker's pot in whole lots with the suggested allocations (portfolioPots.ts). The T-bill now
 // is DTB3's latest rate, its average DTB3's from 2010 over the history's days; today is SPY's last file day.
 
-export const projectionSeed = 20261103;
+export { projectionSeed };
 export const maxProjectionPaths = 2000;
 export const defaultProjectionPaths = 500;
 /** The windows a book is replayed through. */
@@ -30,7 +31,6 @@ export const replayWindows = [
   { name: "Covid", from: "2020-02-17", to: "2020-03-23" },
   { name: "2022", from: "2022-01-03", to: "2022-10-10" },
 ] as const;
-const treasuryBillAverageFromIso = "2010-01-04";
 
 export type ProjectionDrift = "as_it_happened" | "neutral";
 
@@ -50,28 +50,19 @@ export function parsePortfolioProjectionRequest(body: unknown): PortfolioProject
   return { ...book, drift, pathCount };
 }
 
-interface PreparedProjection {
-  asOfIso: string;
-  riskFreeNowPct: number;
-  riskFreeAveragePct: number;
+interface PreparedProjection extends ProjectionContext {
   allocationPct: Map<string, number>;
+  /** The lab's settings with the book's allocations. */
   settings: ReturnType<typeof applyBacktestOverrides>;
   sources: TickerProjectionSource[];
 }
 
-async function prepareProjection(request: PortfolioBookRequest, connection: Knex): Promise<PreparedProjection & { spy: TickerProjectionSource; rates: Awaited<ReturnType<typeof loadTreasuryBillRates>> }> {
-  const dataDirectory = requireBacktestDataDirectory();
-  const ratesToday = await loadTreasuryBillRates(dataDirectory, treasuryBillAverageFromIso, new Date().toISOString().slice(0, 10));
-  const spy = await loadTickerProjectionSource("SPY", ratesToday, connection);
-  const asOfIso = spy.lastFileDay;
-  const sources = await Promise.all(request.tickers.map((ticker) => loadTickerProjectionSource(ticker.symbol, ratesToday, connection).catch((error: unknown) => Promise.reject(new PortfolioRequestError(error instanceof Error ? error.message : String(error))))));
-  const lab = await loadBacktestLabSettings(connection);
-  const effective = applyBacktestOverrides(lab.settings, {});
+async function prepareProjection(request: PortfolioBookRequest, connection: Knex): Promise<PreparedProjection> {
+  const context = await loadProjectionContext(connection);
+  const sources = await Promise.all(request.tickers.map((ticker) => loadTickerProjectionSource(ticker.symbol, context.rates, connection).catch((error: unknown) => Promise.reject(new PortfolioRequestError(error instanceof Error ? error.message : String(error))))));
   const allocationPct = effectiveAllocationPctBySymbol(request.tickers);
-  const settings = { ...effective, volFarmerV4: { ...effective.volFarmerV4, tickerAllocationPct: Object.fromEntries(allocationPct) } };
-  const historyDates = spy.sessions.filter((session) => session.tradingDate >= treasuryBillAverageFromIso).map((session) => session.tradingDate);
-  const riskFreeAveragePct = historyDates.reduce((sum, date) => sum + (ratesToday.ratePercentOnOrBefore(date) ?? 0), 0) / Math.max(1, historyDates.length);
-  return { asOfIso, riskFreeNowPct: ratesToday.ratePercentOnOrBefore(asOfIso) ?? 0, riskFreeAveragePct, allocationPct, settings, sources, spy, rates: ratesToday };
+  const settings = { ...context.labSettings, volFarmerV4: { ...context.labSettings.volFarmerV4, tickerAllocationPct: Object.fromEntries(allocationPct) } };
+  return { ...context, allocationPct, settings, sources };
 }
 
 export interface TickerPot extends PotFigures {
@@ -134,6 +125,8 @@ export interface PortfolioProjection {
   tickers: { symbol: string; allocationPct: number; price: number; strikeSpacing: number; expiryWeekdays: number[]; beta: number; ownHistoryFrom: string | null; tenOclockFrom: string | null; chainDays: number; businessChange: TickerBusinessChange | null }[];
   /** Today's book through each window's actual days (one path each, at the actual drift), and SPY's return over them. */
   replays: { name: string; from: string; to: string; days: number; bookReturn: number; maxDrawdown: number; spyReturn: number }[];
+  /** Each path's CAGR and Max drawdown, in path order: the suggestions compare a change with the book path by path. */
+  pathFigures: { cagr: number[]; maxDrawdown: number[] };
   /** When this projection was computed and saved, if it was read back (portfolioProjectionCache.ts); null when computed now. */
   savedAt: string | null;
 }
@@ -209,6 +202,7 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
       maxDrawdown: replays[index]!.maxDrawdown,
       spyReturn: Math.exp(Array.from(window.days).reduce((sum, at) => sum + market.overnight[at]! + market.day[at]!, 0)) - 1,
     })),
+    pathFigures: { cagr: outcomes.map((outcome) => outcome.cagr), maxDrawdown: outcomes.map((outcome) => outcome.maxDrawdown) },
     savedAt: null,
   };
   saveProjection(dataDirectory, key, projection);

@@ -85,10 +85,10 @@ app.listen(port, () => {
   if (marketQuoteLoopFlag === "true") startMarketQuoteLoop([createOptionQuoteBandConsumer(), createAssignmentRiskConsumer(), createVolatilityConsumer()]);
   else console.log("Market quote loop disabled (MARKET_QUOTE_LOOP_ENABLED=false).");
   // Backtests and analyses queued before a restart start again, as many as BACKTEST_MAX_PARALLEL_SESSIONS and
-  // BACKTEST_MAX_PARALLEL_ANALYSES allow (local only).
+  // BACKTEST_MAX_PARALLEL_ANALYSES allow, and a queued library rebuild (local only).
   if (readBacktestDataDirectory()) {
     import("./backtest/jobs/backtestJobStore.js")
-      .then(async ({ kickBacktestQueue, kickAnalysisQueue }) => ({ backtests: await kickBacktestQueue(), analyses: await kickAnalysisQueue() }))
+      .then(async ({ kickBacktestQueue, kickAnalysisQueue, kickPortfolioLibraryQueue }) => ({ backtests: await kickBacktestQueue(), analyses: await kickAnalysisQueue(), library: await kickPortfolioLibraryQueue() }))
       .then(({ backtests, analyses }) => backtests.length + analyses.length > 0 && console.log(`Started ${backtests.length} queued backtest(s) and ${analyses.length} queued analysis(es).`))
       .catch((error) => console.error(`Could not start the queued backtests and analyses: ${error instanceof Error ? error.message : error}`));
   }

@@ -28,6 +28,7 @@ import {
   kickAnalysisQueue,
   kickBacktestQueue,
   kickDownloadQueue,
+  kickPortfolioLibraryQueue,
   readBacktestMaxParallelSessions,
   listOverviewJobViews,
   resumeBacktestJob,
@@ -76,7 +77,7 @@ function requireUuidParameter(value: string | undefined, what: string): string {
 
 backtestRouter.get("/overview", async (_request, response) => {
   // Reading the overview is one of the moments the queues move on (a stopped download, backtest or analysis no longer blocks them).
-  await Promise.all([kickDownloadQueue(), kickBacktestQueue(), kickAnalysisQueue()]);
+  await Promise.all([kickDownloadQueue(), kickBacktestQueue(), kickAnalysisQueue(), kickPortfolioLibraryQueue()]);
   const [files, jobs, suitabilityBySymbol] = await Promise.all([summarizeBacktestDataFiles(), listOverviewJobViews(), loadTickerSuitabilityBySymbol()]);
   const dataDirectory = requireBacktestDataDirectory();
   const overview: BacktestOverview = { dataDirectory, files, suitabilityBySymbol, jobs, maxParallelSessions: readBacktestMaxParallelSessions(), marketIndexFiles: summarizeMarketIndexFiles(dataDirectory) };

@@ -4,14 +4,22 @@ import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 
 // The portfolio simulator's routes on their own router: the request's checks (400s), how the book moves together, its pot
-// table, and the projection's and suggestions' event streams. The store's database work is mocked; its request parsing is the real one.
+// table, the projection's and suggestions' event streams, and the suggestions' library. The store's database work is mocked;
+// its request parsing is the real one.
 const simulatePortfolioMock = vi.fn();
-const suggestPortfolioChangesMock = vi.fn();
+const suggestionsMock = vi.fn();
+vi.mock("../backtest/portfolio/portfolioLibrarySuggestions.js", () => ({ suggestPortfolioChangesFromLibrary: (...args: unknown[]) => suggestionsMock(...args) }));
+const libraryStatusMock = vi.fn();
+vi.mock("../backtest/portfolio/portfolioLibraryStatus.js", () => ({ portfolioLibraryStatus: (...args: unknown[]) => libraryStatusMock(...args) }));
+const queueLibraryMock = vi.fn();
+vi.mock("../backtest/jobs/backtestJobStore.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../backtest/jobs/backtestJobStore.js")>()),
+  queuePortfolioLibraryJob: (...args: unknown[]) => queueLibraryMock(...args),
+}));
 vi.mock("../backtest/portfolio/portfolioSimulatorStore.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../backtest/portfolio/portfolioSimulatorStore.js")>()),
   listPortfolioTickers: async () => [{ symbol: "XLE", verdict: "suits", sector: "Energy", analysedAt: "2026-11-02T07:14:07.000Z" }],
   simulatePortfolio: (...args: unknown[]) => simulatePortfolioMock(...args),
-  suggestPortfolioChanges: (...args: unknown[]) => suggestPortfolioChangesMock(...args),
 }));
 
 const projectPortfolioMock = vi.fn();
@@ -64,27 +72,39 @@ describe("portfolio simulator routes", () => {
     expect(simulatePortfolioMock).not.toHaveBeenCalled();
   });
 
-  it("answers a book with its projection, empty allocations as equal shares and 5 years by default", async () => {
+  it("answers a book with how it moves together, empty allocations as equal shares and 5 years by default", async () => {
     simulatePortfolioMock.mockResolvedValueOnce({ asOf: "2026-10-30" });
     const response = await post("/portfolio/simulate", { tickers: [{ symbol: "XLE" }, { symbol: "NVDA", allocationPct: 40 }], accountDollars: 3_500_000 });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ asOf: "2026-10-30" });
-    expect(simulatePortfolioMock).toHaveBeenCalledWith({ tickers: [{ symbol: "XLE", allocationPct: null }, { symbol: "NVDA", allocationPct: 40 }], accountDollars: 3_500_000, horizonYears: 5, callDaysPace: "today" });
+    expect(simulatePortfolioMock).toHaveBeenCalledWith({ tickers: [{ symbol: "XLE", allocationPct: null }, { symbol: "NVDA", allocationPct: 40 }], accountDollars: 3_500_000, horizonYears: 5 });
   });
 
-  it("streams the suggestions' progress, then the result", async () => {
-    suggestPortfolioChangesMock.mockImplementationOnce(async (_book: unknown, onProgress: (done: number, total: number) => void) => {
-      onProgress(1, 2);
-      onProgress(2, 2);
-      return { baseline: { excessCalmar: 1, cagr: 0.2, maxDrawdown: -0.2 }, suggestions: [] };
+  it("streams the suggestions' progress, each list so far, then the result", async () => {
+    suggestionsMock.mockImplementationOnce(async (_book: unknown, hooks: { onProgress: (done: number, total: number, label: string) => void; onSuggestions: (suggestions: unknown) => void }) => {
+      hooks.onProgress(1, 2, "Scoring the changes on the library");
+      hooks.onSuggestions({ book: { excessCalmar: 0.2 }, suggestions: [] });
+      hooks.onProgress(2, 2, "Done");
+      return { book: { excessCalmar: 0.2 }, bookExact: { excessCalmar: 0.21 }, suggestions: [] };
     });
     const book = encodeURIComponent(JSON.stringify({ tickers: [{ symbol: "XLE" }], accountDollars: 1_000_000, horizonYears: 3 }));
     const response = await fetch(`${baseUrl}/backtest/portfolio/suggestions/stream?book=${book}`);
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     const text = await response.text();
     expect(text).toContain("event: progress");
-    expect(text).toContain('"done":2,"total":2');
-    expect(text).toContain("event: result");
+    expect(text).toContain('"done":2,"total":2,"label":"Done"');
+    expect(text).toContain('event: suggestions\ndata: {"book":{"excessCalmar":0.2},"suggestions":[]}');
+    expect(text).toContain('event: result\ndata: {"book":{"excessCalmar":0.2},"bookExact":{"excessCalmar":0.21},"suggestions":[]}');
+  });
+
+  it("gives the library's state and queues a rebuild", async () => {
+    libraryStatusMock.mockResolvedValueOnce({ built: null, current: null, updatedSince: [], rebuild: null });
+    const status = await fetch(`${baseUrl}/backtest/portfolio/library`);
+    expect(await status.json()).toEqual({ built: null, current: null, updatedSince: [], rebuild: null });
+    queueLibraryMock.mockResolvedValueOnce("job-1");
+    const rebuild = await fetch(`${baseUrl}/backtest/portfolio/library/rebuild`, { method: "POST" });
+    expect(rebuild.status).toBe(202);
+    expect(await rebuild.json()).toEqual({ jobId: "job-1" });
   });
 
   it("refuses a suggestions stream without a book", async () => {
@@ -95,7 +115,7 @@ describe("portfolio simulator routes", () => {
     portfolioPotsMock.mockResolvedValueOnce({ asOf: "2026-10-30", pots: [] });
     const response = await post("/portfolio/pots", { tickers: [{ symbol: "XLE" }], accountDollars: 1_000_000 });
     expect(response.status).toBe(200);
-    expect(portfolioPotsMock).toHaveBeenCalledWith({ tickers: [{ symbol: "XLE", allocationPct: null }], accountDollars: 1_000_000, horizonYears: 5, callDaysPace: "today" });
+    expect(portfolioPotsMock).toHaveBeenCalledWith({ tickers: [{ symbol: "XLE", allocationPct: null }], accountDollars: 1_000_000, horizonYears: 5 });
   });
 
   it("refuses a projection with a path count outside 1 to 2,000 or with another drift, before any work", async () => {
