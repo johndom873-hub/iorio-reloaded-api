@@ -14,11 +14,12 @@ import { thirtyDayIvElevation } from "./portfolioObservedChain.js";
 //   + β × (SPY's average simple day − the T-bill's average day). Example: a ticker with β 1.5 whose days averaged 0.12%,
 //   T-bill now 4% (0.0159% a day), SPY's average day 0.05% against the T-bill's 0.006%: 0.0159% + 1.5 × 0.044% = 0.082%,
 //   so each day gains ln(1.00082 ÷ 1.0012).
-// - The paths are blocks of 20 consecutive history days drawn at random with replacement, the same dates for every
-//   ticker, from a seeded generator so a book gets the same paths every time.
+// - The paths are blocks of 250 consecutive history days (a year; 20 until Marcelo 2026-11-04: shorter blocks broke up
+//   long bear markets, so the worst Max drawdowns came out milder than real 5-year windows'), drawn at random with
+//   replacement, the same dates for every ticker, from a seeded generator so a book gets the same paths every time.
 
 export const dayHistoryStartIso = "2006-01-01";
-export const pathBlockDays = 20;
+export const pathBlockDays = 250;
 export const tradingDaysPerYear = 252;
 
 /** A session of one symbol: its 10:00 price and close on IBKR's split-adjusted scale, and its 30-day IV (that session's). */
@@ -196,7 +197,7 @@ export function sharedLeftoverDays(histories: readonly TickerDayHistory[]): Int3
 }
 
 /**
- * One path: `horizonDays` history days in blocks of 20 consecutive ones, and for each day a draw in [0, 1) that picks a
+ * One path: `horizonDays` history days in blocks of `blockDays` consecutive ones (250), and for each day a draw in [0, 1) that picks a
  * ticker's leftover day from its list (tickerPathPrices): a path's two streams are seeded by the path alone, so the same
  * path comes out whatever the book, and a shorter horizon's path is the start of a longer one's.
  */

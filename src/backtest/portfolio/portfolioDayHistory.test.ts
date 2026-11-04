@@ -71,9 +71,10 @@ describe("a ticker's history on SPY's dates", () => {
 });
 
 describe("the paths", () => {
-  it("are blocks of 20 consecutive history days with a leftover draw a day, the same for a seed", () => {
-    const paths = drawDayPaths(500, 45, 3, 7);
-    expect(drawDayPaths(500, 45, 3, 7)).toEqual(paths);
+  it("are blocks of consecutive history days with a leftover draw a day, the same for a seed", () => {
+    // Blocks of 20 here (the paths' are 250).
+    const paths = drawDayPaths(500, 45, 3, 7, 20);
+    expect(drawDayPaths(500, 45, 3, 7, 20)).toEqual(paths);
     for (const path of paths) {
       for (const blockStart of [0, 20, 40]) for (let offset = 1; offset < 20 && blockStart + offset < 45; offset++) expect(path.days[blockStart + offset]).toBe(path.days[blockStart]! + offset);
       expect([...path.leftoverDraws].every((draw) => draw >= 0 && draw < 1)).toBe(true);
