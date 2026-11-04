@@ -14,9 +14,18 @@ readonly ibkr_directory=/opt/ibkr
 readonly compose_file="${ibkr_directory}/docker-compose.yml"
 readonly derived_template="${ibkr_directory}/ibc-config.ini.tmpl"
 readonly template_path_in_container=/home/ibgateway/ibc/config.ini.tmpl
-readonly image=ghcr.io/gnzsnz/ib-gateway:latest
 
 cd "$ibkr_directory"
+
+# The template comes from the image the services run (pinned in docker-compose.yml), so a version upgrade re-derives
+# it from the new image. Both services must run the same image.
+compose_images=$(grep -E '^[[:space:]]+image: ghcr\.io/gnzsnz/ib-gateway:' "$compose_file" | sed -E 's/^[[:space:]]+image: //' | sort -u)
+if [[ $(printf '%s\n' "$compose_images" | grep -c .) -ne 1 ]]; then
+  echo "expected one ib-gateway image in ${compose_file}, found: $(echo $compose_images)" >&2
+  exit 1
+fi
+readonly image="$compose_images"
+echo "image: ${image}"
 
 container_id=$(docker create "$image")
 trap 'docker rm "$container_id" >/dev/null' EXIT
