@@ -2,15 +2,24 @@ import type { PathOutcome, RegressionSums } from "./portfolioDayProjection.js";
 
 // The projection's figures over its paths (D6, Marcelo 2026-11-03): each path's CAGR, its Max drawdown on the daily
 // values and its Excess Calmar = (CAGR − the T-bill now) ÷ |Max drawdown|, as the 10th, 50th and 90th percentiles; the
-// share of paths whose Max drawdown is worse than each threshold; the average year of each source (Calls, Puts, LEAPS,
-// T-bills, shares: the account's change, from the book's own records) in dollars and as a share of the starting account;
-// the account at each year's end; and each ticker's average year. Example: 200 paths, 37 of them with a Max drawdown
-// worse than −30%: 18.5%. Book betas (Marcelo 2026-11-04): the least-squares slope of the book's daily return (10:00 to
+// Max drawdown reached in 1 path in 10, 20 and 100 (drawdownAtOddsOf); the average year of each source (Calls, Puts,
+// LEAPS, T-bills, shares: the account's change, from the book's own records) in dollars and as a share of the starting
+// account; the account at each year's end; and each ticker's average year. Book betas (Marcelo 2026-11-04): the least-squares slope of the book's daily return (10:00 to
 // 10:00, the account's own marks) on SPY's simple return over the same stretch of history, over every day of every path,
 // and over the days SPY fell (the downside beta).
 // Example: the book's days lining up as 0.6 × SPY's plus noise give 0.6: a 10% SPY fall typically comes with a 6% fall.
 
-export const fallThresholds = [-0.1, -0.2, -0.3, -0.4] as const;
+/** The odds a Max drawdown is read at (Marcelo 2026-11-04): the fall reached in 1 path in 10, in 20 and in 100. */
+export const drawdownOdds = [10, 20, 100] as const;
+
+/**
+ * The Max drawdown reached in 1 path in N: the value at floor(n ÷ N) of the paths' Max drawdowns sorted from the worst
+ * (the percentiles' convention). Example: 500 paths, 1 in 20: the 26th worst.
+ */
+export function drawdownAtOddsOf(maxDrawdowns: ArrayLike<number>): { oneIn: number; maxDrawdown: number }[] {
+  const sorted = Array.from(maxDrawdowns).sort((a, b) => a - b);
+  return drawdownOdds.map((oneIn) => ({ oneIn, maxDrawdown: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length / oneIn))]! }));
+}
 
 export interface Percentiles {
   p10: number;
@@ -30,8 +39,8 @@ export interface ProjectionSummary {
   cagr: Percentiles;
   maxDrawdown: Percentiles;
   excessCalmar: Percentiles;
-  /** The share of paths whose Max drawdown is worse than each of fallThresholds. */
-  fallWorseThan: { threshold: number; share: number }[];
+  /** The Max drawdown reached in 1 path in 10, 20 and 100 (drawdownAtOddsOf). */
+  drawdownAtOdds: { oneIn: number; maxDrawdown: number }[];
   /** The average year of each source over every path, dollars and ÷ the starting account. */
   averageYear: Record<"calls" | "puts" | "leaps" | "interest" | "shares", { dollars: number; share: number }>;
   /** The account at each simulated year's end. */
@@ -72,7 +81,7 @@ export function summarizeProjection(outcomes: readonly PathOutcome[], input: { a
     cagr: percentilesOf(outcomes.map((outcome) => outcome.cagr)),
     maxDrawdown: percentilesOf(outcomes.map((outcome) => outcome.maxDrawdown)),
     excessCalmar: percentilesOf(outcomes.map((outcome) => (outcome.maxDrawdown < 0 ? (outcome.cagr - riskFree) / -outcome.maxDrawdown : Number.POSITIVE_INFINITY))),
-    fallWorseThan: fallThresholds.map((threshold) => ({ threshold, share: outcomes.filter((outcome) => outcome.maxDrawdown < threshold).length / count })),
+    drawdownAtOdds: drawdownAtOddsOf(outcomes.map((outcome) => outcome.maxDrawdown)),
     averageYear: {
       calls: yearEntry((outcome) => outcome.sources.callsDollars),
       puts: yearEntry((outcome) => outcome.sources.putsDollars),

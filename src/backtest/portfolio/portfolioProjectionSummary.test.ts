@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { addRegressionDay, type PathOutcome, type RegressionSums } from "./portfolioDayProjection.js";
-import { percentilesOf, slopeOfSums, summarizeProjection } from "./portfolioProjectionSummary.js";
+import { drawdownAtOddsOf, percentilesOf, slopeOfSums, summarizeProjection } from "./portfolioProjectionSummary.js";
 
 const outcome = (cagr: number, maxDrawdown: number, calls: number): PathOutcome => ({
   cagr,
@@ -12,6 +12,18 @@ const outcome = (cagr: number, maxDrawdown: number, calls: number): PathOutcome 
   sources: { callsDollars: calls, putsDollars: 0, leapsDollars: 0, interestDollars: 80_000, sharesDollars: 0 },
   byTicker: [{ symbol: "XLE", premiumDollars: calls, callsSold: 200, callAways: 60, daysWithoutShares: 63 }],
   spyRegression: null,
+});
+
+describe("the drawdown at each odds", () => {
+  it("is the fall reached in 1 path in 10, 20 and 100: the value at floor(n ÷ N) from the worst", () => {
+    // 200 paths with Max drawdowns of −0.1%, −0.2%, …, −20%. From the worst, index floor(200 ÷ N): 20 → −18%, 10 → −19%, 2 → −19.8%.
+    const drawdowns = Array.from({ length: 200 }, (_, at) => -(at + 1) / 1000);
+    expect(drawdownAtOddsOf(drawdowns)).toEqual([
+      { oneIn: 10, maxDrawdown: -0.18 },
+      { oneIn: 20, maxDrawdown: -0.19 },
+      { oneIn: 100, maxDrawdown: -0.198 },
+    ]);
+  });
 });
 
 describe("the book betas", () => {
@@ -40,13 +52,14 @@ describe("the projection's figures over its paths", () => {
     expect(percentilesOf([5, 1, 4, 2, 3, 10, 9, 8, 7, 6])).toEqual({ p10: 2, p50: 6, p90: 10 });
   });
 
-  it("works Excess Calmar per path, the falls past each threshold, and each source's average year", () => {
+  it("works Excess Calmar per path, the drawdowns at each odds, and each source's average year", () => {
     const outcomes = [outcome(0.14, -0.25, 300_000), outcome(0.04, -0.35, 100_000)];
     const summary = summarizeProjection(outcomes, { accountDollars: 1_000_000, horizonYears: 2, riskFreeRatePercent: 4, horizonDays: 504 });
     // (14% − 4%) ÷ 25% = 0.4; (4% − 4%) ÷ 35% = 0.
     expect(summary.excessCalmar.p10).toBeCloseTo(0, 12);
     expect(summary.excessCalmar.p90).toBeCloseTo(0.4, 12);
-    expect(summary.fallWorseThan.map((entry) => entry.share)).toEqual([1, 1, 0.5, 0]);
+    // Two paths: floor(2 ÷ N) = 0 for every odds, the worse one.
+    expect(summary.drawdownAtOdds).toEqual([{ oneIn: 10, maxDrawdown: -0.35 }, { oneIn: 20, maxDrawdown: -0.35 }, { oneIn: 100, maxDrawdown: -0.35 }]);
     // Calls (300,000 + 100,000) ÷ 2 paths ÷ 2 years = 100,000 a year, 10% of the account.
     expect(summary.averageYear.calls).toEqual({ dollars: 100_000, share: 0.1 });
     expect(summary.averageYear.interest.dollars).toBe(40_000);

@@ -14,7 +14,9 @@ import { portfolioProjectionCodeHash, readSavedProjection, savedProjectionKey, s
 import { runProjectionInParallel } from "./portfolioProjectionPool.js";
 import { loadProjectionContext, projectionSeed, type ProjectionContext } from "./portfolioProjectionContext.js";
 import { loadTickerProjectionSource, type TickerProjectionSource } from "./portfolioProjectionInputs.js";
-import { summarizeProjection, type ProjectionSummary } from "./portfolioProjectionSummary.js";
+import { drawdownAtOddsOf, summarizeProjection, type ProjectionSummary } from "./portfolioProjectionSummary.js";
+import { libraryDailyReturns, readLibraryManifest } from "./portfolioLibrary.js";
+import { combinedPathFigures } from "./portfolioLibraryScoring.js";
 import { PortfolioRequestError, horizonYearsChoices, parsePortfolioBookRequest, type HorizonYears, type PortfolioBookRequest } from "./portfolioSimulatorStore.js";
 
 // The portfolio simulator's projection and pot table (the lab only, Marcelo 2026-11-03): a book's paths run through v4's
@@ -122,7 +124,9 @@ export interface PortfolioProjection {
   history: { from: string; to: string; days: number };
   summary: ProjectionSummary;
   pots: TickerPot[];
-  tickers: { symbol: string; allocationPct: number; price: number; strikeSpacing: number; expiryWeekdays: number[]; beta: number; ownHistoryFrom: string | null; tenOclockFrom: string | null; chainDays: number; businessChange: TickerBusinessChange | null }[];
+  tickers: { symbol: string; allocationPct: number; price: number; strikeSpacing: number; expiryWeekdays: number[]; beta: number; ownHistoryFrom: string | null; tenOclockFrom: string | null; chainDays: number; businessChange: TickerBusinessChange | null; ownDrawdownAtOdds: { oneIn: number; maxDrawdown: number }[] | null }[];
+  /** Where each ticker's own drawdowns come from: the suggestions' library (its lone runs at the ticker's pot, neutral drift); null without one. */
+  ownDrawdowns: { libraryAsOf: string; staleSymbols: string[] } | null;
   /** Today's book through each window's actual days (one path each, at the actual drift), and SPY's return over them. */
   replays: { name: string; from: string; to: string; days: number; bookReturn: number; maxDrawdown: number; spyReturn: number }[];
   /** Each path's CAGR and Max drawdown, in path order: the suggestions compare a change with the book path by path. */
@@ -167,7 +171,7 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
   const dataDirectory = requireBacktestDataDirectory();
   const key = savedProjectionKey({ input, pathCount: request.pathCount, marketDates: market.dates }, portfolioProjectionCodeHash());
   const saved = readSavedProjection<PortfolioProjection>(dataDirectory, key);
-  if (saved !== null) return { ...saved.projection, savedAt: saved.savedAt };
+  if (saved !== null) return withOwnDrawdowns({ ...saved.projection, savedAt: saved.savedAt }, prepared, request.horizonYears);
   const outcomes = await runProjectionInParallel(input, paths, onProgress);
   const windows = replayWindows
     .map((window) => ({ ...window, days: Int32Array.from(market.dates.flatMap((date, at) => (date >= window.from && date <= window.to ? [at] : []))) }))
@@ -193,6 +197,7 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
       tenOclockFrom: source.firstTenOclockDate !== null && source.firstTenOclockDate < dayHistoryStartIso ? dayHistoryStartIso : source.firstTenOclockDate,
       chainDays: source.observedDays.length,
       businessChange: tickerBusinessChangeOf(source.symbol),
+      ownDrawdownAtOdds: null,
     })),
     replays: windows.map((window, index) => ({
       name: window.name,
@@ -204,8 +209,31 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
       spyReturn: Math.exp(Array.from(window.days).reduce((sum, at) => sum + market.overnight[at]! + market.day[at]!, 0)) - 1,
     })),
     pathFigures: { cagr: outcomes.map((outcome) => outcome.cagr), maxDrawdown: outcomes.map((outcome) => outcome.maxDrawdown) },
+    ownDrawdowns: null,
     savedAt: null,
   };
   saveProjection(dataDirectory, key, projection);
-  return projection;
+  return withOwnDrawdowns(projection, prepared, request.horizonYears);
+}
+
+/**
+ * Each ticker's own Max drawdown at the odds (Marcelo 2026-11-04), read fresh from the suggestions' library: its lone
+ * runs at its pot (L2's blend), over the horizon. A ticker the library lacks gets null; one whose data file changed since
+ * its runs is listed as stale.
+ */
+function withOwnDrawdowns(projection: PortfolioProjection, prepared: PreparedProjection, horizonYears: number): PortfolioProjection {
+  const manifest = readLibraryManifest();
+  if (manifest === null) return { ...projection, ownDrawdowns: null, tickers: projection.tickers.map((ticker) => ({ ...ticker, ownDrawdownAtOdds: null })) };
+  const potBySymbol = new Map(projection.pots.map((pot) => [pot.symbol, pot.potDollars]));
+  const lastFileDayBySymbol = new Map(prepared.sources.map((source) => [source.symbol, source.lastFileDay]));
+  return {
+    ...projection,
+    ownDrawdowns: { libraryAsOf: manifest.asOf, staleSymbols: projection.tickers.filter((ticker) => manifest.tickers[ticker.symbol] && manifest.tickers[ticker.symbol]!.lastFileDay !== lastFileDayBySymbol.get(ticker.symbol)).map((ticker) => ticker.symbol) },
+    tickers: projection.tickers.map((ticker) => {
+      if (!manifest.tickers[ticker.symbol]) return { ...ticker, ownDrawdownAtOdds: null };
+      const returns = libraryDailyReturns(manifest, ticker.symbol, potBySymbol.get(ticker.symbol)!);
+      const figures = combinedPathFigures([{ returns, weight: 1 }], { pathCount: manifest.pathCount, daysPerPath: manifest.horizonDays, horizonDays: horizonYears * tradingDaysPerYear, riskFreeRatePercent: manifest.riskFreeNowPct, tradingDaysPerYear });
+      return { ...ticker, ownDrawdownAtOdds: drawdownAtOddsOf(figures.maxDrawdown) };
+    }),
+  };
 }
