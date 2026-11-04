@@ -9,7 +9,7 @@ const outcome = (cagr: number, maxDrawdown: number, calls: number): PathOutcome 
   maxDrawdownTo: 1,
   endValue: 1_000_000 * (1 + cagr) ** 2,
   yearEndValues: [1_000_000 * (1 + cagr), 1_000_000 * (1 + cagr) ** 2],
-  sources: { callsDollars: calls, putsDollars: 0, leapsDollars: 0, interestDollars: 80_000, sharesDollars: 0 },
+  sources: { callsDollars: calls, putsDollars: 0, leapsDollars: 0, interestDollars: 80_000, dividendsDollars: 0, sharesDollars: 0 },
   byTicker: [{ symbol: "XLE", premiumDollars: calls, callsSold: 200, callAways: 60, daysWithoutShares: 63 }],
   spyRegression: null,
 });

@@ -1,6 +1,6 @@
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
-import { readFileDividends, type FileDividend } from "../backtestFileDividends.js";
+import { readFileDividends, readFileDividendsFetchedAt, type FileDividend } from "../backtestFileDividends.js";
 import { readFileDailyBars, readFileIntradayPrices, type FileIntradayPrices } from "../backtestFileStockBars.js";
 import { currentBusinessFromOf, rowsFrom } from "../tickerBusinessChanges.js";
 import type { StoredDailyBar } from "./backtestBarHistory.js";
@@ -134,6 +134,11 @@ export class BacktestSymbolFile {
   loadDividends(): FileDividend[] | null {
     const dividends = readFileDividends(this.database);
     return dividends === null ? null : dividends.filter((dividend) => this.currentBusinessFrom === null || dividend.exDividendDate >= this.currentBusinessFrom);
+  }
+
+  /** When the file's dividends were last fetched; null when never. */
+  loadDividendsFetchedAt(): string | null {
+    return readFileDividendsFetchedAt(this.database);
   }
 
   /** IBKR's 30-minute bars kept in the file, as the stock's price at a look; null when it has none. */

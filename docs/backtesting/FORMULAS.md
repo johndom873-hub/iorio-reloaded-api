@@ -252,7 +252,7 @@ Example: break-even $100, shares' average cost $104, S 70% (F = $31.20), R0 $100
 - **Earnings dates known 30 days ahead** (Marcelo 2026-10-12): the stored calendar holds every report of the period, but a day sees a report's date only from 30 calendar days before it. Signals' exclusion of expiries spanning a report, the next-earnings date and Pluto's closes before earnings all read only the dates known that day. Example: on 2 March a report on 1 April (30 days) is known, one on 2 April (31 days) is not. Whether a ticker's earnings calendar counts as resolved is the ticker's, as live (`tickerCalendarProfile`).
 - What happens between two looks: Pluto looks every 30 minutes, not at every Day Signals update, and an order fills at once at the look's quotes.
 - A human's hand: the breaker's reset is assumed, the market-stress override is never used.
-- Early assignment and dividends.
+- Early assignment.
 
 ## Vol Farmer (decision maker `vol_farmer`, approved by Marcelo 2026-10-23)
 
@@ -357,19 +357,20 @@ The lab's portfolio simulator projects a book of Vol Farmer v4 tickers 3 or 5 ye
 - **History**: SPY's sessions from 2006 with a 10:00 price (IBKR's 30-minute bars), a close and the previous close. A day has two moves, overnight = ln(10:00 ÷ the previous close) and the day's = ln(close ÷ 10:00), and the IBKR 30-day IV known at 10:00 with its elevation (IV30 ÷ its 60-session median).
 - **Paths**: blocks of 250 consecutive history days (a year; 20 until 2026-11-04) drawn at random, the same dates for every ticker, applied to today's price. Checked against every real 5-year window since 2006 (a start every 21 sessions): with 20-day blocks a 10-ticker book's worst 5% of Max drawdowns was −36.1% against −42.4% in the real windows and 14% of paths fell past −30% against 31%; with 250-day blocks −42.2% and 30% (a high-volatility book alike). Each path is seeded alone (its blocks and its leftover draws from two streams), so a path is the same in any book and a 3-year path is the start of the 5-year one.
 - **Before a listing** (or on a day the file lacks): β × SPY's moves + a leftover of its own (its moves less β × SPY's on one of its days). In a projection the leftover's date is shared by every such ticker of the book on that path day; the suggestions' library draws it from the ticker's own days. β = the slope of its daily log moves on SPY's. Its IV there = SPY's × (its median ÷ SPY's).
-- **Neutral drift** (the default): every day's own move gains the same amount, so the ticker's average simple day becomes the T-bill now + β × (SPY's average day − the T-bill's average day, from 2010).
+- **Neutral drift** (the default; V4, 2026-11-04): every day's own move gains the same amount, so the ticker's average simple day becomes the T-bill now + β × (SPY's average total-return day − the T-bill's average day, from 2010) − its own dividend yield ÷ 252. SPY's average total-return day = its average simple day + its dividends since 2006 (each ÷ the close before its ex-date) ÷ its days. Example (T-bill now 4.03%, average 1.5%, SPY's total about 11% a year, XLE β ≈ 1.0, yield 3.4%): XLE's total is 4.03 + 1.0 × (11 − 1.5) = 13.5% a year, 3.4% of it as cash and 10.1% as price. A projection is refused until SPY's dividends are fetched.
 - **Business changes**: a ticker that was another company before (`src/backtest/tickerBusinessChanges.ts`: a SPAC, a merger, a relisting, MSTR's bitcoin holdings) is a new company from its change date, with no earlier prices read by any analysis; before then it moves as before a listing.
 
 **A simulated day** (D3, D5, the observed chain in place of D4):
 - **Expiries**: today's expiry weekdays (the data file's last 4 weeks); a day's next expiry is the first session on or after it falling on one of them.
 - **The chain**: the next expiry is priced, quoted and traded like one of the ticker's last 60 sessions with the same days to expiry, drawn per path, ticker (by symbol) and day. Per strike: the observed contract's position in standard deviations (ln(K ÷ S) ÷ (anchor × √T)), its IV ÷ the anchor, its half-spread ÷ mid and its previous session's volume, so v4's quote rule, spread limit, delta band and 20% volume cap act as on the real chain. A synthetic strike takes the nearest observed contract; none beyond the outermost gap.
 - **Anchor** = IV30 × the ticker's factor at the day's elevation: the median IV ratio of its same-day expiries since 2020 in elevation bands 0.9 / 1.0 / 1.1 / 1.25 / 1.5 (at least 10 days each), interpolated linearly. It carries a chain between earnings run-ups and ordinary days.
+- **Dividends** (V3): each ticker's yield y = Σ over the 12 months to its last file day of each dividend ÷ the close before its ex-date, both as traded (so splits don't matter); each simulated day credits the shares held after the settlements × the previous close × y ÷ 252 as cash. Example: XLE's four dividends of about 0.9% each → y ≈ 3.4%; 1,000 shares at $90 → $12.14 a day. A ticker whose dividends were never fetched gets y = 0 and is shown so.
 - **v4**: the lab's settings with the book's allocations, one 10:00 look; open options marked each day at IV30 × u (LEAPS at IV30), u = the ticker's median sold-Call IV ÷ IV30; fills at mid; cash at the T-bill now.
 
 **Outputs** (D6):
-- Each path's daily account value: CAGR, Max drawdown on daily values, Excess Calmar = (CAGR − T-bill now) ÷ |Max drawdown|; the 10th, 50th and 90th percentiles; the chance of a fall worse than 10, 20, 30 and 40%; the book's value at each year end; the average year split into Calls, Puts, LEAPS, interest and shares; per ticker the same sources.
+- Each path's daily account value: CAGR, Max drawdown on daily values, Excess Calmar = (CAGR − T-bill now) ÷ |Max drawdown|; the 10th, 50th and 90th percentiles; the chance of a fall worse than 10, 20, 30 and 40%; the book's value at each year end; the average year split into Calls, Puts, LEAPS, interest, dividends and shares; per ticker the same sources.
 - **500 paths** by default, up to 2,000. A finished projection is saved under the hash of its whole input, path count and code, and read back when the same book is asked again on the same data (kept 14 days).
-- **Replays**: today's book through the actual days of 2008 (8 Oct 2007 to 9 Mar 2009), Covid (17 Feb to 23 Mar 2020) and 2022 (3 Jan to 10 Oct 2022), each one path at the actual drift, with SPY's return over the same days. A ticker not yet listed moves as β × SPY's moves.
+- **Replays**: today's book through the actual days of 2008 (8 Oct 2007 to 9 Mar 2009), Covid (17 Feb to 23 Mar 2020) and 2022 (3 Jan to 10 Oct 2022), each one path at the actual drift, with SPY's return over the same days, its dividends reinvested. A ticker not yet listed moves as β × SPY's moves.
 
 **Pots** (whole 100-share lots, the $1,000,000 account by default):
 - A ticker's pot = allocation × (1 + the excess allowance) × the account. The pot table gives the lots at the 80% target, the share of the target reached, the band in lots, the top-up and trim prices, and the smallest pot where the band acts = a lot × 100 ÷ the band %.
@@ -403,9 +404,16 @@ Each is scored on the **library** and the best 5 are then projected exactly:
 - **S4**: highest score first; "within noise" when the score is within its ±.
 - **S5**: the book and the best 5 projected exactly (500 paths, the shared account, the same paths), their exact scores shown as they finish and the five re-sorted by them. Measured on 24 changes of a 10-ticker book (100 paths): lone runs at each change's exact pot correlate 0.975 with the exact changes (0.11 points of CAGR and 0.20 of Max drawdown apart on average), and with only 5%, 10% and 15% levels 0.95 (0.15 and 0.41); on a 6-ticker book with the six levels, the five confirmed changes came within 0.03 points of CAGR and 0.07 of Max drawdown.
 
+## Dividends (approved by Marcelo 2026-11-04)
+
+- **V1**: on each ex-dividend date, the shares held after the previous close's settlements × the dividend per share as paid (× the cycle's split factor ÷ today's, so it matches the shares as the session counts them), credited as cash at that day's 10:00. Example: 1,000 XLE shares and a $0.38 dividend → $380 cash. Shares called away before the ex-date are paid nothing. The buy-and-hold baselines are paid the same way.
+- **V2**: a symbol whose dividends were never fetched is paid none, and the session's notes name it.
+- **Source**: Alpha Vantage's DIVIDENDS, as paid, the whole history, kept in each data file (`DATA-FILES.md`); a business change cuts them as it cuts the prices.
+- **V5**: only dividend payers' results change; a book without dividends is identical row by row.
+
 ## Baselines (comparison only)
 
-Two buy-and-hold series run beside every session, marked at 10:00 each session day and measured with the same formulas as the session (return, CAGR, Sortino, drawdown, worst month). They are for comparison only: nothing in the session depends on them. Neither counts dividends.
+Two buy-and-hold series run beside every session, marked at 10:00 each session day and measured with the same formulas as the session (return, CAGR, Sortino, drawdown, worst month). They are for comparison only: nothing in the session depends on them. Both are paid dividends as the session is (see Dividends), kept as cash.
 
 **Buy and hold of the session's symbols**: each symbol's pot in a pots session, else the starting value in equal parts, one per symbol; each part buys whole shares at its symbol's first 10:00 price in the session and is never rebalanced; what is left stays in cash at the same interest as the session. Value on a day = cash + Σ shares × the day's 10:00 price × F(purchase day) ÷ F(day) (split scale). With one symbol: as many whole shares as the starting value allows.
 
@@ -428,4 +436,4 @@ Example: runs A and B start with $100,000 each; A ends at $130,000 and B at $90,
 ## Also decided (2026-10-12)
 
 1. Interest on the whole cash balance, including cash that secures puts (it is still cash at IBKR).
-2. No dividends in version 1, for the sessions or for either buy and hold. This understates buy and hold for dividend payers (SPY among them); most shortlist names pay little or nothing.
+2. No dividends in version 1, for the sessions or for either buy and hold (replaced 2026-11-04: see Dividends).

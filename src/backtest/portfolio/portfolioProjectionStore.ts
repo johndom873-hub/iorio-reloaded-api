@@ -124,7 +124,7 @@ export interface PortfolioProjection {
   history: { from: string; to: string; days: number };
   summary: ProjectionSummary;
   pots: TickerPot[];
-  tickers: { symbol: string; allocationPct: number; price: number; strikeSpacing: number; expiryWeekdays: number[]; beta: number; ownHistoryFrom: string | null; tenOclockFrom: string | null; chainDays: number; businessChange: TickerBusinessChange | null; ownDrawdownAtOdds: { oneIn: number; maxDrawdown: number }[] | null }[];
+  tickers: { symbol: string; allocationPct: number; price: number; strikeSpacing: number; expiryWeekdays: number[]; beta: number; ownHistoryFrom: string | null; tenOclockFrom: string | null; chainDays: number; businessChange: TickerBusinessChange | null; dividendYield: number | null; ownDrawdownAtOdds: { oneIn: number; maxDrawdown: number }[] | null }[];
   /** Where each ticker's own drawdowns come from: the suggestions' library (its lone runs at the ticker's pot, neutral drift); null without one. */
   ownDrawdowns: { libraryAsOf: string; staleSymbols: string[] } | null;
   /** Today's book through each window's actual days (one path each, at the actual drift), and SPY's return over them. */
@@ -139,11 +139,13 @@ export interface PortfolioProjection {
 export async function projectPortfolio(request: PortfolioProjectionRequest, onProgress?: (done: number, total: number) => void, connection: Knex = db): Promise<PortfolioProjection> {
   if (!(horizonYearsChoices as readonly number[]).includes(request.horizonYears)) throw new PortfolioRequestError(`horizonYears must be one of ${horizonYearsChoices.join(", ")}.`);
   const prepared = await prepareProjection(request, connection);
-  const market = marketDayHistoryOf(prepared.spy.sessions);
+  if (prepared.spy.dividendShares === null) throw new PortfolioRequestError("SPY's dividends were never fetched: npm run backtest:fetch-dividends -- SPY.");
+  const spyDividendShares = prepared.spy.dividendShares;
+  const market = marketDayHistoryOf(prepared.spy.sessions, spyDividendShares);
   if (market.dates.length < 2 * tradingDaysPerYear) throw new PortfolioRequestError("SPY's 10:00 prices cover under 2 years: extend its 30-minute bars back (npm run backtest:backfill-file-stock-bars -- --extend-intraday-bars-back SPY).");
   const riskFreeNowDay = prepared.riskFreeNowPct / 100 / tradingDaysPerYear;
   const riskFreeMeanDay = prepared.riskFreeAveragePct / 100 / tradingDaysPerYear;
-  const histories = prepared.sources.map((source) => tickerDayHistoryOf(source.symbol, source.sessions, market, riskFreeNowDay, riskFreeMeanDay));
+  const histories = prepared.sources.map((source) => tickerDayHistoryOf(source.symbol, source.sessions, market, riskFreeNowDay, riskFreeMeanDay, source.dividendYield ?? 0));
   const horizonDays = request.horizonYears * tradingDaysPerYear;
   const paths = drawDayPaths(market.dates.length, horizonDays, request.pathCount, projectionSeed);
   const leftoverDays = sharedLeftoverDays(histories);
@@ -159,6 +161,7 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
       observedDays: source.observedDays,
       anchorCurve: source.anchorCurve,
       leftoverDays,
+      dividendYield: source.dividendYield ?? 0,
     })),
     settings: prepared.settings,
     accountDollars: request.accountDollars,
@@ -197,6 +200,7 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
       tenOclockFrom: source.firstTenOclockDate !== null && source.firstTenOclockDate < dayHistoryStartIso ? dayHistoryStartIso : source.firstTenOclockDate,
       chainDays: source.observedDays.length,
       businessChange: tickerBusinessChangeOf(source.symbol),
+      dividendYield: source.dividendYield,
       ownDrawdownAtOdds: null,
     })),
     replays: windows.map((window, index) => ({
@@ -206,7 +210,11 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
       days: window.days.length,
       bookReturn: replays[index]!.bookReturn,
       maxDrawdown: replays[index]!.maxDrawdown,
-      spyReturn: Math.exp(Array.from(window.days).reduce((sum, at) => sum + market.overnight[at]! + market.day[at]!, 0)) - 1,
+      // With its dividends reinvested, as the book's are kept.
+      spyReturn:
+        Math.exp(Array.from(window.days).reduce((sum, at) => sum + market.overnight[at]! + market.day[at]!, 0)) *
+          spyDividendShares.filter((dividend) => dividend.exDividendDate >= market.dates[window.days[0]!]! && dividend.exDividendDate <= market.dates[window.days.at(-1)!]!).reduce((product, dividend) => product * (1 + dividend.share), 1) -
+        1,
     })),
     pathFigures: { cagr: outcomes.map((outcome) => outcome.cagr), maxDrawdown: outcomes.map((outcome) => outcome.maxDrawdown) },
     ownDrawdowns: null,

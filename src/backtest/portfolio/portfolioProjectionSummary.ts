@@ -3,7 +3,7 @@ import type { PathOutcome, RegressionSums } from "./portfolioDayProjection.js";
 // The projection's figures over its paths (D6, Marcelo 2026-11-03): each path's CAGR, its Max drawdown on the daily
 // values and its Excess Calmar = (CAGR − the T-bill now) ÷ |Max drawdown|, as the 10th, 50th and 90th percentiles; the
 // Max drawdown reached in 1 path in 10, 20 and 100 (drawdownAtOddsOf); the average year of each source (Calls, Puts,
-// LEAPS, T-bills, shares: the account's change, from the book's own records) in dollars and as a share of the starting
+// LEAPS, T-bills, dividends, shares: the account's change, from the book's own records) in dollars and as a share of the starting
 // account; the account at each year's end; and each ticker's average year. Book betas (Marcelo 2026-11-04): the least-squares slope of the book's daily return (10:00 to
 // 10:00, the account's own marks) on SPY's simple return over the same stretch of history, over every day of every path,
 // and over the days SPY fell (the downside beta).
@@ -42,7 +42,7 @@ export interface ProjectionSummary {
   /** The Max drawdown reached in 1 path in 10, 20 and 100 (drawdownAtOddsOf). */
   drawdownAtOdds: { oneIn: number; maxDrawdown: number }[];
   /** The average year of each source over every path, dollars and ÷ the starting account. */
-  averageYear: Record<"calls" | "puts" | "leaps" | "interest" | "shares", { dollars: number; share: number }>;
+  averageYear: Record<"calls" | "puts" | "leaps" | "interest" | "dividends" | "shares", { dollars: number; share: number }>;
   /** The account at each simulated year's end. */
   yearEnds: { year: number; value: Percentiles }[];
   tickers: { symbol: string; premiumYear: number; callsSoldYear: number; callAwaysYear: number; daysWithoutSharesShare: number }[];
@@ -87,6 +87,7 @@ export function summarizeProjection(outcomes: readonly PathOutcome[], input: { a
       puts: yearEntry((outcome) => outcome.sources.putsDollars),
       leaps: yearEntry((outcome) => outcome.sources.leapsDollars),
       interest: yearEntry((outcome) => outcome.sources.interestDollars),
+      dividends: yearEntry((outcome) => outcome.sources.dividendsDollars),
       shares: yearEntry((outcome) => outcome.sources.sharesDollars),
     },
     yearEnds: (outcomes[0]?.yearEndValues ?? []).map((_, index) => ({ year: index + 1, value: percentilesOf(outcomes.map((outcome) => outcome.yearEndValues[index]!)) })),

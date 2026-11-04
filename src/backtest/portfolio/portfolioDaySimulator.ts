@@ -6,7 +6,7 @@ import type { BacktestLookSymbol } from "../engine/backtestLookTypes.js";
 import { captureLookTimeEt, lookInstantMs } from "../engine/backtestTickerInputs.js";
 import { BacktestTradingCalendar } from "../engine/backtestTradingCalendar.js";
 import { runVolFarmerV4Look } from "../engine/backtestVolFarmerV4Look.js";
-import { creditInterest, expirySettlementInstant, settleExpiry, settleLeapsCall } from "../engine/ledger/ledgerEvents.js";
+import { creditDividend, creditInterest, expirySettlementInstant, settleExpiry, settleLeapsCall } from "../engine/ledger/ledgerEvents.js";
 import { ledgerLeapsLegsDueForSettlement, ledgerLegsDueForSettlement, ledgerNetLiquidationValue } from "../engine/ledger/ledgerSelectors.js";
 import { createSimulatedLedger, requirePosition, unexitedLegsOf, type LedgerLeg, type SimulatedLedger } from "../engine/ledger/simulatedLedger.js";
 import type { ObservedChainDay } from "./portfolioObservedChain.js";
@@ -27,6 +27,8 @@ export interface SimulatedTicker {
   symbol: string;
   /** u (D4): a same-day Call's own IV ÷ IBKR's 30-day IV in the ticker's backtest. */
   sameDayVolatilityUplift: number;
+  /** V3 (Marcelo 2026-11-04): its dividend yield, a year (0.034 for 3.4%), paid on the shares held every simulated day; 0 without one. */
+  dividendYield?: number;
 }
 
 export interface SimulatedTickerDay {
@@ -76,13 +78,14 @@ export interface SimulatedTickerFigures {
 
 /**
  * Where the account's change came from (D6): Calls and Puts sold (fills less commission), the LEAPS (their cash and the
- * open ones at the last close), T-bill interest, and the shares: the rest (their P&L with their commissions).
+ * open ones at the last close), T-bill interest, dividends, and the shares: the rest (their P&L with their commissions).
  */
 export interface SimulationSources {
   callsDollars: number;
   putsDollars: number;
   leapsDollars: number;
   interestDollars: number;
+  dividendsDollars: number;
   sharesDollars: number;
 }
 
@@ -113,6 +116,7 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
   const sameDayOptionsOnly = settings.volFarmerV4.optionsExpiry === "today";
   const accountValues = new Float64Array(dates.length + 1);
   let interestDollars = 0;
+  let dividendsDollars = 0;
   let callsDollars = 0;
   let putsDollars = 0;
   let actionNumber = 0;
@@ -142,6 +146,11 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
       const dollars = computeInterestDollars(ledger.cash, riskFreeRatePercent, calendarDays);
       interestDollars += dollars;
       creditInterest(ledger, at, dollars);
+      // V3: each ticker's dividend yield on the shares held after the settlements, at the previous close, a 252th a day.
+      for (const ticker of tickers) {
+        if (!ticker.dividendYield) continue;
+        dividendsDollars += creditDividend(ledger, { symbol: ticker.symbol, amountPerShare: (closeBySymbolAndDate.get(`${ticker.symbol} ${previousIso}`)! * ticker.dividendYield) / 252, at });
+      }
     }
 
     // c. Every open leg marked at 10:00, as the runner marks it at the quotes' mid: shares at the price, a sold Call or Put
@@ -237,6 +246,6 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
   let leapsDollars = 0;
   for (const entry of ledger.cashJournal) if (isLeaps(entry.positionId)) leapsDollars += entry.amount;
   for (const leg of unexitedLegsOf(ledger)) if (isLeaps(leg.positionId)) leapsDollars += (closePriceByLegId.get(leg.id) ?? leg.entryPrice) * leg.quantity * leg.multiplier * (leg.side === "short" ? -1 : 1);
-  const sharesDollars = accountValues[dates.length]! - startingValue - callsDollars - putsDollars - leapsDollars - interestDollars;
-  return { accountValues, premiumDollars: figures.reduce((sum, entry) => sum + entry.premiumDollars, 0), interestDollars, byTicker: figures, sources: { callsDollars, putsDollars, leapsDollars, interestDollars, sharesDollars } };
+  const sharesDollars = accountValues[dates.length]! - startingValue - callsDollars - putsDollars - leapsDollars - interestDollars - dividendsDollars;
+  return { accountValues, premiumDollars: figures.reduce((sum, entry) => sum + entry.premiumDollars, 0), interestDollars, byTicker: figures, sources: { callsDollars, putsDollars, leapsDollars, interestDollars, dividendsDollars, sharesDollars } };
 }

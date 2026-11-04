@@ -114,7 +114,8 @@ export async function buildPortfolioLibrary(hooks: LibraryBuildHooks, connection
   const dataDirectory = requireBacktestDataDirectory();
   mkdirSync(libraryFolder(dataDirectory), { recursive: true });
   const context = await loadProjectionContext(connection);
-  const market = marketDayHistoryOf(context.spy.sessions);
+  if (context.spy.dividendShares === null) throw new Error("SPY's dividends were never fetched: npm run backtest:fetch-dividends -- SPY.");
+  const market = marketDayHistoryOf(context.spy.sessions, context.spy.dividendShares);
   const globalKey = libraryGlobalKey(context, market);
   const previous = readLibraryManifest(dataDirectory);
   const horizonDays = libraryHorizonYears * tradingDaysPerYear;
@@ -144,7 +145,7 @@ export async function buildPortfolioLibrary(hooks: LibraryBuildHooks, connection
     let lastFileDay: string;
     try {
       const source = await loadTickerProjectionSource(symbol, context.rates, connection);
-      const history = tickerDayHistoryOf(symbol, source.sessions, market, riskFreeNowDay, riskFreeMeanDay);
+      const history = tickerDayHistoryOf(symbol, source.sessions, market, riskFreeNowDay, riskFreeMeanDay, source.dividendYield ?? 0);
       input = {
         symbol,
         history,
@@ -155,6 +156,7 @@ export async function buildPortfolioLibrary(hooks: LibraryBuildHooks, connection
         observedDays: source.observedDays,
         anchorCurve: source.anchorCurve,
         leftoverDays: sharedLeftoverDays([history]),
+        dividendYield: source.dividendYield ?? 0,
       };
       inputKey = savedProjectionKey(input, globalKey);
       lastFileDay = source.lastFileDay;

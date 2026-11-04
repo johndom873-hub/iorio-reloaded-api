@@ -34,12 +34,12 @@ describe("a symbol's daily moves", () => {
 describe("a ticker's history on SPY's dates", () => {
   const dates = weekdays(400);
   const spyDay = (index: number) => 0.01 * Math.sin(index * 1.3);
-  const spy = marketDayHistoryOf(sessionsOf(dates, () => 0, spyDay, () => 0.2));
+  const spy = marketDayHistoryOf(sessionsOf(dates, () => 0, spyDay, () => 0.2), []);
 
   it("measures β on its own days and models the days before its listing as β × SPY's moves", () => {
     // Listed from day 200: its day move is 1.5 × SPY's plus 0.001, its overnight move 0.
     const ownSessions = sessionsOf(dates.slice(199), () => 0, (index) => 1.5 * spyDay(index + 199) + 0.001, () => 0.4);
-    const history = tickerDayHistoryOf("LATE", ownSessions, spy, 0.04 / 252, 0.02 / 252);
+    const history = tickerDayHistoryOf("LATE", ownSessions, spy, 0.04 / 252, 0.02 / 252, 0);
     expect(history.beta).toBeCloseTo(1.5, 6);
     // Its sessions from dates[199]: its own moves from dates[200], the 200th of SPY's 399 days with moves, to the last.
     expect(history.ownDays).toBe(spy.dates.length - 199);
@@ -51,19 +51,26 @@ describe("a ticker's history on SPY's dates", () => {
     expect(history.leftoverDay[after]).toBeCloseTo(0.001, 9);
   });
 
-  it("shifts every day so the average simple day becomes the T-bill now + β × (SPY's average − the T-bill's average)", () => {
+  it("shifts every day so the average simple day becomes the T-bill now + β × (SPY's average total day − the T-bill's average), less its own dividend yield", () => {
+    // SPY pays 0.5% of its close on two ex-dates inside its dates and one before them (left out): 1% over 399 days.
+    const spyWithDividends = marketDayHistoryOf(sessionsOf(dates, () => 0, spyDay, () => 0.2), [
+      { exDividendDate: "1999-12-17", share: 0.005 },
+      { exDividendDate: dates[100]!, share: 0.005 },
+      { exDividendDate: dates[300]!, share: 0.005 },
+    ]);
+    expect(spyWithDividends.meanDividendDay).toBeCloseTo(0.01 / spyWithDividends.dates.length, 15);
     const ownSessions = sessionsOf(dates, () => 0.0005, (index) => 2 * spyDay(index) + 0.002, () => 0.5);
     const riskFreeNowDay = 0.04 / 252;
     const riskFreeMeanDay = 0.015 / 252;
-    const history = tickerDayHistoryOf("STOCK", ownSessions, spy, riskFreeNowDay, riskFreeMeanDay);
+    const history = tickerDayHistoryOf("STOCK", ownSessions, spyWithDividends, riskFreeNowDay, riskFreeMeanDay, 0.03);
     let simpleSum = 0;
     for (let at = 0; at < history.day.length; at++) simpleSum += Math.exp(history.overnight[at]! + history.day[at]! + history.neutralShift) - 1;
-    expect(simpleSum / history.day.length).toBeCloseTo(riskFreeNowDay + history.beta * (spy.meanSimpleDay - riskFreeMeanDay), 12);
+    expect(simpleSum / history.day.length).toBeCloseTo(riskFreeNowDay + history.beta * (spyWithDividends.meanSimpleDay + spyWithDividends.meanDividendDay - riskFreeMeanDay) - 0.03 / 252, 12);
   });
 
   it("draws leftovers only from days every late ticker has", () => {
-    const lateA = tickerDayHistoryOf("A", sessionsOf(dates.slice(99), () => 0, spyDay), spy, 0, 0);
-    const lateB = tickerDayHistoryOf("B", sessionsOf(dates.slice(249), () => 0, spyDay), spy, 0, 0);
+    const lateA = tickerDayHistoryOf("A", sessionsOf(dates.slice(99), () => 0, spyDay), spy, 0, 0, 0);
+    const lateB = tickerDayHistoryOf("B", sessionsOf(dates.slice(249), () => 0, spyDay), spy, 0, 0, 0);
     const shared = sharedLeftoverDays([lateA, lateB]);
     expect(shared[0]).toBe(249);
     expect(shared.length).toBe(spy.dates.length - 249);
@@ -92,8 +99,8 @@ describe("the paths", () => {
 
   it("move today's price by each history day's moves, a day before the listing taking the leftover its draw picks from the list", () => {
     const dates = weekdays(60);
-    const spy = marketDayHistoryOf(sessionsOf(dates, () => 0.01, () => 0.02));
-    const history = tickerDayHistoryOf("LATE", sessionsOf(dates.slice(29), () => 0.003, () => 0.004), spy, 0, 0);
+    const spy = marketDayHistoryOf(sessionsOf(dates, () => 0.01, () => 0.02), []);
+    const history = tickerDayHistoryOf("LATE", sessionsOf(dates.slice(29), () => 0.003, () => 0.004), spy, 0, 0, 0);
     // A draw of 0.5 picks the middle of three listed days: day 45.
     const path = { days: Int32Array.from([5, 40]), leftoverDraws: Float64Array.from([0.5, 0.5]) };
     const prices = tickerPathPrices(history, path, 50, "as_it_happened", Int32Array.from([44, 45, 46]));

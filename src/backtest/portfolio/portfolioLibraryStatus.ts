@@ -32,7 +32,7 @@ export async function portfolioLibraryStatus(connection: Knex = db): Promise<Por
     .map(([symbol]) => symbol);
   return {
     built: { asOf: manifest.asOf, builtAt: manifest.builtAt, tickers: Object.keys(manifest.tickers).length, failed: manifest.failed },
-    current: manifest.globalKey === libraryGlobalKey(context, marketDayHistoryOf(context.spy.sessions)),
+    current: manifest.globalKey === libraryGlobalKey(context, marketDayHistoryOf(context.spy.sessions, context.spy.dividendShares ?? [])),
     updatedSince,
     rebuild,
   };

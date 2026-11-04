@@ -154,6 +154,10 @@ CREATE TABLE ibkr_intraday_bars (
 - The stock's price at a look is the close of the last 30-minute bar ending by then (10:00 reads the 09:30 bar), × the day's split factor to put it on the traded scale. A day's close is its daily bar's, else its last 30-minute bar's. A session stops when either set ends before its last day.
 - A year IBKR has no trades for (a trading suspension: NBIS's 2023) is stored without 30-minute bars; IBKR answers it with error 162 "HMDS query returned no data".
 
+### Cash dividends
+
+Table `file_dividends(ex_dividend_date, amount)`: every cash dividend as paid on its ex-date (not adjusted for later splits), from Alpha Vantage's DIVIDENDS (the whole history in one request; `src/backtest/backtestFileDividends.ts`), with meta `dividends_fetched_at`. Node writes it, the downloader never touches it; a refresh replaces it whole. No table means never fetched (a backtest pays none and says so; the simulator takes a 0% yield). Fetched by `npm run backtest:fetch-dividends [-- SYMBOL ...]` (never-fetched files first, then any over 30 days old; 13 s apart; stops at Alpha Vantage's daily limit of 25) and after a first download. A business change cuts them like the prices.
+
 ### Tickers whose business changed
 
 A ticker that was another company before (a SPAC, a merger, a relisting after a sale, or a change of business such as MSTR's bitcoin holdings) is a new company from the date in `src/backtest/tickerBusinessChanges.ts` (Marcelo 2026-11-04). The file keeps everything as downloaded, but nothing reads the earlier days: `BacktestSymbolFile` (days, issues, unavailable and intraday days, IBKR bars), `loadDailyBarsOf` and the file's contents (`dataFileSummary.ts`) start at the change. So the lab, the analysis and the portfolio simulator see the ticker as listed that day: a book holding it cannot start earlier, and the simulator moves it before then as β × SPY with a leftover from its own days. A ticker's first download logs, and shows in its progress, a possible change when its options start more than 60 days after its stock prices (after the option data's first weeks); a person decides and adds it to the list.

@@ -26,6 +26,8 @@ export interface ProjectionTicker {
   anchorCurve: AnchorCurve;
   /** Where a day without its own moves takes its leftover from (tickerPathPrices): the book's shared days, or its own. */
   leftoverDays: Int32Array;
+  /** V3: its dividend yield a year (portfolioProjectionInputs.ts), paid on the shares held each simulated day; 0 without one. */
+  dividendYield: number;
 }
 
 export interface ProjectionInput {
@@ -135,7 +137,7 @@ function simulatePath(input: ProjectionInput, path: DayPath, pathIndex: number, 
   const drawKeys = input.tickers.map((ticker) => tickerDrawKey(ticker.symbol));
   return simulateBookDays({
     dates,
-    tickers: input.tickers.map((ticker) => ({ symbol: ticker.symbol, sameDayVolatilityUplift: ticker.sameDayVolatilityUplift })),
+    tickers: input.tickers.map((ticker) => ({ symbol: ticker.symbol, sameDayVolatilityUplift: ticker.sameDayVolatilityUplift, dividendYield: ticker.dividendYield })),
     dayOf: (tickerIndex, day) => {
       const ticker = input.tickers[tickerIndex]!;
       const price = prices[tickerIndex]!;

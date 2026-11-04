@@ -76,6 +76,8 @@ export interface MarketDayHistory {
   medianIv: number;
   /** SPY's average simple day, e^(overnight + day) − 1. */
   meanSimpleDay: number;
+  /** V4: SPY's dividends over these dates (each as a share of the close before its ex-date) ÷ their count: its average day's dividend. */
+  meanDividendDay: number;
 }
 
 function medianOf(values: Iterable<number>): number | null {
@@ -85,7 +87,7 @@ function medianOf(values: Iterable<number>): number | null {
   return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
-export function marketDayHistoryOf(spySessions: readonly HistorySession[]): MarketDayHistory {
+export function marketDayHistoryOf(spySessions: readonly HistorySession[], spyDividendShares: readonly { exDividendDate: string; share: number }[]): MarketDayHistory {
   const candidates = spySessions.filter((session) => session.tradingDate >= dayHistoryStartIso).map((session) => session.tradingDate);
   const all = movesOnDates(spySessions, candidates);
   const keep = candidates.map((_, at) => Number.isFinite(all.overnight[at]!) && Number.isFinite(all.day[at]!));
@@ -94,14 +96,17 @@ export function marketDayHistoryOf(spySessions: readonly HistorySession[]): Mark
   const day = pick(all.day);
   let simpleSum = 0;
   for (let at = 0; at < overnight.length; at++) simpleSum += Math.exp(overnight[at]! + day[at]!) - 1;
+  const dates = candidates.filter((_, at) => keep[at]);
+  const dividendSum = dates.length === 0 ? 0 : spyDividendShares.filter((dividend) => dividend.exDividendDate > dates[0]! && dividend.exDividendDate <= dates[dates.length - 1]!).reduce((sum, dividend) => sum + dividend.share, 0);
   return {
-    dates: candidates.filter((_, at) => keep[at]),
+    dates,
     overnight,
     day,
     iv: pick(all.iv),
     elevation: pick(all.elevation),
     medianIv: medianOf(all.iv) ?? 0.2,
     meanSimpleDay: overnight.length === 0 ? 0 : simpleSum / overnight.length,
+    meanDividendDay: dates.length === 0 ? 0 : dividendSum / dates.length,
   };
 }
 
@@ -125,9 +130,10 @@ export interface TickerDayHistory {
 
 /**
  * D1, D2 and the neutral drift for one ticker on the market's dates. `riskFreeNowDay` and `riskFreeMeanDay` are the
- * T-bill's simple day now and on average (rate ÷ 252).
+ * T-bill's simple day now and on average (rate ÷ 252); `dividendYield` its own (V3), paid as cash, so its price drifts
+ * that much less than its total return (V4).
  */
-export function tickerDayHistoryOf(symbol: string, sessions: readonly HistorySession[], market: MarketDayHistory, riskFreeNowDay: number, riskFreeMeanDay: number): TickerDayHistory {
+export function tickerDayHistoryOf(symbol: string, sessions: readonly HistorySession[], market: MarketDayHistory, riskFreeNowDay: number, riskFreeMeanDay: number, dividendYield: number): TickerDayHistory {
   const count = market.dates.length;
   const moves = movesOnDates(sessions, market.dates);
   const own = new Uint8Array(count);
@@ -183,7 +189,7 @@ export function tickerDayHistoryOf(symbol: string, sessions: readonly HistorySes
     simpleSum += Math.exp(overnight[at]! + day[at]! + leftover) - 1;
   }
   const historyMeanSimpleDay = count === 0 ? 0 : simpleSum / count;
-  const target = riskFreeNowDay + beta * (market.meanSimpleDay - riskFreeMeanDay);
+  const target = riskFreeNowDay + beta * (market.meanSimpleDay + market.meanDividendDay - riskFreeMeanDay) - dividendYield / tradingDaysPerYear;
   return { symbol, overnight, day, own, leftoverOvernight, leftoverDay, iv, elevation, beta, ownDays, neutralShift: Math.log((1 + target) / (1 + historyMeanSimpleDay)) };
 }
 

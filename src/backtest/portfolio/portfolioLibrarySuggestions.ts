@@ -81,7 +81,7 @@ export async function suggestPortfolioChangesFromLibrary(request: PortfolioBookR
   const missing = request.tickers.map((ticker) => ticker.symbol).filter((symbol) => !manifest.tickers[symbol]);
   if (missing.length > 0) throw new PortfolioRequestError(`${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not in the suggestions' library${missing.some((symbol) => manifest.failed[symbol]) ? ` (${missing.filter((symbol) => manifest.failed[symbol]).map((symbol) => `${symbol}: ${manifest.failed[symbol]}`).join("; ")})` : ": rebuild it"}.`);
   const context = await loadProjectionContext(connection);
-  const globalKey = libraryGlobalKey(context, marketDayHistoryOf(context.spy.sessions));
+  const globalKey = libraryGlobalKey(context, marketDayHistoryOf(context.spy.sessions, context.spy.dividendShares ?? []));
   const library: LibraryStatus = { asOf: manifest.asOf, builtAt: manifest.builtAt, staleReasons: staleReasonsOf(manifest, globalKey, request.tickers.map((ticker) => ticker.symbol)) };
 
   const addable = (await listPortfolioTickers(connection)).filter((ticker) => ticker.verdict === "suits" && manifest.tickers[ticker.symbol]).map((ticker) => ticker.symbol);

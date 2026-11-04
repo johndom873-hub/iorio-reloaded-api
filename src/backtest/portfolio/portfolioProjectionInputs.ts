@@ -6,7 +6,7 @@ import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { fileIntradayBarsExtendedStartDate, readFileIntradayPrices } from "../backtestFileStockBars.js";
 import { BacktestSymbolFile } from "../engine/backtestSymbolFile.js";
-import { readSplitScheduleCache } from "../engine/splitFactors.js";
+import { readSplitScheduleCache, splitFactorOn } from "../engine/splitFactors.js";
 import type { TreasuryBillRates } from "../engine/treasuryBillRates.js";
 import { loadObservedChainDay, loadTickerCalibration, type TickerCalibration } from "./portfolioCalibration.js";
 import type { HistorySession } from "./portfolioDayHistory.js";
@@ -32,9 +32,16 @@ export interface TickerProjectionSource {
   observedDays: ObservedChainDay[];
   /** The first session with a 10:00 price: 2006 for an extended file, else its first option year. */
   firstTenOclockDate: string | null;
+  /** Each cash dividend as a share of the previous session's close as traded (0.0085 for 0.85%), oldest first; null when its file's dividends were never fetched. */
+  dividendShares: { exDividendDate: string; share: number }[] | null;
+  /** V3: the dividend yield, the sum of the last 12 months' shares (to its last file day); 0 without dividends, null when never fetched. */
+  dividendYield: number | null;
 }
 
-const sourceCache = new Map<string, TickerProjectionSource>();
+/** The key a ticker's source is kept in memory under: its last file day and when its dividends were fetched. */
+const sourceKeyOf = (lastFileDay: string, dividendsFetchedAt: string | null) => `${lastFileDay}|${dividendsFetchedAt ?? ""}`;
+
+const sourceCache = new Map<string, { key: string; source: TickerProjectionSource }>();
 
 /** The ticker's sessions, the IV of each, and their elevations: what the chains and the curve are read with. */
 function elevationOfSession(sessions: readonly HistorySession[], position: number): { iv: number; elevation: number | null } | null {
@@ -51,8 +58,9 @@ export async function loadTickerProjectionSource(symbol: string, rates: Treasury
     const completeDays = file.loadDays().filter((day) => day.status === "complete").map((day) => day.tradingDate);
     const lastFileDay = completeDays.at(-1);
     if (lastFileDay === undefined) throw new Error(`${symbol}: its data file has no complete day.`);
+    const key = sourceKeyOf(lastFileDay, file.loadDividendsFetchedAt());
     const cached = sourceCache.get(symbol);
-    if (cached && cached.lastFileDay === lastFileDay) return cached;
+    if (cached && cached.key === key) return cached.source;
 
     const { bars } = await loadDailyBarsOf(symbol, connection);
     const database = openBacktestDataFileReadOnly(symbol);
@@ -94,6 +102,25 @@ export async function loadTickerProjectionSource(symbol: string, rates: Treasury
       return observed === null ? [] : [observedAgainstAnchor(observed.day, anchorFactorAt(anchorCurve, observed.elevation))];
     });
     const calibration = await loadTickerCalibration(symbol, connection);
+    // A dividend's share of the close before its ex-date, both as traded (the file's split schedule; SPY, whose shares
+    // the neutral drift reads back to 2006, has not split since).
+    const dividends = file.loadDividends();
+    const closeAsTradedBefore = (dateIso: string): number | null => {
+      for (let position = sessions.length - 1; position >= 0; position--) {
+        const session = sessions[position]!;
+        if (session.tradingDate >= dateIso || session.close === null) continue;
+        return session.close * (schedule === null ? 1 : (splitFactorOn(schedule, session.tradingDate) ?? 1));
+      }
+      return null;
+    };
+    const dividendShares =
+      dividends === null
+        ? null
+        : dividends.flatMap((dividend) => {
+            const close = closeAsTradedBefore(dividend.exDividendDate);
+            return close === null || close <= 0 ? [] : [{ exDividendDate: dividend.exDividendDate, share: dividend.amount / close }];
+          });
+    const yearBefore = new Date(Date.parse(`${lastFileDay}T00:00:00Z`) - 365 * 86_400_000).toISOString().slice(0, 10);
     const source: TickerProjectionSource = {
       symbol,
       lastFileDay,
@@ -102,8 +129,10 @@ export async function loadTickerProjectionSource(symbol: string, rates: Treasury
       anchorCurve,
       observedDays,
       firstTenOclockDate: sessions.find((session) => session.tenOclock !== null)?.tradingDate ?? null,
+      dividendShares,
+      dividendYield: dividendShares === null ? null : dividendShares.filter((dividend) => dividend.exDividendDate > yearBefore && dividend.exDividendDate <= lastFileDay).reduce((sum, dividend) => sum + dividend.share, 0),
     };
-    sourceCache.set(symbol, source);
+    sourceCache.set(symbol, { key, source });
     return source;
   } finally {
     file.close();
