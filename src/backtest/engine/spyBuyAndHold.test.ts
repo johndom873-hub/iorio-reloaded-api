@@ -25,4 +25,19 @@ describe("buy and hold of SPY", () => {
     expect(spy.markDay("2024-03-05", null, { ratePercent: 0, calendarDays: 1 })).toEqual({ value: 10_000, exposureDollars: 10_000, interestDollars: 0 });
     expect(spy.daysMarkedAtAnEarlierPrice).toBe(1);
   });
+
+  it("credits SPY's dividends to the shares held on their ex-dates, once, and none before the purchase", () => {
+    // A dividend before the purchase pays nothing; 25 shares × 1.80 = 45 on the ex-date; the next day nothing more.
+    const spy = new SpyBuyAndHold(10_000, [
+      { exDividendDate: "2024-03-01", amount: 2 },
+      { exDividendDate: "2024-03-15", amount: 1.8 },
+    ]);
+    spy.markDay("2024-03-04", 400, null);
+    expect(spy.dividendDollars).toBe(0);
+    expect(spy.markDay("2024-03-15", 400, { ratePercent: 0, calendarDays: 11 }).value).toBeCloseTo(10_045, 8);
+    expect(spy.markDay("2024-03-18", 400, { ratePercent: 0, calendarDays: 3 }).value).toBeCloseTo(10_045, 8);
+    expect(spy.dividendDollars).toBeCloseTo(45, 8);
+    expect(spy.countsDividends).toBe(true);
+    expect(new SpyBuyAndHold(10_000).countsDividends).toBe(false);
+  });
 });

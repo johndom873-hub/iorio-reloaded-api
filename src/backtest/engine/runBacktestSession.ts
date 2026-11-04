@@ -23,8 +23,10 @@ import { BacktestSymbolFile, type SymbolFileDayIssue, type SymbolFileEndOfDayRow
 import { describeDaysWithoutIntradayQuotes } from "../jobs/backtestSessionRequest.js";
 import { loadMarketStressPrices, marketStressSymbol } from "../marketStressBars.js";
 import { SpyBuyAndHold } from "./spyBuyAndHold.js";
+import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
+import { readFileDividends, type FileDividend } from "../backtestFileDividends.js";
 
-import { alignOpenOptionLegsToSplitFactor, buyBackCoveredCallKeepingShares, buyBackPut, creditInterest, creditSpinOff, sellLeapsCall, settleExpiry, settleLeapsCall } from "./ledger/ledgerEvents.js";
+import { alignOpenOptionLegsToSplitFactor, buyBackCoveredCallKeepingShares, buyBackPut, creditDividend, creditInterest, creditSpinOff, sellLeapsCall, settleExpiry, settleLeapsCall } from "./ledger/ledgerEvents.js";
 import { ledgerCommittedDollars, ledgerLeapsLegsDueForSettlement, ledgerLegsDueForSettlement, ledgerNetLiquidationValue, ledgerSharesValue } from "./ledger/ledgerSelectors.js";
 import { createSimulatedLedger, cycleSplitFactorFor, rememberedForRevision, requirePosition, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { bridgeSplitDaysWithoutOptionPrices, findSpinOffs, loadOrInferSplitSchedule, requireSplitFactors, spinOffValuePerShare, splitFactorForNewCycle, splitFactorOn, type SplitSchedule } from "./splitFactors.js";
@@ -133,6 +135,17 @@ async function loadSessionRow(sessionId: string, connection: Knex): Promise<Sess
     .first("id", "symbol", "symbols", connection.raw('start_date::text as "startDate"'), connection.raw('end_date::text as "endDate"'), "starting_value as startingValue", "settings_snapshot as settingsSnapshot", "overrides");
   if (!row) throw new Error(`Backtest session ${sessionId} not found.`);
   return row as SessionRow;
+}
+
+/** SPY's cash dividends from its data file (the SPY baseline's); null without the file or before they were fetched. */
+function loadSpyDividends(): FileDividend[] | null {
+  const database = openBacktestDataFileReadOnly("SPY");
+  if (!database) return null;
+  try {
+    return readFileDividends(database);
+  } finally {
+    database.close();
+  }
 }
 
 async function loadTickerProfile(symbol: string, connection: Knex): Promise<BacktestTickerProfile> {
@@ -361,6 +374,8 @@ interface SessionSymbol {
   unavailableDaysInPeriod: string[];
   /** A split's or spin-off's days inside the period with no option price, skipped (bridgeSplitDaysWithoutOptionPrices, findSpinOffs). */
   splitDaysSkippedInPeriod: string[];
+  /** Its cash dividends inside the period (as paid), each credited once, on the first session day on or after its ex-date; null when its file's dividends were never fetched. */
+  dividends: { exDividendDate: string; amount: number; creditedOn: string | null; creditedDollars: number }[] | null;
   /** Its spin-offs inside the period (findSpinOffs), each with its value per share as traded; credited once, on the first session day on or after it. */
   spinOffs: { firstDayIso: string; valuePerShare: number; creditedOn: string | null }[];
   /** F on each of the symbol's own session days. */
@@ -522,6 +537,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         lastCompleteDay: completeDays.at(-1)!,
         unavailableDaysInPeriod,
         splitDaysSkippedInPeriod: skippedInPeriod,
+        dividends: file.loadDividends()?.filter((dividend) => dividend.exDividendDate > session.startDate && dividend.exDividendDate <= session.endDate).map((dividend) => ({ ...dividend, creditedOn: null, creditedDollars: 0 })) ?? null,
         spinOffs: spinOffsInPeriod,
         splitFactorByDay,
         splitFactorChanges: [...splitFactorByDay.entries()].sort(([a], [b]) => a.localeCompare(b)).filter(([, factor], index, all) => index === 0 || factor !== all[index - 1]![1]).map(([fromDateIso, factor]) => ({ fromDateIso, factor })),
@@ -540,7 +556,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     const spyTicker: { id: string } | undefined = await connection("tickers").where({ symbol: marketStressSymbol }).first("id");
     const spyDailyBars = spyTicker ? await loadBacktestBarHistory(spyTicker.id, connection) : null;
     const spyPriceAtTen = (dateIso: string): number | null => marketStressPrices.priceAt(dateIso, captureLookTimeEt) ?? spyDailyBars?.openOn(dateIso) ?? null;
-    const spyBuyAndHold = marketStressPrices.lastDate !== null || (spyDailyBars?.rows.length ?? 0) > 0 ? new SpyBuyAndHold(startingValue) : null;
+    const spyBuyAndHold = marketStressPrices.lastDate !== null || (spyDailyBars?.rows.length ?? 0) > 0 ? new SpyBuyAndHold(startingValue, loadSpyDividends()) : null;
     const pluto = settings.pluto;
     const closeMinutesByDay = new Map(calendar.sessionsBetween(sessionDays[0]!, sessionDays.at(-1)!).map((tradingSession) => [tradingSession.dateIso, tradingSession.closeMinutesEt]));
 
@@ -749,6 +765,20 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         baselineInterestDollars = computeInterestDollars(baselineCash, interestPeriod.ratePercent, interestPeriod.calendarDays);
         creditInterest(ledger, new Date(decisionInstantMs(todayIso)), interestDollars);
         baselineCash += baselineInterestDollars;
+      }
+      // Cash dividends (Marcelo 2026-11-04): an ex-date that has come pays the shares held after the previous day's expiries
+      // settled (a Call assigned the evening before takes its shares' dividend with it), as paid × the cycle's split
+      // factor ÷ today's; the ticker baseline's shares alike.
+      for (const entry of symbols) {
+        for (const dividend of entry.dividends ?? []) {
+          if (dividend.creditedOn !== null || todayIso < dividend.exDividendDate) continue;
+          dividend.creditedOn = todayIso;
+          const splitFactor = splitFactorToday(entry);
+          const amountOnCycleScale = dividend.amount * (cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor);
+          dividend.creditedDollars = creditDividend(ledger, { symbol: entry.symbol, amountPerShare: amountOnCycleScale, at: new Date(decisionInstantMs(todayIso)) });
+          if (entry.baseline.bought) baselineCash += (entry.baseline.shares * dividend.amount * entry.baseline.splitFactorAtPurchase) / splitFactor;
+          if (dividend.creditedDollars > 0) notes.push(noteFor(entry, `dividend: ${formatWholeDollars(dividend.creditedDollars)} credited, ${dividend.amount.toFixed(4)} a share held (ex-date ${dividend.exDividendDate})`));
+        }
       }
       const spyBaselineDay = spyBuyAndHold?.markDay(todayIso, spyPriceAtTen(todayIso), interestPeriod) ?? null;
 
@@ -1171,9 +1201,14 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     sessionNotes.push(
       spyPurchase === null
         ? `Buy and hold of SPY (comparison only) is not shown: the local DB has no SPY price for the session's days (npm run backtest:backfill-market-stress-bars).`
-        : `Buy and hold of SPY (comparison only): ${formatCount(spyPurchase.shares)} shares at ${spyPurchase.price.toFixed(2)} on ${spyPurchase.dateIso}, SPY's price at 10:00, the rest in cash at the same interest; dividends not counted${spyBuyAndHold!.daysMarkedAtAnEarlierPrice > 0 ? `; ${formatCount(spyBuyAndHold!.daysMarkedAtAnEarlierPrice)} day(s) without a SPY price marked at the last one` : ""}.`,
+        : `Buy and hold of SPY (comparison only): ${formatCount(spyPurchase.shares)} shares at ${spyPurchase.price.toFixed(2)} on ${spyPurchase.dateIso}, SPY's price at 10:00, the rest in cash at the same interest; ${spyBuyAndHold!.countsDividends ? `SPY's dividends credited in cash (${formatWholeDollars(spyBuyAndHold!.dividendDollars)})` : "dividends not counted (SPY's data file has none fetched: npm run backtest:fetch-dividends -- SPY)"}${spyBuyAndHold!.daysMarkedAtAnEarlierPrice > 0 ? `; ${formatCount(spyBuyAndHold!.daysMarkedAtAnEarlierPrice)} day(s) without a SPY price marked at the last one` : ""}.`,
     );
-    sessionNotes.push(`Buy and hold of ${symbols.map((entry) => entry.symbol).join(", ")} (comparison only): the starting value in equal parts, whole shares at each symbol's first 10:00 price, never rebalanced; dividends not counted.`);
+    sessionNotes.push(`Buy and hold of ${symbols.map((entry) => entry.symbol).join(", ")} (comparison only): the starting value in equal parts, whole shares at each symbol's first 10:00 price, never rebalanced; each symbol's dividends credited in cash as the session's.`);
+    // Cash dividends (Marcelo 2026-11-04): what each symbol's shares received, and the symbols whose dividends are unknown.
+    const withoutDividends = symbols.filter((entry) => entry.dividends === null).map((entry) => entry.symbol);
+    if (withoutDividends.length > 0) sessionNotes.push(`${withoutDividends.join(", ")}: dividends not fetched, none credited (npm run backtest:fetch-dividends).`);
+    const dividendDollars = symbols.reduce((sum, entry) => sum + (entry.dividends ?? []).reduce((total, dividend) => total + dividend.creditedDollars, 0), 0);
+    if (dividendDollars > 0) sessionNotes.push(`Cash dividends credited on the shares held: ${formatWholeDollars(dividendDollars)} (${symbols.filter((entry) => (entry.dividends ?? []).some((dividend) => dividend.creditedDollars > 0)).map((entry) => `${entry.symbol} ${formatWholeDollars((entry.dividends ?? []).reduce((total, dividend) => total + dividend.creditedDollars, 0))}`).join(", ")}).`);
     if (skippedUnavailableDays.length > 0) sessionNotes.push(`${formatCount(skippedUnavailableDays.length)} day(s) inside the period could not be downloaded for any symbol and were skipped: ${skippedUnavailableDays.join(", ")}.`);
     const volFarmerV4Note = volFarmerSteps !== null ? describeVolFarmerV4Run(ledger, symbols.map((entry) => entry.symbol), volFarmerSteps.v2.firstPositionPct, "Vol Farmer v4", priceByLegId) : null;
     if (volFarmerV4Note !== null) sessionNotes.push(volFarmerV4Note);

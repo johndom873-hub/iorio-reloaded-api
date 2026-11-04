@@ -748,6 +748,27 @@ function applySpinOffCredit(ledger: SimulatedLedger, event: SpinOffCreditEvent):
   return credited;
 }
 
+/** A cash dividend on the shares held (Marcelo 2026-11-04). */
+export interface DividendCreditEvent {
+  symbol: string;
+  /** The dividend per share, on the cycle's scale (as paid × the cycle's split factor ÷ the day's). */
+  amountPerShare: number;
+  at: Date;
+}
+
+/** Credits every share of the symbol held the dividend in cash; the shares and their cost stay as they are. Returns the dollars credited. */
+function applyDividendCredit(ledger: SimulatedLedger, event: DividendCreditEvent): number {
+  const positionIds = new Set(positionsOfSymbol(ledger, event.symbol).map((position) => position.id));
+  let credited = 0;
+  for (const leg of ledger.legs) {
+    if (leg.legType !== "stock" || leg.exitAt !== null || !positionIds.has(leg.positionId)) continue;
+    const amount = leg.quantity * event.amountPerShare;
+    recordCash(ledger, { at: event.at, kind: "dividend", amount, symbol: event.symbol, positionId: leg.positionId, legId: leg.id });
+    credited += amount;
+  }
+  return credited;
+}
+
 function applyCreditInterest(ledger: SimulatedLedger, at: Date, interestDollars: number): void {
   recordCash(ledger, { at, kind: "interest", amount: interestDollars, symbol: null, positionId: null, legId: null });
 }
@@ -806,6 +827,10 @@ export function alignOpenOptionLegsToSplitFactor(...args: Parameters<typeof appl
 
 export function creditSpinOff(...args: Parameters<typeof applySpinOffCredit>): ReturnType<typeof applySpinOffCredit> {
   return changingLedger(args[0], () => applySpinOffCredit(...args));
+}
+
+export function creditDividend(...args: Parameters<typeof applyDividendCredit>): ReturnType<typeof applyDividendCredit> {
+  return changingLedger(args[0], () => applyDividendCredit(...args));
 }
 
 export function creditInterest(...args: Parameters<typeof applyCreditInterest>): ReturnType<typeof applyCreditInterest> {

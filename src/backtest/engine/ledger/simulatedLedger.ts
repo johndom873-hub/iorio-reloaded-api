@@ -66,7 +66,7 @@ export interface LedgerShareSource {
  * called away at the strike, `leaps_purchase` and `leaps_sale` the LEAPS Calls, `interest` on the cash balance, `deposit`
  * the starting cash.
  */
-export type CashJournalKind = "deposit" | "interest" | "premium" | "buyback" | "commission" | "share_purchase" | "share_sale" | "assignment" | "call_away" | "leaps_purchase" | "leaps_sale" | "spin_off";
+export type CashJournalKind = "deposit" | "interest" | "premium" | "buyback" | "commission" | "share_purchase" | "share_sale" | "assignment" | "call_away" | "leaps_purchase" | "leaps_sale" | "spin_off" | "dividend";
 
 /** One movement of cash; `amount` is signed (money in is positive). The journal always sums to `cash`. */
 export interface CashJournalEntry {

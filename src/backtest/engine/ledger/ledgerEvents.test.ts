@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { easternInstant } from "../../../lib/easternIsoDate.js";
-import { buyBackPut, closeCoveredCall, creditInterest, creditSpinOff, expirySettlementInstant, isAssignedAtExpiry, openCashSecuredPut, openCoveredCall, rollLeg, sellShares, settleExpiry } from "./ledgerEvents.js";
+import { buyBackPut, closeCoveredCall, creditDividend, creditInterest, creditSpinOff, expirySettlementInstant, isAssignedAtExpiry, openCashSecuredPut, openCoveredCall, rollLeg, sellShares, settleExpiry } from "./ledgerEvents.js";
 import { optionPurchaseFillPrice, optionSaleFillPrice } from "./ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerCapitalDeployed, ledgerCashLockedInCashSecuredPuts, ledgerCycles, ledgerFreeCash, ledgerFreeShares, ledgerRealizedPnl } from "./ledgerSelectors.js";
 import { createSimulatedLedger, cycleGroupingWindowMs, cycleSplitFactorFor, isSymbolFlat, legsOfPosition, requireLeg, requirePosition, type SimulatedLedger } from "./simulatedLedger.js";
@@ -612,5 +612,22 @@ describe("a spin-off", () => {
     expectCashEqualsJournal(ledger, ledger.cash);
     // Another symbol's shares are not credited.
     expect(creditSpinOff(ledger, { symbol: "OTHER", valuePerShare: 5, at: decisionAt("2025-02-24") })).toBe(0);
+  });
+});
+
+describe("a cash dividend", () => {
+  it("credits every share held the dividend in cash, the shares and their cost kept", () => {
+    const ledger = newLedger();
+    // 900 XLE shares with a Call on each; 0.38 a share: 900 × 0.38 = 342.
+    openCoveredCall(ledger, { symbol: "XLE", expiryDate: "2026-03-27", strike: 50, contracts: 9, callFillPrice: 0.5, stockFillPrice: 46, at: decisionAt("2026-03-16"), actionId: null, splitFactorToday: 1 });
+    const stockLegs = () => ledger.legs.filter((leg) => leg.legType === "stock" && leg.exitAt === null);
+    const entryBefore = stockLegs().map((leg) => leg.entryPrice);
+    const cashBefore = ledger.cash;
+    expect(creditDividend(ledger, { symbol: "XLE", amountPerShare: 0.38, at: decisionAt("2026-03-23") })).toBeCloseTo(342, 6);
+    expect(ledger.cash - cashBefore).toBeCloseTo(342, 6);
+    expect(stockLegs().map((leg) => leg.entryPrice)).toEqual(entryBefore);
+    expect(ledger.cashJournal.filter((entry) => entry.kind === "dividend")).toHaveLength(stockLegs().length);
+    expectCashEqualsJournal(ledger, ledger.cash);
+    expect(creditDividend(ledger, { symbol: "OTHER", amountPerShare: 1, at: decisionAt("2026-03-23") })).toBe(0);
   });
 });
