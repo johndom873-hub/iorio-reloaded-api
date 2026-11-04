@@ -7,7 +7,8 @@ import { db } from "../../db/connection.js";
 import { connectToIbkrGateway } from "../../ibkr/connectIbkr.js";
 import { findOrCreateTicker } from "../../ibkr/findOrCreateTicker.js";
 import { backtestRepoRoot, requireBacktestDataDirectory } from "../backtestDataDirectory.js";
-import { readFirstOptionDay } from "../backtestDataFile.js";
+import { openBacktestDataFileReadOnly, readFirstOptionDay } from "../backtestDataFile.js";
+import { readFileDividendsFetchedAt, refreshFileDividends } from "../backtestFileDividends.js";
 import { describeFileStockBarsRefresh, FileOptionsPredateStockError, FileStockBarsCancelledError, fileWithoutStockBarsReason, refreshFileStockBars } from "../refreshFileStockBars.js";
 import { possibleBusinessChangeNotice } from "../tickerBusinessChanges.js";
 import { BacktestCancelledError, runBacktestSession } from "../engine/runBacktestSession.js";
@@ -276,6 +277,7 @@ async function runDownloadJob(job: BacktestJobRow, control: JobProcessControl): 
     console.error(`${job.symbol}: the IBKR stock bars for the file failed: ${stockBarsError}`);
   }
   const schedule = stockBarsError ? null : await refreshDetectedSplits(job);
+  await fetchDividendsOfNewFile(job.symbol);
   // Options that match IBKR's prices by no standard split before some day are another security's, or wrong: Resume would
   // find the same, so the message names the date to download from instead.
   const unmatched = schedule?.unmatchedOptionsBefore;
@@ -287,6 +289,30 @@ async function runDownloadJob(job: BacktestJobRow, control: JobProcessControl): 
   if (problems.length === 0) return download;
   const note = `${problems.join(" ")} Resume retries.`;
   return { status: "failed", error: download.status === "succeeded" ? `Option data downloaded. ${note}` : `${download.error} ${note}` };
+}
+
+/**
+ * A file's cash dividends from Alpha Vantage when it has none yet (backtestFileDividends.ts; one request of the free key's
+ * 25 a day). A failure, the daily limit included, is logged and does not fail the download: npm run
+ * backtest:fetch-dividends fetches it later.
+ */
+async function fetchDividendsOfNewFile(symbol: string): Promise<void> {
+  try {
+    const database = openBacktestDataFileReadOnly(symbol);
+    if (!database) return;
+    let fetchedAt: string | null;
+    try {
+      fetchedAt = readFileDividendsFetchedAt(database);
+    } finally {
+      database.close();
+    }
+    if (fetchedAt !== null) return;
+    const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
+    if (!apiKey) throw new Error("ALPHA_VANTAGE_API_KEY is not set");
+    console.log(`${symbol}: ${await refreshFileDividends(symbol, apiKey)} dividends from Alpha Vantage.`);
+  } catch (error) {
+    console.error(`${symbol}: its dividends were not fetched (${errorMessage(error)}); npm run backtest:fetch-dividends fetches them later.`);
+  }
 }
 
 /** The file's split schedule (engine/splitFactors.ts) for the Data files table; null when there is none. A failure to work it out is logged and returns null. */
