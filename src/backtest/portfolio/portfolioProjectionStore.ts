@@ -10,6 +10,7 @@ import { loadBacktestLabSettings } from "../labSettingsStore.js";
 import { dayHistoryStartIso, drawDayPaths, marketDayHistoryOf, sharedLeftoverDays, tickerDayHistoryOf, tradingDaysPerYear } from "./portfolioDayHistory.js";
 import { floorAllocationPctOf, maxAllocationPct, potDollarsOf, potFiguresOf, suggestAllocations, type PotFigures, type SuggestedAllocations } from "./portfolioPots.js";
 import { runReplayPaths, type ProjectionInput } from "./portfolioDayProjection.js";
+import { portfolioProjectionCodeHash, readSavedProjection, savedProjectionKey, saveProjection } from "./portfolioProjectionCache.js";
 import { runProjectionInParallel } from "./portfolioProjectionPool.js";
 import { loadTickerProjectionSource, type TickerProjectionSource } from "./portfolioProjectionInputs.js";
 import { summarizeProjection, type ProjectionSummary } from "./portfolioProjectionSummary.js";
@@ -133,9 +134,11 @@ export interface PortfolioProjection {
   tickers: { symbol: string; allocationPct: number; price: number; strikeSpacing: number; expiryWeekdays: number[]; beta: number; ownHistoryFrom: string | null; tenOclockFrom: string | null; chainDays: number; businessChange: TickerBusinessChange | null }[];
   /** Today's book through each window's actual days (one path each, at the actual drift), and SPY's return over them. */
   replays: { name: string; from: string; to: string; days: number; bookReturn: number; maxDrawdown: number; spyReturn: number }[];
+  /** When this projection was computed and saved, if it was read back (portfolioProjectionCache.ts); null when computed now. */
+  savedAt: string | null;
 }
 
-/** The book's projection; `onProgress` after each path. */
+/** The book's projection, read back when the same one was saved before (portfolioProjectionCache.ts); `onProgress` after each path. */
 export async function projectPortfolio(request: PortfolioProjectionRequest, onProgress?: (done: number, total: number) => void, connection: Knex = db): Promise<PortfolioProjection> {
   if (!(horizonYearsChoices as readonly number[]).includes(request.horizonYears)) throw new PortfolioRequestError(`horizonYears must be one of ${horizonYearsChoices.join(", ")}.`);
   const prepared = await prepareProjection(request, connection);
@@ -165,12 +168,16 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
     riskFreeRatePercent: prepared.riskFreeNowPct,
     seed: projectionSeed,
   };
+  const dataDirectory = requireBacktestDataDirectory();
+  const key = savedProjectionKey({ input, pathCount: request.pathCount, marketDates: market.dates }, portfolioProjectionCodeHash());
+  const saved = readSavedProjection<PortfolioProjection>(dataDirectory, key);
+  if (saved !== null) return { ...saved.projection, savedAt: saved.savedAt };
   const outcomes = await runProjectionInParallel(input, paths, onProgress);
   const windows = replayWindows
     .map((window) => ({ ...window, days: Int32Array.from(market.dates.flatMap((date, at) => (date >= window.from && date <= window.to ? [at] : []))) }))
     .filter((window) => window.days.length > 0 && window.days[0]! > 0 && market.dates.at(-1)! >= window.to);
   const replays = await runReplayPaths({ ...input, drift: "as_it_happened" }, windows);
-  return {
+  const projection: PortfolioProjection = {
     asOf: prepared.asOfIso,
     horizonYears: request.horizonYears,
     drift: request.drift,
@@ -200,5 +207,8 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
       maxDrawdown: replays[index]!.maxDrawdown,
       spyReturn: Math.exp(Array.from(window.days).reduce((sum, at) => sum + market.overnight[at]! + market.day[at]!, 0)) - 1,
     })),
+    savedAt: null,
   };
+  saveProjection(dataDirectory, key, projection);
+  return projection;
 }
