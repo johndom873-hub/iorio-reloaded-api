@@ -1,11 +1,14 @@
-import type { PathOutcome } from "./portfolioDayProjection.js";
+import type { PathOutcome, RegressionSums } from "./portfolioDayProjection.js";
 
 // The projection's figures over its paths (D6, Marcelo 2026-11-03): each path's CAGR, its Max drawdown on the daily
 // values and its Excess Calmar = (CAGR − the T-bill now) ÷ |Max drawdown|, as the 10th, 50th and 90th percentiles; the
 // share of paths whose Max drawdown is worse than each threshold; the average year of each source (Calls, Puts, LEAPS,
 // T-bills, shares: the account's change, from the book's own records) in dollars and as a share of the starting account;
 // the account at each year's end; and each ticker's average year. Example: 200 paths, 37 of them with a Max drawdown
-// worse than −30%: 18.5%.
+// worse than −30%: 18.5%. Book betas (Marcelo 2026-11-04): the least-squares slope of the book's daily return (10:00 to
+// 10:00, the account's own marks) on SPY's simple return over the same stretch of history, over every day of every path,
+// and over the days SPY fell (the downside beta).
+// Example: the book's days lining up as 0.6 × SPY's plus noise give 0.6: a 10% SPY fall typically comes with a 6% fall.
 
 export const fallThresholds = [-0.1, -0.2, -0.3, -0.4] as const;
 
@@ -34,6 +37,25 @@ export interface ProjectionSummary {
   /** The account at each simulated year's end. */
   yearEnds: { year: number; value: Percentiles }[];
   tickers: { symbol: string; premiumYear: number; callsSoldYear: number; callAwaysYear: number; daysWithoutSharesShare: number }[];
+  /** The book's beta on SPY over every day, and over the days SPY fell; null without the regression. */
+  bookBeta: { all: number; down: number } | null;
+}
+
+/** The least-squares slope of the pooled sums: (n Σxy − Σx Σy) ÷ (n Σx² − (Σx)²). */
+export function slopeOfSums(sums: readonly RegressionSums[]): number {
+  let count = 0;
+  let sumSpy = 0;
+  let sumBook = 0;
+  let sumSpyBook = 0;
+  let sumSpySquared = 0;
+  for (const part of sums) {
+    count += part.count;
+    sumSpy += part.sumSpy;
+    sumBook += part.sumBook;
+    sumSpyBook += part.sumSpyBook;
+    sumSpySquared += part.sumSpySquared;
+  }
+  return (count * sumSpyBook - sumSpy * sumBook) / (count * sumSpySquared - sumSpy * sumSpy);
 }
 
 export function summarizeProjection(outcomes: readonly PathOutcome[], input: { accountDollars: number; horizonYears: number; riskFreeRatePercent: number; horizonDays: number }): ProjectionSummary {
@@ -66,5 +88,6 @@ export function summarizeProjection(outcomes: readonly PathOutcome[], input: { a
       callAwaysYear: perYear((outcome) => outcome.byTicker[index]!.callAways),
       daysWithoutSharesShare: outcomes.reduce((sum, outcome) => sum + outcome.byTicker[index]!.daysWithoutShares, 0) / count / input.horizonDays,
     })),
+    bookBeta: outcomes.length > 0 && outcomes.every((outcome) => outcome.spyRegression !== null) ? { all: slopeOfSums(outcomes.map((outcome) => outcome.spyRegression!.all)), down: slopeOfSums(outcomes.map((outcome) => outcome.spyRegression!.down)) } : null,
   };
 }

@@ -162,6 +162,7 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
     drift: request.drift,
     riskFreeRatePercent: prepared.riskFreeNowPct,
     seed: projectionSeed,
+    spyMoves: { overnight: market.overnight, day: market.day },
   };
   const dataDirectory = requireBacktestDataDirectory();
   const key = savedProjectionKey({ input, pathCount: request.pathCount, marketDates: market.dates }, portfolioProjectionCodeHash());

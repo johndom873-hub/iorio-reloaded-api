@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { PathOutcome } from "./portfolioDayProjection.js";
-import { percentilesOf, summarizeProjection } from "./portfolioProjectionSummary.js";
+import { addRegressionDay, type PathOutcome, type RegressionSums } from "./portfolioDayProjection.js";
+import { percentilesOf, slopeOfSums, summarizeProjection } from "./portfolioProjectionSummary.js";
 
 const outcome = (cagr: number, maxDrawdown: number, calls: number): PathOutcome => ({
   cagr,
@@ -11,6 +11,28 @@ const outcome = (cagr: number, maxDrawdown: number, calls: number): PathOutcome 
   yearEndValues: [1_000_000 * (1 + cagr), 1_000_000 * (1 + cagr) ** 2],
   sources: { callsDollars: calls, putsDollars: 0, leapsDollars: 0, interestDollars: 80_000, sharesDollars: 0 },
   byTicker: [{ symbol: "XLE", premiumDollars: calls, callsSold: 200, callAways: 60, daysWithoutShares: 63 }],
+  spyRegression: null,
+});
+
+describe("the book betas", () => {
+  const sumsOf = (days: [number, number][]): RegressionSums => {
+    const sums: RegressionSums = { count: 0, sumSpy: 0, sumBook: 0, sumSpyBook: 0, sumSpySquared: 0 };
+    for (const [spy, book] of days) addRegressionDay(sums, spy, book);
+    return sums;
+  };
+
+  it("is the least-squares slope of the book's days on SPY's, pooled over the paths", () => {
+    // The book moves 0.6 × SPY's day + 0.0002: slope 0.6 whatever the split into paths.
+    const days: [number, number][] = [-0.03, -0.01, 0.002, 0.012, 0.025, -0.02].map((spy) => [spy, 0.6 * spy + 0.0002]);
+    expect(slopeOfSums([sumsOf(days.slice(0, 3)), sumsOf(days.slice(3))])).toBeCloseTo(0.6, 12);
+  });
+
+  it("reads the downside beta on the days SPY fell only, where Covered Calls keep more of the move", () => {
+    // Rises captured at 0.3, falls at 0.9: the downside slope is 0.9.
+    const days: [number, number][] = [-0.03, -0.01, -0.02, 0.01, 0.02, 0.03].map((spy) => [spy, spy < 0 ? 0.9 * spy : 0.3 * spy]);
+    expect(slopeOfSums([sumsOf(days.filter(([spy]) => spy < 0))])).toBeCloseTo(0.9, 12);
+    expect(slopeOfSums([sumsOf(days)])).toBeGreaterThan(0.3);
+  });
 });
 
 describe("the projection's figures over its paths", () => {

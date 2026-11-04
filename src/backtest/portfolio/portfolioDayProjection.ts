@@ -38,6 +38,28 @@ export interface ProjectionInput {
   drift: "as_it_happened" | "neutral";
   riskFreeRatePercent: number;
   seed: number;
+  /** SPY's log moves each history day (overnight: the previous close to 10:00; day: 10:00 to the close): the book betas' x. Absent, no betas. */
+  spyMoves?: { overnight: Float64Array; day: Float64Array };
+}
+
+/** A least-squares slope's sums over the days counted: x is SPY's day, y the book's. */
+export interface RegressionSums {
+  count: number;
+  sumSpy: number;
+  sumBook: number;
+  sumSpyBook: number;
+  sumSpySquared: number;
+}
+
+const emptyRegressionSums = (): RegressionSums => ({ count: 0, sumSpy: 0, sumBook: 0, sumSpyBook: 0, sumSpySquared: 0 });
+
+/** Adds one day to `sums`. */
+export function addRegressionDay(sums: RegressionSums, spy: number, book: number): void {
+  sums.count += 1;
+  sums.sumSpy += spy;
+  sums.sumBook += book;
+  sums.sumSpyBook += spy * book;
+  sums.sumSpySquared += spy * spy;
 }
 
 export interface PathOutcome {
@@ -51,6 +73,8 @@ export interface PathOutcome {
   yearEndValues: number[];
   sources: SimulationSources;
   byTicker: SimulatedTickerFigures[];
+  /** The book's daily returns against SPY's over the same stretches: every day, and the days SPY fell (null without spyMoves). */
+  spyRegression: { all: RegressionSums; down: RegressionSums } | null;
 }
 
 /** `count` weekdays after `asOfIso` (holidays are not left out). */
@@ -150,7 +174,23 @@ export async function runProjectionPaths(input: ProjectionInput, paths: readonly
     const { maxDrawdown, from, to } = maxDrawdownOf(values);
     const yearEndValues: number[] = [];
     for (let year = 1; year * tradingDaysPerYear <= horizonDays; year++) yearEndValues.push(values[Math.min(values.length - 1, year * tradingDaysPerYear)]!);
-    outcomes.push({ cagr: (endValue / input.accountDollars) ** (1 / input.horizonYears) - 1, maxDrawdown, maxDrawdownFrom: from, maxDrawdownTo: to, endValue, yearEndValues, sources: result.sources, byTicker: result.byTicker });
+    let spyRegression: PathOutcome["spyRegression"] = null;
+    if (input.spyMoves) {
+      // The values are the account at each day's 10:00, then at the last close: each step is matched with SPY's move over
+      // the same stretch (today's close to the first 10:00, 10:00 to 10:00, the last 10:00 to the close).
+      const { overnight, day: dayMove } = input.spyMoves;
+      spyRegression = { all: emptyRegressionSums(), down: emptyRegressionSums() };
+      const pathDays = paths[offset]!.days;
+      const last = values.length - 1;
+      for (let step = 0; step < values.length; step++) {
+        const logMove = (step > 0 ? dayMove[pathDays[step - 1]!]! : 0) + (step < last ? overnight[pathDays[step]!]! : 0);
+        const spy = Math.exp(logMove) - 1;
+        const book = values[step]! / (step === 0 ? input.accountDollars : values[step - 1]!) - 1;
+        addRegressionDay(spyRegression.all, spy, book);
+        if (spy < 0) addRegressionDay(spyRegression.down, spy, book);
+      }
+    }
+    outcomes.push({ cagr: (endValue / input.accountDollars) ** (1 / input.horizonYears) - 1, maxDrawdown, maxDrawdownFrom: from, maxDrawdownTo: to, endValue, yearEndValues, sources: result.sources, byTicker: result.byTicker, spyRegression });
     onPathDone?.();
   }
   return outcomes;
