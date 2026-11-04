@@ -32,6 +32,10 @@ describe("portfolioWarningsOf (W1–W6)", () => {
 
   it("W6: allocations not adding up to 100%", () => {
     expect(portfolioWarningsOf({ tickers: [], groups: [], allocationTotalPct: 95 })[0]).toMatchObject({ code: "allocations_not_100" });
+    // Within half a point of 100%: rounding of allocations typed to 2 decimals, not flagged.
+    expect(portfolioWarningsOf({ tickers: [], groups: [], allocationTotalPct: 99.99 })).toEqual([]);
+    expect(portfolioWarningsOf({ tickers: [], groups: [], allocationTotalPct: 100.49 })).toEqual([]);
+    expect(portfolioWarningsOf({ tickers: [], groups: [], allocationTotalPct: 99.5 })[0]).toMatchObject({ code: "allocations_not_100", text: "The allocations add up to 99.50%, not 100%" });
   });
 });
 

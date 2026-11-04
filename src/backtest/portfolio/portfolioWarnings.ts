@@ -15,6 +15,8 @@ export const lotShareOfPotLimit = 0.8;
 export const groupShareLimit = 0.3;
 export const ownHistoryYearsMinimum = 5;
 export const spyFallSeenMinimum = -0.2;
+/** W6 (Marcelo 2026-11-04): allocations within this many points of 100% are not flagged (allocations typed to 2 decimals sum to 99.99% or 100.03%). */
+export const allocationTotalTolerancePct = 0.5;
 
 export type PortfolioWarningCode = "doesnt_suit" | "lot_too_large" | "group_too_large" | "short_history" | "no_bear_market_in_backtest" | "allocations_not_100";
 
@@ -53,7 +55,7 @@ export function portfolioWarningsOf(input: { tickers: readonly WarningTickerInpu
   if (shortHistory.length > 0) warnings.push({ code: "short_history", symbols: shortHistory, text: `${listText(shortHistory)}: under 5 years of ${shortHistory.length === 1 ? "its" : "their"} own history; earlier weeks modelled from SPY` });
   const noBearMarket = input.tickers.filter((ticker) => ticker.backtestWorstSpyFall !== null && ticker.backtestWorstSpyFall > spyFallSeenMinimum).map((ticker) => ticker.symbol);
   if (noBearMarket.length > 0) warnings.push({ code: "no_bear_market_in_backtest", symbols: noBearMarket, text: `${listText(noBearMarket)}: ${noBearMarket.length === 1 ? "its" : "their"} backtest saw no SPY fall of 20%, so how much of a fall v4 keeps there is unmeasured` });
-  if (Math.abs(input.allocationTotalPct - 100) > 0.005) warnings.push({ code: "allocations_not_100", symbols: [], text: `The allocations add up to ${input.allocationTotalPct.toFixed(2)}%, not 100%` });
+  if (Math.abs(input.allocationTotalPct - 100) >= allocationTotalTolerancePct) warnings.push({ code: "allocations_not_100", symbols: [], text: `The allocations add up to ${input.allocationTotalPct.toFixed(2)}%, not 100%` });
   return warnings;
 }
 

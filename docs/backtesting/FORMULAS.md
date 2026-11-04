@@ -388,7 +388,7 @@ The lab's portfolio simulator projects a book of Vol Farmer v4 tickers 3 or 5 ye
 - **W3**: one group holds over 30% of the book.
 - **W4**: under 5 years of its own daily bars.
 - **W5**: its analysis backtest saw no 20% fall of SPY from a peak inside it.
-- **W6**: the allocations don't add up to 100%.
+- **W6**: the allocations add up to 0.5 points or more away from 100% (99.5% or less, 100.5% or more; nearer is rounding, 2026-11-04).
 
 **Suggestions** (2026-11-04): one change at a time, none taking a ticker above 25%:
 - drop a ticker (the others keep their proportions, back to 100%);
