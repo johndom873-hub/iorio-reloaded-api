@@ -195,29 +195,41 @@ export function sharedLeftoverDays(histories: readonly TickerDayHistory[]): Int3
   return Int32Array.from(days);
 }
 
-/** One path: `horizonDays` history days in blocks of 20 consecutive ones, and a leftover day for each (from `leftoverDays`; −1 with none). */
+/**
+ * One path: `horizonDays` history days in blocks of 20 consecutive ones, and for each day a draw in [0, 1) that picks a
+ * ticker's leftover day from its list (tickerPathPrices): a path's two streams are seeded by the path alone, so the same
+ * path comes out whatever the book, and a shorter horizon's path is the start of a longer one's.
+ */
 export interface DayPath {
   days: Int32Array;
-  leftoverDays: Int32Array;
+  leftoverDraws: Float64Array;
 }
 
-export function drawDayPaths(historyDays: number, horizonDays: number, pathCount: number, seed: number, leftoverDays: Int32Array, blockDays = pathBlockDays): DayPath[] {
-  const random = seededRandom(seed);
-  return Array.from({ length: pathCount }, () => {
+/** The seed of path `pathIndex`'s stream `stream` (0: its blocks, 1: its leftover draws). */
+const pathStreamSeed = (seed: number, pathIndex: number, stream: number) => (Math.imul(seed ^ 0x9e3779b9, 31) + Math.imul(pathIndex + 1, 0x85ebca6b) + Math.imul(stream + 1, 0xc2b2ae35)) >>> 0;
+
+export function drawDayPaths(historyDays: number, horizonDays: number, pathCount: number, seed: number, blockDays = pathBlockDays): DayPath[] {
+  return Array.from({ length: pathCount }, (_, pathIndex) => {
+    const blocks = seededRandom(pathStreamSeed(seed, pathIndex, 0));
+    const leftovers = seededRandom(pathStreamSeed(seed, pathIndex, 1));
     const days = new Int32Array(horizonDays);
-    const leftovers = new Int32Array(horizonDays).fill(-1);
     let filled = 0;
     while (filled < horizonDays) {
-      const start = Math.floor(random() * (historyDays - blockDays + 1));
+      const start = Math.floor(blocks() * (historyDays - blockDays + 1));
       for (let offset = 0; offset < blockDays && filled < horizonDays; offset++) days[filled++] = start + offset;
     }
-    if (leftoverDays.length > 0) for (let day = 0; day < horizonDays; day++) leftovers[day] = leftoverDays[Math.floor(random() * leftoverDays.length)]!;
-    return { days, leftoverDays: leftovers };
+    const leftoverDraws = new Float64Array(horizonDays);
+    for (let day = 0; day < horizonDays; day++) leftoverDraws[day] = leftovers();
+    return { days, leftoverDraws };
   });
 }
 
-/** A ticker's prices along a path from today's price: the 10:00 price and close of each day, with that day's IV and elevation. */
-export function tickerPathPrices(history: TickerDayHistory, path: DayPath, todaysPrice: number, drift: "as_it_happened" | "neutral"): { tenOclock: Float64Array; close: Float64Array; iv: Float64Array; elevation: Float64Array } {
+/**
+ * A ticker's prices along a path from today's price: the 10:00 price and close of each day, with that day's IV and
+ * elevation. A day without its own moves takes its leftover from `leftoverDays` at the path's draw (none when empty):
+ * the book's shared days in a projection (sharedLeftoverDays), the ticker's own in the suggestions' library.
+ */
+export function tickerPathPrices(history: TickerDayHistory, path: DayPath, todaysPrice: number, drift: "as_it_happened" | "neutral", leftoverDays: Int32Array): { tenOclock: Float64Array; close: Float64Array; iv: Float64Array; elevation: Float64Array } {
   const horizon = path.days.length;
   const tenOclock = new Float64Array(horizon);
   const close = new Float64Array(horizon);
@@ -230,8 +242,8 @@ export function tickerPathPrices(history: TickerDayHistory, path: DayPath, today
     let overnight = history.overnight[at]!;
     let day = history.day[at]! + shift;
     if (history.own[at] !== 1) {
-      const leftoverAt = path.leftoverDays[step]!;
-      if (leftoverAt >= 0) {
+      if (leftoverDays.length > 0) {
+        const leftoverAt = leftoverDays[Math.floor(path.leftoverDraws[step]! * leftoverDays.length)]!;
         overnight += history.leftoverOvernight[leftoverAt]!;
         day += history.leftoverDay[leftoverAt]!;
       }

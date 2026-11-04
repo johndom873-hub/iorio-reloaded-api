@@ -148,7 +148,8 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
   const riskFreeMeanDay = prepared.riskFreeAveragePct / 100 / tradingDaysPerYear;
   const histories = prepared.sources.map((source) => tickerDayHistoryOf(source.symbol, source.sessions, market, riskFreeNowDay, riskFreeMeanDay));
   const horizonDays = request.horizonYears * tradingDaysPerYear;
-  const paths = drawDayPaths(market.dates.length, horizonDays, request.pathCount, projectionSeed, sharedLeftoverDays(histories));
+  const paths = drawDayPaths(market.dates.length, horizonDays, request.pathCount, projectionSeed);
+  const leftoverDays = sharedLeftoverDays(histories);
   const input: ProjectionInput = {
     asOfIso: prepared.asOfIso,
     tickers: prepared.sources.map((source, index) => ({
@@ -160,6 +161,7 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
       sameDayVolatilityUplift: source.calibration.sameDayVolatilityUplift ?? 1,
       observedDays: source.observedDays,
       anchorCurve: source.anchorCurve,
+      leftoverDays,
     })),
     settings: prepared.settings,
     accountDollars: request.accountDollars,

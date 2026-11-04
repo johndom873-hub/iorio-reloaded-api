@@ -71,22 +71,33 @@ describe("a ticker's history on SPY's dates", () => {
 });
 
 describe("the paths", () => {
-  it("are blocks of 20 consecutive history days, the same for a seed", () => {
-    const paths = drawDayPaths(500, 45, 3, 7, Int32Array.from([10, 11, 12]));
-    expect(drawDayPaths(500, 45, 3, 7, Int32Array.from([10, 11, 12]))).toEqual(paths);
+  it("are blocks of 20 consecutive history days with a leftover draw a day, the same for a seed", () => {
+    const paths = drawDayPaths(500, 45, 3, 7);
+    expect(drawDayPaths(500, 45, 3, 7)).toEqual(paths);
     for (const path of paths) {
       for (const blockStart of [0, 20, 40]) for (let offset = 1; offset < 20 && blockStart + offset < 45; offset++) expect(path.days[blockStart + offset]).toBe(path.days[blockStart]! + offset);
-      expect([...path.leftoverDays].every((day) => day >= 10 && day <= 12)).toBe(true);
+      expect([...path.leftoverDraws].every((draw) => draw >= 0 && draw < 1)).toBe(true);
     }
   });
 
-  it("move today's price by each history day's moves, a day before the listing taking the path's leftover", () => {
+  it("give each path the same days whatever the path count, a shorter horizon's path being the start of a longer one's", () => {
+    const long = drawDayPaths(500, 45, 3, 7);
+    const short = drawDayPaths(500, 25, 5, 7);
+    for (let pathIndex = 0; pathIndex < 3; pathIndex++) {
+      expect([...short[pathIndex]!.days]).toEqual([...long[pathIndex]!.days.subarray(0, 25)]);
+      expect([...short[pathIndex]!.leftoverDraws]).toEqual([...long[pathIndex]!.leftoverDraws.subarray(0, 25)]);
+    }
+  });
+
+  it("move today's price by each history day's moves, a day before the listing taking the leftover its draw picks from the list", () => {
     const dates = weekdays(60);
     const spy = marketDayHistoryOf(sessionsOf(dates, () => 0.01, () => 0.02));
     const history = tickerDayHistoryOf("LATE", sessionsOf(dates.slice(29), () => 0.003, () => 0.004), spy, 0, 0);
-    const path = { days: Int32Array.from([5, 40]), leftoverDays: Int32Array.from([45, 45]) };
-    const prices = tickerPathPrices(history, path, 50, "as_it_happened");
+    // A draw of 0.5 picks the middle of three listed days: day 45.
+    const path = { days: Int32Array.from([5, 40]), leftoverDraws: Float64Array.from([0.5, 0.5]) };
+    const prices = tickerPathPrices(history, path, 50, "as_it_happened", Int32Array.from([44, 45, 46]));
     // Day 5 (before the listing): β × SPY's moves + day 45's leftover; day 40: its own moves.
+    expect(tickerPathPrices(history, path, 50, "as_it_happened", new Int32Array(0)).tenOclock[0]).toBeCloseTo(50 * Math.exp(history.overnight[5]!), 9);
     const overnightFive = history.overnight[5]! + history.leftoverOvernight[45]!;
     expect(prices.tenOclock[0]).toBeCloseTo(50 * Math.exp(overnightFive), 9);
     expect(prices.close[0]).toBeCloseTo(prices.tenOclock[0]! * Math.exp(history.day[5]! + history.leftoverDay[45]!), 9);

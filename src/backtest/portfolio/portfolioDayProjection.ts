@@ -24,6 +24,8 @@ export interface ProjectionTicker {
   /** The last 60 sessions' chains, each against its own anchor. */
   observedDays: ObservedChainDay[];
   anchorCurve: AnchorCurve;
+  /** Where a day without its own moves takes its leftover from (tickerPathPrices): the book's shared days, or its own. */
+  leftoverDays: Int32Array;
 }
 
 export interface ProjectionInput {
@@ -71,9 +73,16 @@ export function nextExpiriesOf(dates: readonly string[], weekdays: readonly numb
 
 const calendarDaysBetween = (fromIso: string, toIso: string) => Math.round((Date.parse(`${toIso}T00:00:00Z`) - Date.parse(`${fromIso}T00:00:00Z`)) / 86_400_000);
 
-/** A draw in [0, 1) for a path, ticker and day: the same each run (mulberry32 on the three). */
-export function projectionDraw(seed: number, pathIndex: number, tickerIndex: number, dayIndex: number): number {
-  let state = (Math.imul(seed ^ 0x9e3779b9, 31) + pathIndex * 1_000_003 + tickerIndex * 10_007 + dayIndex * 7_919) >>> 0;
+/** A ticker's key in projectionDraw: its symbol's 32-bit FNV-1a hash, so its draws are the same in any book. */
+export function tickerDrawKey(symbol: string): number {
+  let hash = 0x811c9dc5;
+  for (let at = 0; at < symbol.length; at++) hash = Math.imul(hash ^ symbol.charCodeAt(at), 0x01000193) >>> 0;
+  return hash;
+}
+
+/** A draw in [0, 1) for a path, ticker (tickerDrawKey) and day: the same each run (mulberry32 on the three). */
+export function projectionDraw(seed: number, pathIndex: number, tickerKey: number, dayIndex: number): number {
+  let state = (Math.imul(seed ^ 0x9e3779b9, 31) + pathIndex * 1_000_003 + Math.imul(tickerKey, 10_007) + dayIndex * 7_919) >>> 0;
   state = (state + 0x6d2b79f5) >>> 0;
   let value = state;
   value = Math.imul(value ^ (value >>> 15), value | 1);
@@ -98,7 +107,8 @@ export function maxDrawdownOf(values: ArrayLike<number>): { maxDrawdown: number;
 
 /** One path through v4's own day on `dates` (the path as long as them): the simulator's result. */
 function simulatePath(input: ProjectionInput, path: DayPath, pathIndex: number, dates: readonly string[], expiriesByTicker: readonly string[][]) {
-  const prices = input.tickers.map((ticker) => tickerPathPrices(ticker.history, path, ticker.todaysPrice, input.drift));
+  const prices = input.tickers.map((ticker) => tickerPathPrices(ticker.history, path, ticker.todaysPrice, input.drift, ticker.leftoverDays));
+  const drawKeys = input.tickers.map((ticker) => tickerDrawKey(ticker.symbol));
   return simulateBookDays({
     dates,
     tickers: input.tickers.map((ticker) => ({ symbol: ticker.symbol, sameDayVolatilityUplift: ticker.sameDayVolatilityUplift })),
@@ -118,7 +128,7 @@ function simulatePath(input: ProjectionInput, path: DayPath, pathIndex: number, 
         observedChain:
           candidates.length === 0
             ? null
-            : { day: candidates[Math.floor(projectionDraw(input.seed, pathIndex, tickerIndex, day) * candidates.length)]!, volatilityAnchor: impliedVolatility * anchorFactorAt(ticker.anchorCurve, Number.isFinite(elevation) ? elevation : null) },
+            : { day: candidates[Math.floor(projectionDraw(input.seed, pathIndex, drawKeys[tickerIndex]!, day) * candidates.length)]!, volatilityAnchor: impliedVolatility * anchorFactorAt(ticker.anchorCurve, Number.isFinite(elevation) ? elevation : null) },
       };
     },
     settings: input.settings,
@@ -169,7 +179,7 @@ export async function runReplayPaths(input: ProjectionInput, windows: readonly R
   for (const window of windows) {
     const dates = simulatedSessionsAfter(input.asOfIso, window.days.length);
     const expiriesByTicker = input.tickers.map((ticker) => nextExpiriesOf(dates, ticker.expiryWeekdays));
-    const result = await simulatePath(input, { days: window.days, leftoverDays: new Int32Array(window.days.length).fill(-1) }, 0, dates, expiriesByTicker);
+    const result = await simulatePath({ ...input, tickers: input.tickers.map((ticker) => ({ ...ticker, leftoverDays: new Int32Array(0) })) }, { days: window.days, leftoverDraws: new Float64Array(window.days.length) }, 0, dates, expiriesByTicker);
     const values = result.accountValues;
     outcomes.push({ name: window.name, bookReturn: values[values.length - 1]! / input.accountDollars - 1, maxDrawdown: maxDrawdownOf(values).maxDrawdown, sources: result.sources });
   }
