@@ -97,6 +97,23 @@ describe("planOptionQuoteBand", () => {
     expect(strikesOf(later.contracts, "P")).toEqual([60, 70, 80, 85, 90, 95]);
   });
 
+  it("quotes the Calls the volume rule left out when no Call in the delta range has the volume for one contract, and only then", () => {
+    const farCall = { expiry, strike: 160, right: "C" as const };
+    const nearCalls = [100, 105, 110, 120].map((strike) => ({ expiry, strike, right: "C" as const }));
+    const puts = universe.filter((contract) => contract.right === "P");
+    const quoted = (contracts: { strike: number; right: "C" | "P" }[]) => strikesOf(contracts, "C");
+    // DRAM on 4 Nov: the price fell away from yesterday's volume, which sits on strikes far above it.
+    const gapped = planOptionQuoteBand({ universe: [...puts, farCall], callsWithoutVolume: nearCalls, todaysQuotes: [quoteAt(60, "P", 100)], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 100, callDeltaRange });
+    expect(quoted(gapped.contracts)).toEqual([100, 105, 110, 120].filter((strike) => callAbsDeltaAt(strike) >= 0.03 && callAbsDeltaAt(strike) <= 0.4));
+    expect(quoted(gapped.contracts).length).toBeGreaterThan(0);
+    // A Call with the volume inside the range keeps the rule: the ones without it stay out.
+    const covered = planOptionQuoteBand({ universe: [...puts, { expiry, strike: 120, right: "C" as const }], callsWithoutVolume: nearCalls.filter((contract) => contract.strike !== 120), todaysQuotes: [quoteAt(60, "P", 100)], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 100, callDeltaRange });
+    expect(quoted(covered.contracts)).toEqual([120]);
+    // A Call whose delta is not known yet (never quoted today) may be inside the range: no lift until it has been quoted.
+    const unknown = planOptionQuoteBand({ universe: [...puts, { expiry, strike: 120, right: "C" as const }], callsWithoutVolume: nearCalls.filter((contract) => contract.strike !== 120), todaysQuotes: [quoteAt(60, "P", 100)], overnightImpliedVolatilityByContract: new Map(), anchors, clock, now, stockPrice: 100, callDeltaRange });
+    expect(quoted(unknown.contracts)).toEqual([120]);
+  });
+
   it("quotes every Call whose IV is unknown and every Put below the price, and follows the live price", () => {
     const unknown = planOptionQuoteBand({ universe, todaysQuotes: [], overnightImpliedVolatilityByContract: new Map(), anchors, clock, now, stockPrice: 100, callDeltaRange });
     expect(strikesOf(unknown.contracts, "C")).toEqual(callStrikes);

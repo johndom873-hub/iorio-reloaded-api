@@ -260,6 +260,8 @@ export interface VolFarmerV4Market {
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
   /** Pluto only (Marcelo 2026-10-30): expiries without the previous session's volume, sold without the volume limit for the day. */
   volumeLimitLiftedExpiries?: ReadonlySet<string>;
+  /** Pluto only: expiries whose Calls are sold without the volume limit for the day, no Call in the delta range having the volume for it. */
+  volumeLimitLiftedCallExpiries?: ReadonlySet<string>;
   /** Years from the look to today's close: a same-day expiry's time. */
   yearsToTodaysClose: number;
   /** Years from the look to an expiry's settlement: the LEAPS' time. */
@@ -577,6 +579,7 @@ export function runVolFarmerV4Turn(input: VolFarmerV4LookInput): VolFarmerV4Turn
       riskFreeRate,
       previousSessionVolumeByContract: market.previousSessionVolumeByContract,
       ...(market.volumeLimitLiftedExpiries ? { volumeLimitLiftedExpiries: market.volumeLimitLiftedExpiries } : {}),
+      ...(market.volumeLimitLiftedCallExpiries ? { volumeLimitLiftedCallExpiries: market.volumeLimitLiftedCallExpiries } : {}),
       settings: { minAbsDelta: limits.minAbsDelta, maxAbsDelta: limits.maxAbsDelta, minDte: dte, maxDte: dte, maxSpreadPctOfMid: farmer.maxSpreadPctOfMid },
       spreadShareCharged: market.spreadShareCharged,
       isHeld: (contract) => limits.heldExcluded && heldContracts.has(contractKeyOf(contract)),

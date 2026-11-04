@@ -21,9 +21,12 @@ function workingPlutoOpenOrderRows(connection: Knex) {
   return connection("order_requests as orq").join("pluto_actions as pa", "pa.id", "orq.pluto_action_id").whereIn("pa.execution_strategy", strategiesUnderSafetyLimits).whereIn("orq.status", [...activeOrderRequestStatuses]).whereRaw("orq.request_type like 'open_%'");
 }
 
-/** Pluto's orders sent on the Eastern date of `now`, on `symbol` or (null) across the book: every order built counts. */
+/**
+ * Pluto's orders sent on the Eastern date of `now`, on `symbol` or (null) across the book: an order built and confirmed counts,
+ * one the route refused (blocked) or that errored does not reach IBKR and does not.
+ */
 export function plutoOrdersSentToday(now: Date, symbol: string | null, connection: Knex = db) {
-  const query = connection("pluto_actions").whereIn("execution_strategy", strategiesUnderSafetyLimits).whereNotNull("order_request_id").whereRaw("(created_at at time zone 'America/New_York')::date = ?::date", [easternIsoDate(now)]);
+  const query = connection("pluto_actions").whereIn("execution_strategy", strategiesUnderSafetyLimits).whereNotNull("order_request_id").whereNotIn("outcome", ["blocked", "error"]).whereRaw("(created_at at time zone 'America/New_York')::date = ?::date", [easternIsoDate(now)]);
   return (symbol === null ? query : query.where({ symbol })).count({ count: "*" }).first();
 }
 

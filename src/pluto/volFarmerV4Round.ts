@@ -32,6 +32,8 @@ import { isLastSessionBeforeWeekend } from "../lib/tradingWeek.js";
 import { loadInFlightNotionals, loadInFlightNotionalsBySymbol, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
 import { executePlutoOrder, watchPlutoOrder, type ExecuteInput } from "./executor.js";
 import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
+import { contractKey } from "../lib/optionContractKey.js";
+import { hasPreviousSessionVolumeForOneContract } from "./optionRequoteBand.js";
 import { expiriesWithoutPreviousSessionVolume, nextListedExpiryAfter, optionQuoteBandDayUniverse, volFarmerV4ExpiryRule } from "./optionQuoteBandPlan.js";
 import { loadFinishedOptionQuoteBandCycle, loadOptionQuoteBandQuotes } from "./optionQuoteBandQuotes.js";
 import { latestCycleQuotes } from "./latestBandQuotes.js";
@@ -463,6 +465,9 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   const soldExpiry = volFarmerV4SoldExpiry(chain.expirations, clock.todayIso, v3.optionsExpiry);
   const volumeLimitLiftedExpiries = expiriesWithoutPreviousSessionVolume(soldExpiry === null ? [] : [soldExpiry], previousSessionVolumeByContract);
   if (pass === "cycles_calls_puts" && soldExpiry !== null && volumeLimitLiftedExpiries.has(soldExpiry)) note(`no previous-session volume for ${describeExpiry(soldExpiry, clock.todayIso)}: the 20% volume rule is off for it today`);
+  // A Call quoted without the volume for one contract (the quote loop quotes them only when no Call in the delta range has it) lifts the rule on the sold expiry's Calls.
+  const callsLiftedExpiries = new Set(soldExpiry !== null && !volumeLimitLiftedExpiries.has(soldExpiry) && quotes.some((quote) => quote.right === "C" && quote.expiry === soldExpiry && !hasPreviousSessionVolumeForOneContract(previousSessionVolumeByContract?.get(contractKey(quote)) ?? null)) ? [soldExpiry] : []);
+  if (pass === "cycles_calls_puts" && soldExpiry !== null && callsLiftedExpiries.has(soldExpiry)) note(`no Call in the delta range had the volume yesterday: the 20% volume rule is off for the Calls of ${describeExpiry(soldExpiry, clock.todayIso)} today`);
   const soldExpiryCallQuoted = soldExpiry !== null && quotes.some((quote) => quote.right === "C" && quote.expiry === soldExpiry);
   const noCallQuotedReason = soldExpiryCallQuoted
     ? undefined
@@ -479,6 +484,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
     forwardAnchors,
     previousSessionVolumeByContract,
     volumeLimitLiftedExpiries,
+    volumeLimitLiftedCallExpiries: callsLiftedExpiries,
     yearsToTodaysClose: yearsToSessionClose(now, clock.closeMinutesEt),
     yearsToExpiry: (expiry) => yearsBetweenIsoDates(clock.todayIso, expiry),
     leapsCallQuotes: {
@@ -672,7 +678,7 @@ async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; t
       plan: { quantity: call.contracts, limitPrice: limitPrice!, notional: costDollars, fullSizeQuantity: call.contracts },
       reasons: [`Vol Farmer v4: ${chosenBecause}.`],
     });
-    if (result.orderId !== null) round.bookCounts.ordersToday += 1;
+    if (result.outcome === "confirmed") round.bookCounts.ordersToday += 1;
     if (result.outcome !== "confirmed" || result.orderId === null) {
       note(`the buyback of ${call.contracts}× ${label}: ${result.detail}`);
       continue;
@@ -806,7 +812,7 @@ async function sendOrder(context: {
         ? { kind: "leaps_sell", actionId, symbol: ticker.symbol, positionId: item.leg!.positionId, legId: item.leg!.legId, contract: { expiry: contract.expiry, strike: contract.strike, right: "C", dte }, plan, reasons }
         : { kind: "strategy_open", actionId, symbol: ticker.symbol, strategyKey: item.contract.strategyKey as "covered_call" | "cash_secured_put", contract: { ...contract, dte }, plan, buyEveryShare: buysShares, reasons, scoresSnapshot };
   const result = await executePlutoOrder(input.api, settings, executeInput);
-  if (result.orderId !== null) {
+  if (result.outcome === "confirmed") {
     round.bookCounts.ordersToday += 1;
     tickerCounts.ordersToday += 1;
   }
@@ -895,7 +901,7 @@ async function sendShareOrder(context: { input: VolFarmerV4RoundInput; ticker: P
     ? { kind: "shares_buy", actionId, symbol: ticker.symbol, plan, reasons, scoresSnapshot: { kind: "vol_farmer_v4", version: "vf4-1", stock: { bid: twoSided!.bid, ask: twoSided!.ask, quoteSource: "live", quotedAt: new Date(quote!.updatedAtMs!).toISOString() }, order: { shares, chosenBecause, scores } } }
     : { kind: "shares_sell", actionId, symbol: ticker.symbol, positionId: leftover!.positionId, legId: leftover!.legId, plan, reasons };
   const result = await executePlutoOrder(input.api, settings, executeInput);
-  if (result.orderId !== null) {
+  if (result.outcome === "confirmed") {
     round.bookCounts.ordersToday += 1;
     tickerCounts.ordersToday += 1;
   }

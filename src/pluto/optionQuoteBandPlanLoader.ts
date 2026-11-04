@@ -7,7 +7,7 @@ import { addCalendarDays } from "../lib/calendarDays.js";
 import type { MarketQuoteConsumer } from "../lib/marketQuoteLoop.js";
 import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { loadOptionQuoteBandQuotes, recordFinishedOptionQuoteBandCycles, upsertOptionQuoteBandQuotes, type OptionQuoteBandCycleWrite, type OptionQuoteBandQuote, type OptionQuoteBandQuoteWrite } from "./optionQuoteBandQuotes.js";
-import { optionQuoteBandDayUniverse, planOptionQuoteBand, volFarmerV4ExpiryRule, type OptionQuoteBandExpiryRule, type OptionQuoteBandPlan, type OptionQuoteBandClock, type OptionQuoteBandScope, type OptionQuoteBandUniverseContract } from "./optionQuoteBandPlan.js";
+import { optionQuoteBandCallsWithoutVolume, optionQuoteBandDayUniverse, planOptionQuoteBand, volFarmerV4ExpiryRule, type OptionQuoteBandExpiryRule, type OptionQuoteBandPlan, type OptionQuoteBandClock, type OptionQuoteBandScope, type OptionQuoteBandUniverseContract } from "./optionQuoteBandPlan.js";
 import { forwardAnchorsFromBandQuotes } from "./optionQuoteBandForwardAnchors.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState } from "./stateStore.js";
@@ -36,6 +36,8 @@ export interface OptionQuoteBandPlanner {
 
 interface TickerDay {
   universe: OptionQuoteBandUniverseContract[];
+  /** The Calls the 20% volume rule left out: quoted on a day no Call in the delta range has the volume for it. */
+  callsWithoutVolume: OptionQuoteBandUniverseContract[];
   overnightImpliedVolatilityByContract: Map<string, number>;
   /** Empty until the band has quotes today (read again each cycle until then). */
   anchors: Map<string, BaselineForwardAnchor>;
@@ -108,8 +110,9 @@ export function createOptionQuoteBandPlanner(dependencies: OptionQuoteBandPlanne
       dependencies.loadForwardAnchors(ticker.tickerId, tradingDateIso),
     ]);
     // An expiry without the previous session's volume is quoted whole: the 20% rule is lifted on it for the day.
-    const universe = optionQuoteBandDayUniverse({ expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, sessionIso: tradingDateIso, expiryRule: scope.expiryRule, previousSessionVolumeByContract: volume });
-    const entry: TickerDay = { universe, overnightImpliedVolatilityByContract: overnight, anchors, expiryRule: scope.expiryRule, callDeltaRange: scope.callDeltaRange };
+    const universeInput = { expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, sessionIso: tradingDateIso, expiryRule: scope.expiryRule, previousSessionVolumeByContract: volume };
+    const universe = optionQuoteBandDayUniverse(universeInput);
+    const entry: TickerDay = { universe, callsWithoutVolume: optionQuoteBandCallsWithoutVolume(universeInput), overnightImpliedVolatilityByContract: overnight, anchors, expiryRule: scope.expiryRule, callDeltaRange: scope.callDeltaRange };
     day!.byTicker.set(ticker.tickerId, entry);
     return entry;
   };

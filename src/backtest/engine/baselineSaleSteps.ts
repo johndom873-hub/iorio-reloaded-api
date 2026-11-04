@@ -117,6 +117,8 @@ export interface BaselineCandidateInput {
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
   /** Pluto only (Marcelo 2026-10-30): expiries without the previous session's volume, on which the volume limit is lifted for the day; the lab always has the volumes. */
   volumeLimitLiftedExpiries?: ReadonlySet<string>;
+  /** Pluto only: expiries whose Calls (not Puts) are sold without the volume limit for the day, no Call in the delta range having the volume for it. */
+  volumeLimitLiftedCallExpiries?: ReadonlySet<string>;
   settings: Pick<BacktestBaselineSettings, "minAbsDelta" | "maxAbsDelta" | "minDte" | "maxDte" | "maxSpreadPctOfMid">;
   /** λ: the share of the half-spread a fill gives up. */
   spreadShareCharged: number;
@@ -223,7 +225,7 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
     const ask = quote.ask!;
     const mid = (bid + ask) / 2;
     const volume = input.previousSessionVolumeByContract?.get(contractKey(quote)) ?? null;
-    const volumeCap = input.volumeLimitLiftedExpiries?.has(quote.expiry) ? Number.POSITIVE_INFINITY : volume === null ? 0 : Math.floor(volume * baselineMaxVolumeShare);
+    const volumeCap = input.volumeLimitLiftedExpiries?.has(quote.expiry) || (isCall && input.volumeLimitLiftedCallExpiries?.has(quote.expiry)) ? Number.POSITIVE_INFINITY : volume === null ? 0 : Math.floor(volume * baselineMaxVolumeShare);
     if (volumeCap < 1) {
       rejections.tooLittleVolume++;
       continue;

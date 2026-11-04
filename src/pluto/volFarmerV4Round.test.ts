@@ -37,6 +37,8 @@ const harness = vi.hoisted(() => ({
   quotes: [] as unknown[],
   /** No after-close capture for the previous session: its volumes are unknown. */
   previousSessionVolumeMissing: false,
+  /** Strikes whose contracts the previous session's capture lists with no volume. */
+  noVolumeStrikes: [] as number[],
   bookCounts: { workingOrders: 0, ordersToday: 0, openPositions: 0 },
   committed: 0,
   actions: [] as Record<string, unknown>[],
@@ -103,7 +105,7 @@ vi.mock("./optionQuoteBandPlanLoader.js", () => ({
   defaultOptionQuoteBandPlannerDependencies: {
     loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 960, riskFreeRate: 0.04 }),
     loadForwardAnchors: async () => new Map(),
-    loadPreviousSessionVolume: async () => (harness.previousSessionVolumeMissing ? null : new Map((harness.quotes as SymbolFileQuote[]).map((quote) => [contractKey(quote), 1_000]))),
+    loadPreviousSessionVolume: async () => (harness.previousSessionVolumeMissing ? null : new Map((harness.quotes as SymbolFileQuote[]).map((quote) => [contractKey(quote), harness.noVolumeStrikes.includes(quote.strike) ? 0 : 1_000]))),
   },
 }));
 vi.mock("./optionQuoteBandQuotes.js", () => ({ loadOptionQuoteBandQuotes: async () => [], loadFinishedOptionQuoteBandCycle: async () => ({ cycleNumber: 1, startedAt: new Date(0), finishedAt: new Date(0) }) }));
@@ -211,6 +213,7 @@ beforeEach(() => {
   harness.stepImpliedVolatility = null;
   harness.quotes = [...quotesAt("C"), ...quotesAt("P")];
   harness.previousSessionVolumeMissing = false;
+  harness.noVolumeStrikes = [];
   harness.bookCounts = { workingOrders: 0, ordersToday: 0, openPositions: 0 };
   harness.committed = 0;
   harness.actions.length = 0;
@@ -320,6 +323,16 @@ describe("runVolFarmerV4Round", () => {
     await round();
     expect(harness.events.filter((event) => event.type === "holdings_adopted")).toHaveLength(1);
     expect(harness.executed).toEqual([]);
+  });
+
+  it("sells a Call quoted without the volume for one contract: the volume rule is off for the sold expiry's Calls that day, and the round says so", async () => {
+    holdingFirstPosition(1_000);
+    // The previous session's capture lists every Call with no volume (the price gapped away from where the volume was); the quote loop quoted them anyway.
+    harness.noVolumeStrikes = Array.from({ length: 101 }, (_, index) => 40 + index);
+    harness.chain = { expirations: ["20261106"], strikesByExpiry: new Map([["20261106", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
+    const summary = await round();
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", strategyKey: "covered_call", plan: expect.objectContaining({ quantity: 10 }) })]);
+    expect(summary.notes).toContainEqual(expect.stringContaining("no Call in the delta range had the volume yesterday: the 20% volume rule is off for the Calls of"));
   });
 
   it("waits on a ticker that holds only Puts", async () => {

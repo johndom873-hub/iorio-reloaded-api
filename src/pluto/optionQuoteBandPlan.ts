@@ -85,6 +85,12 @@ export function optionQuoteBandDayUniverse(input: Parameters<typeof optionQuoteB
   return contracts.filter((contract) => lifted.has(contract.expiry) || hasPreviousSessionVolumeForOneContract(input.previousSessionVolumeByContract?.get(contractKey(contract)) ?? null));
 }
 
+/** The rule's expiries' Calls the 20% volume rule leaves out of the day's universe: quoted only on a day the rule is lifted for them (planOptionQuoteBand). */
+export function optionQuoteBandCallsWithoutVolume(input: Parameters<typeof optionQuoteBandDayUniverse>[0]): OptionQuoteBandUniverseContract[] {
+  const kept = new Set(optionQuoteBandDayUniverse(input).map((contract) => contractKey(contract)));
+  return optionQuoteBandExpiryContracts(input).filter((contract) => contract.right === "C" && !kept.has(contractKey(contract)));
+}
+
 export interface OptionQuoteBandClock {
   todayIso: string;
   /** Today's close, minutes after midnight Eastern. */
@@ -150,9 +156,15 @@ export interface OptionQuoteBandPlan {
   unknownImpliedVolatilityCount: number;
 }
 
-/** The contracts to quote at this cycle, at the live price `stockPrice` and the moment `now`. */
+/**
+ * The contracts to quote at this cycle, at the live price `stockPrice` and the moment `now`. When no Call of the universe sits inside the
+ * strategy's |delta| range (a price that gapped away from the previous session's volume), the Calls the 20% volume rule left out
+ * (`callsWithoutVolume`) are quoted too, and the round sells from them with the rule lifted (volFarmerV4Round.ts). A Call whose delta
+ * cannot be predicted yet counts as possibly inside the range, until it has been quoted once today.
+ */
 export function planOptionQuoteBand(input: {
   universe: readonly OptionQuoteBandUniverseContract[];
+  callsWithoutVolume?: readonly OptionQuoteBandUniverseContract[];
   todaysQuotes: readonly OptionQuoteBandQuote[];
   overnightImpliedVolatilityByContract: ReadonlyMap<string, number>;
   anchors: ReadonlyMap<string, BaselineForwardAnchor>;
@@ -163,21 +175,34 @@ export function planOptionQuoteBand(input: {
   callDeltaRange: OptionRequoteBand;
 }): OptionQuoteBandPlan {
   const firstLookOfDay = input.todaysQuotes.length === 0;
-  const lastSeen = lastSeenImpliedVolatilities(input);
-  const universe = input.universe.map((contract) => ({ ...contract, lastSeenImpliedVolatility: lastSeen.get(contractKey(contract)) ?? null }));
-  const { toQuote } = selectOptionRequoteContracts({
-    universe,
-    band: optionRequoteBand(input.callDeltaRange, firstLookOfDay),
-    stockPrice: input.stockPrice,
-    todayIso: input.clock.todayIso,
-    yearsToTodaysClose: yearsToSessionClose(input.now, input.clock.closeMinutesEt),
-    riskFreeRate: input.clock.riskFreeRate,
-    forwardFor: (expiry, years) => forwardFromAnchor(input.anchors.get(expiry), input.stockPrice, years, input.clock.riskFreeRate),
-  });
+  const lastSeen = lastSeenImpliedVolatilities({ ...input, universe: [...input.universe, ...(input.callsWithoutVolume ?? [])] });
+  const withLastSeen = (contracts: readonly OptionQuoteBandUniverseContract[]) => contracts.map((contract) => ({ ...contract, lastSeenImpliedVolatility: lastSeen.get(contractKey(contract)) ?? null }));
+  const select = (contracts: readonly OptionQuoteBandUniverseContract[]) =>
+    selectOptionRequoteContracts({
+      universe: withLastSeen(contracts),
+      band: optionRequoteBand(input.callDeltaRange, firstLookOfDay),
+      stockPrice: input.stockPrice,
+      todayIso: input.clock.todayIso,
+      yearsToTodaysClose: yearsToSessionClose(input.now, input.clock.closeMinutesEt),
+      riskFreeRate: input.clock.riskFreeRate,
+      forwardFor: (expiry, years) => forwardFromAnchor(input.anchors.get(expiry), input.stockPrice, years, input.clock.riskFreeRate),
+    });
+  let universe = input.universe;
+  let selection = select(universe);
+  const quotedToday = new Set(input.todaysQuotes.map((quote) => contractKey({ expiry: quote.expiry, strike: quote.strike, right: quote.right })));
+  const callMayBeInRange = (contract: OptionQuoteBandUniverseContract) => {
+    const predicted = selection.predictedAbsDeltaByKey.get(contractKey(contract));
+    if (predicted === undefined) return !quotedToday.has(contractKey(contract));
+    return predicted >= input.callDeltaRange.minAbsDelta && predicted <= input.callDeltaRange.maxAbsDelta;
+  };
+  if ((input.callsWithoutVolume?.length ?? 0) > 0 && !universe.some((contract) => contract.right === "C" && callMayBeInRange(contract))) {
+    universe = [...universe, ...input.callsWithoutVolume!];
+    selection = select(universe);
+  }
   return {
-    contracts: toQuote.map(({ expiry, strike, right }) => ({ expiry, strike, right })),
+    contracts: selection.toQuote.map(({ expiry, strike, right }) => ({ expiry, strike, right })),
     firstLookOfDay,
     universeCount: universe.length,
-    unknownImpliedVolatilityCount: universe.filter((contract) => contract.lastSeenImpliedVolatility === null).length,
+    unknownImpliedVolatilityCount: withLastSeen(universe).filter((contract) => contract.lastSeenImpliedVolatility === null).length,
   };
 }
