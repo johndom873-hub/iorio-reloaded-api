@@ -36,9 +36,14 @@ interface HistoricalDataCheckResult {
 // job_runs.error_message or the Telegram alert, which is how "reqHistoricalData
 // was silently hung" made it into a notification even though the failure was
 // a specific, named IBKR error the whole time.
-export async function checkHistoricalData(connection: IbkrConnection): Promise<HistoricalDataCheckResult> {
+// The probe's request id. A timed-out request stays open at IBKR, so a second probe on the same connection needs its
+// own id: reusing it is refused as "Duplicate ticker ID" (code 322, seen 2026-11-04 on the re-check after a data reconnect).
+export const historicalDataProbeRequestId = 999_001;
+export const historicalDataReprobeRequestId = 999_004;
+
+export async function checkHistoricalData(connection: IbkrConnection, requestId = historicalDataProbeRequestId): Promise<HistoricalDataCheckResult> {
   try {
-    await lookupLatestDailyBar(connection, HISTORICAL_DATA_PROBE_SYMBOL, 999_001);
+    await lookupLatestDailyBar(connection, HISTORICAL_DATA_PROBE_SYMBOL, requestId);
     return { healthy: true, errorMessage: null };
   } catch (error) {
     return { healthy: false, errorMessage: error instanceof Error ? error.message : String(error) };
@@ -146,7 +151,8 @@ export async function reconnectDataAndReprobe(connection: IbkrConnection): Promi
   }
   const resultKind = parseGatewayControlResultKind(output);
   if (resultKind !== "data_reconnected") return { recovered: false, outcome: `not run (${resultKind ?? "no result line"})`, output };
-  const reprobe = await checkHistoricalData(connection);
+  // Same connection as the probe that failed, whose request may still be open: its own request id.
+  const reprobe = await checkHistoricalData(connection, historicalDataReprobeRequestId);
   return reprobe.healthy ? { recovered: true, outcome: "recovered", output } : { recovered: false, outcome: `still failing (${reprobe.errorMessage ?? "unknown error"})`, output };
 }
 

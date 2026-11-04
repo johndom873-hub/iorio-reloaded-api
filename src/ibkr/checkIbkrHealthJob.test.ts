@@ -689,6 +689,8 @@ describe("runIbkrHealthCheckJob: historical data probe failures with a healthy h
       expect(mocks.reconnectIbkrGatewayDataOnVps.mock.calls[0]![0]).toMatchObject({ sshHost: "vps.example", sshPort: 2222, sshUsername: "healthcheck", sshPrivateKey: Buffer.from("reconnect-data-key") });
       expect(mocks.restartIbkrGatewayOnVps).not.toHaveBeenCalled();
       expect(mocks.connectToIbkrGateway).toHaveBeenCalledTimes(1);
+      // The re-check runs on the same connection, where the failed probe's request may still be open: its own request id.
+      expect(mocks.lookupLatestDailyBar.mock.calls.map((call) => call[2])).toEqual([999_001, 999_004]);
       const output = lastJobOutput();
       expect(output.details.probe).toEqual({ failed: true, reason: historicalTimeoutError, restarted: false, dataReconnect: "recovered" });
       expect(output.details.output).toContain("data farms reconnected, recovered");
