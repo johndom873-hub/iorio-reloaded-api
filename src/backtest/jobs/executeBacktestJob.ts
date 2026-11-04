@@ -8,7 +8,8 @@ import { connectToIbkrGateway } from "../../ibkr/connectIbkr.js";
 import { findOrCreateTicker } from "../../ibkr/findOrCreateTicker.js";
 import { backtestRepoRoot, requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { readFirstOptionDay } from "../backtestDataFile.js";
-import { describeFileStockBarsRefresh, FileOptionsPredateStockError, FileStockBarsCancelledError, refreshFileStockBars } from "../refreshFileStockBars.js";
+import { describeFileStockBarsRefresh, FileOptionsPredateStockError, FileStockBarsCancelledError, fileWithoutStockBarsReason, refreshFileStockBars } from "../refreshFileStockBars.js";
+import { possibleBusinessChangeNotice } from "../tickerBusinessChanges.js";
 import { BacktestCancelledError, runBacktestSession } from "../engine/runBacktestSession.js";
 import { describeUnmatchedOptions, refreshSplitScheduleForSymbol, type SplitSchedule } from "../engine/splitFactors.js";
 import { runAnalysisJob } from "../analysis/runAnalysisJob.js";
@@ -187,7 +188,10 @@ async function refreshStockBarsOfFile(job: BacktestJobRow, control: JobProcessCo
       isCancelled: () => control.cancelRequested,
     });
     console.log(describeFileStockBarsRefresh(result));
-    await control.reportProgress(afterDownload.done, afterDownload.total, `${downloadLabel} · IBKR bars to ${result.dailyLastDate}`);
+    // On a ticker's first download only: a ticker looked at once is not asked about again.
+    const businessChangeNotice = result.fullRefreshReason === fileWithoutStockBarsReason ? possibleBusinessChangeNotice(job.symbol, result.dailyFirstDate, firstOptionDay) : null;
+    if (businessChangeNotice !== null) console.log(businessChangeNotice);
+    await control.reportProgress(afterDownload.done, afterDownload.total, `${downloadLabel} · IBKR bars to ${result.dailyLastDate}${businessChangeNotice !== null ? " · options start long after its prices: another company before? (see the log)" : ""}`);
   } finally {
     connection.disconnect();
   }

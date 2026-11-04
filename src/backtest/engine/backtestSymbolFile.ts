@@ -1,6 +1,7 @@
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { readFileDailyBars, readFileIntradayPrices, type FileIntradayPrices } from "../backtestFileStockBars.js";
+import { currentBusinessFromOf, rowsFrom } from "../tickerBusinessChanges.js";
 import type { StoredDailyBar } from "./backtestBarHistory.js";
 import { SymbolFileSliceReads } from "./symbolFileSliceReads.js";
 
@@ -8,7 +9,8 @@ import { SymbolFileSliceReads } from "./symbolFileSliceReads.js";
 // day's 10:00 quotes and end-of-day rows, the quotes at each look inside the day (intraday_days, and the slices that
 // symbolFileSliceReads.ts reads), what the downloader could not retrieve (day_issues, unavailable_days), and IBKR's stock
 // bars Node keeps in it (the stock prices). The open interest the files hold is not read: no rule uses it. Read-only;
-// the downloader and the IBKR bars step write it.
+// the downloader and the IBKR bars step write it. A ticker whose business changed (tickerBusinessChanges.ts) holds
+// nothing before the change here: its days, issues and bars start there.
 
 export interface SymbolFileDay {
   tradingDate: string;
@@ -83,7 +85,11 @@ export class BacktestSymbolFile {
   /** The option reads, from the file's slices. */
   private readonly slices: SymbolFileSliceReads;
 
-  constructor(private readonly database: DatabaseSync) {
+  /** `currentBusinessFrom`: the first date read (open() takes it from tickerBusinessChanges.ts); null reads every day. */
+  constructor(
+    private readonly database: DatabaseSync,
+    private readonly currentBusinessFrom: string | null = null,
+  ) {
     // The downloader may be committing a day: wait for its lock instead of failing.
     database.exec("PRAGMA busy_timeout = 3000");
     const version = (database.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined)?.value;
@@ -101,7 +107,7 @@ export class BacktestSymbolFile {
     const database = openBacktestDataFileReadOnly(symbol);
     if (!database) throw new Error(`No data file for ${symbol}: download it first.`);
     try {
-      return new BacktestSymbolFile(database);
+      return new BacktestSymbolFile(database, currentBusinessFromOf(symbol));
     } catch (error) {
       database.close();
       throw error;
@@ -109,22 +115,24 @@ export class BacktestSymbolFile {
   }
 
   loadDays(): SymbolFileDay[] {
-    return this.daysStatement.all() as unknown as SymbolFileDay[];
+    return rowsFrom(this.daysStatement.all() as unknown as SymbolFileDay[], this.currentBusinessFrom);
   }
 
   /** Complete days with no option price at all: no 10:00 quote and no end-of-day row (GSAT's 2025-02-11, a split's first day). */
   loadDaysWithoutOptionPrices(): Set<string> {
-    return new Set((this.daysWithoutOptionPricesStatement.all() as { tradingDate: string }[]).map((day) => day.tradingDate));
+    return new Set(rowsFrom(this.daysWithoutOptionPricesStatement.all() as { tradingDate: string }[], this.currentBusinessFrom).map((day) => day.tradingDate));
   }
 
   /** IBKR's daily bars kept in the file (backtestFileStockBars.ts), ascending; null when it has none. */
   loadIbkrDailyBars(): StoredDailyBar[] | null {
-    return readFileDailyBars(this.database);
+    const bars = readFileDailyBars(this.database);
+    return bars === null ? null : rowsFrom(bars, this.currentBusinessFrom);
   }
 
   /** IBKR's 30-minute bars kept in the file, as the stock's price at a look; null when it has none. */
   loadIbkrIntradayPrices(fromDateIso: string, toDateIso: string): FileIntradayPrices | null {
-    return readFileIntradayPrices(this.database, fromDateIso, toDateIso);
+    const from = this.currentBusinessFrom !== null && this.currentBusinessFrom > fromDateIso ? this.currentBusinessFrom : fromDateIso;
+    return from > toDateIso ? null : readFileIntradayPrices(this.database, from, toDateIso);
   }
 
   loadQuotes(tradingDate: string): SymbolFileQuote[] {
@@ -156,7 +164,7 @@ export class BacktestSymbolFile {
    */
   loadDayIssuesByDate(): Map<string, SymbolFileDayIssue[]> {
     const issuesByDate = new Map<string, SymbolFileDayIssue[]>();
-    for (const issue of (this.dayIssuesStatement.all() as Record<string, unknown>[]).map(dayIssueOfRow)) {
+    for (const issue of rowsFrom((this.dayIssuesStatement.all() as Record<string, unknown>[]).map(dayIssueOfRow), this.currentBusinessFrom)) {
       const issues = issuesByDate.get(issue.tradingDate);
       if (issues) issues.push(issue);
       else issuesByDate.set(issue.tradingDate, [issue]);
@@ -166,12 +174,12 @@ export class BacktestSymbolFile {
 
   /** Days the downloader could not retrieve, ascending: no 10:00 quotes (the day has no `days` row) or no intraday quotes (it has one). */
   loadUnavailableDays(): { tradingDate: string; reason: string }[] {
-    return (this.unavailableDaysStatement.all() as Record<string, unknown>[]).map((row) => ({ tradingDate: String(row.tradingDate), reason: String(row.reason) }));
+    return rowsFrom((this.unavailableDaysStatement.all() as Record<string, unknown>[]).map((row) => ({ tradingDate: String(row.tradingDate), reason: String(row.reason) })), this.currentBusinessFrom);
   }
 
   /** The days whose intraday quotes are stored. */
   loadIntradayDays(): Set<string> {
-    return new Set((this.intradayDaysStatement.all() as { tradingDate: string }[]).map((row) => String(row.tradingDate)));
+    return new Set(rowsFrom(this.intradayDaysStatement.all() as { tradingDate: string }[], this.currentBusinessFrom).map((row) => String(row.tradingDate)));
   }
 
   /**

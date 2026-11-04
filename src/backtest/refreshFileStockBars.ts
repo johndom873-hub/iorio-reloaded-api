@@ -125,9 +125,12 @@ const tailComparisonDays = 45;
 const sameToTheCent = (first: number | null | undefined, second: number | null | undefined): boolean =>
   first !== null && first !== undefined && second !== null && second !== undefined && Math.round(first * 100) === Math.round(second * 100);
 
+/** Why every bar is fetched on a file's first refresh, after its download. */
+export const fileWithoutStockBarsReason = "the file has no IBKR bars yet";
+
 /** Null when the file's bars can take the tail; else why every bar is fetched again. */
 export function reasonToFetchEveryBar(stored: StoredFileStockBarsTail | null, firstOptionDay: string, lastDateToStore: string): string | null {
-  if (!stored) return "the file has no IBKR bars yet";
+  if (!stored) return fileWithoutStockBarsReason;
   if (stored.version !== fileStockBarsVersion) return `its bars are version ${stored.version ?? "unknown"}, not ${fileStockBarsVersion}`;
   if (stored.intradayFirstDate.slice(0, 4) > firstOptionDay.slice(0, 4)) return `its options start ${firstOptionDay}, before its 30-minute bars (${stored.intradayFirstDate})`;
   const earliestLastDate = stored.dailyLastDate < stored.intradayLastDate ? stored.dailyLastDate : stored.intradayLastDate;

@@ -7,6 +7,7 @@ import { backtestDataFilePath, requireBacktestDataDirectory } from "../backtestD
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { readFileDailyBars, readFileIntradayPrices } from "../backtestFileStockBars.js";
 import { listBacktestDataFileSymbols, readBacktestDataFileContents } from "../dataFileSummary.js";
+import { currentBusinessFromOf, rowsFrom } from "../tickerBusinessChanges.js";
 import { BacktestSymbolFile } from "../engine/backtestSymbolFile.js";
 import { loadBacktestBarHistory, type StoredDailyBar } from "../engine/backtestBarHistory.js";
 import { readSplitScheduleCache, refreshSplitScheduleForSymbol, type SplitSchedule } from "../engine/splitFactors.js";
@@ -231,13 +232,14 @@ export interface AnalysisFigureProgress {
 const addCalendarDays = (dateIso: string, days: number) => new Date(Date.parse(`${dateIso}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 const yearsBefore = (dateIso: string, years: number) => `${Number(dateIso.slice(0, 4)) - years}${dateIso.slice(4)}`;
 
-/** The symbol's IBKR daily bars as a session reads them: the file's, else the local DB's. */
+/** The symbol's IBKR daily bars as a session reads them: the file's, else the local DB's; from its business change, if any (tickerBusinessChanges.ts). */
 export async function loadDailyBarsOf(symbol: string, connection: Knex): Promise<{ bars: StoredDailyBar[]; source: "file" | "database" | null }> {
+  const currentBusinessFrom = currentBusinessFromOf(symbol);
   const database = openBacktestDataFileReadOnly(symbol);
   if (database) {
     try {
       const fileBars = readFileDailyBars(database);
-      if (fileBars && fileBars.length > 0) return { bars: fileBars, source: "file" };
+      if (fileBars && fileBars.length > 0) return { bars: rowsFrom(fileBars, currentBusinessFrom), source: "file" };
     } finally {
       database.close();
     }
@@ -245,7 +247,7 @@ export async function loadDailyBarsOf(symbol: string, connection: Knex): Promise
   const ticker: { id: string } | undefined = await connection("tickers").where({ symbol }).first("id");
   if (!ticker) return { bars: [], source: null };
   const history = await loadBacktestBarHistory(ticker.id, connection);
-  return { bars: [...history.rows], source: history.rows.length > 0 ? "database" : null };
+  return { bars: rowsFrom(history.rows, currentBusinessFrom), source: history.rows.length > 0 ? "database" : null };
 }
 
 /** What the file says about itself, tolerating files written before a table existed. */
@@ -255,7 +257,7 @@ function readFileQuality(symbol: string, firstDate: string | null, lastDate: str
     database.exec("PRAGMA busy_timeout = 3000");
     const tables = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
     const holidays = firstDate && lastDate ? Number((database.prepare("SELECT count(*) AS count FROM days WHERE status = 'no_data' AND trading_date BETWEEN ? AND ?").get(firstDate, lastDate) as { count: number }).count) : 0;
-    const rows = database.prepare("SELECT min(quote_rows) AS min, max(quote_rows) AS max FROM days WHERE status = 'complete'").get() as { min: number | null; max: number | null };
+    const rows = database.prepare("SELECT min(quote_rows) AS min, max(quote_rows) AS max FROM days WHERE status = 'complete' AND trading_date >= ?").get(firstDate ?? "0000-01-01") as { min: number | null; max: number | null };
     const lastDay = lastDate ? ((database.prepare("SELECT quote_rows AS rows FROM days WHERE trading_date = ?").get(lastDate) as { rows: number | null } | undefined)?.rows ?? null) : null;
     const meta = tables.has("meta") ? new Map((database.prepare("SELECT key, value FROM meta").all() as { key: string; value: string }[]).map((row) => [row.key, row.value])) : new Map<string, string>();
     const tenOclockBars = tables.has("ibkr_intraday_bars") ? Number((database.prepare("SELECT count(*) AS count FROM ibkr_intraday_bars WHERE start_minutes_et = 570").get() as { count: number }).count) : null;

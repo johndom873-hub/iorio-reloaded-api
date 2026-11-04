@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { openBacktestDataFileReadOnly } from "./backtestDataFile.js";
+import { currentBusinessFromOf } from "./tickerBusinessChanges.js";
 import { countFileDailyBars } from "./backtestFileStockBars.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "./backtestDataDirectory.js";
 import { calendarDaysBetween } from "../lib/easternIsoDate.js";
@@ -50,18 +51,20 @@ export function readBacktestDataFileContents(symbol: string): DataFileContents |
   try {
     // The downloader may be committing a day: wait for its lock instead of failing.
     database.exec("PRAGMA busy_timeout = 3000");
-    const range = database.prepare("SELECT min(trading_date) AS firstDate, max(trading_date) AS lastDate, count(*) AS completeDays FROM days WHERE status = 'complete'").get() as {
+    // A ticker whose business changed holds nothing before the change (tickerBusinessChanges.ts).
+    const from = currentBusinessFromOf(symbol) ?? "0000-01-01";
+    const range = database.prepare("SELECT min(trading_date) AS firstDate, max(trading_date) AS lastDate, count(*) AS completeDays FROM days WHERE status = 'complete' AND trading_date >= ?").get(from) as {
       firstDate: string | null;
       lastDate: string | null;
       completeDays: number;
     };
     // The data-quality and intraday tables were added after the first downloads: a file may lack them.
     const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
-    const countOf = (sql: string) => Number((database.prepare(sql).get() as { count: number }).count);
+    const countOf = (sql: string) => Number((database.prepare(sql).get(from) as { count: number }).count);
     const quality = {
-      daysWithIssues: tableNames.has("day_issues") ? countOf("SELECT count(DISTINCT trading_date) AS count FROM day_issues") : 0,
-      unavailableDays: tableNames.has("unavailable_days") ? countOf("SELECT count(*) AS count FROM unavailable_days") : 0,
-      intradayDays: tableNames.has("intraday_days") ? countOf("SELECT count(*) AS count FROM intraday_days WHERE status = 'complete'") : null,
+      daysWithIssues: tableNames.has("day_issues") ? countOf("SELECT count(DISTINCT trading_date) AS count FROM day_issues WHERE trading_date >= ?") : 0,
+      unavailableDays: tableNames.has("unavailable_days") ? countOf("SELECT count(*) AS count FROM unavailable_days WHERE trading_date >= ?") : 0,
+      intradayDays: tableNames.has("intraday_days") ? countOf("SELECT count(*) AS count FROM intraday_days WHERE status = 'complete' AND trading_date >= ?") : null,
     };
     if (!range.firstDate || !range.lastDate) return { ...emptyContents, ...quality, completeDays: Number(range.completeDays) };
     const storedDays = database.prepare("SELECT trading_date AS tradingDate FROM days WHERE trading_date BETWEEN ? AND ?").all(range.firstDate, range.lastDate) as { tradingDate: string }[];
@@ -86,7 +89,10 @@ export function readBacktestDataFileContents(symbol: string): DataFileContents |
  * the downloader recorded as unavailable is not one of them), and how many of its complete days lack intraday quotes.
  * Null when the symbol has no file.
  */
-export function readBacktestDataFilePeriodContents(symbol: string, startDate: string, endDate: string): DataFilePeriodContents | null {
+export function readBacktestDataFilePeriodContents(symbol: string, requestedStartDate: string, endDate: string): DataFilePeriodContents | null {
+  // A ticker whose business changed holds nothing before the change (tickerBusinessChanges.ts).
+  const currentBusinessFrom = currentBusinessFromOf(symbol);
+  const startDate = currentBusinessFrom !== null && currentBusinessFrom > requestedStartDate ? currentBusinessFrom : requestedStartDate;
   const database = openBacktestDataFileReadOnly(symbol);
   if (!database) return null;
   try {

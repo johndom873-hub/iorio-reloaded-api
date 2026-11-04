@@ -5,6 +5,7 @@ import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
 import { requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { stockCommissionDollars } from "../engine/ledger/ledgerFills.js";
 import { loadTreasuryBillRates } from "../engine/treasuryBillRates.js";
+import { tickerBusinessChangeOf, type TickerBusinessChange } from "../tickerBusinessChanges.js";
 import { loadBacktestLabSettings } from "../labSettingsStore.js";
 import { dayHistoryStartIso, drawDayPaths, marketDayHistoryOf, sharedLeftoverDays, tickerDayHistoryOf, tradingDaysPerYear } from "./portfolioDayHistory.js";
 import { floorAllocationPctOf, maxAllocationPct, potDollarsOf, potFiguresOf, suggestAllocations, type PotFigures, type SuggestedAllocations } from "./portfolioPots.js";
@@ -129,7 +130,7 @@ export interface PortfolioProjection {
   history: { from: string; to: string; days: number };
   summary: ProjectionSummary;
   pots: TickerPot[];
-  tickers: { symbol: string; allocationPct: number; price: number; strikeSpacing: number; expiryWeekdays: number[]; beta: number; ownHistoryFrom: string | null; tenOclockFrom: string | null; chainDays: number }[];
+  tickers: { symbol: string; allocationPct: number; price: number; strikeSpacing: number; expiryWeekdays: number[]; beta: number; ownHistoryFrom: string | null; tenOclockFrom: string | null; chainDays: number; businessChange: TickerBusinessChange | null }[];
   /** Today's book through each window's actual days (one path each, at the actual drift), and SPY's return over them. */
   replays: { name: string; from: string; to: string; days: number; bookReturn: number; maxDrawdown: number; spyReturn: number }[];
 }
@@ -188,6 +189,7 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
       ownHistoryFrom: market.dates[histories[index]!.own.indexOf(1)] ?? null,
       tenOclockFrom: source.firstTenOclockDate !== null && source.firstTenOclockDate < dayHistoryStartIso ? dayHistoryStartIso : source.firstTenOclockDate,
       chainDays: source.observedDays.length,
+      businessChange: tickerBusinessChangeOf(source.symbol),
     })),
     replays: windows.map((window, index) => ({
       name: window.name,
