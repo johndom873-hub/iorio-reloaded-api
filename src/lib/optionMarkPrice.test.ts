@@ -18,4 +18,22 @@ describe("optionMarkPrice", () => {
     expect(optionMarkPrice({ bid: 0, ask: 0.05, last: null })).toBeNull();
     expect(optionMarkPrice({})).toBeNull();
   });
+
+  it("values a no-bid option whose ask is the smallest price ($0.01) at the mid of 0 and the ask", () => {
+    expect(optionMarkPrice({ bid: null, ask: 0.01, last: null })).toBe(0.005);
+    expect(optionMarkPrice({ bid: 0, ask: 0.01, last: null })).toBe(0.005);
+    expect(optionMarkPrice({ bid: -1, ask: 0.01 })).toBe(0.005);
+  });
+
+  it("keeps the last trade ahead of that, and a real two-sided quote ahead of both", () => {
+    expect(optionMarkPrice({ bid: null, ask: 0.01, last: 0.03 })).toBe(0.03);
+    expect(optionMarkPrice({ bid: 0.01, ask: 0.01, last: null })).toBe(0.01);
+  });
+
+  it("does not apply to a no-bid option with a wider ask, or no ask at all", () => {
+    expect(optionMarkPrice({ bid: null, ask: 0.02, last: null })).toBeNull();
+    expect(optionMarkPrice({ bid: null, ask: 2, last: null })).toBeNull();
+    expect(optionMarkPrice({ bid: null, ask: null, last: null })).toBeNull();
+    expect(optionMarkPrice({ bid: null, ask: 0, last: null })).toBeNull();
+  });
 });
