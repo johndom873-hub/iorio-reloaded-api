@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const harness = vi.hoisted(() => ({
   bandQuotesIn: false,
+  noBandExpiryToday: false,
   passRequests: [] as Record<string, unknown>[],
   /** One entry per runPlutoPass call: an Error throws, a string is the skipped reason, null a model-call round. */
   passScript: [] as (Error | string | null)[],
@@ -84,7 +85,7 @@ vi.mock("./stateStore.js", () => ({
 }));
 vi.mock("./bandQuoteWatermark.js", async () => {
   const actual = await vi.importActual<typeof import("./bandQuoteWatermark.js")>("./bandQuoteWatermark.js");
-  return { ...actual, loadTodaysFinishedBandCycles: async () => harness.finishedCycles, hasTodaysBandQuotes: async () => harness.bandQuotesIn };
+  return { ...actual, loadTodaysFinishedBandCycles: async () => harness.finishedCycles, hasTodaysBandQuotes: async () => harness.bandQuotesIn, noEnabledTickerHasBandExpiryOn: async () => harness.noBandExpiryToday };
 });
 vi.mock("./systemChecks.js", () => ({ isInsideTradingWindow: () => harness.insideWindow }));
 
@@ -104,6 +105,7 @@ const etInstant = (hhmm: string) => new Date(`2026-10-07T${String(Number(hhmm.sl
 beforeEach(() => {
   vi.useFakeTimers({ now: etInstant("10:10") });
   harness.bandQuotesIn = false;
+  harness.noBandExpiryToday = false;
   harness.passRequests.length = 0;
   harness.passScript.length = 0;
   harness.events.length = 0;
@@ -158,6 +160,21 @@ describe("PlutoAgent opening look (audit A)", () => {
     expect(harness.passRequests[1]).toMatchObject({ trigger: "settings_changed", heldPositionsOnly: true });
     await agent.housekeeping();
     expect(agent.forcedRounds[0]).toMatchObject({ trigger: "opening_analysis" });
+  });
+
+  it("a day no ticker has the band's expiry runs the opening look at once with an info notice, no warning, and no late-seed round", async () => {
+    harness.noBandExpiryToday = true;
+    const agent = makeAgent();
+    await agent.housekeeping();
+    expect(agent.forcedRounds[0]).toMatchObject({ trigger: "opening_analysis", detail: { noOptionExpiryToday: true } });
+    await agent.loopIteration();
+    expect(harness.events.some((event) => event.type === "analysis_started" && event.payload.data === "no_option_expiry_today")).toBe(true);
+    expect(harness.events.some((event) => event.type === "warning")).toBe(false);
+    expect(harness.telegrams.filter((message) => message.startsWith("ℹ️ Pluto: no option on Pluto's tickers expires at today's close"))).toHaveLength(1);
+    expect(harness.telegrams.some((message) => message.startsWith("⚠️"))).toBe(false);
+    vi.setSystemTime(etInstant("10:40"));
+    await agent.housekeeping();
+    expect(agent.forcedRounds).toEqual([]);
   });
 
   it("10:30 fallback runs on incomplete data with a warning and an alert, then one late-seed round with a 'ready now' message", async () => {

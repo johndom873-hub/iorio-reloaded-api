@@ -29,21 +29,11 @@ describe("summarizeExpirySettlement", () => {
     ],
   };
 
-  it("separates corrections from skipped items and words the applied message", () => {
-    const summary = summarizeExpirySettlement("apply", result);
+  it("separates corrections from skipped items", () => {
+    const summary = summarizeExpirySettlement(result);
     expect(summary.changes).toHaveLength(1);
     expect(summary.skipped).toHaveLength(1);
-    expect(summary.notify).toContain("APPLIED");
-    expect(summary.notify).toContain("realized P&L +$437.50");
-    expect(summary.notify).toContain("1 item(s) need manual review");
-  });
-
-  it("labels a dry run as changing nothing", () => {
-    expect(summarizeExpirySettlement("dry_run", result).notify).toContain("DRY RUN — nothing changed");
-  });
-
-  it("never notifies for skipped items alone", () => {
-    expect(summarizeExpirySettlement("apply", { ...result, actions: [result.actions[1]!] }).notify).toBeUndefined();
+    expect(summary.pnlDelta).toBe(437.5);
   });
 });
 

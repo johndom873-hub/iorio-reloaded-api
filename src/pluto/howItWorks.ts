@@ -5,7 +5,8 @@ import { regularCloseEt } from "../lib/marketSessionStatus.js";
 import { roundToCents } from "../lib/positionOrderRules.js";
 import { tradingSessionsPerYear } from "../lib/tradingSessionsHeld.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
-import { cancelMarginMinutes, closeMarginMinutes, hhmmMinutesBefore } from "./sessionSchedule.js";
+import { openingLookFallbackEtMinutes } from "./openingLook.js";
+import { cancelMarginMinutes, closeMarginMinutes, hhmmFromMinutes, hhmmMinutesBefore } from "./sessionSchedule.js";
 import { volFarmerV4BuyBackMinutesBeforeWindowEnd } from "./volFarmerV4LiveBook.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadEnabledPlutoTickerSettings, tickerPotFraction, type PlutoTickerSettings } from "./tickerSettingsStore.js";
@@ -43,6 +44,8 @@ export interface PlutoHowItWorks {
     unfilledOrderCancelMinutes: number;
     /** A premium yield a year is the sale's return × this ÷ the trading sessions it is held (tradingSessionsHeld.ts). */
     premiumYieldSessionsPerYear: number;
+    /** The opening analysis runs on whatever quotes are in by this time (HH:MM ET), openingLook.ts. */
+    openingLookFallbackEt: string;
   };
   /** The Safety Limits: they hold Vol Farmer v4's orders (safetyLimits.ts). */
   safetyLimits: {
@@ -167,6 +170,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       dailyLossBreakerPct: settings.dailyLossBreakerPct,
       unfilledOrderCancelMinutes: figures.unfilledOrderCancelMinutes,
       premiumYieldSessionsPerYear: tradingSessionsPerYear,
+      openingLookFallbackEt: hhmmFromMinutes(openingLookFallbackEtMinutes),
     },
     safetyLimits: {
       maxWorkingOrdersPerTicker: settings.safetyMaxWorkingOrdersPerTicker,

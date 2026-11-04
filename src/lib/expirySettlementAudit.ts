@@ -478,21 +478,14 @@ export async function runExpirySettlementAudit(mode: ExpirySettlementMode, datab
 }
 
 /**
- * Splits a result into corrections vs. skipped items and builds the Telegram text
- * (shared by the nightly job and the worker's right-after-expiry run). Skipped items
- * repeat until fixed by hand, so they never trigger a message on their own.
+ * Splits a result into corrections vs. skipped items (shared by the nightly job and the worker's right-after-expiry run).
+ * Corrections are logged only, never sent to Telegram (Marcelo 2026-11-04: the audit has already fixed them and nobody acts
+ * on them); skipped legs that need someone alert through buildExpiryAuditFailureMessage.
  */
-export function summarizeExpirySettlement(mode: ExpirySettlementMode, result: ExpirySettlementResult) {
+export function summarizeExpirySettlement(result: ExpirySettlementResult) {
   const changes = result.actions.filter((action) => action.kind !== "skipped" && action.kind !== "marginal_call");
   const skipped = result.actions.filter((action) => action.kind === "skipped" || action.kind === "marginal_call");
-  const pnlDelta = result.realizedPnlDelta;
-  const notify =
-    changes.length === 0
-      ? undefined
-      : `Expiry settlement audit (${mode === "apply" ? "APPLIED" : "DRY RUN — nothing changed"}): ${changes.length} correction(s), realized P&L ${pnlDelta >= 0 ? "+" : "-"}$${Math.abs(pnlDelta).toFixed(2)}.\n` +
-        changes.map((action) => `• ${action.description}`).join("\n") +
-        (skipped.length > 0 ? `\n${skipped.length} item(s) need manual review (see job log).` : "");
-  return { changes, skipped, pnlDelta, notify };
+  return { changes, skipped, pnlDelta: result.realizedPnlDelta };
 }
 
 /**

@@ -70,7 +70,7 @@ export function describeOrderTelegramNotice(order: OrderTelegramNotice, fills: O
     case "submitted":
       return message(`⏳ ${subject} working at IBKR ${by}:`, ...orderLines);
     case "partially_filled":
-      return message(`⚠️ ${subject} partly filled, rest still working ${by}:`, ...fillLines);
+      return message(`ℹ️ ${subject} partly filled, rest still working ${by}:`, ...fillLines);
     case "filled":
       return message(`✅ ${subject} filled ${by}:`, ...fillLines);
     case "cancelled": {

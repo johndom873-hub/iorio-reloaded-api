@@ -21,7 +21,7 @@ import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { assemblePlutoReadinessResults, decidePlutoReadinessRun, describePlutoReadinessOutcome, reusableProbeResults, runPlutoReadinessTests } from "./readiness.js";
 import { createPlutoReadinessProbes } from "./readinessProbes.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, recordPlutoRelease, savePlutoReadiness } from "./stateStore.js";
-import { findNewlyFinishedBandCycles, hasTodaysBandQuotes, loadTodaysFinishedBandCycles, rememberAnalysed } from "./bandQuoteWatermark.js";
+import { findNewlyFinishedBandCycles, hasTodaysBandQuotes, loadTodaysFinishedBandCycles, noEnabledTickerHasBandExpiryOn, rememberAnalysed } from "./bandQuoteWatermark.js";
 import { isInsideTradingWindow } from "./systemChecks.js";
 import { easternIsoDate, easternMinutesOfDay } from "../lib/easternIsoDate.js";
 
@@ -378,12 +378,23 @@ export class PlutoAgent {
     const now = new Date();
     const todayIso = easternIsoDate(now);
     if (this.openingLook.doneFor === todayIso && this.openingLook.incompleteFor !== todayIso) return;
-    const decision = decideOpeningLook({ todayIso, nowEtMinutes: easternMinutesOfDay(now), dataReady: await hasTodaysBandQuotes(now), progress: this.openingLook });
+    const dataReady = await hasTodaysBandQuotes(now);
+    // Read only while no band quote is in: on a day without the band's expiry none will come.
+    const noBandExpiryToday = !dataReady && (await noEnabledTickerHasBandExpiryOn(todayIso));
+    const decision = decideOpeningLook({ todayIso, nowEtMinutes: easternMinutesOfDay(now), dataReady, noBandExpiryToday, progress: this.openingLook });
     if (decision === "wait" || decision === "done") return;
-    const detail = decision === "run_after_late_seed" ? { date: todayIso, afterLateSeed: true } : decision === "run_incomplete" ? { date: todayIso, dataIncomplete: true, reason: "the market quote loop had not quoted today's band by 10:30 ET" } : { date: todayIso };
+    const detail =
+      decision === "run_after_late_seed"
+        ? { date: todayIso, afterLateSeed: true }
+        : decision === "run_incomplete"
+          ? { date: todayIso, dataIncomplete: true, reason: "the market quote loop had not quoted today's band by 10:30 ET" }
+          : decision === "run_without_option_expiry"
+            ? { date: todayIso, noOptionExpiryToday: true }
+            : { date: todayIso };
     const announcement = `${todayIso}:${decision}`;
     if (this.analysisStartedAnnouncedFor !== announcement) {
-      await recordPlutoEvent("analysis_started", { date: todayIso, data: decision === "run_incomplete" ? "incomplete" : decision === "run_after_late_seed" ? "complete_after_early_start" : "complete" });
+      const data = decision === "run_incomplete" ? "incomplete" : decision === "run_after_late_seed" ? "complete_after_early_start" : decision === "run_without_option_expiry" ? "no_option_expiry_today" : "complete";
+      await recordPlutoEvent("analysis_started", { date: todayIso, data });
       this.analysisStartedAnnouncedFor = announcement;
     }
     this.pendingOpeningLook = { todayIso, decision };
@@ -398,6 +409,7 @@ export class PlutoAgent {
     this.openingLook = advanceOpeningLook(this.openingLook, pending.todayIso, pending.decision);
     const quietly = (step: Promise<unknown>) => step.catch((error) => console.warn(`Pluto: opening-look message failed — ${error instanceof Error ? error.message : error}`));
     if (pending.decision === "run_after_late_seed") await quietly(notifyPlutoTelegram("✅ Pluto: today's option quotes are in now, and Pluto has run its full opening analysis."));
+    if (pending.decision === "run_without_option_expiry") await quietly(notifyPlutoTelegram("ℹ️ Pluto: no option on Pluto's tickers expires at today's close, so there are no option quotes to wait for. Pluto has run its opening analysis without them, and sells no Calls or Puts today."));
     if (pending.decision === "run_incomplete") {
       await quietly(recordPlutoEvent("warning", { message: "opening look on incomplete data: the market quote loop had not quoted today's band by 10:30 ET; one more full round follows once it does" }));
       await quietly(notifyPlutoTelegram("⚠️ Pluto: today's option quotes were not in by 10:30 ET, so Pluto's opening analysis ran on incomplete data. Check the market quote loop on System Health. Pluto runs a full analysis once the quotes are in."));

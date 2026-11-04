@@ -55,7 +55,7 @@ describe("describeOrderTelegramNotice", () => {
   it("lists the order with its limit while it works, and the fills once filled", () => {
     expect(describeOrderTelegramNotice(order(), [])).toBe("⏳ AAPL order working at IBKR (Marce, web):\n• Sell $180 Put · 17 Oct (10DTE) · 2× @ 1.25 limit");
     expect(describeOrderTelegramNotice(order({ status: "partially_filled", placedBy: "Pluto" }), [{ ...putFill, quantity: 1 }])).toBe(
-      "⚠️ AAPL order partly filled, rest still working (Pluto):\n• Sell $180 Put · 17 Oct (10DTE) · 1× @ 1.25",
+      "ℹ️ AAPL order partly filled, rest still working (Pluto):\n• Sell $180 Put · 17 Oct (10DTE) · 1× @ 1.25",
     );
     expect(describeOrderTelegramNotice(order({ status: "filled", placedBy: "Genosuke" }), [putFill])).toBe("✅ AAPL order filled (Genosuke):\n• Sell $180 Put · 17 Oct (10DTE) · 2× @ 1.25");
   });

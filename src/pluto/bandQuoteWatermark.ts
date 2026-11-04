@@ -1,5 +1,10 @@
 import { db } from "../db/connection.js";
+import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { optionQuoteBandExpiryContracts } from "./optionQuoteBandPlan.js";
+import { optionQuoteBandScopeOf } from "./optionQuoteBandPlanLoader.js";
+import { loadPlutoSettings } from "./settingsStore.js";
+import { loadEnabledPlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // What drives Pluto's loop (Marcelo, 2026-10-06; the band's quotes since Signals was retired 2026-10-27, its finished
 // cycles since 2026-10-30): the market quote loop quotes the option quote band for both strategies in cycles and records
@@ -58,4 +63,18 @@ export async function hasTodaysBandQuotes(now: Date = new Date()): Promise<boole
     .whereRaw("c.trading_date::text = ?", [easternIsoDate(now)])
     .first(db.raw("1 as found"));
   return row !== undefined;
+}
+
+/**
+ * True when Pluto's tickers have stored chains and none has an expiry the band covers on the session (optionQuoteBandExpiryContracts
+ * under the Options expiry setting): the band has nothing to quote that day. Example: "today" on Tue 3 Nov 2026, every chain
+ * listing Mon/Wed/Fri or Friday expiries only. False with no ticker enabled, or a ticker whose chain is not stored yet.
+ */
+export async function noEnabledTickerHasBandExpiryOn(tradingDateIso: string): Promise<boolean> {
+  const [settings, tickers] = await Promise.all([loadPlutoSettings(), loadEnabledPlutoTickerSettings()]);
+  if (tickers.length === 0) return false;
+  const { expiryRule } = optionQuoteBandScopeOf(settings);
+  const chains = await Promise.all(tickers.map((ticker) => loadStoredOptionChain(ticker.tickerId)));
+  if (chains.some((chain) => chain.expirations.length === 0)) return false;
+  return chains.every((chain) => optionQuoteBandExpiryContracts({ expirations: chain.expirations, strikesByExpiry: chain.strikesByExpiry, sessionIso: tradingDateIso, expiryRule }).length === 0);
 }

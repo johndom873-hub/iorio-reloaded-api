@@ -36,7 +36,8 @@ function minutesOfDay(hhmm: string): number {
   return hour * 60 + minute;
 }
 
-function hhmmFromMinutes(minutes: number): string {
+/** Pure: minutes after midnight as HH:MM (630 is 10:30). */
+export function hhmmFromMinutes(minutes: number): string {
   const clamped = Math.max(0, minutes);
   return `${String(Math.floor(clamped / 60)).padStart(2, "0")}:${String(clamped % 60).padStart(2, "0")}`;
 }

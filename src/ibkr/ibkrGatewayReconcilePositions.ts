@@ -60,13 +60,12 @@ async function correctExpirySettlementsNow(passId: number): Promise<void> {
   try {
     const mode = readExpirySettlementMode();
     const result = await runExpirySettlementAudit(mode);
-    const { changes, skipped, notify } = summarizeExpirySettlement(mode, result);
+    const { changes, skipped } = summarizeExpirySettlement(result);
     for (const action of result.actions) {
       console.log(`Reconciliation #${passId}: expiry settlement [${mode}] ${action.kind}: ${action.description}`);
       if (action.kind === "marginal_call") marginalCallPositionIds.add(action.positionId);
     }
     console.log(`Reconciliation #${passId}: expiry settlement (${mode}): ${result.legsExamined} expired short leg(s) examined, ${changes.length} correction(s), ${skipped.length} skipped.`);
-    if (notify) await dependencies.notifyTelegram(notify);
   } catch (error) {
     console.error(`Reconciliation #${passId}: expiry settlement correction failed: ${error instanceof Error ? error.message : error}`);
   }
