@@ -11,6 +11,7 @@ import { dataFileNearExpiryDays, type BacktestDataFileIssues, type BacktestDataF
 import { addCalendarDays, isWeekendDate, weekdaysBetweenInclusive } from "./jobs/backtestJobRules.js";
 import type { DataFileCoverage, DataFilePeriodContents } from "./jobs/backtestSessionRequest.js";
 import { readSplitScheduleCache, splitScheduleFingerprint, splitScheduleFingerprintsMatch } from "./engine/splitFactors.js";
+import { dayNumberOf, dayNumberOfKey, daysToExpiryOfKey, sliceKey, tenOClockLookMinute } from "./engine/symbolFileSlices.js";
 
 // The Data files table: what each symbol file in the data folder holds (docs/backtesting/DATA-FILES.md), read-only.
 
@@ -244,10 +245,79 @@ function cachedDetectedSplits(dataDirectory: string, symbol: string, contents: D
   return splitScheduleFingerprintsMatch(cache.fingerprint, current) ? cache.schedule.splits : null;
 }
 
+/** Each symbol's latest implied volatility in the local DB's IBKR daily bars (a fraction: 0.27 = 27%) and its day: the newest bar that has one. */
+export async function loadLatestImpliedVolatility(symbols: readonly string[], connection: Knex = db): Promise<Map<string, { tradingDate: string; impliedVolatility: number }>> {
+  if (symbols.length === 0) return new Map();
+  const result: { rows: { symbol: string; trading_date: string; implied_volatility: string }[] } = await connection.raw(
+    `SELECT t.symbol, latest.trading_date::text AS trading_date, latest.implied_volatility
+     FROM tickers t
+     CROSS JOIN LATERAL (
+       SELECT b.trading_date, b.implied_volatility FROM daily_price_bars b
+       WHERE b.ticker_id = t.id AND b.implied_volatility IS NOT NULL
+       ORDER BY b.trading_date DESC LIMIT 1
+     ) latest
+     WHERE t.symbol = ANY(?)`,
+    [[...symbols]],
+  );
+  return new Map(result.rows.map((row) => [row.symbol, { tradingDate: row.trading_date, impliedVolatility: Number(row.implied_volatility) }]));
+}
+
+/** How many full Monday-to-Friday weeks the Expiries column looks at. */
+export const expiryWeeksMeasured = 4;
+
+/** The Monday (as a day number) of each of the last `count` full Monday-to-Friday weeks that end on or before `lastDayNumber`, newest first. */
+export function lastFullWeekMondays(lastDayNumber: number, count: number): number[] {
+  const weekdayIndex = (lastDayNumber + 3) % 7; // 1970-01-01 was a Thursday; Monday = 0
+  const mondayOfLastWeek = lastDayNumber - weekdayIndex;
+  const newestMonday = weekdayIndex >= 4 ? mondayOfLastWeek : mondayOfLastWeek - 7;
+  return Array.from({ length: count }, (_, weeksBack) => newestMonday - 7 * weeksBack);
+}
+
+/** The median of the weekly expiry counts; 0.5 apart from a whole number when an even count of weeks has two middle values that differ. Null without a week. */
+export function medianOfWeeklyExpiryCounts(weeklyCounts: readonly number[]): number | null {
+  if (weeklyCounts.length === 0) return null;
+  const sorted = [...weeklyCounts].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+}
+
+/**
+ * Expiries a week: in each of the last 4 full Monday-to-Friday weeks before the file's last day, the distinct expirations
+ * (with a Call quoted at 10:00) that fall on a weekday of that week, taken from every stored day of the week (a Monday
+ * holds the week's whole set; the other days cover a missing one); the median of those weeks. Weeks with no stored day
+ * are left out. A daily-expiry ticker reads 5, Monday-Wednesday-Friday 3, weekly only 1. Null without a file, slices or a full week.
+ */
+export function readBacktestDataFileExpiriesPerWeek(symbol: string, lastDate: string | null): number | null {
+  if (!lastDate) return null;
+  const mondays = lastFullWeekMondays(dayNumberOf(lastDate), expiryWeeksMeasured);
+  const database = openBacktestDataFileReadOnly(symbol);
+  if (!database) return null;
+  try {
+    database.exec("PRAGMA busy_timeout = 3000");
+    const hasSlices = database.prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'ten_oclock_quote_slices'").get();
+    if (!hasSlices) return null;
+    const oldestMonday = mondays.at(-1)!;
+    const newestFriday = mondays[0]! + 4;
+    const keys = database
+      .prepare("SELECT key FROM ten_oclock_quote_slices WHERE key BETWEEN ? AND ? AND call_count > 0")
+      .all(sliceKey(oldestMonday, tenOClockLookMinute, 0), sliceKey(newestFriday, tenOClockLookMinute, 65_535)) as { key: number }[];
+    const expiryDaysByMonday = new Map<number, Set<number>>(mondays.map((monday) => [monday, new Set<number>()]));
+    for (const { key } of keys) {
+      const tradingDay = dayNumberOfKey(key);
+      const monday = tradingDay - ((tradingDay + 3) % 7);
+      const expiryDay = tradingDay + daysToExpiryOfKey(key);
+      if (expiryDay >= monday && expiryDay <= monday + 4) expiryDaysByMonday.get(monday)?.add(expiryDay);
+    }
+    return medianOfWeeklyExpiryCounts([...expiryDaysByMonday.values()].filter((expiryDays) => expiryDays.size > 0).map((expiryDays) => expiryDays.size));
+  } finally {
+    database.close();
+  }
+}
+
 export async function summarizeBacktestDataFiles(connection: Knex = db): Promise<BacktestDataFileSummary[]> {
   const symbols = listBacktestDataFileSymbols();
   const dataDirectory = requireBacktestDataDirectory();
-  const barRanges = await loadDailyBarRanges(symbols, connection);
+  const [barRanges, latestImpliedVolatility] = await Promise.all([loadDailyBarRanges(symbols, connection), loadLatestImpliedVolatility(symbols, connection)]);
   return symbols.map((symbol) => {
     let contents = emptyContents;
     let issues: ReturnType<typeof readBacktestDataFileIssues> = { issueDays: 0, issues: noIssues };
@@ -259,6 +329,13 @@ export async function summarizeBacktestDataFiles(connection: Knex = db): Promise
       console.warn(`Backtest data file ${symbol}.sqlite could not be read: ${error instanceof Error ? error.message : error}`);
     }
     const bars = barRanges.get(symbol);
+    const impliedVolatility = latestImpliedVolatility.get(symbol);
+    let expiriesPerWeek: number | null = null;
+    try {
+      expiriesPerWeek = readBacktestDataFileExpiriesPerWeek(symbol, contents.lastDate);
+    } catch (error) {
+      console.warn(`Backtest data file ${symbol}.sqlite's expiries a week could not be read: ${error instanceof Error ? error.message : error}`);
+    }
     return {
       symbol,
       detectedSplits: cachedDetectedSplits(dataDirectory, symbol, contents, bars),
@@ -273,6 +350,9 @@ export async function summarizeBacktestDataFiles(connection: Knex = db): Promise
       barsFirstDate: bars?.firstDate ?? null,
       barsLastDate: bars?.lastDate ?? null,
       barsCount: bars?.count ?? 0,
+      latestImpliedVolatility: impliedVolatility?.impliedVolatility ?? null,
+      latestImpliedVolatilityDate: impliedVolatility?.tradingDate ?? null,
+      expiriesPerWeek,
       ...issues,
     };
   });

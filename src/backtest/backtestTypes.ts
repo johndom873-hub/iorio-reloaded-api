@@ -846,6 +846,11 @@ export interface BacktestDataFileSummary {
   barsLastDate: string | null;
   /** How many of those bars are stored; 0 when none. */
   barsCount: number;
+  /** The newest IBKR implied volatility among those bars (a fraction: 0.27 = 27%) and its day; null when none has one. */
+  latestImpliedVolatility: number | null;
+  latestImpliedVolatilityDate: string | null;
+  /** Expirations a week with a Call at 10:00: the median of the file's last 4 full Monday-to-Friday weeks (5 = daily expiries); null without a full week. */
+  expiriesPerWeek: number | null;
   /** Distinct days in `issues` but its farExpiries: nothing stored, stored with a part or a near expiration missing, or not retrievable. */
   issueDays: number;
   issues: BacktestDataFileIssues;
