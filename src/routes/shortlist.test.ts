@@ -632,6 +632,23 @@ describe("PATCH /shortlist/:id/bot-enabled", () => {
     expect(await call("PATCH", `/${entryId}/bot-enabled`, { enabled: true })).toMatchObject({ status: 200, json: { botEnabled: true } });
     expect((await readEntries(ticker.id))[0]).toMatchObject({ bot_enabled: true });
   });
+
+  it("switching Pluto off forgets what Vol Farmer v4 remembers of the ticker, and leaves other tickers' memory", async () => {
+    const ticker = await insertTicker();
+    const other = await insertTicker();
+    const entryId = await insertEntry(ticker.id);
+    await call("PATCH", `/${entryId}/bot-enabled`, { enabled: true });
+    const memory = JSON.stringify({ state: { first: { shares: 100 } }, pending: [] });
+    await testDb("pluto_vol_farmer_v4_cycles").insert([{ ticker_id: ticker.id, memory }, { ticker_id: other.id, memory }]);
+
+    // Switched on again with nothing changed: the memory stays.
+    expect(await call("PATCH", `/${entryId}/bot-enabled`, { enabled: true })).toMatchObject({ status: 200 });
+    expect(await testDb("pluto_vol_farmer_v4_cycles").where({ ticker_id: ticker.id }).count<{ count: string }[]>("* as count")).toEqual([{ count: "1" }]);
+
+    expect(await call("PATCH", `/${entryId}/bot-enabled`, { enabled: false })).toMatchObject({ status: 200, json: { botEnabled: false } });
+    expect(await testDb("pluto_vol_farmer_v4_cycles").where({ ticker_id: ticker.id })).toEqual([]);
+    expect(await testDb("pluto_vol_farmer_v4_cycles").where({ ticker_id: other.id })).toHaveLength(1);
+  });
 });
 
 describe("DELETE /shortlist/:id", () => {
@@ -647,6 +664,15 @@ describe("DELETE /shortlist/:id", () => {
     expect(entries[0]?.removed_at).toBeInstanceOf(Date);
     expect(invalidatePricePerformanceSnapshotMock).toHaveBeenCalledTimes(1);
     expect(((await call("GET", "/")).json as any[]).map((row) => row.symbol)).not.toContain(ticker.symbol);
+  });
+
+  it("forgets what Vol Farmer v4 remembers of the removed ticker", async () => {
+    const ticker = await insertTicker();
+    const entryId = await insertEntry(ticker.id);
+    await testDb("pluto_vol_farmer_v4_cycles").insert({ ticker_id: ticker.id, memory: JSON.stringify({ state: {}, pending: [] }) });
+
+    expect((await call("DELETE", `/${entryId}`)).status).toBe(204);
+    expect(await testDb("pluto_vol_farmer_v4_cycles").where({ ticker_id: ticker.id })).toEqual([]);
   });
 
   it("answers 404 for an unknown entry", async () => {

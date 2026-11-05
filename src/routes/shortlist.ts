@@ -1,5 +1,6 @@
 import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { recordPlutoEvent } from "../pluto/ledger.js";
+import { clearVolFarmerV4Memory } from "../pluto/volFarmerV4LookLoader.js";
 import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
@@ -283,7 +284,7 @@ shortlistRouter.patch("/:id/bot-enabled", requireAdmin, async (request, response
   }
   const userId = request.session.userId as string;
   const result = await db.transaction(async (trx) => {
-    const entry = await trx("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").where("se.id", request.params.id).whereNull("se.removed_at").forUpdate("se").first("se.id", "se.bot_enabled", "t.symbol");
+    const entry = await trx("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").where("se.id", request.params.id).whereNull("se.removed_at").forUpdate("se").first("se.id", "se.ticker_id", "se.bot_enabled", "t.symbol");
     if (!entry) return { status: 404 as const, error: "Entry not found or already removed." };
     if (Boolean(entry.bot_enabled) === enabled) return { status: 200 as const, symbol: entry.symbol as string, changed: false };
     if (enabled) {
@@ -292,6 +293,9 @@ shortlistRouter.patch("/:id/bot-enabled", requireAdmin, async (request, response
       if (enabledCount >= settings.maxEnabledTickers) return { status: 409 as const, error: `Pluto already has ${enabledCount} enabled tickers, the maximum (${settings.maxEnabledTickers}). Disable one first or raise the cap on the Pluto screen.` };
     }
     await trx("shortlist_entries").where({ id: entry.id }).update({ bot_enabled: enabled, bot_enabled_changed_by_user_id: userId, bot_enabled_changed_at: trx.fn.now() });
+    // Switched off, Pluto stops looking at the ticker, so what Vol Farmer v4 remembers of its holdings goes stale: forgotten
+    // here, the next switch-on adopts the holdings as the ledger has them then (Marcelo 2026-11-05).
+    if (!enabled) await clearVolFarmerV4Memory(entry.ticker_id, trx);
     return { status: 200 as const, symbol: entry.symbol as string, changed: true };
   });
   if (result.status !== 200) {
@@ -317,6 +321,8 @@ shortlistRouter.delete("/:id", async (request, response) => {
     const openPositionCount = await countOpenPositionsForTicker(entry.ticker_id, trx);
     if (openPositionCount > 0) return { openPositionCount };
     await trx("shortlist_entries").where({ id: request.params.id }).update({ removed_at: trx.fn.now() });
+    // A removed ticker is no longer looked at (an admin may remove one Pluto is on for): Vol Farmer v4's memory of it goes too.
+    await clearVolFarmerV4Memory(entry.ticker_id, trx);
     return "removed";
   });
 
