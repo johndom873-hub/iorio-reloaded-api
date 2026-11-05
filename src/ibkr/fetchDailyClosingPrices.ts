@@ -28,6 +28,20 @@ const gatewaySilentTimeoutMs = 30_000;
  *
  * A leg with no price gets null (the job then skips that position).
  */
+
+/**
+ * An option's closing price from IBKR's portfolio mark. IBKR marks an option with no bid at 0 (a $108 Call on a $58
+ * stock), a real value: it counts when the option is out of the money at the underlying's close, a Call struck above it
+ * or a Put struck below. A 0 on an in-the-money option, or with no close to judge it, is not trusted: null.
+ * Example: INTC $108 Call, close $58.27 → 0; a $50 Call there marked 0 → null.
+ */
+export function priceFromPortfolioMark(marketPrice: number, right: string | undefined, strike: number | undefined, underlyingClose: number | null): number | null {
+  if (marketPrice > 0) return marketPrice;
+  if (marketPrice !== 0 || underlyingClose === null || strike === undefined) return null;
+  const optionRight = right?.charAt(0).toUpperCase();
+  const outOfTheMoney = optionRight === "C" ? strike > underlyingClose : optionRight === "P" ? strike < underlyingClose : false;
+  return outOfTheMoney ? 0 : null;
+}
 export async function fetchDailyClosingPrices(contracts: PriceContract[], sessionDateIso: string): Promise<Record<string, number | null>> {
   const priceByKey: Record<string, number | null> = Object.fromEntries(contracts.map((contract) => [contract.key, null]));
   if (contracts.length === 0) return priceByKey;
@@ -90,7 +104,8 @@ export async function fetchDailyClosingPrices(contracts: PriceContract[], sessio
       resolveAccountDone();
     }
 
-    const uniqueStockSymbols = [...new Set(stockContracts.map((contract) => contract.symbol))];
+    // An option's underlying close too: it tells a worthless 0 mark from a missing one (priceFromPortfolioMark).
+    const uniqueStockSymbols = [...new Set([...stockContracts, ...optionContracts].map((contract) => contract.symbol))];
     if (uniqueStockSymbols.length === 0) resolveBarsDone();
     let nextReqId = 7_000;
     for (const symbol of uniqueStockSymbols) {
@@ -145,7 +160,7 @@ export async function fetchDailyClosingPrices(contracts: PriceContract[], sessio
           row.contract.strike === contract.strike &&
           row.contract.right?.charAt(0).toUpperCase() === contract.right?.charAt(0).toUpperCase(),
       );
-      priceByKey[contract.key] = held && held.marketPrice > 0 ? held.marketPrice : null;
+      priceByKey[contract.key] = held ? priceFromPortfolioMark(held.marketPrice, contract.right, contract.strike, stockClosesBySymbol.get(contract.symbol) ?? null) : null;
     }
 
     return priceByKey;

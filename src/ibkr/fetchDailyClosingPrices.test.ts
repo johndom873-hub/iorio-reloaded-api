@@ -146,7 +146,9 @@ describe("fetchDailyClosingPrices option marks", () => {
     ib.onAccountSubscribe = () => undefined;
   });
 
-  const run = async (contracts: PriceContract[], rows: () => void) => {
+  // The underlying's session close, which the fetch now requests for every option's symbol (190 unless a test sets it).
+  const run = async (contracts: PriceContract[], rows: () => void, underlyingClose: number | null = 190) => {
+    ib.onHistoricalRequest = (reqId) => emitBars(reqId, underlyingClose === null ? [] : [["20261006", underlyingClose]]);
     ib.onAccountSubscribe = () => {
       rows();
       ib.emit(EventName.accountDownloadEnd, "U21518308");
@@ -154,9 +156,9 @@ describe("fetchDailyClosingPrices option marks", () => {
     return fetchDailyClosingPrices(contracts, sessionDate);
   };
 
-  it("uses the portfolio mark of a held contract and makes no historical request for options alone", async () => {
+  it("uses the portfolio mark of a held contract, requesting the underlying's daily bar once", async () => {
     expect(await run([option("opt")], () => optionRow({}, -1, 1.25))).toEqual({ opt: 1.25 });
-    expect(ib.reqHistoricalData).not.toHaveBeenCalled();
+    expect(ib.historicalRequests.map((request) => request.contract.symbol)).toEqual(["AAPL"]);
     expect(ib.reqAccountUpdates).toHaveBeenCalledWith(true, "");
   });
 
@@ -177,9 +179,25 @@ describe("fetchDailyClosingPrices option marks", () => {
     ).toEqual({ opt: 0.8 });
   });
 
-  it("returns null for a missing contract and for a non-positive mark", async () => {
-    expect(await run([option("missing"), option("zero", { strike: 205 })], () => optionRow({ strike: 205 }, 1, 0))).toEqual({ missing: null, zero: null });
+  it("returns null for a missing contract and for a negative mark", async () => {
+    expect(await run([option("missing"), option("other", { strike: 205 })], () => optionRow({ strike: 205 }, 1, 0.5))).toEqual({ missing: null, other: 0.5 });
     expect(await run([option("negative")], () => optionRow({}, 1, -1))).toEqual({ negative: null });
+  });
+
+  it("prices a 0 mark at 0 when the option is out of the money at the underlying's close (no bid: worthless)", async () => {
+    // Close 190: a $200 Call and a $180 Put are out of the money (INTC's $108 Call on a $58.27 close, 2026-11-04).
+    expect(await run([option("call", { strike: 200 }), option("put", { strike: 180, right: "P" as PriceContract["right"] })], () => {
+      optionRow({ strike: 200 }, -1, 0);
+      optionRow({ strike: 180, right: "P" as Contract["right"] }, -1, 0);
+    })).toEqual({ call: 0, put: 0 });
+  });
+
+  it("keeps a 0 mark unpriced when the option is in the money, or the underlying has no close for the session", async () => {
+    expect(await run([option("itmCall", { strike: 180 }), option("itmPut", { strike: 200, right: "P" as PriceContract["right"] })], () => {
+      optionRow({ strike: 180 }, -1, 0);
+      optionRow({ strike: 200, right: "P" as Contract["right"] }, -1, 0);
+    })).toEqual({ itmCall: null, itmPut: null });
+    expect(await run([option("noClose")], () => optionRow({}, -1, 0), null)).toEqual({ noClose: null });
   });
 
   it("matches on symbol, expiry, strike and right, all four", async () => {
@@ -227,8 +245,8 @@ describe("fetchDailyClosingPrices option marks", () => {
   });
 
   it("prices stocks and options together, waiting for both completion signals", async () => {
-    ib.onHistoricalRequest = (reqId) => emitBars(reqId, [["20261006", 101]]);
-    expect(await run([stock("s", "AAPL"), option("o")], () => optionRow({}, 1, 3.3))).toEqual({ s: 101, o: 3.3 });
+    expect(await run([stock("s", "AAPL"), option("o")], () => optionRow({}, 1, 3.3), 101)).toEqual({ s: 101, o: 3.3 });
+    expect(ib.reqHistoricalData).toHaveBeenCalledTimes(1);
   });
 
   it("keeps waiting for the account download after the bars are in", async () => {

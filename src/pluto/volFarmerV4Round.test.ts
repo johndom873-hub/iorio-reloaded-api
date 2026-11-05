@@ -24,6 +24,8 @@ const harness = vi.hoisted(() => ({
   positions: [] as unknown[],
   positionsByTickerId: new Map<string, unknown[]>(),
   accountFreeCash: 400_000,
+  /** Risk & Limits' min cash reserve, % of the account's value: 0 unless a test sets it. */
+  minCashReservePct: 0,
   /** IBKR's settled cash handed to the round (null: none reported), and what it leaves once the open Puts' cash is out. */
   settledCashValue: 2_000_000 as number | null,
   settledFreeCash: 2_000_000,
@@ -65,6 +67,7 @@ vi.mock("../lib/liveTradingSessions.js", async () => {
 });
 vi.mock("../lib/commissionEstimate.js", async (original) => ({ ...(await original<object>()), loadCommissionEstimator: async () => ({ perContractDollars: () => harness.optionCommission }), loadStockCommissionEstimator: async () => ({ perShareDollars: () => 0.005 }) }));
 // The round hands the account's cash (500,000) and the settled cash in turn.
+vi.mock("../lib/tradingSettingsStore.js", () => ({ loadTradingSettings: async () => ({ minCashReservePct: harness.minCashReservePct }) }));
 vi.mock("../lib/accountContext.js", () => ({ accountContextFromTotalCash: async (cash: number | null) => ({ freeCash: cash === 500_000 ? harness.accountFreeCash : harness.settledFreeCash }) }));
 vi.mock("../lib/tickerFreeze.js", () => ({ frozenSymbolSet: async () => new Set() }));
 vi.mock("../ibkr/pricePool.js", () => ({ fetchPricesPoolFirst: async () => ({ stock: 100 }) }));
@@ -197,6 +200,7 @@ beforeEach(() => {
   harness.positions = [];
   harness.positionsByTickerId.clear();
   harness.accountFreeCash = 400_000;
+  harness.minCashReservePct = 0;
   harness.settledCashValue = 2_000_000;
   harness.settledFreeCash = 2_000_000;
   harness.stockQuote = { bid: 99.98, ask: 100.02, updatedAtMs: Date.now() };
@@ -339,6 +343,15 @@ describe("runVolFarmerV4Round", () => {
     await round();
     // Half the pot wants 12 lots of $10,000.50; the free cash pays for floor(50,000 ÷ 10,000.50) = 4.
     expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", buyEveryShare: true, plan: expect.objectContaining({ quantity: 4 }) })]);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringContaining("the free cash ($50,000) pays for 4 of the 12 lots half the pot wants")]);
+  });
+
+  it("keeps the min cash reserve out of the free cash, as the order route does (no plan it would refuse)", async () => {
+    harness.accountFreeCash = 100_000;
+    harness.minCashReservePct = 5;
+    await round();
+    // $100,000 free less 5% of the $1,000,000 account leaves $50,000: floor(50,000 ÷ 10,000.50) = 4 lots, not 9.
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", plan: expect.objectContaining({ quantity: 4 }) })]);
     expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringContaining("the free cash ($50,000) pays for 4 of the 12 lots half the pot wants")]);
   });
 

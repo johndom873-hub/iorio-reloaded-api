@@ -30,6 +30,7 @@ import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { frozenSymbolSet } from "../lib/tickerFreeze.js";
 import { isLastSessionBeforeWeekend } from "../lib/tradingWeek.js";
 import { loadInFlightNotionals, loadInFlightNotionalsBySymbol, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
+import { loadTradingSettings } from "../lib/tradingSettingsStore.js";
 import { executePlutoOrder, watchPlutoOrder, type ExecuteInput } from "./executor.js";
 import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
 import { nextListedExpiryAfter, optionQuoteBandExpiryContracts, volFarmerV4ExpiryRule } from "./optionQuoteBandPlan.js";
@@ -195,7 +196,7 @@ export function volFarmerV4CallsToBuyBack(input: { state: VolFarmerV4SymbolState
 
 export async function runVolFarmerV4Round(input: VolFarmerV4RoundInput): Promise<VolFarmerV4RoundSummary> {
   const { settings, now } = input;
-  const [enabled, frozen, clock, optionCommissions, stockCommissions, account, settledAccount, lastFilledAtBySymbol] = await Promise.all([
+  const [enabled, frozen, clock, optionCommissions, stockCommissions, account, settledAccount, lastFilledAtBySymbol, tradingSettings] = await Promise.all([
     loadEnabledPlutoTickerSettings(),
     frozenSymbolSet(),
     defaultOptionQuoteBandPlannerDependencies.loadClock(input.todayIso),
@@ -204,6 +205,7 @@ export async function runVolFarmerV4Round(input: VolFarmerV4RoundInput): Promise
     accountContextFromTotalCash(input.totalCashValue),
     accountContextFromTotalCash(input.settledCashValue),
     loadLastFilledPlutoActionAtBySymbol(),
+    loadTradingSettings(),
   ]);
   const summary: VolFarmerV4RoundSummary = { looked: [], planned: 0, sent: 0, notes: [] };
   const v4Tickers = enabled.filter((ticker) => input.symbols.length === 0 || input.symbols.includes(ticker.symbol));
@@ -227,6 +229,8 @@ export async function runVolFarmerV4Round(input: VolFarmerV4RoundInput): Promise
     commissions: { option: optionCommissions, stock: stockCommissions },
     accountFreeCash: account.freeCash,
     settledFreeCash: input.settledCashValue === null ? null : settledAccount.freeCash,
+    /** The cash every opening order must leave (Risk & Limits' min cash reserve, of the account's value): the order route refuses one that goes below it. */
+    cashReserveDollars: (tradingSettings.minCashReservePct / 100) * input.netLiquidationValue,
   };
   const lastRounds = new Map<string, LastRound>();
   const potDollarsOf = (ticker: PlutoTickerSettings) => tickerPotFraction(allocationBySymbol.get(ticker.symbol) ?? 0, settings) * input.netLiquidationValue;
@@ -278,6 +282,7 @@ type RoundState = {
   accountFreeCash: number;
   /** IBKR's settled cash less the cash the open Puts hold; null when IBKR reported no settled cash. */
   settledFreeCash: number | null;
+  cashReserveDollars: number;
 };
 
 /** The ticker's caps an opening order counts under: why it waits, or null when they leave room for it. */
@@ -409,11 +414,13 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
     return nothingDue;
   }
   const budgetFree = (settings.capitalBudgetPct / 100) * input.netLiquidationValue - round.bookCommitted;
-  const accountFree = round.accountFreeCash - round.accountInFlightAtStart - round.committedThisRound;
+  // The account's and the settled cash keep the min cash reserve, as the order route does (Marcelo 2026-11-04). Example:
+  // $372,180 free, a 5% reserve on $996,217 leaves $322,369 to buy with.
+  const accountFree = round.accountFreeCash - round.accountInFlightAtStart - round.committedThisRound - round.cashReserveDollars;
   // The cash account's settled cash left (Marcelo 2026-10-31): IBKR's settled cash less what the open Puts hold, the
   // orders in flight and the round's earlier orders. Example: $40,000 settled, a $5,000 purchase working and $10,000
   // bought earlier this round leave $25,000.
-  const settledFree = round.settledFreeCash === null ? 0 : round.settledFreeCash - round.accountInFlightAtStart - round.committedThisRound;
+  const settledFree = round.settledFreeCash === null ? 0 : round.settledFreeCash - round.accountInFlightAtStart - round.committedThisRound - round.cashReserveDollars;
   const freeCash = Math.max(0, Math.min(budgetFree, accountFree, settledFree));
   lastRound.figures = { potDollars, committedDollars: tickerExposure + inFlight.tickerNotional, freeCashDollars: freeCash, leapsCapDollars: (potDollars * settings.volFarmerV4LeapsMaxAllocationPct) / 100, putsDollars: (potDollars * (100 - settings.volFarmerV4FirstPositionPct)) / 100 };
   // v4's buyback minutes (Marcelo 2026-11-02): only the Calls in the money are bought back, and nothing else is sent.
