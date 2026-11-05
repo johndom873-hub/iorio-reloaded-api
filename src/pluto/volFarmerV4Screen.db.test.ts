@@ -30,6 +30,8 @@ beforeAll(async () => {
     { id: waitingId, symbol: "VFW", company_name: "Waiting Co" },
     { id: disabledId, symbol: "VFD", company_name: "Disabled Co" },
   ]);
+  await testDb("pluto_settings").insert({ id: 1 }).onConflict("id").ignore();
+  await testDb("pluto_state").insert({ id: 1 }).onConflict("id").ignore();
   await testDb("shortlist_entries").insert([adoptedId, waitingId, disabledId].map((ticker_id) => ({ ticker_id, added_by_user_id: userId, bot_enabled: ticker_id !== disabledId })));
 });
 
@@ -73,6 +75,10 @@ describe("the Vol Farmer v2 card", () => {
       lastRoundFigures: figures,
     });
     expect(adopted!.adoptedAt).not.toBeNull();
+    // The Next action column is built from real inputs (not the "unavailable" stand-in), with its six actions and no order sent yet.
+    expect(adopted!.nextAction.text).not.toBe("Next action unavailable");
+    expect(adopted!.actions.map((action) => action.key)).toEqual(["sell_calls", "sell_puts", "buy_leaps", "buy_shares", "sell_shares", "buy_back_call"]);
+    expect(adopted).toMatchObject({ lastOrder: null, cancelledToday: 0 });
     expect(waiting).toMatchObject({ waiting: true, adoptedAt: null, first: null, second: null, leaps: null, workingOrders: [], lastRoundFigures: null });
 
     // A memory saved after a last round keeps the round's notes, and a later round keeps the memory.

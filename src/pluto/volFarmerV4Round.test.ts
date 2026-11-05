@@ -26,7 +26,6 @@ const harness = vi.hoisted(() => ({
   accountFreeCash: 400_000,
   /** IBKR's settled cash handed to the round (null: none reported), and what it leaves once the open Puts' cash is out. */
   settledCashValue: 2_000_000 as number | null,
-  settledCashIsTotalCash: false,
   settledFreeCash: 2_000_000,
   /** Pluto's own stock quote of every ticker. */
   stockQuote: { bid: 99.98 as number | null, ask: 100.02 as number | null, updatedAtMs: 0 as number | null },
@@ -153,7 +152,7 @@ const marketWatch = {
 };
 
 function round(stressed = false, todayIso = "2026-10-27", clock: { now?: Date; windowEndAtMs?: number } = {}) {
-  return runVolFarmerV4Round({ passId: "p1", settings: roundSettings as never, api: {} as never, marketWatch: marketWatch as never, trackWatch: () => {}, now: clock.now ?? new Date(`${todayIso}T15:00:00Z`), todayIso, totalCashValue: 500_000, settledCashValue: harness.settledCashValue, settledCashIsTotalCash: harness.settledCashIsTotalCash, netLiquidationValue: 1_000_000, cancelByMs: null, windowEndAtMs: clock.windowEndAtMs ?? null, symbols: [], stressed });
+  return runVolFarmerV4Round({ passId: "p1", settings: roundSettings as never, api: {} as never, marketWatch: marketWatch as never, trackWatch: () => {}, now: clock.now ?? new Date(`${todayIso}T15:00:00Z`), todayIso, totalCashValue: 500_000, settledCashValue: harness.settledCashValue, netLiquidationValue: 1_000_000, cancelByMs: null, windowEndAtMs: clock.windowEndAtMs ?? null, symbols: [], stressed });
 }
 
 const v4Ticker = (symbol: string) => ({ tickerId: `t-${symbol}`, symbol, allocationPct: null, alwaysHoldTheStock: null as "on" | "off" | null });
@@ -199,7 +198,6 @@ beforeEach(() => {
   harness.positionsByTickerId.clear();
   harness.accountFreeCash = 400_000;
   harness.settledCashValue = 2_000_000;
-  harness.settledCashIsTotalCash = false;
   harness.settledFreeCash = 2_000_000;
   harness.stockQuote = { bid: 99.98, ask: 100.02, updatedAtMs: Date.now() };
   harness.leftoverStockLeg = null;
@@ -533,13 +531,12 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
     expect(harness.lastRounds.get("t-VFT")!.notes.slice(0, 2)).toEqual(["IBKR reports no settled cash, so the free cash is 0: nothing is bought and no Put sold", expect.stringContaining("no top-up")]);
   });
 
-  it("on the paper account, with the total cash standing in for the settled cash, buys and says so", async () => {
+  it("on the paper account, with the total cash standing in for the settled cash, buys without a note about it", async () => {
     topUpDue();
     harness.settledCashValue = 500_000;
-    harness.settledCashIsTotalCash = true;
     await round();
     expect(harness.executed).toEqual([expect.objectContaining({ kind: "shares_buy" })]);
-    expect(harness.lastRounds.get("t-VFT")!.notes).toContain("IBKR reports no settled cash on the paper account, so the total cash stands in");
+    expect(harness.lastRounds.get("t-VFT")!.notes.join(" ")).not.toContain("stands in");
   });
 
   it("on an expiry day, buys a flat ticker's first position with its first Call, expiring at today's close", async () => {

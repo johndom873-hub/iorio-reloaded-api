@@ -197,7 +197,7 @@ export function volFarmerV4CallPremiumShare(fillPrice: number, positionContracts
  * The Step at this look as stepRule sets it: the fixed Step, or the one-month implied move from the previous session's IV.
  * Null when the implied-move rule finds no IV for the previous session: no Put and no LEAPS entry then (Marcelo 2026-10-29).
  */
-function volFarmerV2StepAtLook(v2: BacktestVolFarmerV2Settings, market: Pick<VolFarmerV4Market, "stepImpliedVolatility">): VolFarmerV4Step | null {
+export function volFarmerV2StepAtLook(v2: BacktestVolFarmerV2Settings, market: Pick<VolFarmerV4Market, "stepImpliedVolatility">): VolFarmerV4Step | null {
   if (v2.stepRule !== "implied_move_at_put_sale") return { stepPct: v2.stepBelowFirstBreakEvenPct, impliedVolatility: null };
   const impliedVolatility = market.stepImpliedVolatility();
   return impliedVolatility === null ? null : volFarmerV4ImpliedMoveStep(impliedVolatility);
