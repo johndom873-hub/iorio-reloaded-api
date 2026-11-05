@@ -36,6 +36,11 @@ import type { BookKey } from "../books/bookKeys.js";
 // A Pluto strategy order also gets the book-wide cap: every Pluto ticker's exposure and working orders together, after
 // the order, at most Pluto's book value (strategyBookCapitalVerdict, Marcelo 2026-10-21; the book's value since 2026-11-05).
 //
+// The limits judge only what the order adds (Marcelo 2026-11-05): an order adding no notional (a Call on shares held, a Call
+// roll, a Put roll whose net credit covers its strike difference) passes the three limits and a Pluto order's pot (the book cap
+// already let it pass), even when the book or the ticker is already above them. Example: COIN at 22.8% of the Manual book and
+// its cash at 1.2%: a Call roll ($0) goes, a $29,700 Put is refused.
+//
 // The Pluto and Manual books (Marcelo 2026-11-05): a live order is measured against its own book, Pluto's for a Pluto
 // order or an order on a ticker in Pluto's book, Manual's otherwise. The portfolio value is the book's value, the cash its
 // usable cash (src/books/bookFigures.ts), the Puts and working orders its own; so an order can only use its book's cash,
@@ -342,6 +347,8 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
   const workingOrdersNote = inFlight.totalNotional > 0 ? ` (counting ${formatWholeDollars(inFlight.totalNotional)} of orders still working)` : "";
 
   const reasons: string[] = [];
+  // The limits and the pot judge what the order adds (see the header): an order adding nothing passes them.
+  const orderAddsNotional = orderNotional > 0;
 
   // Compared in dollars, not as fraction x 100 against the percentage: 0.07 * 100 is 7.000000000000001, which would block an order
   // sitting exactly at a 7% limit.
@@ -353,11 +360,11 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
   const strategyPotDollars = figures.strategyPotFraction === undefined || figures.strategyPotFraction === null ? undefined : figures.strategyPotFraction * totalPortfolioValue;
   const strategyBook = figures.strategyBook && strategyBookCapitalVerdict({ ...figures.strategyBook, orderNotional, netLiquidationValue: totalPortfolioValue });
   if (figures.strategyPotFraction !== undefined) {
-    if (strategyPotDollars !== undefined && tickerExposureAfter > strategyPotDollars) {
+    if (orderAddsNotional && strategyPotDollars !== undefined && tickerExposureAfter > strategyPotDollars) {
       reasons.push(`${figures.symbol} would be ${formatWholeDollars(tickerExposureAfter)}, above its Pluto pot of ${formatWholeDollars(strategyPotDollars)} (${formatPct(figures.strategyPotFraction!)} of ${valueLabel})${workingOrdersNote}.`);
     }
     if (strategyBook && !strategyBook.fits) reasons.push(describeStrategyBookCapitalRefusal(strategyBook));
-  } else {
+  } else if (orderAddsNotional) {
     if (orderNotional > limitInDollars(settings.maxOrderPctOfPortfolio)) {
       reasons.push(`This order is ${formatPct(orderSharePct)} of ${valueLabel}, above the ${settings.maxOrderPctOfPortfolio}% max order size.`);
     }
@@ -368,7 +375,7 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
 
   const cashAfter = freeCash - orderNotional;
   const cashReserveAfterPct = cashAfter / totalPortfolioValue;
-  if (cashAfter < limitInDollars(settings.minCashReservePct)) {
+  if (orderAddsNotional && cashAfter < limitInDollars(settings.minCashReservePct)) {
     reasons.push(`Placing this order would leave only ${formatPct(cashReserveAfterPct)} of ${valueLabel} as cash, below the ${settings.minCashReservePct}% min cash reserve${workingOrdersNote}.`);
   }
 

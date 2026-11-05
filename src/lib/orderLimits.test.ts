@@ -88,6 +88,12 @@ describe("evaluateOrderLimitFigures for a Pluto strategy order", () => {
     expect(over.reasons).toEqual(["LADR would be $53,000, above its Pluto pot of $50,000 (25.0% of portfolio value) (counting $8,000 of orders still working)."]);
   });
 
+  it("lets an order adding nothing pass a ticker already past its pot", () => {
+    // LADR already $53,000 against its $50,000 pot: a Call on shares held ($0) goes, a $1 order is refused.
+    expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 53_000, orderNotional: 0, strategyPotFraction: 0.25 })).toMatchObject({ blocked: false, reasons: [] });
+    expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 53_000, orderNotional: 1, strategyPotFraction: 0.25 }).reasons).toEqual(["LADR would be $53,001, above its Pluto pot of $50,000 (25.0% of portfolio value)."]);
+  });
+
   it("refuses an order that takes what Pluto's tickers commit past Pluto's book value (A1), with its reason at confirm", () => {
     // The cap at half the value it is measured on: $100,000 of $200,000; the book commits $96,000. A $45 Put ×1 at 0.80 adds
     // $4,420 → $100,420: refused. (Live, the cap is all of Pluto's book value: budgetFraction 1 of the book's value.)
@@ -103,6 +109,31 @@ describe("evaluateOrderLimitFigures for a Pluto strategy order", () => {
   it("keeps the cash reserve", () => {
     // $60,000 cash − $52,000 order = $8,000 = 4% of the account, under the 5% reserve.
     expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 52_000, strategyPotFraction: 0.3 }).reasons).toEqual([expect.stringMatching(/4.0% of portfolio value as cash, below the 5% min cash reserve/)]);
+  });
+});
+
+describe("evaluateOrderLimitFigures judges only what the order adds", () => {
+  // Staging's Manual book on 2026-11-05: $264,255 value, $3,125 cash (1.2%), COIN already $60,250 (22.8%); limits 10% / 20% / 5%.
+  const manualBook = { symbol: "COIN", totalPortfolioValue: 264_255, totalCashValue: 3_125, cashLockedInCsps: 0, inFlight: { totalNotional: 0, tickerNotional: 0 }, valueLabel: "the Manual book's value", settings: { maxOrderPctOfPortfolio: 10, maxConcentrationPerTickerPct: 20, minCashReservePct: 5 } };
+
+  it("lets an order adding nothing pass a book already above the concentration and the cash reserve", () => {
+    // Rolling COIN's 4 Calls $180 → $185 adds $0: COIN stays at 22.8%, cash at 1.2%.
+    expect(evaluateOrderLimitFigures({ ...manualBook, existingTickerExposure: 60_250, orderNotional: 0 })).toMatchObject({ blocked: false, reasons: [] });
+  });
+
+  it("still refuses an order that adds notional on all three limits", () => {
+    // A TSLA $300 Put at $3 adds $29,700: 11.2% of the book, TSLA $37,700 + $29,700 = 25.5%, cash $3,125 − $29,700 = −10.1%.
+    const put = evaluateOrderLimitFigures({ ...manualBook, symbol: "TSLA", existingTickerExposure: 37_700, orderNotional: 29_700 });
+    expect(put.reasons).toEqual([
+      "This order is 11.2% of the Manual book's value, above the 10% max order size.",
+      "TSLA would be 25.5% of the Manual book's value, above the 20% max concentration per ticker.",
+      "Placing this order would leave only -10.1% of the Manual book's value as cash, below the 5% min cash reserve.",
+    ]);
+  });
+
+  it("refuses even a small added order on a book already under the cash reserve", () => {
+    // A $628 LEAPS leaves $3,125 − $628 = $2,497 = 0.9%, below the 5% reserve.
+    expect(evaluateOrderLimitFigures({ ...manualBook, symbol: "HOOD", existingTickerExposure: 0, orderNotional: 628 }).reasons).toEqual([expect.stringMatching(/0.9% of the Manual book's value as cash, below the 5% min cash reserve/)]);
   });
 });
 
