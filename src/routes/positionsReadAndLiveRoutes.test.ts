@@ -61,8 +61,6 @@ vi.mock("../lib/pulseChartSampleCollector.js", () => ({
 const getRiskFreeRateMock = vi.fn();
 vi.mock("../lib/riskFreeRate.js", () => ({ getRiskFreeRate: (...args: unknown[]) => getRiskFreeRateMock(...args) }));
 
-const computeLegSuccessProbabilitiesMock = vi.fn();
-vi.mock("../lib/positionSuccessProbability.js", () => ({ computeLegSuccessProbabilities: (...args: unknown[]) => computeLegSuccessProbabilitiesMock(...args) }));
 
 const loadRecoveryTargetWindowMock = vi.fn();
 vi.mock("../lib/recoveryTargetWindow.js", () => ({ loadRecoveryTargetWindow: (...args: unknown[]) => loadRecoveryTargetWindowMock(...args) }));
@@ -154,7 +152,6 @@ beforeEach(() => {
   recordUnrealizedPnlSampleMock.mockReset();
   recordLegDeltaSampleMock.mockReset();
   getRiskFreeRateMock.mockReset().mockResolvedValue(0.04);
-  computeLegSuccessProbabilitiesMock.mockReset().mockReturnValue({ probabilityByDelta: 0.7, probabilityByD2: 0.65 });
   loadRecoveryTargetWindowMock.mockReset().mockResolvedValue({ deltaTargetMin: 0.2, deltaTargetMax: 0.3, dteTargetMin: 20, dteTargetMax: 45 });
   fetchCyclesForTickersMock.mockReset().mockImplementation(actualCycleQueries.fetchCyclesForTickers);
   fetchBreakEvenByPositionIdMock.mockReset().mockImplementation(actualBreakEvenQueries.fetchBreakEvenByPositionId);
@@ -663,7 +660,7 @@ describe("GET /positions/greeks/stream", () => {
     expect(forStockLeg.events).toEqual([{}]);
   });
 
-  it("sends a first frame of live greeks enriched with the leg's success probabilities, and records the delta sample", async () => {
+  it("sends a first frame of live greeks and records the delta sample", async () => {
     const { legIds, symbol } = await createPosition("covered_call", [longStock(100, { entryPrice: 50 }), longStock(100, { entryPrice: 60 }), shortCall(1)]);
     const callLegId = legIds[2]!;
     const live = { delta: 0.3, gamma: 0.02, vega: 0.1, theta: -0.05, impliedVolatility: 0.4, underlyingPrice: 52 };
@@ -673,27 +670,9 @@ describe("GET /positions/greeks/stream", () => {
     });
 
     const { events } = await readServerSentEvents(`/positions/greeks/stream?legIds=${callLegId}`, 1);
-    expect(events).toEqual([{ [callLegId]: { ...live, asOfDate: null, probabilityByDelta: 0.7, probabilityByD2: 0.65 } }]);
+    expect(events).toEqual([{ [callLegId]: { ...live, asOfDate: null } }]);
     expect(streamPooledGreeksMock.mock.calls[0]![0]).toEqual([{ key: callLegId, symbol, expiry: "20300118", strike: 55, right: OptionType.Call }]);
-    // The stock cost basis the call is judged against is the average entry of the open shares: (50 x 100 + 60 x 100) / 200 = 55.
-    expect(computeLegSuccessProbabilitiesMock).toHaveBeenCalledWith(
-      { side: "short", optionType: "call", strike: 55, expiryIsoDate: "2030-01-18", stockCostBasisPerShare: 55 },
-      { ...live, asOfDate: null },
-      0.04,
-    );
     expect(recordLegDeltaSampleMock).toHaveBeenCalledWith(callLegId, 0.3);
-  });
-
-  it("has no stock cost basis for a put, and passes a null risk-free rate when it cannot be read", async () => {
-    const { legIds } = await createPosition("cash_secured_put", [shortPut(1)]);
-    getRiskFreeRateMock.mockRejectedValue(new Error("FRED down"));
-    streamPooledGreeksMock.mockImplementation(async (_contracts: unknown, onUpdate: (greeks: unknown) => void, signal: AbortSignal) => {
-      onUpdate({ [legIds[0]!]: { delta: -0.2, gamma: 0.01, vega: 0.08, theta: -0.04 } });
-      await waitForAbort(signal);
-    });
-    const { events } = await readServerSentEvents(`/positions/greeks/stream?legIds=${legIds[0]}`, 1);
-    expect(events).toHaveLength(1);
-    expect(computeLegSuccessProbabilitiesMock).toHaveBeenCalledWith(expect.objectContaining({ optionType: "put", stockCostBasisPerShare: null }), expect.anything(), null);
   });
 
   it("applies the nightly snapshot to the first frame only, then lets live values replace it but never regress to nothing", async () => {
@@ -708,7 +687,6 @@ describe("GET /positions/greeks/stream", () => {
       onUpdate({ [legId]: empty });
       await waitForAbort(signal);
     });
-    computeLegSuccessProbabilitiesMock.mockReturnValue({ probabilityByDelta: null, probabilityByD2: null });
 
     const { events } = await readServerSentEvents(`/positions/greeks/stream?legIds=${legId}`, 3);
     const greeksOf = (event: Record<string, any>) => ({ delta: event[legId].delta, asOfDate: event[legId].asOfDate });

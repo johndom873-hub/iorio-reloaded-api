@@ -67,7 +67,7 @@ describe("easternIsoDate equals the removed easternDateIso", () => {
     expect(easternIsoDate(utc("2026-11-02T05:00:00Z"))).toBe("2026-11-02");
   });
 
-  it("defaults to the current time (positionSuccessProbability calls it with no argument)", () => {
+  it("defaults to the current time when called with no argument", () => {
     vi.useFakeTimers();
     vi.setSystemTime(utc("2026-11-02T04:30:00Z")); // 23:30 EST on 11-01
     expect(easternIsoDate()).toBe("2026-11-01");
