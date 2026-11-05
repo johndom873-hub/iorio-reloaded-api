@@ -9,7 +9,7 @@ import { sessionsHeldAmong } from "../../lib/tradingSessionsHeld.js";
 // file's 10:00 quotes with the engine's own candidate rules (selectBaselineCandidates, as v4's look calls it): a Call
 // expiring at that day's close, struck above the 10:00 price, |delta| within v4's Call range (0.05–0.5), bid at least
 // $0.05, spread at most v4's limit (50% of the mid); the pick is the best by premium yield. Each day also gives F4's lots:
-// the most lots any of those Calls has volume for (its volume limit, 20% of its previous session's volume).
+// the most lots any of those Calls has bid size for (its size limit: the bid size of its 10:00 quote, Marcelo 2026-11-05).
 
 /** The flat rates the backtest's ledger charges, as v4's look ranks with them. */
 const ledgerCommissions: BaselineCommissions = { option: flatCommissionEstimator, stock: flatStockCommissionEstimator };

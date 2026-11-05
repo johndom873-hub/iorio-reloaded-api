@@ -9,8 +9,8 @@ import { median } from "./analysisPriceFigures.js";
 // - F2 smallest pot = one lot at the highest 10:00 price of the last 12 months ÷ 80%; with one ticker the account it needs
 //   is that ÷ 1.2 (the pot is 1.2× the account).
 // - F3 share of the target reached at pot P: lots = floor(80% of P ÷ a lot), share = lots × a lot ÷ 80% of P.
-// - F4 largest pot by Call volume: on each expiry day, L = the most lots any Call v4 could sell (F5) has volume for (its
-//   limit, 20% of its previous session's volume), and that day's largest pot = L × a lot ÷ 80%; the figure is the largest
+// - F4 largest pot by Call size: on each expiry day, L = the most lots any Call v4 could sell (F5) has bid size for (its
+//   limit, the bid size of its 10:00 quote), and that day's largest pot = L × a lot ÷ 80%; the figure is the largest
 //   pot that fits on at least 80% of the last 12 months' expiry days.
 
 /** With one ticker the pot is the account × (100% + the excess allowance): 1.2 at 20%. */
