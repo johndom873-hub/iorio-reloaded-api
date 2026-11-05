@@ -104,7 +104,28 @@ describe("the Next action column", () => {
     state.second = { shares: 200, costPerShare: 90, premiums: [], calls: [], puts: [] };
     const result = describeVolFarmerV4NextActions(dram({ ticker: { ...dram().ticker, second: { ...position(200, 90), breakEvenPerShare: 90 } }, state, expirations: [...everyDayExpiries, "20270319", "20270618"], stepImpliedVolatility: 0.6 }));
     // Step = 0.6 × √(21 ÷ 252) = 17.32%; half of it under B-E² $90 is $82.2058. 19 Mar 2027 is 135 days out, under the 180 a LEAPS needs; 18 Jun is 226.
-    expect(line(result, "buy_leaps")).toMatchObject({ state: "waiting", detail: "Buys the Call of 18 Jun 2027 (226DTE) whose |delta| is nearest 0.6 if DRAM is at $82.21 or below (half a Step under the second position's break-even)." });
+    expect(line(result, "buy_leaps")).toMatchObject({ state: "waiting", detail: "Buys the Call of 18 Jun 2027 (226DTE) whose |delta| is nearest 0.6 if DRAM is at $82.21 or below (half a Step under the second position's break-even). The LEAPS Calls have not been quoted yet." });
+  });
+
+  describe("the LEAPS Calls as the round quoted them", () => {
+    const secondHoldsShares = () => {
+      const state = stateOf(400, 100);
+      state.second = { shares: 200, costPerShare: 90, premiums: [], calls: [], puts: [] };
+      return state;
+    };
+    const withLook = (leapsLook: NonNullable<NonNullable<VolFarmerV4NextActionsInput["ticker"]["lastRoundFigures"]>["leapsLook"]>) =>
+      dram({ ticker: { ...dram().ticker, second: { ...position(200, 90), breakEvenPerShare: 90 }, lastRoundFigures: { ...figuresOf(56_957.09, 45_204.9), leapsLook } }, state: secondHoldsShares(), expirations: [...everyDayExpiries, "20270618"], stepImpliedVolatility: 0.6 });
+
+    it("names the contract v4's pick takes on them, with the bid and ask quoted, and says it picks again at the price", () => {
+      const result = describeVolFarmerV4NextActions(withLook({ tradingDate: "2026-11-04", quotedAt: "2026-11-04T15:02:00Z", expiry: "2027-06-18", contract: { strike: 85, bid: 13.9, ask: 14.5 }, reason: null }));
+      expect(line(result, "buy_leaps").detail).toBe("Buys the Call of 18 Jun 2027 (226DTE) whose |delta| is nearest 0.6 if DRAM is at $82.21 or below (half a Step under the second position's break-even). On the quotes of Wed 4 Nov it would pick the $85 Call · 18 Jun (226DTE), bid $13.90, ask $14.50; it picks again when the price is reached.");
+    });
+
+    it("gives the reason there is no contract instead of a guess", () => {
+      const result = describeVolFarmerV4NextActions(withLook({ tradingDate: "2026-11-04", quotedAt: "2026-11-04T15:02:00Z", expiry: "2027-06-18", contract: null, reason: "10 strikes quoted near |delta| 0.6, none with a bid of at least $0.05 and a spread within 50% of the mid" }));
+      expect(line(result, "buy_leaps").detail).toContain("On the quotes of Wed 4 Nov: 10 strikes quoted near |delta| 0.6, none with a bid of at least $0.05 and a spread within 50% of the mid.");
+      expect(line(result, "buy_leaps").detail).not.toContain("it would pick");
+    });
   });
 
   it("a ticker v4 has not adopted yet says it waits", () => {

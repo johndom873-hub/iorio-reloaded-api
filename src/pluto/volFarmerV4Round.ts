@@ -1,8 +1,8 @@
 import { db } from "../db/connection.js";
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
 import { sharesPerContract } from "../backtest/engine/backtestBook.js";
-import { baselineQuoteRejection } from "../backtest/engine/baselineSaleSteps.js";
-import { newVolFarmerV4SymbolState, runVolFarmerV4Turn, volFarmerV4BreakEven, volFarmerV4TurnOrder, type VolFarmerV4Market, type VolFarmerV4SymbolState } from "../backtest/engine/volFarmerV4Steps.js";
+import { baselineMinimumBid, baselineQuoteRejection } from "../backtest/engine/baselineSaleSteps.js";
+import { chooseVolFarmerV4Leaps, newVolFarmerV4SymbolState, runVolFarmerV4Turn, volFarmerV4BreakEven, volFarmerV4TurnOrder, type VolFarmerV4Market, type VolFarmerV4SymbolState } from "../backtest/engine/volFarmerV4Steps.js";
 import type { BacktestVolFarmerV3Settings, VolFarmerV3CallsInTheMoneyAtLastLook } from "../backtest/backtestTypes.js";
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { liveExpiryStrikes } from "../ibkr/liveOptionChainLookups.js";
@@ -59,7 +59,7 @@ import {
   type VolFarmerV4PendingOrder,
   type VolFarmerV4PlannedOrder,
 } from "./volFarmerV4LiveBook.js";
-import { loadVolFarmerV4LeftoverStockLeg, loadVolFarmerV4LegStatuses, loadVolFarmerV4Memory, loadVolFarmerV4OrderOutcomes, loadVolFarmerV4StepImpliedVolatility, saveVolFarmerV4LastRound, saveVolFarmerV4Memory, type VolFarmerV4RoundFigures } from "./volFarmerV4LookLoader.js";
+import { loadVolFarmerV4LeapsLook, loadVolFarmerV4LeftoverStockLeg, loadVolFarmerV4LegStatuses, loadVolFarmerV4Memory, loadVolFarmerV4OrderOutcomes, loadVolFarmerV4StepImpliedVolatility, saveVolFarmerV4LastRound, saveVolFarmerV4Memory, type VolFarmerV4LeapsLook, type VolFarmerV4RoundFigures } from "./volFarmerV4LookLoader.js";
 
 // One Pluto round under Vol Farmer v4 (Marcelo 2026-10-31; Vol Farmer v2's from 2026-10-27): every enabled ticker gets a
 // look at every round (its rules at every look, as the lab's "every look"), on its live book
@@ -422,7 +422,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   // bought earlier this round leave $25,000.
   const settledFree = round.settledFreeCash === null ? 0 : round.settledFreeCash - round.accountInFlightAtStart - round.committedThisRound - round.cashReserveDollars;
   const freeCash = Math.max(0, Math.min(budgetFree, accountFree, settledFree));
-  lastRound.figures = { potDollars, committedDollars: tickerExposure + inFlight.tickerNotional, freeCashDollars: freeCash, leapsCapDollars: (potDollars * settings.volFarmerV4LeapsMaxAllocationPct) / 100, putsDollars: (potDollars * (100 - settings.volFarmerV4FirstPositionPct)) / 100 };
+  lastRound.figures = { potDollars, committedDollars: tickerExposure + inFlight.tickerNotional, freeCashDollars: freeCash, leapsCapDollars: (potDollars * settings.volFarmerV4LeapsMaxAllocationPct) / 100, putsDollars: (potDollars * (100 - settings.volFarmerV4FirstPositionPct)) / 100, ...(lastRound.figures?.leapsLook === undefined ? {} : { leapsLook: lastRound.figures.leapsLook }) };
   // v4's buyback minutes (Marcelo 2026-11-02): only the Calls in the money are bought back, and nothing else is sent.
   const liveSessions = await loadLiveTradingSessions(now);
   const nextSessionIso = liveSessions.openDays.find((dateIso) => dateIso > clock.todayIso);
@@ -520,6 +520,12 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   }
   if (pass === "cycles_calls_puts") summary.looked.push(symbol);
   lastRound.notes.push(...look.notes);
+  // The LEAPS is a possible next action once the second position holds shares and none is held: its Calls are quoted once a
+  // day (unless this round quoted them to buy), for the card to name the contract v4 would pick on them (Marcelo 2026-11-05).
+  const secondShares = memory.state.second?.shares ?? 0;
+  if (pass === "cycles_calls_puts" && lastRound.figures !== null && secondShares > 0 && memory.state.leaps === null && look.missing.size === 0) {
+    lastRound.figures.leapsLook = await leapsLookOfToday({ input, ticker, stockPrice, riskFreeRate: clock.riskFreeRate, impliedVolatility: stepImpliedVolatility, listedExpiries, strikesByExpiry: chain.strikesByExpiry, leapsMinDte: v2.leapsMinDte, absDelta: v2.leapsAbsDelta, maxSpreadPctOfMid: farmer.maxSpreadPctOfMid, spreadShareCharged: v2.leapsSpreadCostChargedPct / 100 });
+  }
   for (const { position, candidate, maxShareOfPremium } of look.commissionCapSkips) {
     await recordCommissionCapSkip({ passId: input.passId, symbol, tradingDate: clock.todayIso, position, expiry: candidate.expiry, strike: candidate.strike, dte: candidate.dte, fillPrice: candidate.fillPrice, premiumDollars: candidate.premiumDollars, commissionDollars: candidate.commissionDollars, maxShareOfPremium });
   }
@@ -903,6 +909,26 @@ async function sendShareOrder(context: { input: VolFarmerV4RoundInput; ticker: P
   }
   input.trackWatch(watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: buying ? "buy" : "sell", multiplier: 1 }, description: result.detail, cancelByMs: input.cancelByMs }), result.orderId, ticker.symbol);
   return { actionId, sent: true, detail: `${result.detail} (${formatWholeDollars(limitPrice! * shares)})` };
+}
+
+/**
+ * The LEAPS Calls as quoted today: the contract the engine's own pick (chooseVolFarmerV4Leaps) takes on them at today's
+ * stock price, or why there is none. One burst a day per ticker: a look already saved for today is kept. Nothing is
+ * inferred at another price.
+ */
+export async function leapsLookOfToday(context: { input: VolFarmerV4RoundInput; ticker: PlutoTickerSettings; stockPrice: number; riskFreeRate: number; impliedVolatility: number | null; listedExpiries: readonly string[]; strikesByExpiry: ReadonlyMap<string, number[]>; leapsMinDte: number; absDelta: number; maxSpreadPctOfMid: number; spreadShareCharged: number }): Promise<VolFarmerV4LeapsLook> {
+  const { input, ticker } = context;
+  const previous = await loadVolFarmerV4LeapsLook(ticker.tickerId);
+  if (previous !== null && previous.tradingDate === input.todayIso) return previous;
+  const expiry = context.listedExpiries.find((listed) => daysToExpiry(listed, input.todayIso) >= context.leapsMinDte) ?? null;
+  const look = { tradingDate: input.todayIso, quotedAt: new Date().toISOString(), expiry };
+  if (expiry === null) return { ...look, contract: null, reason: `no Call expiry ${context.leapsMinDte} or more days out is listed` };
+  const quotes = await quoteLeapsExpiry({ input, ticker, expiry, stockPrice: context.stockPrice, riskFreeRate: context.riskFreeRate, impliedVolatility: context.impliedVolatility, heldStrike: null, storedStrikes: context.strikesByExpiry.get(expiry.replaceAll("-", "")) ?? null, absDelta: context.absDelta });
+  const chosen = chooseVolFarmerV4Leaps({ quotes, expiry, stockPrice: context.stockPrice, yearsToExpiry: yearsBetweenIsoDates(input.todayIso, expiry), riskFreeRate: context.riskFreeRate, absDelta: context.absDelta, maxSpreadPctOfMid: context.maxSpreadPctOfMid, spreadShareCharged: context.spreadShareCharged });
+  if (chosen !== null) return { ...look, contract: { strike: chosen.strike, bid: chosen.bid, ask: chosen.ask }, reason: null };
+  if (quotes.length === 0) return { ...look, contract: null, reason: `no strike near |delta| ${context.absDelta} returned a two-sided quote` };
+  const failing = quotes.filter((quote) => baselineQuoteRejection(quote, context.maxSpreadPctOfMid) !== null).length;
+  return { ...look, contract: null, reason: failing === quotes.length ? `${quotes.length} ${quotes.length === 1 ? "strike" : "strikes"} quoted near |delta| ${context.absDelta}, none with a bid of at least $${baselineMinimumBid.toFixed(2)} and a spread within ${context.maxSpreadPctOfMid}% of the mid` : "no quoted strike gave an implied volatility" };
 }
 
 /**

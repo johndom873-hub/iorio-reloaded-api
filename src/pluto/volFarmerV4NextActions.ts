@@ -3,6 +3,7 @@ import { sharesPerContract } from "../backtest/engine/backtestBook.js";
 import { runVolFarmerV4Steps, volFarmerV2StepAtLook, volFarmerV4BreakEven, volFarmerV4LeapsEntryPriceCap, type VolFarmerV4Book, type VolFarmerV4Market, type VolFarmerV4SymbolState } from "../backtest/engine/volFarmerV4Steps.js";
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { formatWeekdayDayMonth } from "../lib/easternIsoDate.js";
+import { formatTradePrice } from "../lib/tradeMessageFormatting.js";
 import { formatWholeDollars } from "../lib/formatWholeDollars.js";
 import { daysToExpiry, describeOptionContract, formatDayMonth } from "../lib/optionContractLabel.js";
 import { isLastSessionBeforeWeekend } from "../lib/tradingWeek.js";
@@ -282,8 +283,18 @@ export function describeVolFarmerV4NextActions(input: VolFarmerV4NextActionsInpu
         : expiry === null
           ? `a Call at least ${rules.v2.leapsMinDte} days out (none is listed)`
           : `the Call of ${formatDayMonth(expiry)} ${expiry.slice(0, 4)} (${daysToExpiry(expiry, todayIso)}DTE) whose |delta| is nearest ${rules.v2.leapsAbsDelta}`;
-    if (stepCap === null) add("buy_leaps", "Buy a LEAPS", "waiting", "Buy a LEAPS", `buys ${what} once the previous session's IV gives a Step`, `Buys ${what} once the previous session's IV gives a Step.`);
-    else add("buy_leaps", "Buy a LEAPS", "waiting", `Buy a LEAPS if ${symbol} is at $${stepCap.toFixed(2)} or below`, what, `Buys ${what} if ${symbol} is at $${stepCap.toFixed(2)} or below (half a Step under the second position's break-even).`);
+    // The contract v4 picks on the LEAPS Calls as quoted (the round's look of the day), or why there is none: real quotes only.
+    const look = leaps === null ? ticker.lastRoundFigures?.leapsLook ?? null : null;
+    const quoted =
+      leaps !== null
+        ? ""
+        : look === null
+          ? " The LEAPS Calls have not been quoted yet."
+          : look.contract !== null && look.expiry !== null
+            ? ` On the quotes of ${formatWeekdayDayMonth(look.tradingDate)} it would pick the ${describeOptionContract({ strike: look.contract.strike, right: "C", expiry: look.expiry, dte: daysToExpiry(look.expiry, todayIso) })}, bid $${formatTradePrice(look.contract.bid)}, ask $${formatTradePrice(look.contract.ask)}; it picks again when the price is reached.`
+            : ` On the quotes of ${formatWeekdayDayMonth(look.tradingDate)}: ${look.reason ?? "no contract"}.`;
+    if (stepCap === null) add("buy_leaps", "Buy a LEAPS", "waiting", "Buy a LEAPS", `buys ${what} once the previous session's IV gives a Step`, `Buys ${what} once the previous session's IV gives a Step.${quoted}`);
+    else add("buy_leaps", "Buy a LEAPS", "waiting", `Buy a LEAPS if ${symbol} is at $${stepCap.toFixed(2)} or below`, what, `Buys ${what} if ${symbol} is at $${stepCap.toFixed(2)} or below (half a Step under the second position's break-even).${quoted}`);
   }
 
   // Buy and sell shares: where v4's own rebalancing would trade, while the first position has no Call open.

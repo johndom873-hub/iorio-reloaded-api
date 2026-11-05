@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { blackScholesPriceOnForward } from "../lib/impliedVolatilitySurface.js";
+import { blackScholesDelta, blackScholesPriceOnForward } from "../lib/impliedVolatilitySurface.js";
 import { contractKey } from "../lib/optionContractKey.js";
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
 import { plutoSafetyLimitsSettingsFixture, plutoVolFarmerV4SettingsFixture } from "./plutoSettingsFixture.js";
@@ -20,6 +20,9 @@ const harness = vi.hoisted(() => ({
   memory: new Map<string, unknown>(),
   saves: [] as { tickerId: string; adopted: boolean }[],
   lastRounds: new Map<string, { notes: string[]; figures: unknown }>(),
+  /** The LEAPS look each ticker's last round saved (as the table keeps it), and the bursts of LEAPS Calls sent. */
+  leapsLooks: new Map<string, unknown>(),
+  leapsBursts: [] as string[],
   outcomes: new Map<string, unknown>(),
   positions: [] as unknown[],
   positionsByTickerId: new Map<string, unknown[]>(),
@@ -125,7 +128,11 @@ vi.mock("./volFarmerV4LookLoader.js", () => ({
   },
   saveVolFarmerV4LastRound: async (tickerId: string, lastRound: { notes: string[]; figures: unknown }) => {
     harness.lastRounds.set(tickerId, structuredClone({ notes: lastRound.notes, figures: lastRound.figures }));
+    const look = (lastRound.figures as { leapsLook?: unknown } | null)?.leapsLook;
+    if (look === undefined) harness.leapsLooks.delete(tickerId);
+    else harness.leapsLooks.set(tickerId, structuredClone(look));
   },
+  loadVolFarmerV4LeapsLook: async (tickerId: string) => harness.leapsLooks.get(tickerId) ?? null,
   loadVolFarmerV4OrderOutcomes: async (actionIds: string[]) => new Map(actionIds.flatMap((id) => (harness.outcomes.has(id) ? [[id, harness.outcomes.get(id)]] : []))),
   loadVolFarmerV4LegStatuses: async () => new Map(),
   loadVolFarmerV4StepImpliedVolatility: async () => harness.stepImpliedVolatility,
@@ -150,7 +157,7 @@ function quotesAt(right: "C" | "P", expiry = "2026-11-06", days = 10): SymbolFil
 }
 
 const marketWatch = {
-  burst: async (_symbol: string, contracts: { expiry: string; strike: number; right: "C" | "P" }[]) => contracts.map((contract) => (harness.quotes as SymbolFileQuote[]).find((quote) => contractKey(quote) === contractKey(contract))!),
+  burst: async (_symbol: string, contracts: { expiry: string; strike: number; right: "C" | "P" }[]) => (contracts[0]?.expiry.startsWith("2027") ? harness.leapsBursts.push(contracts[0].expiry) : 0, contracts).map((contract) => (harness.quotes as SymbolFileQuote[]).find((quote) => contractKey(quote) === contractKey(contract))!),
   snapshot: (symbol: string) => ({ symbol, last: 100, previousClose: 100, ...harness.stockQuote }),
 };
 
@@ -196,6 +203,8 @@ beforeEach(() => {
   harness.memory.clear();
   harness.saves.length = 0;
   harness.lastRounds.clear();
+  harness.leapsLooks.clear();
+  harness.leapsBursts.length = 0;
   harness.outcomes.clear();
   harness.positions = [];
   harness.positionsByTickerId.clear();
@@ -391,6 +400,85 @@ describe("runVolFarmerV4Round", () => {
     const contracts = Math.floor(10_000 / leapsContractCost(leaps!));
     expect(leaps!.quantity).toBe(contracts);
     expect(harness.lastRounds.get("t-VFT")!.notes).toContain(`the free cash ($10,000) held the LEAPS to ${contracts} of the ${Math.floor(25_000 / leapsContractCost(leaps!))} contracts its cap allows`);
+  });
+
+  // The LEAPS is only a possible next action (Marcelo 2026-11-05): the stock is above the price that triggers it. The round quotes
+  // its Calls once a day, from real quotes, and saves what v4's own pick is on them, or why there is none.
+  describe("the LEAPS Calls' look of the day", () => {
+    /** withLeapsDue, with the second position's break-even at 105: half a Step under it is $97.13, the stock at 100 is above. */
+    function withLeapsNotYetDue(): void {
+      withLeapsDue("t-VFT");
+      const memory = harness.memory.get("t-VFT") as { state: { second: { costPerShare: number } } };
+      memory.state.second.costPerShare = 105;
+    }
+
+    it("quotes the Calls of the first expiry 180 or more days out and saves the contract v4's pick takes, with its real bid and ask", async () => {
+      withLeapsNotYetDue();
+      await round();
+      const quotes = (harness.quotes as SymbolFileQuote[]).filter((quote) => quote.expiry === "2027-12-17" && quote.right === "C");
+      const look = (harness.lastRounds.get("t-VFT")!.figures as { leapsLook: { tradingDate: string; expiry: string; contract: { strike: number; bid: number; ask: number }; reason: null } }).leapsLook;
+      expect(look).toMatchObject({ tradingDate: "2026-10-27", expiry: "2027-12-17", reason: null });
+      const quoted = quotes.find((quote) => quote.strike === look.contract.strike)!;
+      expect(look.contract).toEqual({ strike: quoted.strike, bid: quoted.bid, ask: quoted.ask });
+      // Quotes at IV 50% on the forward of a stock at 100, 416 days out: the strike whose |delta| is nearest 0.6.
+      const years = 416 / 365;
+      const forward = 100 * Math.exp(0.04 * years);
+      const nearestToSixTenths = quotes.map((quote) => quote.strike).reduce((best, strike) => (Math.abs(blackScholesDelta(forward, strike, years, 0.04, 0.5, true) - 0.6) < Math.abs(blackScholesDelta(forward, best, years, 0.04, 0.5, true) - 0.6) ? strike : best));
+      expect(look.contract.strike).toBe(nearestToSixTenths);
+      expect(harness.leapsBursts).toHaveLength(1);
+      expect(harness.executed.some((order) => order.kind === "leaps_buy")).toBe(false);
+    });
+
+    it("keeps the day's look at the next round: no second burst", async () => {
+      withLeapsNotYetDue();
+      await round();
+      const first = structuredClone(harness.leapsLooks.get("t-VFT"));
+      await round();
+      expect(harness.leapsBursts).toHaveLength(1);
+      expect(harness.leapsLooks.get("t-VFT")).toEqual(first);
+    });
+
+    it("looks again on the next day", async () => {
+      withLeapsNotYetDue();
+      await round();
+      await round(false, "2026-10-28");
+      expect(harness.leapsBursts).toHaveLength(2);
+      expect(harness.leapsLooks.get("t-VFT")).toMatchObject({ tradingDate: "2026-10-28" });
+    });
+
+    it("says why when no quoted strike passes v4's quote rules, and names no contract", async () => {
+      withLeapsNotYetDue();
+      // Every LEAPS Call with a $0.01 bid: under the $0.05 minimum.
+      harness.quotes = (harness.quotes as SymbolFileQuote[]).map((quote) => (quote.expiry === "2027-12-17" ? { ...quote, bid: 0.01, ask: 0.02 } : quote));
+      await round();
+      const look = (harness.lastRounds.get("t-VFT")!.figures as { leapsLook: { contract: unknown; reason: string } }).leapsLook;
+      expect(look.contract).toBeNull();
+      expect(look.reason).toMatch(/^\d+ strikes quoted near \|delta\| 0\.6, none with a bid of at least \$0\.05 and a spread within \d+% of the mid$/);
+    });
+
+    it("says so when no Call expiry is listed 180 or more days out, with no burst", async () => {
+      withLeapsNotYetDue();
+      harness.chain = { expirations: ["20261120"], strikesByExpiry: new Map() };
+      await round();
+      expect(harness.lastRounds.get("t-VFT")!.figures).toMatchObject({ leapsLook: { expiry: null, contract: null, reason: expect.stringContaining("no Call expiry 180 or more days out is listed") } });
+      expect(harness.leapsBursts).toHaveLength(0);
+    });
+
+    it("looks at nothing while the second position holds no shares", async () => {
+      holdingFirstPosition(600);
+      await round();
+      expect(harness.lastRounds.get("t-VFT")!.figures).not.toHaveProperty("leapsLook");
+      expect(harness.leapsBursts).toHaveLength(0);
+    });
+
+    it("looks at nothing once a LEAPS is held", async () => {
+      withLeapsNotYetDue();
+      const memory = harness.memory.get("t-VFT") as { state: { leaps: unknown } };
+      memory.state.leaps = { legIds: ["leaps-1"], expiry: "2027-12-17", strike: 100, intendedContracts: 5 };
+      await round();
+      expect(harness.lastRounds.get("t-VFT")!.figures).not.toHaveProperty("leapsLook");
+      expect(harness.leapsBursts).toHaveLength(0);
+    });
   });
 
   it("buys no LEAPS without the previous session's IV, and says why", async () => {

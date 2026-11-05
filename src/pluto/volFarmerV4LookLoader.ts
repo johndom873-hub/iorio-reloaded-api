@@ -22,6 +22,21 @@ export async function saveVolFarmerV4Memory(tickerId: string, memory: VolFarmerV
   await connection("pluto_vol_farmer_v4_cycles").insert(row).onConflict("ticker_id").merge();
 }
 
+/**
+ * What the LEAPS Calls quoted at one look (Marcelo 2026-11-05): once a second position holds shares and no LEAPS is held, the
+ * round quotes the LEAPS expiry's Calls nearest the |delta| asked once a day, so the card can name the contract v4 would pick
+ * on those quotes. Real quotes only: no contract and no price are inferred at another stock price.
+ */
+export interface VolFarmerV4LeapsLook {
+  tradingDate: string;
+  quotedAt: string;
+  /** YYYY-MM-DD; null when no Call expiry is listed that far out. */
+  expiry: string | null;
+  /** The contract chosen on the quotes (the engine's own pick), or why none was. */
+  contract: { strike: number; bid: number; ask: number } | null;
+  reason: string | null;
+}
+
 /** The figures a round read for a ticker, for the Pluto screen's warnings. */
 export interface VolFarmerV4RoundFigures {
   /** The ticker's pot: its allocation of Pluto's budget, the cap the pot check holds its orders to. */
@@ -34,6 +49,14 @@ export interface VolFarmerV4RoundFigures {
   leapsCapDollars: number;
   /** What the Puts sell on: the pot less the First position's share (rounds before 2026-10-30 lack it: half the pot). */
   putsDollars?: number;
+  /** Set only while the LEAPS is a possible next action; a look of an earlier day is shown as that day's. */
+  leapsLook?: VolFarmerV4LeapsLook;
+}
+
+/** The LEAPS look the ticker's last round saved, if any. */
+export async function loadVolFarmerV4LeapsLook(tickerId: string, connection: Knex = db): Promise<VolFarmerV4LeapsLook | null> {
+  const row = await connection("pluto_vol_farmer_v4_cycles").where({ ticker_id: tickerId }).first("last_round_figures");
+  return (row?.last_round_figures as VolFarmerV4RoundFigures | null | undefined)?.leapsLook ?? null;
 }
 
 /** A round's notes on a ticker and its figures (null: it stopped before reading the book); a ticker not adopted yet gets a row with no memory. */

@@ -14,7 +14,7 @@ vi.mock("../db/connection.js", async () => {
 
 const { db } = await import("../db/connection.js");
 const { dropIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
-const { saveVolFarmerV4LastRound, saveVolFarmerV4Memory } = await import("./volFarmerV4LookLoader.js");
+const { loadVolFarmerV4LeapsLook, saveVolFarmerV4LastRound, saveVolFarmerV4Memory } = await import("./volFarmerV4LookLoader.js");
 const { loadVolFarmerV4Screen } = await import("./volFarmerV4Screen.js");
 const testDb: Knex = db;
 
@@ -86,5 +86,14 @@ describe("the Vol Farmer v2 card", () => {
     await saveVolFarmerV4LastRound(adoptedId, { at, notes: [], figures });
     const [again] = await loadVolFarmerV4Screen();
     expect(again).toMatchObject({ workingOrders: [], lastRoundNotes: [], first: { shares: 500 } });
+
+    // The LEAPS look a round saved with its figures is read back for the day's next round, and is gone once a round saves none.
+    const leapsLook = { tradingDate: "2026-10-28", quotedAt: at.toISOString(), expiry: "2027-12-17", contract: { strike: 90, bid: 13.9, ask: 14.5 }, reason: null };
+    await saveVolFarmerV4LastRound(adoptedId, { at, notes: [], figures: { ...figures, leapsLook } });
+    expect(await loadVolFarmerV4LeapsLook(adoptedId)).toEqual(leapsLook);
+    expect((await loadVolFarmerV4Screen())[0]!.lastRoundFigures).toMatchObject({ leapsLook });
+    await saveVolFarmerV4LastRound(adoptedId, { at, notes: [], figures });
+    expect(await loadVolFarmerV4LeapsLook(adoptedId)).toBeNull();
+    expect(await loadVolFarmerV4LeapsLook(waitingId)).toBeNull();
   });
 });
