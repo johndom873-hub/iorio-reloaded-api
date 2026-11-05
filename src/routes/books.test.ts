@@ -29,6 +29,29 @@ vi.mock("../books/bookFigures.js", async (importOriginal) => ({
   }),
 }));
 
+// The cut-over's plan reads IBKR (live figures or the statement): stood in here with the staging preview's figures.
+const cutoverPlan = vi.hoisted(() => ({ plutoPositionsValue: 238_995, manualPositionsValue: 265_692, ibkrCash: 355_585 }));
+vi.mock("../books/cutover.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../books/cutover.js")>();
+  return {
+    ...original,
+    planBooksCutover: async (plutoStartingValue: number) => ({
+      mode: "live",
+      cutOverAt: new Date("2026-11-05T05:00:00Z"),
+      statementToDate: null,
+      ibkrCash: cutoverPlan.ibkrCash,
+      plutoStartingValue,
+      plutoPositionsValue: cutoverPlan.plutoPositionsValue,
+      manualPositionsValue: cutoverPlan.manualPositionsValue,
+      plutoOpeningCash: plutoStartingValue - cutoverPlan.plutoPositionsValue,
+      manualOpeningCash: cutoverPlan.ibkrCash - (plutoStartingValue - cutoverPlan.plutoPositionsValue),
+      plutoSymbols: [],
+      statementRowKeys: [],
+      legsWithoutClosingPrice: [],
+    }),
+  };
+});
+
 const { db } = await import("../db/connection.js");
 const { dropIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
 const { booksRouter } = await import("./books.js");
@@ -142,5 +165,30 @@ describe("the ticker switch", () => {
     expect(await db("ticker_book_periods").where({ ticker_id: ticker.id }).whereNull("ended_at").first("book_key")).toEqual({ book_key: "pluto" });
     expect(await db("book_leg_transfers").where({ position_leg_id: leg.id }).first("from_book", "to_book", db.raw("mark_price::float AS mark"), db.raw("realized_dollars::float AS realized"))).toEqual({ from_book: "manual", to_book: "pluto", mark: 162.4, realized: 2_480 });
     expect(await totalsByBook()).toEqual({ pluto: -32_480, manual: 32_480 });
+  });
+});
+
+describe("POST /books/cutover", () => {
+  beforeEach(async () => {
+    for (const table of ["book_value_snapshots", "ticker_book_periods", "books_cutover"]) await db(table).del();
+  });
+
+  it("previews Pluto at $400,000 without writing: $161,005 of cash, Manual $194,580", async () => {
+    const preview = await call("POST", "/books/cutover/preview", { plutoStartingValue: 400_000 });
+    expect(preview).toMatchObject({ status: 200, json: { mode: "live", ibkrCash: 355_585, pluto: { cash: 161_005, positionsValue: 238_995, bookValue: 400_000 }, manual: { cash: 194_580, positionsValue: 265_692, bookValue: 460_272 } } });
+    expect(await db("books_cutover").first("id")).toBeUndefined();
+  });
+
+  it("starts the books once, with the opening cash in the ledger, and refuses a second start", async () => {
+    expect((await call("POST", "/books/cutover", { plutoStartingValue: 400_000 })).status).toBe(200);
+    expect(await totalsByBook()).toEqual({ pluto: 161_005, manual: 194_580 });
+    expect(await call("POST", "/books/cutover", { plutoStartingValue: 400_000 })).toEqual({ status: 409, json: { error: "The books have already been started." } });
+  });
+
+  it("refuses a start that leaves a book with negative cash, naming the range, and a trader", async () => {
+    expect(await call("POST", "/books/cutover", { plutoStartingValue: 200_000 })).toEqual({ status: 409, json: { error: "A book would start with negative cash (Pluto −$38,995, Manual $394,580): Pluto's starting value must be between $238,995 and $594,580." } });
+    expect((await call("POST", "/books/cutover", { plutoStartingValue: -1 })).status).toBe(400);
+    sessionAccess.level = "trader";
+    expect((await call("POST", "/books/cutover/preview", { plutoStartingValue: 400_000 })).status).toBe(403);
   });
 });

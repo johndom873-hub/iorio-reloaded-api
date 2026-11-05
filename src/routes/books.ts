@@ -5,6 +5,8 @@ import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
 import { loadBooksLiveState, loadPlutoBookSymbolsNow } from "../books/bookFigures.js";
 import { bookLabels, isBookKey } from "../books/bookKeys.js";
 import { formatWholeDollars } from "../lib/formatWholeDollars.js";
+import { readAppEnvironment } from "../lib/appEnvironment.js";
+import { applyBooksCutover, planBooksCutover, type CutoverPlan } from "../books/cutover.js";
 
 // The Pluto and Manual books (Marcelo 2026-11-05). Everyone sees both books; only an admin splits a deposit or moves cash.
 
@@ -31,7 +33,8 @@ booksRouter.get("/", async (_request, response) => {
     loadPlutoBookSymbolsNow(),
   ]);
   if (!state.ready) {
-    response.json({ ready: false });
+    // What starting the books would read (POST /books/cutover): IBKR's statement on prod, its live figures elsewhere.
+    response.json({ ready: false, startsFrom: cutoverFromStatement() ? "statement" : "live" });
     return;
   }
   const lastNightValues = lastNight
@@ -131,4 +134,59 @@ booksRouter.post("/moves", requireAdmin, async (request, response) => {
     { book_key: toBook, amount: amountDollars, effective_at: now, kind: "book_move", group_id: groupId, description, created_by_user_id: userId },
   ]);
   response.json({ moved: true });
+});
+
+// Starting the books from the screen (Marcelo 2026-11-05; once per environment, admins only): prod starts from IBKR's
+// statement and never from live figures; staging and development from IBKR's live figures (the paper account's statement
+// has no sections). Preview writes nothing; start recomputes the plan at the moment it is applied.
+const cutoverFromStatement = () => readAppEnvironment() === "production";
+
+function describeCutoverPlan(plan: CutoverPlan) {
+  return {
+    mode: plan.mode,
+    cutOverAt: plan.cutOverAt.toISOString(),
+    statementToDate: plan.statementToDate,
+    ibkrCash: plan.ibkrCash,
+    pluto: { cash: plan.plutoOpeningCash, positionsValue: plan.plutoPositionsValue, bookValue: plan.plutoStartingValue },
+    manual: { cash: plan.manualOpeningCash, positionsValue: plan.manualPositionsValue, bookValue: plan.manualOpeningCash + plan.manualPositionsValue },
+    plutoSymbols: plan.plutoSymbols,
+    legsWithoutClosingPrice: plan.legsWithoutClosingPrice,
+  };
+}
+
+function readPlutoStartingValue(body: unknown): number | null {
+  const value = Number((body as { plutoStartingValue?: unknown } | undefined)?.plutoStartingValue);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+booksRouter.post("/cutover/preview", requireAdmin, async (request, response) => {
+  const plutoStartingValue = readPlutoStartingValue(request.body);
+  if (plutoStartingValue === null) {
+    response.status(400).json({ error: "Pluto's starting value must be a dollar amount of 0 or more." });
+    return;
+  }
+  try {
+    response.json(describeCutoverPlan(await planBooksCutover(plutoStartingValue, { withoutStatement: !cutoverFromStatement() })));
+  } catch (error) {
+    response.status(409).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+booksRouter.post("/cutover", requireAdmin, async (request, response) => {
+  const plutoStartingValue = readPlutoStartingValue(request.body);
+  if (plutoStartingValue === null) {
+    response.status(400).json({ error: "Pluto's starting value must be a dollar amount of 0 or more." });
+    return;
+  }
+  try {
+    const plan = await planBooksCutover(plutoStartingValue, { withoutStatement: !cutoverFromStatement() });
+    if (plan.plutoOpeningCash < 0 || plan.manualOpeningCash < 0) {
+      response.status(409).json({ error: `A book would start with negative cash (Pluto ${formatWholeDollars(plan.plutoOpeningCash)}, Manual ${formatWholeDollars(plan.manualOpeningCash)}): Pluto's starting value must be between ${formatWholeDollars(plan.plutoPositionsValue)} and ${formatWholeDollars(plan.ibkrCash + plan.plutoPositionsValue)}.` });
+      return;
+    }
+    await applyBooksCutover(plan, request.session.userId as string);
+    response.json(describeCutoverPlan(plan));
+  } catch (error) {
+    response.status(409).json({ error: error instanceof Error ? error.message : String(error) });
+  }
 });
