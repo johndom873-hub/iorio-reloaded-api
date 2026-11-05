@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { db } from "../db/connection.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { fetchFlexStatements } from "../ibkr/fetchFlexCashTransactions.js";
-import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { readAppEnvironment } from "../lib/appEnvironment.js";
+import { lastCompletedSessionDate } from "../lib/marketSessionStatus.js";
 import { loadOpenLegMarketValues } from "../lib/positionExposure.js";
 import { attributeStatement, statementBaseCurrencyProblem, statementCutOffAt, statementSectionRows } from "./statementAttribution.js";
 import { missingStatementSections } from "./statementImport.js";
@@ -48,6 +49,12 @@ interface ClosingLegRow {
   entry_price: string;
   closing_price: string | null;
 }
+
+/**
+ * Whether this environment starts its books from IBKR's statement (and posts the nightly statement into them): prod only.
+ * Staging and development start from IBKR's live figures, the paper account's statement having no sections (and SGD).
+ */
+export const booksStartFromStatement = () => readAppEnvironment() === "production";
 
 /** The plan, nothing written. `withoutStatement` starts from IBKR's live figures (staging's paper account has no usable statement). */
 export async function planBooksCutover(plutoStartingValue: number, options: { withoutStatement: boolean }): Promise<CutoverPlan> {
@@ -103,6 +110,9 @@ export async function planBooksCutover(plutoStartingValue: number, options: { wi
 
 /** Writes the plan in one transaction: the cut-over row, the two opening balances, Pluto's ticker periods and the first snapshots. */
 export async function applyBooksCutover(plan: CutoverPlan, createdByUserId: string | null): Promise<void> {
+  // The first book values are the baseline night: the statement's last day, or the last session closed before a live
+  // start (a start at 00:24 on Thursday 5 Nov counts as Wednesday 4 Nov's close; Thursday's nightly values are its day).
+  const snapshotDate = plan.statementToDate ?? (await lastCompletedSessionDate(plan.cutOverAt));
   await db.transaction(async (trx) => {
     if (await trx("books_cutover").first("id")) throw new Error("The books have already been started.");
     await trx("books_cutover").insert({
@@ -123,7 +133,6 @@ export async function applyBooksCutover(plan: CutoverPlan, createdByUserId: stri
     ]);
     const tickers: { id: string }[] = await trx("tickers").whereIn("symbol", plan.plutoSymbols).select("id");
     if (tickers.length > 0) await trx("ticker_book_periods").insert(tickers.map((ticker) => ({ ticker_id: ticker.id, book_key: "pluto", started_at: plan.cutOverAt, created_by_user_id: createdByUserId })));
-    const snapshotDate = plan.statementToDate ?? easternIsoDate(plan.cutOverAt);
     await trx("book_value_snapshots")
       .insert([
         { snapshot_date: snapshotDate, book_key: "pluto", cash: plan.plutoOpeningCash, positions_value: plan.plutoPositionsValue, book_value: plan.plutoStartingValue },

@@ -5,8 +5,7 @@ import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
 import { loadBooksLiveState, loadPlutoBookSymbolsNow } from "../books/bookFigures.js";
 import { bookLabels, isBookKey } from "../books/bookKeys.js";
 import { formatWholeDollars } from "../lib/formatWholeDollars.js";
-import { readAppEnvironment } from "../lib/appEnvironment.js";
-import { applyBooksCutover, planBooksCutover, type CutoverPlan } from "../books/cutover.js";
+import { applyBooksCutover, booksStartFromStatement, planBooksCutover, type CutoverPlan } from "../books/cutover.js";
 
 // The Pluto and Manual books (Marcelo 2026-11-05). Everyone sees both books; only an admin splits a deposit or moves cash.
 
@@ -139,7 +138,7 @@ booksRouter.post("/moves", requireAdmin, async (request, response) => {
 // Starting the books from the screen (Marcelo 2026-11-05; once per environment, admins only): prod starts from IBKR's
 // statement and never from live figures; staging and development from IBKR's live figures (the paper account's statement
 // has no sections). Preview writes nothing; start recomputes the plan at the moment it is applied.
-const cutoverFromStatement = () => readAppEnvironment() === "production";
+const cutoverFromStatement = booksStartFromStatement;
 
 function describeCutoverPlan(plan: CutoverPlan) {
   return {

@@ -14,6 +14,7 @@ import { reportWorkerHeartbeat } from "../lib/workerHeartbeatLiveness.js";
 import { liveDataProbeSymbol, probeCompetingLiveSession } from "./probeCompetingLiveSession.js";
 import { blockedAfterReloginMessage, blockedRestartDeferredMessage, competingLiveSessionSurvivedRestart, reportCompetingLiveSession } from "../lib/competingLiveSessionAlert.js";
 import { reportPositionReconciliation, type PositionReconciliationResult } from "../lib/positionReconciliationAlert.js";
+import { checkBooksCashGap } from "../books/bookCashGapAlert.js";
 
 // Confirmed 2026-08-27: reqHistoricalData can silently hang (no data, no
 // error event — just a timeout) while the connection handshake itself and
@@ -315,12 +316,14 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
     let workerCheck: { active: boolean; restarted: boolean } | null = null;
     let competingLiveSession: Awaited<ReturnType<typeof probeCompetingLiveSession>> | null = null;
     let problems: string[] | null = null;
+    let booksCashGap: string | null = null;
     const buildDetails = () => ({
       output: gatewayOutput,
       handshakeErrors,
       probe,
       worker: workerCheck ? { active: workerCheck.active, restarted: workerCheck.restarted } : null,
       reconciliationProblems: problems,
+      booksCashGap,
       competingLiveSession,
       marketQuoteLoopProblem,
       opsMonitorProblem,
@@ -502,6 +505,8 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
     await classifyReconciliationProblems(reconciliationProblems)
       .then(reportPositionReconciliation)
       .catch((error) => console.warn(`position reconciliation alert failed: ${error instanceof Error ? error.message : error}`));
+    // The books' cash against IBKR's (bookCashGapAlert.ts), once IBKR has answered; its failure never fails the run.
+    booksCashGap = await checkBooksCashGap().catch((error) => `Books cash gap check itself failed: ${error instanceof Error ? error.message : error}`);
 
     await checkWorkerHeartbeat();
     return {

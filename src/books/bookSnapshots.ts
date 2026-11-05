@@ -20,6 +20,9 @@ export interface ClosingLegValue {
 export async function writeBookValueSnapshots(snapshotDate: string, legs: readonly ClosingLegValue[], now: Date = new Date()): Promise<Record<BookKey, number> | null> {
   const cutover = await loadBooksCutover();
   if (!cutover) return null;
+  // Never over the start's own values (the baseline night) or before them.
+  const first = await db("book_value_snapshots").first(db.raw("min(snapshot_date)::text AS first"));
+  if (first?.first && snapshotDate <= first.first) return null;
   const periods = await loadTickerBookPeriods();
   const confirmedThrough = await loadConfirmedLedgerCutOffAt(cutover);
   const positionIds = [...new Set(legs.map((leg) => leg.positionId))];

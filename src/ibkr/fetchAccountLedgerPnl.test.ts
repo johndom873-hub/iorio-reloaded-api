@@ -23,9 +23,10 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("fetchAccountLedgerPnl", () => {
-  it("subscribes to all account updates and returns the BASE ledger realized and unrealized P&L when the download ends", async () => {
+  it("subscribes to all account updates and returns the BASE ledger realized and unrealized P&L (a USD-based account, rate 1) when the download ends", async () => {
     const result = fetchAccountLedgerPnl();
     await vi.advanceTimersByTimeAsync(0);
+    accountValue("$LEDGER-ExchangeRate", "1.00", "USD");
     expect(ib.reqAccountUpdates).toHaveBeenCalledWith(true, "");
     accountValue("$LEDGER-RealizedPnL", "1234.56", "BASE");
     accountValue("$LEDGER-UnrealizedPnL", "-78.9", "BASE");
@@ -56,6 +57,7 @@ describe("fetchAccountLedgerPnl", () => {
   it("keeps an earlier real figure when a later empty one arrives, and still reads a genuine zero", async () => {
     const result = fetchAccountLedgerPnl();
     await vi.advanceTimersByTimeAsync(0);
+    accountValue("$LEDGER-ExchangeRate", "1.00", "USD");
     accountValue("$LEDGER-UnrealizedPnL", "12.5", "BASE");
     accountValue("$LEDGER-UnrealizedPnL", "", "BASE");
     accountValue("$LEDGER-RealizedPnL", "0", "BASE");
@@ -66,6 +68,7 @@ describe("fetchAccountLedgerPnl", () => {
   it("keeps the last numeric BASE value when IBKR sends a figure several times", async () => {
     const result = fetchAccountLedgerPnl();
     await vi.advanceTimersByTimeAsync(0);
+    accountValue("$LEDGER-ExchangeRate", "1.00", "USD");
     accountValue("$LEDGER-RealizedPnL", "100", "BASE");
     accountValue("$LEDGER-RealizedPnL", "200", "BASE");
     accountValue("$LEDGER-RealizedPnL", "oops", "BASE");
@@ -76,9 +79,31 @@ describe("fetchAccountLedgerPnl", () => {
   it("returns a zero figure as a real value", async () => {
     const result = fetchAccountLedgerPnl();
     await vi.advanceTimersByTimeAsync(0);
+    accountValue("$LEDGER-ExchangeRate", "1.00", "USD");
     accountValue("$LEDGER-RealizedPnL", "0", "BASE");
     ib.emit(EventName.accountDownloadEnd, "U21518308");
     expect(await result).toEqual({ realizedPnl: 0, unrealizedPnl: null });
+  });
+
+  it("gives an SGD-based account's BASE figures in US dollars at the USD entry's rate (base per USD)", async () => {
+    const result = fetchAccountLedgerPnl();
+    await vi.advanceTimersByTimeAsync(0);
+    accountValue("$LEDGER-UnrealizedPnL", "-89719.58", "BASE", "DUR854038");
+    accountValue("$LEDGER-RealizedPnL", "0.00", "BASE", "DUR854038");
+    accountValue("$LEDGER-ExchangeRate", "1.00", "SGD", "DUR854038");
+    accountValue("$LEDGER-ExchangeRate", "1.2762129", "USD", "DUR854038");
+    ib.emit(EventName.accountDownloadEnd, "DUR854038");
+    const ledger = await result;
+    expect(ledger.unrealizedPnl).toBeCloseTo(-70301.3, 0);
+    expect(ledger.realizedPnl).toBe(0);
+  });
+
+  it("leaves both null, rather than another currency as dollars, when no USD rate came", async () => {
+    const result = fetchAccountLedgerPnl();
+    await vi.advanceTimersByTimeAsync(0);
+    accountValue("$LEDGER-UnrealizedPnL", "-89719.58", "BASE", "DUR854038");
+    ib.emit(EventName.accountDownloadEnd, "DUR854038");
+    expect(await result).toEqual({ realizedPnl: null, unrealizedPnl: null });
   });
 
   it("unsubscribes using the account name the values carried, removes its listeners and disconnects", async () => {

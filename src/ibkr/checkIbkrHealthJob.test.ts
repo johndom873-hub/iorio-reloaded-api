@@ -48,6 +48,7 @@ vi.mock("../lib/competingLiveSessionAlert.js", async () => {
   };
 });
 vi.mock("../lib/positionReconciliationAlert.js", () => ({ reportPositionReconciliation: mocks.reportPositionReconciliation }));
+vi.mock("../books/bookCashGapAlert.js", () => ({ checkBooksCashGap: async () => null }));
 vi.mock("../lib/marketQuoteLoopLiveness.js", () => ({ reportMarketQuoteLoopLiveness: mocks.reportMarketQuoteLoopLiveness }));
 vi.mock("../lib/opsMonitorLiveness.js", () => ({ reportOpsMonitorLiveness: mocks.reportOpsMonitorLiveness }));
 vi.mock("../lib/workerHeartbeatLiveness.js", () => ({ reportWorkerHeartbeat: mocks.reportWorkerHeartbeat }));
@@ -350,6 +351,7 @@ describe("runIbkrHealthCheckJob: healthy path", () => {
       probe: { failed: false, reason: null, restarted: false },
       worker: { active: true, restarted: false },
       reconciliationProblems: [],
+      booksCashGap: null,
       competingLiveSession: "flowing",
       marketQuoteLoopProblem: null,
       opsMonitorProblem: null,

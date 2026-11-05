@@ -41,10 +41,10 @@ function sessionDateSql(timestamp: string): string {
 
 /**
  * `book` (the Dashboard's book switch, Marcelo 2026-11-05): only each position's daily P&L in the book its ticker belonged
- * to that night (bookOfPositionAtNightSql), and only from the books' first date (`booksFromDate`); null = every position.
+ * to that night (bookOfPositionAtNightSql), and only after the books' first date (`booksFromDate`, the baseline night: its own day happened before the books); null = every position.
  */
 export async function computeStrategyDailyPnlSeries(days: number, book: { book: BookKey; booksFromDate: string } | null = null): Promise<StrategyDailyPnl[]> {
-  const bookFilter = book === null ? "" : `WHERE ${bookOfPositionAtNightSql("p", "pd.d")} = ? AND pd.d >= ?::date`;
+  const bookFilter = book === null ? "" : `WHERE ${bookOfPositionAtNightSql("p", "pd.d")} = ? AND pd.d > ?::date`;
   const result = await db.raw(
     `
     WITH days AS (

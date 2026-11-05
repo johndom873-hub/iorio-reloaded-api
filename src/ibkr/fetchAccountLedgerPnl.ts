@@ -16,8 +16,11 @@ export interface AccountLedgerPnl {
  *
  * IBKR breaks $LEDGER values out per currency plus one "BASE" entry that's
  * the account-total figure converted to the account's base currency —
- * that's the one this reads; per-currency entries (e.g. "SGD") are
- * ignored. There is no daily_pnl equivalent in this data — that field is
+ * that's the one this reads, in US dollars (Marcelo 2026-11-05): divided by
+ * the USD entry's ExchangeRate (base per USD, 1 on prod, 1.2762 on staging's
+ * SGD paper account on 2026-11-05). With no USD rate both stay null rather
+ * than record another currency as dollars (the nightly snapshot still writes
+ * the rest). There is no daily_pnl equivalent in this data — that field is
  * intentionally left unpopulated by the daily snapshot job (2026-08-20
  * decision: not worth resurrecting the broken reqPnL path just for it).
  */
@@ -27,7 +30,8 @@ export async function fetchAccountLedgerPnl(): Promise<AccountLedgerPnl> {
 
   try {
     return await new Promise<AccountLedgerPnl>((resolve, reject) => {
-      const ledger: AccountLedgerPnl = { realizedPnl: null, unrealizedPnl: null };
+      const ledgerInBase: AccountLedgerPnl = { realizedPnl: null, unrealizedPnl: null };
+      let usdExchangeRate: number | null = null;
       let accountName: string | null = null;
 
       const timer = setTimeout(() => {
@@ -37,18 +41,20 @@ export async function fetchAccountLedgerPnl(): Promise<AccountLedgerPnl> {
 
       function onUpdateAccountValue(key: string, value: string, currency: string, account: string) {
         accountName = account;
+        if (key === "$LEDGER-ExchangeRate" && currency === "USD" && Number(value) > 0) usdExchangeRate = Number(value);
         if (currency !== "BASE") return;
         // An empty string is "no value", not zero: Number("") is 0, which would record a figure IBKR never sent.
         if (value.trim() === "") return;
         const numericValue = Number(value);
         if (Number.isNaN(numericValue)) return;
-        if (key === "$LEDGER-RealizedPnL") ledger.realizedPnl = numericValue;
-        if (key === "$LEDGER-UnrealizedPnL") ledger.unrealizedPnl = numericValue;
+        if (key === "$LEDGER-RealizedPnL") ledgerInBase.realizedPnl = numericValue;
+        if (key === "$LEDGER-UnrealizedPnL") ledgerInBase.unrealizedPnl = numericValue;
       }
 
       function onAccountDownloadEnd() {
         cleanup();
-        resolve(ledger);
+        const inUsd = (valueInBase: number | null) => (valueInBase === null || usdExchangeRate === null ? null : valueInBase / usdExchangeRate);
+        resolve({ realizedPnl: inUsd(ledgerInBase.realizedPnl), unrealizedPnl: inUsd(ledgerInBase.unrealizedPnl) });
       }
 
       function cleanup() {

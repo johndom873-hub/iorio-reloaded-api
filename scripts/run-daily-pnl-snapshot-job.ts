@@ -68,6 +68,7 @@ import { runJob } from "../src/lib/runJob.js";
 import { buildPnlSnapshotJobOutcome, type PnlSnapshotProblem } from "../src/lib/pnlSnapshotJobOutcome.js";
 import { assignFlowsToSnapshots, extractExternalCashFlows, type FlexCashFlow } from "../src/lib/flexCashFlowAssignment.js";
 import { importStatementIntoBooks } from "../src/books/statementImport.js";
+import { booksStartFromStatement } from "../src/books/cutover.js";
 import { writeBookValueSnapshots } from "../src/books/bookSnapshots.js";
 import { fillWorthlessExpiredOptionPrices } from "../src/lib/expiredOptionWorthlessPrice.js";
 import { fetchOpenLegsOfOpenPositions, type OpenPositionLegRow } from "../src/lib/openPositionLegsForPnlSnapshot.js";
@@ -151,14 +152,17 @@ async function runStatementSteps(snapshotDate: string, legRows: OpenPositionLegR
       console.error(`Cash-flow reconciliation failed: ${describeError(error)}`);
       problems.push({ message: `Flex cash-flow reconcile failed, so deposits and withdrawals may still count as trading P&L - ${describeError(error)}`, errorCount: 1, nothingUsable: false });
     }
-    try {
-      if (statements.length !== 1) throw new Error(`expected one statement, got ${statements.length}`);
-      const result = await importStatementIntoBooks(statements[0]! as Record<string, unknown>);
-      if (result.posted) console.log(`Books: statement through ${result.toDate} posted ${result.newEntryCount} entr(ies); gap against IBKR's ending cash ${result.gap === null ? "unknown" : result.gap.toFixed(6)}.`);
-      for (const message of result.problems) problems.push({ message: `Books: ${message}`, errorCount: 1, nothingUsable: false });
-    } catch (error) {
-      console.error(`Books statement import failed: ${describeError(error)}`);
-      problems.push({ message: `Books: IBKR's statement could not be posted - ${describeError(error)}`, errorCount: 1, nothingUsable: false });
+    // Staging and development start their books from IBKR's live figures and post no statement (cutover.ts).
+    if (booksStartFromStatement()) {
+      try {
+        if (statements.length !== 1) throw new Error(`expected one statement, got ${statements.length}`);
+        const result = await importStatementIntoBooks(statements[0]! as Record<string, unknown>);
+        if (result.posted) console.log(`Books: statement through ${result.toDate} posted ${result.newEntryCount} entr(ies); gap against IBKR's ending cash ${result.gap === null ? "unknown" : result.gap.toFixed(6)}.`);
+        for (const message of result.problems) problems.push({ message: `Books: ${message}`, errorCount: 1, nothingUsable: false });
+      } catch (error) {
+        console.error(`Books statement import failed: ${describeError(error)}`);
+        problems.push({ message: `Books: IBKR's statement could not be posted - ${describeError(error)}`, errorCount: 1, nothingUsable: false });
+      }
     }
   }
   try {
