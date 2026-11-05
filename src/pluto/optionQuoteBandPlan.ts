@@ -12,7 +12,7 @@ import { optionRequoteBand, selectOptionRequoteContracts, type OptionRequoteBand
 //   universe          the stored chain's contracts (both rights) of the expiry Vol Farmer v4 sells: the one ending at the
 //                     session's close (0 days away), or the next listed after the session (its Options expiry setting); a
 //                     LEAPS is quoted when its steps ask for one, volFarmerV4Round.ts. No contract is left out for its volume:
-//                     a sale is capped at the bid size of its quote (baselineSaleSteps.ts, Marcelo 2026-11-05)
+//                     Pluto's sales have no size limit (baselineSaleSteps.ts, Marcelo 2026-11-05)
 //   last-seen IV      the contract's own IV at its latest quote today (the mid's IV on the expiry's forward, Pluto's
 //                     forward from the band's own quotes moved with the stock: forwardAtSpot); else last night's IBKR IV plus the
 //                     expiry's median shift today (own IV today − IBKR IV last night, over the expiry's contracts that

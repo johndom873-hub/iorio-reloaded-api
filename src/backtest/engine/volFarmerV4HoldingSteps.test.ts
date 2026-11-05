@@ -23,6 +23,7 @@ function marketOf(stockPrice: number, expiry = "2026-11-06"): VolFarmerV4Market 
   return {
     symbol: "VFT",
     todayIso: "2026-10-27",
+    salesSizeLimit: "bid_size",
     stockPrice,
     riskFreeRate: 0.04,
     quotes,
@@ -319,3 +320,33 @@ describe("Vol Farmer v3's holding", () => {
     expect(freeBook.orders.calls[0]!.candidate.strike).toBeGreaterThan(100);
   });
 });
+
+describe("the size limit on a sale (Marcelo 2026-11-05)", () => {
+  /** The 10 held lots' Call, the market's Call quotes carrying `bidSize` and its limit set as asked. */
+  function sellOn(salesSizeLimit: "bid_size" | "none", bidSize: number | null) {
+    const market = marketOf(100);
+    const sized: VolFarmerV4Market = { ...market, salesSizeLimit, quotes: market.quotes.map((quote) => ({ ...quote, bidSize })) };
+    const state = { ...newVolFarmerV4SymbolState(), first: positionOf(1_000, 100) };
+    // A $200,000 pot: the 10 lots held ($100,000) are its half in shares, so nothing is rebalanced before the Call.
+    const { book, orders } = recordingBook(200_000);
+    const note = runVolFarmerV4Steps({ state, market: sized, farmer: defaultBacktestVolFarmerSettings, v2, v3: defaultBacktestVolFarmerV3Settings, book });
+    return { orders, note };
+  }
+
+  it("in the lab, caps a Call sale at the bid size of its quote: 3 on the bid sells 3 of the 10 free lots", () => {
+    expect(sellOn("bid_size", 3).orders.calls.map((sale) => sale.contracts)).toEqual([3]);
+  });
+
+  it("in the lab, sells nothing on a quote with no bid size or a size of 0, and the note says the bid size left it out", () => {
+    for (const bidSize of [null, 0]) {
+      const { orders, note } = sellOn("bid_size", bidSize);
+      expect(orders.calls).toEqual([]);
+      expect(note).toMatch(/no Call .*bid size \d+/);
+    }
+  });
+
+  it("in Pluto, has no size limit: every free lot is sold whatever the bid shows, even a bid of 3 or none", () => {
+    for (const bidSize of [3, null]) expect(sellOn("none", bidSize).orders.calls.map((sale) => sale.contracts)).toEqual([10]);
+  });
+});
+

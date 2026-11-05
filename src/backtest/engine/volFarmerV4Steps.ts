@@ -258,6 +258,8 @@ export interface VolFarmerV4Market {
   quotesLeftUnreadByRight?: { C: number; P: number };
   forwardAnchors: ReadonlyMap<string, BaselineForwardAnchor>;
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
+  /** A sale's size limit: the lab's "bid_size" (the bid size of the quote at the look), Pluto's "none" (see baselineSaleSteps.ts, Marcelo 2026-11-05). */
+  salesSizeLimit: "bid_size" | "none";
   /** Years from the look to today's close: a same-day expiry's time. */
   yearsToTodaysClose: number;
   /** Years from the look to an expiry's settlement: the LEAPS' time. */
@@ -574,7 +576,7 @@ export function runVolFarmerV4Turn(input: VolFarmerV4LookInput): VolFarmerV4Turn
       stockPrice,
       riskFreeRate,
       previousSessionVolumeByContract: market.previousSessionVolumeByContract,
-      capsAtBidSize: true,
+      sizeLimit: market.salesSizeLimit,
       settings: { minAbsDelta: limits.minAbsDelta, maxAbsDelta: limits.maxAbsDelta, minDte: dte, maxDte: dte, maxSpreadPctOfMid: farmer.maxSpreadPctOfMid },
       spreadShareCharged: market.spreadShareCharged,
       isHeld: (contract) => limits.heldExcluded && heldContracts.has(contractKeyOf(contract)),

@@ -52,6 +52,7 @@ function marketOf(stockPrice: number): VolFarmerV4Market {
   return {
     symbol: "VFT",
     todayIso: "2026-10-27",
+    salesSizeLimit: "none",
     stockPrice,
     riskFreeRate: 0.04,
     quotes,

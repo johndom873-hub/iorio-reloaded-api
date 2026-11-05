@@ -736,7 +736,7 @@ const volFarmerV4SourcePaths: readonly string[] = [
 
 /** The copied rows whose note names a rule v4 reads differently: the Calls' strike and expiry are its own choices. */
 const volFarmerV4Notes: Readonly<Record<string, string>> = {
-  maxSpreadPctOfMid: "(ask − bid) ÷ mid; a bid of at least $0.05, and a sale of at most the bid size of its quote at the look (no bid size, no sale; Marcelo 2026-11-05)",
+  maxSpreadPctOfMid: "(ask − bid) ÷ mid; a bid of at least $0.05, and in the lab, a sale of at most the bid size of its quote at the look (no bid size, no sale; Marcelo 2026-11-05); Pluto sells with no size limit",
   callMinAbsDelta: "the Call sold is the one with the highest premium yield (annualized) inside this |delta| range, on the expiry Calls and Puts expire sets, struck as Calls struck at least sets; |delta| from each quote's own implied volatility",
   putsStartCallYieldPct: "% a year: Puts start while the first position's Calls yield under this. At each look where the first position needs a new Call (none open), the best Call it can sell (the Calls' |delta| range, the expiry sold, struck as Calls struck at least sets) is measured by its premium yield; under this (no Call: 0%), Puts are sold with the rest of the pot (after the First position), beside the Calls",
   putMaxAbsDelta: "the Puts' highest |delta|: the Put sold is the one with the highest premium yield of the expiry sold (Calls and Puts expire) up to this |delta|, struck as Puts struck at most sets; as many contracts as the rest of the pot secures (strike × 100 each)",

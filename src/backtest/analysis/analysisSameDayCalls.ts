@@ -77,7 +77,7 @@ export function scanSameDayCalls(file: BacktestSymbolFile, day: SameDayCallScanD
     riskFreeRate: day.riskFreeRate,
     // v4's volume limit is the bid size of the 10:00 quote (Marcelo 2026-11-05), not a share of the previous session's volume.
     previousSessionVolumeByContract: null,
-    capsAtBidSize: true,
+    sizeLimit: "bid_size",
     settings: { minAbsDelta: settings.callMinAbsDelta, maxAbsDelta: settings.callMaxAbsDelta, minDte: 0, maxDte: 0, maxSpreadPctOfMid: settings.maxSpreadPctOfMid },
     spreadShareCharged: settings.spreadShareCharged,
     isHeld: () => false,

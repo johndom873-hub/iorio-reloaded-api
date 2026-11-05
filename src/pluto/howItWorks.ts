@@ -59,7 +59,7 @@ export interface PlutoHowItWorks {
     tickerCooldownMinutes: number;
   };
   volFarmerV4: {
-    /** The Calls' |delta| range, spread limit and bid minimum; a sale is also capped at the bid size of its quote (no number to quote). */
+    /** The Calls' |delta| range, spread limit and bid minimum (a sale has no size limit: it is a limit at the live mid). */
     callMinAbsDelta: number;
     callMaxAbsDelta: number;
     maxSpreadPctOfMid: number;

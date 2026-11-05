@@ -29,7 +29,7 @@ const askSizeTickTypes = new Set([3, 70]);
 const optionImpliedVolatilityTickType = 24;
 /** How long a stock asked for its IV waits for tick 24 after its two-sided quote. */
 export const impliedVolatilityGraceMs = 1_500;
-/** How long an option waits for its bid and ask sizes after its two-sided quote (Vol Farmer v4 caps a sale at the bid size); settled without them after it. */
+/** How long an option waits for its bid and ask sizes after its two-sided quote (kept with the quote for analysis; Pluto's sales have no size limit); settled without them after it. */
 export const quoteSizeGraceMs = 1_000;
 
 export interface WindowContract {

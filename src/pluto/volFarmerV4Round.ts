@@ -463,6 +463,8 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   const marketWith = (leapsQuotesByExpiry: ReadonlyMap<string, SymbolFileQuote[]>, missing: Set<string>): VolFarmerV4Market => ({
     symbol,
     todayIso: clock.todayIso,
+    // Pluto sells limits at the live mid, re-checked on a live quote just before and at the order route: no size limit (Marcelo 2026-11-05).
+    salesSizeLimit: "none",
     stockPrice,
     riskFreeRate: clock.riskFreeRate,
     quotes,

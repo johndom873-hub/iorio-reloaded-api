@@ -116,10 +116,11 @@ export interface BaselineCandidateInput {
   /** The previous session's volume by contractKey; null when unknown (nothing passes the volume limit). */
   previousSessionVolumeByContract: ReadonlyMap<string, number> | null;
   /**
-   * Vol Farmer v4 (Marcelo 2026-11-05): a contract's volume cap is the bid size of its quote at the look, in place of 20% of the previous
-   * session's volume; a quote with no bid size, or a size of 0, allows none. Example: a bid of 211 contracts allows a sale of up to 211.
+   * Vol Farmer v4's limit on a sale's size (Marcelo 2026-11-05), in place of 20% of the previous session's volume. "bid_size" (the lab):
+   * the bid size of the quote at the look, a quote with no size or a size of 0 allowing none; example: a bid of 211 contracts allows up
+   * to 211. "none" (Pluto, whose sales are limits at the live mid, re-checked on a live quote): no limit. Absent: the 20% rule.
    */
-  capsAtBidSize?: boolean;
+  sizeLimit?: "bid_size" | "none";
   settings: Pick<BacktestBaselineSettings, "minAbsDelta" | "maxAbsDelta" | "minDte" | "maxDte" | "maxSpreadPctOfMid">;
   /** λ: the share of the half-spread a fill gives up. */
   spreadShareCharged: number;
@@ -226,7 +227,7 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
     const ask = quote.ask!;
     const mid = (bid + ask) / 2;
     const volume = input.previousSessionVolumeByContract?.get(contractKey(quote)) ?? null;
-    const volumeCap = input.capsAtBidSize ? Math.floor(quote.bidSize ?? 0) : volume === null ? 0 : Math.floor(volume * baselineMaxVolumeShare);
+    const volumeCap = input.sizeLimit === "none" ? Number.POSITIVE_INFINITY : input.sizeLimit === "bid_size" ? Math.floor(quote.bidSize ?? 0) : volume === null ? 0 : Math.floor(volume * baselineMaxVolumeShare);
     if (volumeCap < 1) {
       rejections.tooLittleVolume++;
       continue;

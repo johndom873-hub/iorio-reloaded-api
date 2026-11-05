@@ -246,22 +246,16 @@ describe("runVolFarmerV4Round", () => {
     expect(harness.lastRounds.get("t-VFT")).toEqual({ notes: [expect.stringContaining("VFT Sell $105 Call")], figures: { potDollars: 250_000, committedDollars: 30_000, freeCashDollars: 400_000, leapsCapDollars: 25_000, putsDollars: 125_000 } });
   });
 
-  it("caps a Call sale at the bid size of its quote (Marcelo 2026-11-05), whatever the contract traded the day before", async () => {
-    holdingFirstPosition(1_000);
-    harness.quotes = [...quotesAt("C").map((quote) => ({ ...quote, bidSize: 3 })), ...quotesAt("P")];
+  it("sells every uncovered lot whatever the bid size of its quote shows, or none shown (Marcelo 2026-11-05: Pluto's sales are limits at the live mid)", async () => {
     harness.chain = { expirations: ["20261106"], strikesByExpiry: new Map([["20261106", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
-    await round();
-    // 10 lots are uncovered; the bid shows 3 contracts.
-    expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", strategyKey: "covered_call", plan: expect.objectContaining({ quantity: 3 }) })]);
-  });
-
-  it("sells no Call on a quote with no bid size, and says the bid size left it out", async () => {
-    holdingFirstPosition(1_000);
-    harness.quotes = [...quotesAt("C").map((quote) => ({ ...quote, bidSize: null })), ...quotesAt("P")];
-    harness.chain = { expirations: ["20261106"], strikesByExpiry: new Map([["20261106", Array.from({ length: 101 }, (_, index) => 40 + index)]]) };
-    const summary = await round();
-    expect(harness.executed).toEqual([]);
-    expect(summary.notes).toContainEqual(expect.stringMatching(/no Call .*bid size \d+/));
+    for (const bidSize of [3, null]) {
+      holdingFirstPosition(1_000);
+      harness.executed.length = 0;
+      harness.quotes = [...quotesAt("C").map((quote) => ({ ...quote, bidSize })), ...quotesAt("P")];
+      await round();
+      // 10 lots are uncovered; the bid shows 3, or no size at all.
+      expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", strategyKey: "covered_call", plan: expect.objectContaining({ quantity: 10 }) })]);
+    }
   });
 
   it("counts an order still working as planned, and opens afresh once it ended unfilled", async () => {
