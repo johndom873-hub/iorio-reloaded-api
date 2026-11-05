@@ -12,7 +12,8 @@ import { daysToExpiry, describeOptionContract } from "../lib/optionContractLabel
 import { loadPreviousClose } from "../lib/tickerCalendarQueries.js";
 import { formatTradePrice, toIsoExpiry } from "../lib/tradeMessageFormatting.js";
 import { resolvePlutoSession } from "./sessionSchedule.js";
-import { loadPlutoSettings } from "./settingsStore.js";
+import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
+import { loadPlutoTickerAllocations } from "./tickerAllocations.js";
 import { plutoOrdersSentToday, loadPlutoOrdersSentToday } from "./safetyLimits.js";
 import { describePlutoBlock, loadPlutoState } from "./stateStore.js";
 import { describeVolFarmerV4NextActions, type VolFarmerV4ActionLine, type VolFarmerV4NextAction } from "./volFarmerV4NextActions.js";
@@ -89,6 +90,9 @@ export async function loadVolFarmerV4Screen(connection: Knex = db): Promise<VolF
   const legs: { id: string; strike_price: string | null; expiry_date: string | null; quantity: number; exit_at: Date | null }[] =
     legIds.length === 0 ? [] : await connection("position_legs").whereIn("id", [...new Set(legIds)]).select("id", "strike_price", connection.raw("expiry_date::text as expiry_date"), "quantity", "exit_at");
   const legById = new Map(legs.map((leg) => [leg.id, leg]));
+  // The pot-based figures follow the ticker's pot as set now, not the one its last round read: a changed allocation shows at once.
+  const [currentSettings, allocations] = await Promise.all([loadPlutoSettings(connection), loadPlutoTickerAllocations(tickers.map((ticker) => ticker.symbol), connection)]);
+  const potBySymbol = new Map(allocations.map((allocation) => [allocation.symbol, allocation.potDollars]));
   const base: VolFarmerV4ScreenTickerBase[] = tickers.map((ticker) => {
     const row = rowByTickerId.get(ticker.tickerId);
     const memory = row?.memory ? volFarmerV4MemoryFromStored(row.memory) : null;
@@ -132,10 +136,20 @@ export async function loadVolFarmerV4Screen(connection: Knex = db): Promise<VolF
       workingOrders: (memory?.pending ?? []).map((order) => ({ kind: order.kind, strike: order.strike, expiry: order.expiry, contracts: order.contracts, shares: order.shares ?? null })),
       lastRoundAt: row?.last_round_at?.toISOString() ?? null,
       lastRoundNotes: row?.last_round_notes ?? [],
-      lastRoundFigures: row?.last_round_figures ?? null,
+      lastRoundFigures: figuresAtCurrentPot(row?.last_round_figures ?? null, potBySymbol.get(ticker.symbol) ?? null, currentSettings),
     };
   });
   return withNextActions(base, tickers, rowByTickerId, connection);
+}
+
+/**
+ * The last round's figures with the ones that come from the pot (the pot, what the Puts sell on, the LEAPS cap) taken at the
+ * ticker's pot now: a warning or a blocker raised at the old pot goes away the moment the allocation grows. What the ticker
+ * commits and the free cash stay as the round read them. Without a pot now (no account value recorded) the round's own stay.
+ */
+export function figuresAtCurrentPot(figures: VolFarmerV4RoundFigures | null, potDollars: number | null, settings: Pick<PlutoSettings, "volFarmerV4FirstPositionPct" | "volFarmerV4LeapsMaxAllocationPct">): VolFarmerV4RoundFigures | null {
+  if (figures === null || potDollars === null) return figures;
+  return { ...figures, potDollars, putsDollars: (potDollars * (100 - settings.volFarmerV4FirstPositionPct)) / 100, leapsCapDollars: (potDollars * settings.volFarmerV4LeapsMaxAllocationPct) / 100 };
 }
 
 const unavailableNextAction: VolFarmerV4NextAction = { state: "not_due", text: "Next action unavailable", sub: null, alert: null };
