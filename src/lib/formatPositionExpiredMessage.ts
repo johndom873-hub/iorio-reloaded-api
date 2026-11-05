@@ -50,11 +50,9 @@ export function formatPositionExpiredMessage(input: {
   uncertain?: boolean;
 }): string {
   const { symbol, strategyKey, legs, realizedPnl, realizedPnlPercent, assigned, uncertain } = input;
-  // The trading goal is opposite by strategy: a covered call is sold to exit the stock, so
-  // assignment is the desired outcome; a cash-secured put is sold for premium, so assignment
-  // (being forced to buy the stock) is the undesired one.
-  const desiredOutcome = strategyKey === "covered_call" ? assigned : !assigned;
-  const emoji = desiredOutcome ? (realizedPnl >= 0 ? "🟢" : "🔴") : "⚠️";
+  // Assignment is the undesired outcome for every strategy (Vol Farmer sells options for premium and never wants them
+  // assigned): an assigned contract gets the warning, an expiry without assignment a dot by the P&L's sign.
+  const emoji = assigned ? "⚠️" : realizedPnl >= 0 ? "🟢" : "🔴";
   const assignmentLabel = assigned
     ? strategyKey === "covered_call"
       ? "assigned — shares called away"

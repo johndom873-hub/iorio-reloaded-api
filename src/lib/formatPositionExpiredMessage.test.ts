@@ -7,16 +7,18 @@ const legs = [
 ];
 
 describe("formatPositionExpiredMessage", () => {
-  it("covered call assigned (desired outcome): a green or red dot by P&L sign, not a checkmark", () => {
+  it("covered call assigned (undesired outcome): a warning triangle regardless of P&L sign", () => {
     const gain = formatPositionExpiredMessage({ symbol: "BE", strategyKey: "covered_call", legs, realizedPnl: 543.87, realizedPnlPercent: 1.93, assigned: true });
-    expect(gain.startsWith("🟢")).toBe(true);
+    expect(gain.startsWith("⚠️")).toBe(true);
     const loss = formatPositionExpiredMessage({ symbol: "BE", strategyKey: "covered_call", legs, realizedPnl: -10, realizedPnlPercent: -0.1, assigned: true });
-    expect(loss.startsWith("🔴")).toBe(true);
+    expect(loss.startsWith("⚠️")).toBe(true);
   });
 
-  it("covered call expired worthless (undesired outcome): a warning triangle regardless of P&L sign", () => {
-    const message = formatPositionExpiredMessage({ symbol: "SPCX", strategyKey: "covered_call", legs, realizedPnl: 537.74, realizedPnlPercent: 1.76, assigned: false });
-    expect(message.startsWith("⚠️")).toBe(true);
+  it("covered call expired worthless (desired outcome): a green or red dot by P&L sign", () => {
+    const gain = formatPositionExpiredMessage({ symbol: "SPCX", strategyKey: "covered_call", legs, realizedPnl: 537.74, realizedPnlPercent: 1.76, assigned: false });
+    expect(gain.startsWith("🟢")).toBe(true);
+    const loss = formatPositionExpiredMessage({ symbol: "SPCX", strategyKey: "covered_call", legs, realizedPnl: -10, realizedPnlPercent: -0.1, assigned: false });
+    expect(loss.startsWith("🔴")).toBe(true);
   });
 
   it("cash-secured put expired worthless (desired outcome): a dot, not a triangle", () => {
