@@ -34,6 +34,29 @@ export function percentilesOf(values: readonly number[]): Percentiles {
   return { p10: at(0.1), p50: at(0.5), p90: at(0.9) };
 }
 
+/** A path's figures summed up over the paths: v4's own, the book held, SPY held. */
+export interface HeldSummary {
+  cagr: Percentiles;
+  maxDrawdown: Percentiles;
+  /** The account's lowest value against the start, −30% for a low 30% under it (0 when it never went under). */
+  lowestAgainstStart: Percentiles;
+  /** That low reached in 1 path in 10, 20 and 100, at the drawdown odds' convention. */
+  lowestAgainstStartAtOdds: { oneIn: number; lowestAgainstStart: number }[];
+  /** The account at each simulated year's end. */
+  yearEnds: { year: number; value: Percentiles }[];
+}
+
+function heldSummaryOf(figures: readonly { cagr: number; maxDrawdown: number; lowestAgainstStart: number; yearEndValues: readonly number[] }[]): HeldSummary {
+  const lows = figures.map((figure) => figure.lowestAgainstStart);
+  return {
+    yearEnds: (figures[0]?.yearEndValues ?? []).map((_, index) => ({ year: index + 1, value: percentilesOf(figures.map((figure) => figure.yearEndValues[index]!)) })),
+    cagr: percentilesOf(figures.map((figure) => figure.cagr)),
+    maxDrawdown: percentilesOf(figures.map((figure) => figure.maxDrawdown)),
+    lowestAgainstStart: percentilesOf(lows),
+    lowestAgainstStartAtOdds: drawdownAtOddsOf(lows).map((entry) => ({ oneIn: entry.oneIn, lowestAgainstStart: entry.maxDrawdown })),
+  };
+}
+
 export interface ProjectionSummary {
   pathCount: number;
   cagr: Percentiles;
@@ -48,6 +71,10 @@ export interface ProjectionSummary {
   tickers: { symbol: string; premiumYear: number; callsSoldYear: number; callAwaysYear: number; daysWithoutSharesShare: number }[];
   /** The book's beta on SPY over every day, and over the days SPY fell; null without the regression. */
   bookBeta: { all: number; down: number } | null;
+  /** v4's lowest against the start, and on the same paths the book and SPY held (Marcelo 2026-11-04); spy null without it. */
+  v4: HeldSummary;
+  heldBook: HeldSummary;
+  heldSpy: HeldSummary | null;
 }
 
 /** The least-squares slope of the pooled sums: (n Σxy − Σx Σy) ÷ (n Σx² − (Σx)²). */
@@ -99,5 +126,8 @@ export function summarizeProjection(outcomes: readonly PathOutcome[], input: { a
       daysWithoutSharesShare: outcomes.reduce((sum, outcome) => sum + outcome.byTicker[index]!.daysWithoutShares, 0) / count / input.horizonDays,
     })),
     bookBeta: outcomes.length > 0 && outcomes.every((outcome) => outcome.spyRegression !== null) ? { all: slopeOfSums(outcomes.map((outcome) => outcome.spyRegression!.all)), down: slopeOfSums(outcomes.map((outcome) => outcome.spyRegression!.down)) } : null,
+    v4: heldSummaryOf(outcomes),
+    heldBook: heldSummaryOf(outcomes.map((outcome) => outcome.heldBook)),
+    heldSpy: outcomes.length > 0 && outcomes.every((outcome) => outcome.heldSpy !== null) ? heldSummaryOf(outcomes.map((outcome) => outcome.heldSpy!)) : null,
   };
 }

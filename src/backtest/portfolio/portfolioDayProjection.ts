@@ -1,5 +1,5 @@
 import type { EffectiveBacktestSettings } from "../backtestTypes.js";
-import { tickerPathPrices, tradingDaysPerYear, type DayPath, type TickerDayHistory } from "./portfolioDayHistory.js";
+import { tickerPathPrices, tradingDaysPerYear, type DayPath, type TickerDayHistory, type VolatilityStart } from "./portfolioDayHistory.js";
 import { simulateBookDays, type SimulatedTickerFigures, type SimulationSources } from "./portfolioDaySimulator.js";
 import { anchorFactorAt, observedDaysNearest, type AnchorCurve, type ObservedChainDay } from "./portfolioObservedChain.js";
 
@@ -28,6 +28,10 @@ export interface ProjectionTicker {
   leftoverDays: Int32Array;
   /** V3: its dividend yield a year (portfolioProjectionInputs.ts), paid on the shares held each simulated day; 0 without one. */
   dividendYield: number;
+  /** Today's IV and its half-life: a path's first days start from it (VolatilityStart); null without today's IV. */
+  volatilityStart: VolatilityStart | null;
+  /** Per history day, the anchor's event factor: its macro factor on a macro event day, its earnings one on a reaction day, else 1. */
+  eventAnchorFactor: Float64Array;
 }
 
 export interface ProjectionInput {
@@ -42,6 +46,16 @@ export interface ProjectionInput {
   seed: number;
   /** SPY's log moves each history day (overnight: the previous close to 10:00; day: 10:00 to the close): the book betas' x. Absent, no betas. */
   spyMoves?: { overnight: Float64Array; day: Float64Array };
+  /** SPY as a ticker held beside the book (its buy and hold on the same paths, Marcelo 2026-11-04); absent, none. */
+  spyHeld?: ProjectionTicker;
+}
+
+/** A buy and hold's figures on one path: CAGR, Max drawdown on its daily values, its lowest value ÷ the start − 1, and its value at each year's end. */
+export interface HeldFigures {
+  cagr: number;
+  maxDrawdown: number;
+  lowestAgainstStart: number;
+  yearEndValues: number[];
 }
 
 /** A least-squares slope's sums over the days counted: x is SPY's day, y the book's. */
@@ -67,6 +81,11 @@ export function addRegressionDay(sums: RegressionSums, spy: number, book: number
 export interface PathOutcome {
   cagr: number;
   maxDrawdown: number;
+  /** The account's lowest value ÷ the starting account − 1 (Max drawdown is from any peak instead). */
+  lowestAgainstStart: number;
+  /** On the same path: the book's tickers held at their allocations from today's prices, and SPY held (null without spyHeld). */
+  heldBook: HeldFigures;
+  heldSpy: HeldFigures | null;
   /** The Max drawdown's peak and trough, simulated day indexes. */
   maxDrawdownFrom: number;
   maxDrawdownTo: number;
@@ -132,10 +151,10 @@ export function maxDrawdownOf(values: ArrayLike<number>): { maxDrawdown: number;
 }
 
 /** One path through v4's own day on `dates` (the path as long as them): the simulator's result. */
-function simulatePath(input: ProjectionInput, path: DayPath, pathIndex: number, dates: readonly string[], expiriesByTicker: readonly string[][]) {
-  const prices = input.tickers.map((ticker) => tickerPathPrices(ticker.history, path, ticker.todaysPrice, input.drift, ticker.leftoverDays));
+export async function simulatePath(input: ProjectionInput, path: DayPath, pathIndex: number, dates: readonly string[], expiriesByTicker: readonly string[][]) {
+  const prices = input.tickers.map((ticker) => tickerPathPrices(ticker.history, path, ticker.todaysPrice, input.drift, ticker.leftoverDays, ticker.volatilityStart));
   const drawKeys = input.tickers.map((ticker) => tickerDrawKey(ticker.symbol));
-  return simulateBookDays({
+  const result = await simulateBookDays({
     dates,
     tickers: input.tickers.map((ticker) => ({ symbol: ticker.symbol, sameDayVolatilityUplift: ticker.sameDayVolatilityUplift, dividendYield: ticker.dividendYield })),
     dayOf: (tickerIndex, day) => {
@@ -154,13 +173,48 @@ function simulatePath(input: ProjectionInput, path: DayPath, pathIndex: number, 
         observedChain:
           candidates.length === 0
             ? null
-            : { day: candidates[Math.floor(projectionDraw(input.seed, pathIndex, drawKeys[tickerIndex]!, day) * candidates.length)]!, volatilityAnchor: impliedVolatility * anchorFactorAt(ticker.anchorCurve, Number.isFinite(elevation) ? elevation : null) },
+            : {
+                day: candidates[Math.floor(projectionDraw(input.seed, pathIndex, drawKeys[tickerIndex]!, day) * candidates.length)]!,
+                volatilityAnchor: impliedVolatility * anchorFactorAt(ticker.anchorCurve, Number.isFinite(elevation) ? elevation : null) * ticker.eventAnchorFactor[path.days[day]!]!,
+              },
       };
     },
     settings: input.settings,
     startingValue: input.accountDollars,
     riskFreeRatePercent: input.riskFreeRatePercent,
   });
+  return { result, prices };
+}
+
+/**
+ * A buy and hold on one path (Marcelo 2026-11-04): each ticker's weight of the account in shares at today's price, never
+ * traded, its dividend yield ÷ 252 a day credited in cash on the shares' value at the previous close, the rest of the account
+ * and the dividends in cash at the T-bill now. Values at the start and each day's close, as the account's.
+ */
+export function heldValuesOf(holdings: readonly { weight: number; todaysPrice: number; close: Float64Array; dividendYield: number }[], accountDollars: number, riskFreeRatePercent: number): Float64Array {
+  const days = holdings[0]?.close.length ?? 0;
+  const values = new Float64Array(days + 1);
+  values[0] = accountDollars;
+  let cash = accountDollars * Math.max(0, 1 - holdings.reduce((sum, holding) => sum + holding.weight, 0));
+  for (let day = 0; day < days; day++) {
+    cash *= 1 + riskFreeRatePercent / 100 / tradingDaysPerYear;
+    let shares = 0;
+    for (const holding of holdings) {
+      const previous = day === 0 ? holding.todaysPrice : holding.close[day - 1]!;
+      cash += (accountDollars * holding.weight * (previous / holding.todaysPrice) * holding.dividendYield) / tradingDaysPerYear;
+      shares += accountDollars * holding.weight * (holding.close[day]! / holding.todaysPrice);
+    }
+    values[day + 1] = shares + cash;
+  }
+  return values;
+}
+
+function heldFiguresOf(values: Float64Array, accountDollars: number, horizonYears: number): HeldFigures {
+  let lowest = accountDollars;
+  for (const value of values) lowest = Math.min(lowest, value);
+  const yearEndValues: number[] = [];
+  for (let year = 1; year * tradingDaysPerYear < values.length; year++) yearEndValues.push(values[year * tradingDaysPerYear]!);
+  return { cagr: (values[values.length - 1]! / accountDollars) ** (1 / horizonYears) - 1, maxDrawdown: maxDrawdownOf(values).maxDrawdown, lowestAgainstStart: lowest / accountDollars - 1, yearEndValues };
 }
 
 /** Runs the paths `paths` (their indexes from `firstPathIndex`): one outcome each. */
@@ -170,10 +224,22 @@ export async function runProjectionPaths(input: ProjectionInput, paths: readonly
   const expiriesByTicker = input.tickers.map((ticker) => nextExpiriesOf(dates, ticker.expiryWeekdays));
   const outcomes: PathOutcome[] = [];
   for (let offset = 0; offset < paths.length; offset++) {
-    const result = await simulatePath(input, paths[offset]!, firstPathIndex + offset, dates, expiriesByTicker);
+    const { result, prices } = await simulatePath(input, paths[offset]!, firstPathIndex + offset, dates, expiriesByTicker);
     const values = result.accountValues;
     const endValue = values[values.length - 1]!;
     const { maxDrawdown, from, to } = maxDrawdownOf(values);
+    let lowest = input.accountDollars;
+    for (const value of values) lowest = Math.min(lowest, value);
+    const weights = input.settings.volFarmerV4.tickerAllocationPct;
+    const heldBook = heldFiguresOf(
+      heldValuesOf(input.tickers.map((ticker, index) => ({ weight: (weights[ticker.symbol] ?? 0) / 100, todaysPrice: ticker.todaysPrice, close: prices[index]!.close, dividendYield: ticker.dividendYield })), input.accountDollars, input.riskFreeRatePercent),
+      input.accountDollars,
+      input.horizonYears,
+    );
+    const spy = input.spyHeld;
+    const heldSpy = spy
+      ? heldFiguresOf(heldValuesOf([{ weight: 1, todaysPrice: spy.todaysPrice, close: tickerPathPrices(spy.history, paths[offset]!, spy.todaysPrice, input.drift, new Int32Array(0), spy.volatilityStart).close, dividendYield: spy.dividendYield }], input.accountDollars, input.riskFreeRatePercent), input.accountDollars, input.horizonYears)
+      : null;
     const yearEndValues: number[] = [];
     for (let year = 1; year * tradingDaysPerYear <= horizonDays; year++) yearEndValues.push(values[Math.min(values.length - 1, year * tradingDaysPerYear)]!);
     let spyRegression: PathOutcome["spyRegression"] = null;
@@ -192,7 +258,7 @@ export async function runProjectionPaths(input: ProjectionInput, paths: readonly
         if (spy < 0) addRegressionDay(spyRegression.down, spy, book);
       }
     }
-    outcomes.push({ cagr: (endValue / input.accountDollars) ** (1 / input.horizonYears) - 1, maxDrawdown, maxDrawdownFrom: from, maxDrawdownTo: to, endValue, yearEndValues, sources: result.sources, byTicker: result.byTicker, spyRegression });
+    outcomes.push({ cagr: (endValue / input.accountDollars) ** (1 / input.horizonYears) - 1, maxDrawdown, lowestAgainstStart: lowest / input.accountDollars - 1, heldBook, heldSpy, maxDrawdownFrom: from, maxDrawdownTo: to, endValue, yearEndValues, sources: result.sources, byTicker: result.byTicker, spyRegression });
     onPathDone?.();
   }
   return outcomes;
@@ -208,7 +274,7 @@ export async function runPathValues(input: ProjectionInput, paths: readonly DayP
   const expiriesByTicker = input.tickers.map((ticker) => nextExpiriesOf(dates, ticker.expiryWeekdays));
   const values = new Float32Array(paths.length * horizonDays);
   for (let offset = 0; offset < paths.length; offset++) {
-    const result = await simulatePath(input, paths[offset]!, firstPathIndex + offset, dates, expiriesByTicker);
+    const { result } = await simulatePath(input, paths[offset]!, firstPathIndex + offset, dates, expiriesByTicker);
     for (let day = 0; day < horizonDays; day++) values[offset * horizonDays + day] = result.accountValues[day]! / input.accountDollars;
     onPathDone?.();
   }
@@ -226,6 +292,7 @@ export interface ReplayOutcome {
   bookReturn: number;
   maxDrawdown: number;
   sources: SimulationSources;
+  byTicker: SimulatedTickerFigures[];
 }
 
 /**
@@ -238,9 +305,9 @@ export async function runReplayPaths(input: ProjectionInput, windows: readonly R
   for (const window of windows) {
     const dates = simulatedSessionsAfter(input.asOfIso, window.days.length);
     const expiriesByTicker = input.tickers.map((ticker) => nextExpiriesOf(dates, ticker.expiryWeekdays));
-    const result = await simulatePath({ ...input, tickers: input.tickers.map((ticker) => ({ ...ticker, leftoverDays: new Int32Array(0) })) }, { days: window.days, leftoverDraws: new Float64Array(window.days.length) }, 0, dates, expiriesByTicker);
+    const { result } = await simulatePath({ ...input, tickers: input.tickers.map((ticker) => ({ ...ticker, leftoverDays: new Int32Array(0), volatilityStart: null })) }, { days: window.days, leftoverDraws: new Float64Array(window.days.length) }, 0, dates, expiriesByTicker);
     const values = result.accountValues;
-    outcomes.push({ name: window.name, bookReturn: values[values.length - 1]! / input.accountDollars - 1, maxDrawdown: maxDrawdownOf(values).maxDrawdown, sources: result.sources });
+    outcomes.push({ name: window.name, bookReturn: values[values.length - 1]! / input.accountDollars - 1, maxDrawdown: maxDrawdownOf(values).maxDrawdown, sources: result.sources, byTicker: result.byTicker });
   }
   return outcomes;
 }

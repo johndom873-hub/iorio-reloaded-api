@@ -7,11 +7,11 @@ import { db } from "../../db/connection.js";
 import { computeSourceClosureHash } from "../../lib/computeSourceClosureHash.js";
 import { requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { listBacktestDataFileSymbols } from "../dataFileSummary.js";
-import { drawDayPaths, marketDayHistoryOf, sharedLeftoverDays, tickerDayHistoryOf, tradingDaysPerYear, type DayPath, type MarketDayHistory } from "./portfolioDayHistory.js";
+import { drawDayPaths, marketDayHistoryOf, sharedLeftoverDays, tradingDaysPerYear, type DayPath, type MarketDayHistory } from "./portfolioDayHistory.js";
 import type { ProjectionInput } from "./portfolioDayProjection.js";
 import { savedProjectionKey } from "./portfolioProjectionCache.js";
 import { runPathValuesInParallel } from "./portfolioProjectionPool.js";
-import { loadTickerProjectionSource } from "./portfolioProjectionInputs.js";
+import { loadTickerWithHistory, projectionTickerOf } from "./portfolioProjectionTickers.js";
 import { loadProjectionContext, projectionSeed, type ProjectionContext } from "./portfolioProjectionContext.js";
 
 // The suggestions' library (Marcelo 2026-11-04, L1–L3): every data-file ticker run alone through v4's day on the
@@ -132,8 +132,6 @@ export async function buildPortfolioLibrary(hooks: LibraryBuildHooks, connection
     failed: {},
   };
   const paths: DayPath[] = drawDayPaths(market.dates.length, horizonDays, libraryPathCount, projectionSeed);
-  const riskFreeNowDay = context.riskFreeNowPct / 100 / tradingDaysPerYear;
-  const riskFreeMeanDay = context.riskFreeAveragePct / 100 / tradingDaysPerYear;
   const fileSymbols = listBacktestDataFileSymbols();
   const symbols = hooks.onlySymbols ? fileSymbols.filter((symbol) => hooks.onlySymbols!.includes(symbol)) : fileSymbols;
   const totalRuns = symbols.length * libraryPotLevelsDollars.length;
@@ -144,20 +142,9 @@ export async function buildPortfolioLibrary(hooks: LibraryBuildHooks, connection
     let inputKey: string;
     let lastFileDay: string;
     try {
-      const source = await loadTickerProjectionSource(symbol, context.rates, connection);
-      const history = tickerDayHistoryOf(symbol, source.sessions, market, riskFreeNowDay, riskFreeMeanDay, source.dividendYield ?? 0);
-      input = {
-        symbol,
-        history,
-        todaysPrice: source.calibration.price,
-        strikeSpacing: source.calibration.strikeSpacing,
-        expiryWeekdays: source.calibration.expiryWeekdays,
-        sameDayVolatilityUplift: source.calibration.sameDayVolatilityUplift ?? 1,
-        observedDays: source.observedDays,
-        anchorCurve: source.anchorCurve,
-        leftoverDays: sharedLeftoverDays([history]),
-        dividendYield: source.dividendYield ?? 0,
-      };
+      const ticker = await loadTickerWithHistory(symbol, market, context.rates, { nowPct: context.riskFreeNowPct, averagePct: context.riskFreeAveragePct }, connection);
+      const source = ticker.source;
+      input = projectionTickerOf(ticker, market, sharedLeftoverDays([ticker.history]));
       inputKey = savedProjectionKey(input, globalKey);
       lastFileDay = source.lastFileDay;
     } catch (error) {

@@ -7,7 +7,8 @@ import { stockCommissionDollars } from "../engine/ledger/ledgerFills.js";
 import { loadTreasuryBillRates, type TreasuryBillRates } from "../engine/treasuryBillRates.js";
 import { tickerBusinessChangeOf, type TickerBusinessChange } from "../tickerBusinessChanges.js";
 import { loadBacktestLabSettings } from "../labSettingsStore.js";
-import { dayHistoryStartIso, drawDayPaths, marketDayHistoryOf, sharedLeftoverDays, tickerDayHistoryOf, tradingDaysPerYear } from "./portfolioDayHistory.js";
+import { dayHistoryStartIso, drawDayPaths, leftoverDaysByTicker, marketDayHistoryOf, tradingDaysPerYear } from "./portfolioDayHistory.js";
+import { ivHalfLifeOf, ivNowAgainstNormalOf, loadTickerWithHistory, projectionTickerOf } from "./portfolioProjectionTickers.js";
 import { floorAllocationPctOf, maxAllocationPct, potDollarsOf, potFiguresOf, suggestAllocations, type PotFigures, type SuggestedAllocations } from "./portfolioPots.js";
 import { runReplayPaths, type ProjectionInput } from "./portfolioDayProjection.js";
 import { portfolioProjectionCodeHash, readSavedProjection, savedProjectionKey, saveProjection } from "./portfolioProjectionCache.js";
@@ -124,7 +125,7 @@ export interface PortfolioProjection {
   history: { from: string; to: string; days: number };
   summary: ProjectionSummary;
   pots: TickerPot[];
-  tickers: { symbol: string; allocationPct: number; price: number; strikeSpacing: number; expiryWeekdays: number[]; beta: number; ownHistoryFrom: string | null; tenOclockFrom: string | null; chainDays: number; businessChange: TickerBusinessChange | null; dividendYield: number | null; ownDrawdownAtOdds: { oneIn: number; maxDrawdown: number }[] | null }[];
+  tickers: { symbol: string; allocationPct: number; price: number; strikeSpacing: number; expiryWeekdays: number[]; beta: number; ownHistoryFrom: string | null; standIn: { symbol: string; volatilityRatio: number } | null; ivNowAgainstNormal: number | null; ivHalfLifeSessions: number; eventFactors: { macro: number; earningsReaction: number }; tenOclockFrom: string | null; chainDays: number; businessChange: TickerBusinessChange | null; dividendYield: number | null; ownDrawdownAtOdds: { oneIn: number; maxDrawdown: number }[] | null }[];
   /** Where each ticker's own drawdowns come from: the suggestions' library (its lone runs at the ticker's pot, neutral drift); null without one. */
   ownDrawdowns: { libraryAsOf: string; staleSymbols: string[] } | null;
   /** Today's book through each window's actual days (one path each, at the actual drift), and SPY's return over them. */
@@ -143,26 +144,18 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
   const spyDividendShares = prepared.spy.dividendShares;
   const market = marketDayHistoryOf(prepared.spy.sessions, spyDividendShares);
   if (market.dates.length < 2 * tradingDaysPerYear) throw new PortfolioRequestError("SPY's 10:00 prices cover under 2 years: extend its 30-minute bars back (npm run backtest:backfill-file-stock-bars -- --extend-intraday-bars-back SPY).");
-  const riskFreeNowDay = prepared.riskFreeNowPct / 100 / tradingDaysPerYear;
-  const riskFreeMeanDay = prepared.riskFreeAveragePct / 100 / tradingDaysPerYear;
-  const histories = prepared.sources.map((source) => tickerDayHistoryOf(source.symbol, source.sessions, market, riskFreeNowDay, riskFreeMeanDay, source.dividendYield ?? 0));
+  const riskFree = { nowPct: prepared.riskFreeNowPct, averagePct: prepared.riskFreeAveragePct };
+  const withHistories = await Promise.all(prepared.sources.map((source) => loadTickerWithHistory(source.symbol, market, prepared.rates, riskFree, connection)));
+  const histories = withHistories.map((ticker) => ticker.history);
   const horizonDays = request.horizonYears * tradingDaysPerYear;
   const paths = drawDayPaths(market.dates.length, horizonDays, request.pathCount, projectionSeed);
-  const leftoverDays = sharedLeftoverDays(histories);
+  const leftoverDays = leftoverDaysByTicker(histories);
+  // SPY held beside the book, on the same paths: its own moves, so the market's (Marcelo 2026-11-04).
+  const spyHeld = projectionTickerOf(await loadTickerWithHistory("SPY", market, prepared.rates, riskFree, connection), market, new Int32Array(0));
   const input: ProjectionInput = {
     asOfIso: prepared.asOfIso,
-    tickers: prepared.sources.map((source, index) => ({
-      symbol: source.symbol,
-      history: histories[index]!,
-      todaysPrice: source.calibration.price,
-      strikeSpacing: source.calibration.strikeSpacing,
-      expiryWeekdays: source.calibration.expiryWeekdays,
-      sameDayVolatilityUplift: source.calibration.sameDayVolatilityUplift ?? 1,
-      observedDays: source.observedDays,
-      anchorCurve: source.anchorCurve,
-      leftoverDays,
-      dividendYield: source.dividendYield ?? 0,
-    })),
+    tickers: withHistories.map((ticker, index) => projectionTickerOf(ticker, market, leftoverDays[index]!)),
+    spyHeld,
     settings: prepared.settings,
     accountDollars: request.accountDollars,
     horizonYears: request.horizonYears,
@@ -197,6 +190,10 @@ export async function projectPortfolio(request: PortfolioProjectionRequest, onPr
       expiryWeekdays: source.calibration.expiryWeekdays,
       beta: histories[index]!.beta,
       ownHistoryFrom: market.dates[histories[index]!.own.indexOf(1)] ?? null,
+      standIn: histories[index]!.standIn === null ? null : { symbol: histories[index]!.standIn!.symbol, volatilityRatio: histories[index]!.standIn!.volatilityRatio },
+      ivNowAgainstNormal: ivNowAgainstNormalOf(source),
+      ivHalfLifeSessions: ivHalfLifeOf(withHistories[index]!),
+      eventFactors: source.eventFactors,
       tenOclockFrom: source.firstTenOclockDate !== null && source.firstTenOclockDate < dayHistoryStartIso ? dayHistoryStartIso : source.firstTenOclockDate,
       chainDays: source.observedDays.length,
       businessChange: tickerBusinessChangeOf(source.symbol),

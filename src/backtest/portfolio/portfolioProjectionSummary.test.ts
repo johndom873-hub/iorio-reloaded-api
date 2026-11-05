@@ -5,6 +5,9 @@ import { drawdownAtOddsOf, percentilesOf, slopeOfSums, summarizeProjection } fro
 const outcome = (cagr: number, maxDrawdown: number, calls: number): PathOutcome => ({
   cagr,
   maxDrawdown,
+  lowestAgainstStart: maxDrawdown / 2,
+  heldBook: { cagr: cagr * 2, maxDrawdown: maxDrawdown * 2, lowestAgainstStart: maxDrawdown, yearEndValues: [1_000_000 * (1 + 2 * cagr)] },
+  heldSpy: null,
   maxDrawdownFrom: 0,
   maxDrawdownTo: 1,
   endValue: 1_000_000 * (1 + cagr) ** 2,
@@ -65,5 +68,16 @@ describe("the projection's figures over its paths", () => {
     expect(summary.averageYear.interest.dollars).toBe(40_000);
     expect(summary.tickers[0]).toEqual({ symbol: "XLE", premiumYear: 100_000, callsSoldYear: 100, callAwaysYear: 30, daysWithoutSharesShare: 63 / 504 });
     expect(summary.yearEnds.map((entry) => entry.year)).toEqual([1, 2]);
+  });
+
+  it("sums up v4's lowest against today and the book held on the same paths; SPY held null without it", () => {
+    const summary = summarizeProjection([outcome(0.14, -0.25, 300_000), outcome(0.04, -0.35, 100_000)], { accountDollars: 1_000_000, horizonYears: 2, riskFreeRatePercent: 4, horizonDays: 504 });
+    // The fixture's lows are half its Max drawdowns (−12.5%, −17.5%); held: double CAGR and Max drawdown, the low at the drawdown.
+    expect(summary.v4.lowestAgainstStart).toEqual({ p10: -0.175, p50: -0.125, p90: -0.125 });
+    expect(summary.v4.lowestAgainstStartAtOdds[0]).toEqual({ oneIn: 10, lowestAgainstStart: -0.175 });
+    expect(summary.heldBook.cagr).toEqual({ p10: 0.08, p50: 0.28, p90: 0.28 });
+    expect(summary.heldBook.lowestAgainstStart.p10).toBe(-0.35);
+    expect(summary.heldBook.yearEnds).toEqual([{ year: 1, value: { p10: 1_080_000, p50: 1_280_000, p90: 1_280_000 } }]);
+    expect(summary.heldSpy).toBeNull();
   });
 });

@@ -47,7 +47,7 @@ describe("an observed chain day", () => {
 });
 
 describe("a synthetic contract quoted like an observed one", () => {
-  const observed = { standardDeviations: 1.44, impliedVolatilityRatio: 1.6, halfSpreadShare: 0.6, previousSessionVolume: 120 };
+  const observed = { standardDeviations: 1.44, impliedVolatilityRatio: 1.6, halfSpreadShare: 0.6, previousSessionVolume: 120, bidSize: 250 };
 
   it("quotes a $0.05 mid at 0.02 / 0.08 and a $0.20 mid at 0.08 / 0.32, with the observed volume", () => {
     expect(quoteLikeObserved(0.05, observed)).toEqual({ bid: 0.02, ask: 0.08, previousSessionVolume: 120 });
@@ -60,7 +60,7 @@ describe("a synthetic contract quoted like an observed one", () => {
   });
 
   it("takes the nearest observed contract, and none past the outermost gap beyond the listed strikes", () => {
-    const contracts = [-1, 0, 1].map((standardDeviations) => ({ standardDeviations, impliedVolatilityRatio: null, halfSpreadShare: 0.1, previousSessionVolume: standardDeviations + 10 }));
+    const contracts = [-1, 0, 1].map((standardDeviations) => ({ standardDeviations, impliedVolatilityRatio: null, halfSpreadShare: 0.1, previousSessionVolume: standardDeviations + 10, bidSize: 250 }));
     expect(nearestObservedContract(contracts, 0.4)?.previousSessionVolume).toBe(10);
     expect(nearestObservedContract(contracts, 0.6)?.previousSessionVolume).toBe(11);
     expect(nearestObservedContract(contracts, 1.9)?.previousSessionVolume).toBe(11);
@@ -68,27 +68,35 @@ describe("a synthetic contract quoted like an observed one", () => {
     expect(nearestObservedContract(contracts, -2.1)).toBeNull();
   });
 
-  // $65.50 (in the money, −1.45 standard deviations on the 30-day IV) is past the observed strikes.
-  it("lists only the strikes the observed day reaches, each priced at the 30-day IV × its observed IV ratio", () => {
-    const day = { dateIso: "2026-10-30", daysToExpiry: 0, calls: [0, 1.44].map((standardDeviations, index) => ({ standardDeviations, impliedVolatilityRatio: [1.5, 3.0][index]!, halfSpreadShare: 0.2, previousSessionVolume: 500 })), puts: [] };
+  // Observed Calls at 0 and 1.44 standard deviations, put back at $66, a 20% 30-day IV, six hours out: $66 and $66.50.
+  it("lists the observed day's own strikes at today's price, each priced at the 30-day IV × its observed IV ratio", () => {
+    const day = { dateIso: "2026-10-30", daysToExpiry: 0, calls: [0, 1.44].map((standardDeviations, index) => ({ standardDeviations, impliedVolatilityRatio: [1.5, 3.0][index]!, halfSpreadShare: 0.2, previousSessionVolume: 500, bidSize: 250 })), puts: [] };
     const chain = syntheticExpiryChain({ expiry: "2026-10-30", stockPrice: 66, yearsToExpiry: sixHours, riskFreeRate: 0.04, volatility: 0.3, strikeSpacing: 0.5, observed: { day, thirtyDayVolatility: 0.2 } });
     expect(chain.quotes.every((quote) => quote.right === "C")).toBe(true);
-    expect(chain.quotes.map((quote) => quote.strike).sort((a, b) => a - b)).toEqual([66, 66.5, 67]);
+    expect(chain.quotes.map((quote) => quote.strike)).toEqual([66, 66.5]);
     const forward = 66 * Math.exp(0.04 * sixHours);
     const midOf = (strike: number, ratio: number) => Math.round(blackScholesPriceOnForward(forward, strike, sixHours, 0.04, 0.2 * ratio, true) * 100) / 100;
     const sixtySix = chain.quotes.find((quote) => quote.strike === 66)!;
     expect(Math.round(((sixtySix.bid! + sixtySix.ask!) / 2) * 100) / 100).toBeCloseTo(midOf(66, 1.5), 2);
-    // $67 stands 2.88 standard deviations out: within the outermost gap past $66.50, priced on its ratio of 3.0 (a mid of about $0.09).
-    const sixtySeven = chain.quotes.find((quote) => quote.strike === 67)!;
-    expect(sixtySeven.bid).toBeCloseTo(Math.round(midOf(67, 3.0) * 0.8 * 100) / 100, 2);
     expect([...chain.previousSessionVolumeByContract.values()].every((volume) => volume === 500)).toBe(true);
+    // Each quote's bid size is its observed contract's, the most v4 sells of it.
+    expect(chain.quotes.every((quote) => quote.bidSize === 250)).toBe(true);
+  });
+
+  // The same day on a path at $33, double the IV: the strikes stand as far out in standard deviations, not on the $0.50 grid.
+  it("keeps the observed strikes' distance in standard deviations wherever the path's price and IV are", () => {
+    const day = { dateIso: "2026-10-30", daysToExpiry: 0, calls: [-1, 0, 1].map((standardDeviations) => ({ standardDeviations, impliedVolatilityRatio: 1, halfSpreadShare: 0.2, previousSessionVolume: 500, bidSize: 250 })), puts: [{ standardDeviations: -2, impliedVolatilityRatio: 1, halfSpreadShare: 0.2, previousSessionVolume: 500, bidSize: 250 }] };
+    const chain = syntheticExpiryChain({ expiry: "2026-10-30", stockPrice: 33, yearsToExpiry: sixHours, riskFreeRate: 0.04, volatility: 0.4, strikeSpacing: 0.5, observed: { day, thirtyDayVolatility: 0.4 } });
+    const scale = 0.4 * Math.sqrt(sixHours);
+    const expected = [-2, -1, 0, 1].map((standardDeviations) => Math.round(33 * Math.exp(standardDeviations * scale) * 100) / 100);
+    expect([...new Set(chain.quotes.map((quote) => quote.strike))].sort((a, b) => a - b)).toEqual(expected);
   });
 
   it("prices at the nearest observed contract with an IV ratio when the nearest has none", () => {
     const contracts = [
-      { standardDeviations: 0, impliedVolatilityRatio: 1.5, halfSpreadShare: 0.1, previousSessionVolume: 10 },
-      { standardDeviations: 1, impliedVolatilityRatio: null, halfSpreadShare: null, previousSessionVolume: 0 },
-      { standardDeviations: 3, impliedVolatilityRatio: 2.2, halfSpreadShare: 0.5, previousSessionVolume: 1 },
+      { standardDeviations: 0, impliedVolatilityRatio: 1.5, halfSpreadShare: 0.1, previousSessionVolume: 10, bidSize: 250 },
+      { standardDeviations: 1, impliedVolatilityRatio: null, halfSpreadShare: null, previousSessionVolume: 0, bidSize: 250 },
+      { standardDeviations: 3, impliedVolatilityRatio: 2.2, halfSpreadShare: 0.5, previousSessionVolume: 1, bidSize: 250 },
     ];
     expect(impliedVolatilityRatioNear(contracts, 1.2)).toBe(1.5);
     expect(impliedVolatilityRatioNear(contracts, 2.2)).toBe(2.2);
@@ -119,7 +127,7 @@ describe("the volatility anchor", () => {
   });
 
   it("reads a day against its anchor: positions and IV ratios ÷ the factor", () => {
-    const day = { dateIso: "2026-10-30", daysToExpiry: 0, calls: [{ standardDeviations: 1.48, impliedVolatilityRatio: 1.25, halfSpreadShare: 0.1, previousSessionVolume: 5 }], puts: [] };
+    const day = { dateIso: "2026-10-30", daysToExpiry: 0, calls: [{ standardDeviations: 1.48, impliedVolatilityRatio: 1.25, halfSpreadShare: 0.1, previousSessionVolume: 5, bidSize: 250 }], puts: [] };
     const anchored = observedAgainstAnchor(day, 0.74);
     expect(anchored.calls[0]!.standardDeviations).toBeCloseTo(2, 12);
     expect(anchored.calls[0]!.impliedVolatilityRatio).toBeCloseTo(1.25 / 0.74, 12);

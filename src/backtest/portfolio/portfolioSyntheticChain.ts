@@ -37,27 +37,20 @@ export function syntheticMid(stockPrice: number, strike: number, yearsToExpiry: 
 }
 
 /**
- * Calls and Puts of one expiry on a strike grid wide enough for 5 standard deviations to the expiry (at least ±3%), with
- * each contract's previous-session volume by contractKey. With an observed day, each strike is priced at the 30-day IV ×
- * the IV ratio of the observed contract nearest it with one (standard deviations on the 30-day IV), and quotes and trades
- * like the observed contract nearest it; a strike past the observed ones is not listed.
+ * Calls and Puts of one expiry, with each contract's previous-session volume by contractKey. Without an observed day, on a
+ * strike grid at the spacing wide enough for 5 standard deviations to the expiry (at least ±3%). With one, at the observed
+ * day's own strikes, Calls' and Puts' together (Marcelo 2026-11-04): each observed contract's standard deviations put back
+ * at today's price, 30-day IV and time to the expiry, price × exp(sd × the 30-day IV × √T), to the cent; so the chain keeps
+ * the real one's strikes against the price wherever the path has taken it. Each strike is priced at the 30-day IV × the IV
+ * ratio of the observed contract nearest it with one, and quotes and trades like the observed contract nearest it: its
+ * spread, its previous session's volume and its bid size (v4 sells no more than the bid size, Marcelo 2026-11-05).
+ * Example: an observed strike 1.44 standard deviations up, on $66 at a 20% IV six hours out: $66 × exp(1.44 × 0.2 × 0.0262) = $66.50.
  */
 export function syntheticExpiryChain(input: { expiry: string; stockPrice: number; yearsToExpiry: number; riskFreeRate: number; volatility: number; strikeSpacing: number; observed?: { day: ObservedChainDay; thirtyDayVolatility: number } }): { quotes: SymbolFileQuote[]; previousSessionVolumeByContract: Map<string, number> } {
   const { expiry, stockPrice, yearsToExpiry, riskFreeRate, volatility, strikeSpacing, observed } = input;
-  const halfWidth = Math.max(0.03, 5 * volatility * Math.sqrt(Math.max(yearsToExpiry, 1e-6)));
   const quotes: SymbolFileQuote[] = [];
   const previousSessionVolumeByContract = new Map<string, number>();
-  let strikes = strikeGrid(stockPrice, strikeSpacing, halfWidth);
-  if (observed !== undefined) {
-    // Only the strikes within the observed ones' reach can be listed (nearestObservedContract): the grid is cut to them,
-    // a little wide, before each strike is checked as it always is.
-    const reach = observedReach(observed.day);
-    if (reach === null) return { quotes, previousSessionVolumeByContract };
-    const scale = observed.thirtyDayVolatility * Math.sqrt(yearsToExpiry);
-    const lowest = stockPrice * Math.exp(reach.low * scale) * (1 - 1e-6);
-    const highest = stockPrice * Math.exp(reach.high * scale) * (1 + 1e-6);
-    strikes = strikes.filter((strike) => strike >= lowest && strike <= highest);
-  }
+  const strikes = observed === undefined ? strikeGrid(stockPrice, strikeSpacing, Math.max(0.03, 5 * volatility * Math.sqrt(Math.max(yearsToExpiry, 1e-6)))) : observedStrikesOf(observed.day, stockPrice, observed.thirtyDayVolatility * Math.sqrt(yearsToExpiry));
   for (const strike of strikes) {
     for (const right of ["C", "P"] as const) {
       if (observed === undefined) {
@@ -76,7 +69,7 @@ export function syntheticExpiryChain(input: { expiry: string; stockPrice: number
       const mid = syntheticMid(stockPrice, strike, yearsToExpiry, riskFreeRate, ratio === null ? volatility : observed.thirtyDayVolatility * ratio, right === "C");
       if (mid === null) continue;
       const like = quoteLikeObserved(mid, nearest)!;
-      const quote = { expiry, strike, right, bid: like.bid, ask: like.ask, bidSize: syntheticQuoteSize, askSize: syntheticQuoteSize };
+      const quote = { expiry, strike, right, bid: like.bid, ask: like.ask, bidSize: nearest.bidSize, askSize: syntheticQuoteSize };
       quotes.push(quote);
       if (like.previousSessionVolume > 0) previousSessionVolumeByContract.set(contractKey(quote), like.previousSessionVolume);
     }
@@ -84,20 +77,14 @@ export function syntheticExpiryChain(input: { expiry: string; stockPrice: number
   return { quotes, previousSessionVolumeByContract };
 }
 
-/** The standard deviations an observed day's contracts reach, Calls and Puts together, an outermost gap past each end; null with none. */
-function observedReach(day: ObservedChainDay): { low: number; high: number } | null {
-  let low = Number.POSITIVE_INFINITY;
-  let high = Number.NEGATIVE_INFINITY;
-  for (const contracts of [day.calls, day.puts]) {
-    if (contracts.length === 0) continue;
-    const first = contracts[0]!.standardDeviations;
-    const last = contracts[contracts.length - 1]!.standardDeviations;
-    const firstGap = contracts.length > 1 ? contracts[1]!.standardDeviations - first : 0;
-    const lastGap = contracts.length > 1 ? last - contracts[contracts.length - 2]!.standardDeviations : 0;
-    low = Math.min(low, first - firstGap);
-    high = Math.max(high, last + lastGap);
+/** An observed day's strikes, Calls' and Puts' together, at `stockPrice` with `scale` = the 30-day IV × √T, to the cent, ascending. */
+function observedStrikesOf(day: ObservedChainDay, stockPrice: number, scale: number): number[] {
+  const strikes = new Set<number>();
+  for (const contract of [...day.calls, ...day.puts]) {
+    const strike = Math.round(stockPrice * Math.exp(contract.standardDeviations * scale) * 100) / 100;
+    if (strike > 0) strikes.add(strike);
   }
-  return low === Number.POSITIVE_INFINITY ? null : { low, high };
+  return [...strikes].sort((a, b) => a - b);
 }
 
 /** The third Friday of a month ("2027-06"): the standard monthly expiry. */
