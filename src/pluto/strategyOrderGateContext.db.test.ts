@@ -35,7 +35,7 @@ async function action(executionStrategy: "cc_put_ladder" | "edge_margin" | "vol_
 const putPayload = (strike: number) => ({ symbol: "GATE", strategyKey: "cash_secured_put", legs: [{ role: "option", action: "SELL", symbol: "GATE", quantity: 1, unitPrice: 0.8, strike, expiry: "20261120", right: "P" }] }) as never;
 
 beforeAll(async () => {
-  await testDb("pluto_settings").insert({ id: 1, capital_budget_pct: 40, excess_allowance_pct: 0 });
+  await testDb("pluto_settings").insert({ id: 1, excess_allowance_pct: 0 });
   await testDb("users").insert({ id: userId, username: "strategy-gate", display_name: "Strategy Gate", password_hash: "x" });
   await testDb("tickers").insert([{ id: gateId, symbol: "GATE", company_name: "Gate Co" }, { id: otherId, symbol: "OTHR", company_name: "Other Co" }]);
   await testDb("shortlist_entries").insert([gateId, otherId].map((ticker_id) => ({ ticker_id, added_by_user_id: userId, bot_enabled: true })));
@@ -56,10 +56,10 @@ describe("loadStrategyOrderGateContext", () => {
 
   it("reads the ticker's pot and delta range, the book, the clock and the expiry's forward", async () => {
     const put = await action("vol_farmer_v4", { strategyKey: "cash_secured_put" });
-    // Two enabled tickers share the budget equally: 50% × 40% = a 20% pot.
+    // Two enabled tickers share Pluto's book equally: a 50% pot of its value.
     expect(await loadStrategyOrderGateContext({ pluto_action_id: put, payload: putPayload(45) }, testDb, now)).toEqual({
-      potFraction: 0.2,
-      book: { symbols: ["GATE", "OTHR"], budgetFraction: 0.4 },
+      potFraction: 0.5,
+      book: { symbols: ["GATE", "OTHR"], budgetFraction: 1 },
       deltaChecked: true,
       isEntryPut: true,
       minAbsDelta: 0,
@@ -74,21 +74,21 @@ describe("loadStrategyOrderGateContext", () => {
   it("holds Vol Farmer v4's Puts to |delta| at most its Put |delta| and its Calls to its Calls' range, and gives its LEAPS the book's cap alone", async () => {
     // The migration's defaults: Put |delta| 0.30, the Calls 0.05–0.50.
     const put = await action("vol_farmer_v4", { strategyKey: "cash_secured_put" });
-    expect(await loadStrategyOrderGateContext({ pluto_action_id: put, payload: putPayload(45) }, testDb, now)).toMatchObject({ potFraction: 0.2, deltaChecked: true, isEntryPut: true, minAbsDelta: 0, maxAbsDelta: 0.3 });
+    expect(await loadStrategyOrderGateContext({ pluto_action_id: put, payload: putPayload(45) }, testDb, now)).toMatchObject({ potFraction: 0.5, deltaChecked: true, isEntryPut: true, minAbsDelta: 0, maxAbsDelta: 0.3 });
     const call = await action("vol_farmer_v4", { strategyKey: "covered_call" });
     const callPayload = { symbol: "GATE", strategyKey: "covered_call", legs: [{ role: "option", action: "SELL", symbol: "GATE", quantity: 1, unitPrice: 0.8, strike: 55, expiry: "20261120", right: "C" }] } as never;
-    expect(await loadStrategyOrderGateContext({ pluto_action_id: call, payload: callPayload }, testDb, now)).toMatchObject({ potFraction: 0.2, deltaChecked: true, isEntryPut: false, minAbsDelta: 0.05, maxAbsDelta: 0.5 });
+    expect(await loadStrategyOrderGateContext({ pluto_action_id: call, payload: callPayload }, testDb, now)).toMatchObject({ potFraction: 0.5, deltaChecked: true, isEntryPut: false, minAbsDelta: 0.05, maxAbsDelta: 0.5 });
     const leaps = await action("vol_farmer_v4", { strategyKey: "leaps" });
     const leapsPayload = { symbol: "GATE", strategyKey: "leaps", legs: [{ role: "option", action: "BUY", symbol: "GATE", quantity: 1, unitPrice: 12, strike: 40, expiry: "20271217", right: "C" }] } as never;
-    expect(await loadStrategyOrderGateContext({ pluto_action_id: leaps, payload: leapsPayload }, testDb, now)).toMatchObject({ potFraction: null, deltaChecked: false, book: { symbols: ["GATE", "OTHR"], budgetFraction: 0.4 } });
+    expect(await loadStrategyOrderGateContext({ pluto_action_id: leaps, payload: leapsPayload }, testDb, now)).toMatchObject({ potFraction: null, deltaChecked: false, book: { symbols: ["GATE", "OTHR"], budgetFraction: 1 } });
   });
 
   it("raises the ticker's pot by the excess allowance; the book's cap stays Pluto's budget", async () => {
     await testDb("pluto_settings").where({ id: 1 }).update({ excess_allowance_pct: 25 });
     try {
-      // 50% × (1 + 25%) × 40% = a 25% pot.
+      // 50% × (1 + 25%) = a 62.5% pot of Pluto's book value.
       const put = await action("vol_farmer_v4", { strategyKey: "cash_secured_put" });
-      expect(await loadStrategyOrderGateContext({ pluto_action_id: put, payload: putPayload(45) }, testDb, now)).toMatchObject({ potFraction: 0.25, book: { budgetFraction: 0.4 } });
+      expect(await loadStrategyOrderGateContext({ pluto_action_id: put, payload: putPayload(45) }, testDb, now)).toMatchObject({ potFraction: 0.625, book: { budgetFraction: 1 } });
     } finally {
       await testDb("pluto_settings").where({ id: 1 }).update({ excess_allowance_pct: 0 });
     }

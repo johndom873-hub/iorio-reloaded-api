@@ -28,6 +28,8 @@ interface OpenLegRow {
   strikePrice: string | null;
   expiryDate: string | null;
   symbol: string;
+  /** The position's ticker (the books' leg ownership, src/books). */
+  tickerId?: string;
   /** The leg's latest nightly closing price (position_leg_price_snapshots); null/absent when it has none yet. */
   lastClosingPrice?: string | null;
 }
@@ -103,6 +105,7 @@ async function resolveOpenPositionsAndLegs(symbol?: string): Promise<{ positions
       "pl.strike_price as strikePrice",
       db.raw("to_char(pl.expiry_date, 'YYYYMMDD') as \"expiryDate\""),
       "t.symbol",
+      "p.ticker_id as tickerId",
       db.raw(
         `(SELECT lps.price FROM position_leg_price_snapshots lps WHERE lps.position_leg_id = pl.id ORDER BY lps.snapshot_date DESC LIMIT 1) AS "lastClosingPrice"`,
       ),
@@ -156,6 +159,37 @@ export function computeExposureRows(positions: OpenPositionRow[], legs: OpenLegR
     sector: p.sector,
     exposure: exposureByPositionId.get(p.positionId) ?? 0,
   }));
+}
+
+export interface OpenLegMarketValue {
+  positionId: string;
+  strategyKey: string;
+  tickerId: string;
+  symbol: string;
+  /** The leg's market value at its mark, a short leg negative: what the books count as the position's worth (no Put collateral, which is cash). */
+  marketValue: number;
+}
+
+/** Pure: each open leg's market value, priced as computeExposureRows prices it (live, else last close, else entry). */
+export function computeLegMarketValues(legs: OpenLegRow[], pricesByKey: Record<string, number | null>): OpenLegMarketValue[] {
+  return legs.map((leg, index) => {
+    const fallbackPrice = leg.lastClosingPrice !== null && leg.lastClosingPrice !== undefined ? Number(leg.lastClosingPrice) : Number(leg.entryPrice);
+    const price = pricesByKey[String(index)] ?? fallbackPrice;
+    return { positionId: leg.positionId, strategyKey: leg.strategyKey, tickerId: leg.tickerId ?? "", symbol: leg.symbol, marketValue: price * leg.quantity * leg.multiplier * (leg.side === "short" ? -1 : 1) };
+  });
+}
+
+/** Every open leg's market value now (pool first, as the one-shot exposures). */
+export async function loadOpenLegMarketValues(): Promise<OpenLegMarketValue[]> {
+  const { legs } = await resolveOpenPositionsAndLegs();
+  if (legs.length === 0) return [];
+  let pricesByKey: Record<string, number | null> = {};
+  try {
+    pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs), { settleGraceMs: exposurePriceSettleGraceMs });
+  } catch {
+    // Every leg falls back to its closing or entry price.
+  }
+  return computeLegMarketValues(legs, pricesByKey);
 }
 
 // The one-shot exposures (Dashboard, Risk & Limits) stop waiting this long after the last leg price arrived: a leg that

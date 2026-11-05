@@ -184,43 +184,37 @@ describe("evaluateOrderPath", () => {
 });
 
 describe("evaluatePlutoCash", () => {
-  // Net liquidation $100,000 and a 60% budget: a $60,000 budget, warned below $3,000 free.
+  // Pluto's book worth $60,000, $40,000 committed on its tickers: warned below $3,000 free (5%).
   const account = { netLiquidationValue: 100_000, totalCashValue: 50_000, settledCash: 50_000, settledCashIsTotalCash: false, buyingPower: 50_000, excessLiquidity: 50_000 };
-  const pluto = { capitalBudgetPct: 60, enabledTickerCount: 3, committedOnPlutoTickers: 40_000, cashLockedInCsps: 10_000, inFlightNotional: 0 };
+  const pluto = { enabledTickerCount: 3, booksStarted: true, plutoBookValue: 60_000, committedOnPlutoTickers: 40_000, availableCash: 30_000, availableSettledCash: 30_000 };
 
-  it("measures the free cash as the budget left when the account has more ($60,000 − $40,000 = $20,000 < $50,000 − $10,000)", () => {
-    expect(evaluatePlutoCash(account, pluto)).toEqual({ name: "Pluto cash", status: "ok", detail: "free cash $20,000 is 33.3% of Pluto's $60,000 budget (60% of net liquidation), limited by the budget left" });
+  it("measures the free cash as what the book has uncommitted when its cash is larger ($60,000 − $40,000 = $20,000 < $30,000)", () => {
+    expect(evaluatePlutoCash(account, pluto)).toEqual({ name: "Pluto cash", status: "ok", detail: "free cash $20,000 is 33.3% of Pluto's $60,000 book, limited by what Pluto's book has uncommitted" });
   });
 
-  it("measures it as the account's free cash when that is smaller ($12,000 − $10,000 − $500 working = $1,500), and warns below 5% of the budget", () => {
-    const result = evaluatePlutoCash({ ...account, totalCashValue: 12_000 }, { ...pluto, inFlightNotional: 500 });
+  it("measures it as Pluto's available cash when that is smaller, and warns below 5% of the book", () => {
+    const result = evaluatePlutoCash(account, { ...pluto, availableCash: 1_500 });
     expect(result.status).toBe("warn");
-    expect(result.detail).toBe("free cash $1,500 is 2.5% of Pluto's $60,000 budget (60% of net liquidation), limited by the account's free cash; the budget has $20,000 left. Below 5%: Pluto's new Puts and cycles will be cut or skipped");
+    expect(result.detail).toBe("free cash $1,500 is 2.5% of Pluto's $60,000 book, limited by Pluto's available cash (its cash less its Puts, its working orders and the min cash reserve); the book has $20,000 uncommitted. Below 5%: Pluto's new Puts and cycles will be cut or skipped");
   });
 
-  it("measures it as the settled cash left when that is the smallest ($14,000 settled − $10,000 = $4,000), and as none when IBKR reports no settled cash", () => {
-    expect(evaluatePlutoCash({ ...account, settledCash: 14_000 }, pluto)).toEqual({ name: "Pluto cash", status: "ok", detail: "free cash $4,000 is 6.7% of Pluto's $60,000 budget (60% of net liquidation), limited by the settled cash left (settled cash less the open Puts' strikes and the orders working); the budget has $20,000 left" });
-    expect(evaluatePlutoCash({ ...account, settledCash: null }, pluto)).toMatchObject({ status: "warn", detail: expect.stringContaining("free cash $0 is 0.0% of Pluto's $60,000 budget (60% of net liquidation), limited by IBKR reporting no settled cash, so Pluto buys nothing and sells no Put") });
-    // The paper account: no settled cash reported, so the total cash stands in and only the account's free cash limits.
-    expect(evaluatePlutoCash({ ...account, totalCashValue: 25_000, settledCash: 25_000, settledCashIsTotalCash: true }, pluto)).toEqual({ name: "Pluto cash", status: "ok", detail: "free cash $15,000 is 25.0% of Pluto's $60,000 budget (60% of net liquidation), limited by the account's free cash; the budget has $20,000 left; IBKR reports no settled cash on the paper account, so the total cash stands in" });
+  it("measures it as the settled cash left when that is the smallest, and as none when IBKR reports no settled cash", () => {
+    expect(evaluatePlutoCash(account, { ...pluto, availableSettledCash: 4_000 })).toEqual({ name: "Pluto cash", status: "ok", detail: "free cash $4,000 is 6.7% of Pluto's $60,000 book, limited by Pluto's settled cash left (its settled cash less its Puts, its working orders and the min cash reserve); the book has $20,000 uncommitted" });
+    expect(evaluatePlutoCash(account, { ...pluto, availableSettledCash: null })).toMatchObject({ status: "warn", detail: expect.stringContaining("free cash $0 is 0.0% of Pluto's $60,000 book, limited by IBKR reporting no settled cash, so Pluto buys nothing and sells no Put") });
+    expect(evaluatePlutoCash({ ...account, settledCashIsTotalCash: true }, { ...pluto, availableCash: 15_000, availableSettledCash: 15_000 })).toEqual({ name: "Pluto cash", status: "ok", detail: "free cash $15,000 is 25.0% of Pluto's $60,000 book, limited by Pluto's available cash (its cash less its Puts, its working orders and the min cash reserve); the book has $20,000 uncommitted; IBKR reports no settled cash on the paper account, so the total cash stands in" });
   });
 
-  it("warns at none free when the budget is overcommitted, and passes at exactly 5% ($3,000 of $60,000)", () => {
+  it("warns at none free when the book is overcommitted, and passes at exactly 5% ($3,000 of $60,000)", () => {
     expect(evaluatePlutoCash(account, { ...pluto, committedOnPlutoTickers: 65_000 })).toMatchObject({ status: "warn", detail: expect.stringContaining("free cash $0 is 0.0%") });
     expect(evaluatePlutoCash(account, { ...pluto, committedOnPlutoTickers: 57_000 }).status).toBe("ok");
     expect(evaluatePlutoCash(account, { ...pluto, committedOnPlutoTickers: 57_001 }).status).toBe("warn");
   });
 
-  it("passes when Pluto has no tickers or no budget, whatever the cash", () => {
-    expect(evaluatePlutoCash({ ...account, totalCashValue: 0 }, { ...pluto, enabledTickerCount: 0 })).toMatchObject({ status: "ok", detail: "Pluto has no tickers or no capital budget" });
-    expect(evaluatePlutoCash({ ...account, totalCashValue: 0 }, { ...pluto, capitalBudgetPct: 0 }).status).toBe("ok");
-  });
-
-  it("only warns when it cannot be measured", () => {
+  it("passes when Pluto has no tickers, and warns before the books are started or with no cash figure", () => {
+    expect(evaluatePlutoCash(account, { ...pluto, enabledTickerCount: 0 })).toMatchObject({ status: "ok", detail: "Pluto has no tickers" });
+    expect(evaluatePlutoCash(account, { ...pluto, booksStarted: false })).toMatchObject({ status: "warn", detail: "the Pluto and Manual books have not been started yet, so Pluto sends nothing" });
     expect(evaluatePlutoCash(account, null)).toMatchObject({ status: "warn", detail: expect.stringContaining("could not be measured") });
-    expect(evaluatePlutoCash(null, pluto).status).toBe("warn");
-    expect(evaluatePlutoCash({ ...account, totalCashValue: null }, pluto).status).toBe("warn");
-    expect(evaluatePlutoCash({ ...account, netLiquidationValue: 0 }, pluto).status).toBe("warn");
+    expect(evaluatePlutoCash(account, { ...pluto, availableCash: null })).toMatchObject({ status: "warn", detail: "could not be measured: IBKR's cash is missing" });
   });
 });
 

@@ -18,7 +18,7 @@ import { loadEnabledPlutoTickerSettings, tickerPotFraction, type PlutoTickerSett
 // own functions on fixed example inputs. Percentages are in percent (5 = 5%), deltas as fractions, money in dollars.
 
 /**
- * Vol Farmer v4's example: a $2M account, a 20% allocation, the stock at $100, a first break-even of $96 after a fall, IBKR's
+ * Vol Farmer v4's example: Pluto's book worth $1M, a 20% allocation, the stock at $100, a first break-even of $96 after a fall, IBKR's
  * IV at 60%; the first position rebalanced after a fall to $90 and a rise to $110.
  */
 const volFarmerV4ExampleStockPrice = 100;
@@ -26,7 +26,7 @@ const volFarmerV4ExampleFirstBreakEven = 96;
 const volFarmerV4ExampleImpliedVolatility = 0.6;
 const volFarmerV4ExampleFallPrice = 70;
 const volFarmerV4ExampleRisePrice = 130;
-const volFarmerV4ExampleAccountValue = 2_000_000;
+const volFarmerV4ExamplePlutoBookValue = 1_000_000;
 const volFarmerV4ExampleAllocationPct = 20;
 /** The buyback's example (Marcelo 2026-11-02): a minute before the window's end the stock is at $101, the lots' Calls struck at $100 quoted around a $1.10 mid. */
 const volFarmerV4ExampleBuyBackStockPrice = 101;
@@ -37,8 +37,7 @@ export interface PlutoHowItWorks {
     windowStartEt: string;
     windowEndEt: string;
     windowEndMinutesBeforeCloseAtLeast: number;
-    capitalBudgetPct: number;
-    /** Every ticker's pot is its allocation raised by this share (tickerPotFraction). */
+    /** Every ticker's pot is its allocation of Pluto's book value raised by this share (tickerPotFraction). */
     excessAllowancePct: number;
     dailyLossBreakerPct: number;
     unfilledOrderCancelMinutes: number;
@@ -99,7 +98,8 @@ export interface PlutoHowItWorks {
     buyBackStartsEt: string;
     buyBackCancelledAtEt: string;
     example: {
-      accountValue: number;
+      /** Pluto's book value in the example: the pots' base since the Pluto and Manual books (2026-11-05). */
+      plutoBookValue: number;
       allocationPct: number;
       pot: number;
       stockPrice: number;
@@ -139,7 +139,7 @@ const percent = (fraction: number) => Math.round(fraction * 1_000_000) / 10_000;
 
 /** Pure: the tab's numbers from Pluto's settings, the platform's unfilled-order sweep and the code's constants. */
 export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfilledOrderCancelMinutes: number; tickers: readonly Pick<PlutoTickerSettings, "symbol" | "alwaysHoldTheStock">[] }): PlutoHowItWorks {
-  const pot = volFarmerV4ExampleAccountValue * tickerPotFraction(volFarmerV4ExampleAllocationPct, settings);
+  const pot = volFarmerV4ExamplePlutoBookValue * tickerPotFraction(volFarmerV4ExampleAllocationPct, settings);
   const volFarmerV4Step = settings.volFarmerV4StepRule === "implied_move_at_put_sale" ? volFarmerV4ImpliedMoveStep(volFarmerV4ExampleImpliedVolatility).stepPct : settings.volFarmerV4StepBelowFirstBreakEvenPct;
   // A lot's cost at a price, as the steps count it (the shares and their commission).
   const lotCostAt = (price: number) => price * 100 + flatStockCommissionEstimator.perShareDollars("buy") * 100;
@@ -164,7 +164,6 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       windowStartEt: settings.windowStartEt,
       windowEndEt: settings.windowEndEt,
       windowEndMinutesBeforeCloseAtLeast: closeMarginMinutes,
-      capitalBudgetPct: settings.capitalBudgetPct,
       excessAllowancePct: settings.excessAllowancePct,
       dailyLossBreakerPct: settings.dailyLossBreakerPct,
       unfilledOrderCancelMinutes: figures.unfilledOrderCancelMinutes,
@@ -214,7 +213,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       buyBackStartsEt: hhmmMinutesBefore(settings.windowEndEt, volFarmerV4BuyBackMinutesBeforeWindowEnd),
       buyBackCancelledAtEt: hhmmMinutesBefore(regularCloseEt, cancelMarginMinutes),
       example: {
-        accountValue: volFarmerV4ExampleAccountValue,
+        plutoBookValue: volFarmerV4ExamplePlutoBookValue,
         allocationPct: volFarmerV4ExampleAllocationPct,
         pot,
         stockPrice: volFarmerV4ExampleStockPrice,

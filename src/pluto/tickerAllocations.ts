@@ -16,12 +16,12 @@ export interface PlutoTickerAllocation {
   allocationPct: number | null;
   /**
    * The ticker's pot in dollars, while it is enabled in Pluto: allocation (effective) × (1 + the excess allowance) ×
-   * Pluto's capital budget at last night's account value (tickerPotFraction). Null when the ticker is not enabled or no
-   * account value is recorded.
+   * Pluto's book value at last night's snapshot (tickerPotFraction). Null when the ticker is not enabled or no book value
+   * is recorded (before the books are started).
    */
   potDollars: number | null;
-  /** Pluto's capital budget in dollars at last night's account value; null when none is recorded. */
-  capitalBudgetDollars: number | null;
+  /** Pluto's book value at last night's snapshot; null when none is recorded. */
+  plutoBookValueDollars: number | null;
   /** The ticker's own Always hold the stock (Marcelo 2026-11-03); null = Pluto's setting, alwaysHoldTheStockEffective. */
   alwaysHoldTheStock: VolFarmerV3AlwaysHoldTheStock | null;
   /** What the ticker follows: its own value, else Pluto's volFarmerV4AlwaysHoldTheStock. */
@@ -33,19 +33,18 @@ export async function loadPlutoTickerAllocations(symbols: readonly string[], con
   const [settings, enabledTickers, lastSnapshot] = await Promise.all([
     loadPlutoSettings(connection),
     loadEnabledPlutoTickerSettings(connection),
-    connection("account_pnl_snapshots").whereNotNull("net_liquidation_value").orderBy("snapshot_date", "desc").first("net_liquidation_value"),
+    connection("book_value_snapshots").where({ book_key: "pluto" }).orderBy("snapshot_date", "desc").first("book_value"),
   ]);
-  const accountValue = lastSnapshot ? Number(lastSnapshot.net_liquidation_value) : null;
-  const capitalBudgetDollars = accountValue === null ? null : (accountValue * settings.capitalBudgetPct) / 100;
+  const plutoBookValueDollars = lastSnapshot ? Number(lastSnapshot.book_value) : null;
   const effectiveBySymbol = effectiveAllocationPctBySymbol(enabledTickers);
   return Promise.all(
     symbols.map(async (symbol) => {
       const tickerSettings = await loadPlutoTickerSettings(symbol, connection);
       const enabled = enabledTickers.some((ticker) => ticker.symbol === symbol);
       const effectivePct = effectiveBySymbol.get(symbol);
-      const potDollars = enabled && effectivePct !== undefined && accountValue !== null ? accountValue * tickerPotFraction(effectivePct, settings) : null;
+      const potDollars = enabled && effectivePct !== undefined && plutoBookValueDollars !== null ? plutoBookValueDollars * tickerPotFraction(effectivePct, settings) : null;
       const alwaysHoldTheStock = tickerSettings?.alwaysHoldTheStock ?? null;
-      return { symbol, enabled, allocationPct: tickerSettings?.allocationPct ?? null, potDollars, capitalBudgetDollars, alwaysHoldTheStock, alwaysHoldTheStockEffective: alwaysHoldTheStock ?? settings.volFarmerV4AlwaysHoldTheStock };
+      return { symbol, enabled, allocationPct: tickerSettings?.allocationPct ?? null, potDollars, plutoBookValueDollars, alwaysHoldTheStock, alwaysHoldTheStockEffective: alwaysHoldTheStock ?? settings.volFarmerV4AlwaysHoldTheStock };
     }),
   );
 }

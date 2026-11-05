@@ -74,7 +74,6 @@ export function fixturePlutoSettings(overrides: Partial<PlutoSettings> = {}): Pl
   return {
     ...plutoSafetyLimitsSettingsFixture,
   ...plutoVolFarmerV4SettingsFixture,
-    capitalBudgetPct: 50,
     excessAllowancePct: 0,
     windowStartEt: "10:00",
     windowEndEt: "15:30",

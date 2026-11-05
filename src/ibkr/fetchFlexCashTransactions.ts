@@ -26,7 +26,8 @@ interface SendRequestResponse {
   };
 }
 
-interface FlexStatementXml {
+export interface FlexStatementXml {
+  [section: string]: unknown;
   accountId?: string;
   CashTransactions?: {
     CashTransaction?: CashTransactionXml | CashTransactionXml[];
@@ -142,12 +143,19 @@ async function assertStatementsAreForWorkerAccount(statements: FlexStatementXml[
  * Which snapshot each flow belongs to is decided by flexCashFlowAssignment.ts.
  */
 export async function fetchFlexCashTransactions(): Promise<FlexCashFlow[]> {
+  return extractExternalCashFlows(await fetchFlexStatements());
+}
+
+/**
+ * The whole Flex report, every section the query holds (the books' import reads trades, cash transactions, sales taxes,
+ * transfers and the cash report from it, src/books/statementImport.ts). Refused unless it is the worker's account.
+ */
+export async function fetchFlexStatements(): Promise<FlexStatementXml[]> {
   const token = requireEnvironmentVariable("IBKR_FLEX_TOKEN");
   const queryId = requireEnvironmentVariable("IBKR_FLEX_QUERY_ID");
 
   const referenceCode = await sendFlexRequestRetryingRateLimit(token, queryId);
   const statements = await pollFlexStatement(token, referenceCode);
   await assertStatementsAreForWorkerAccount(statements);
-
-  return extractExternalCashFlows(statements);
+  return statements;
 }

@@ -19,6 +19,8 @@ import { refreshStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { invalidatePricePerformanceSnapshot } from "../lib/pricePerformanceSnapshot.js";
 import { countOpenPositionsForTicker, describeOpenPositionsBlockingRemoval } from "../lib/positionQueries.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { applyTickerSwitch, planTickerSwitch } from "../books/tickerSwitch.js";
+import { loadBooksLiveState } from "../books/bookFigures.js";
 
 export const shortlistRouter = Router();
 shortlistRouter.use(requireAuth);
@@ -283,6 +285,9 @@ shortlistRouter.patch("/:id/bot-enabled", requireAdmin, async (request, response
     return;
   }
   const userId = request.session.userId as string;
+  // Once the books are started, the switch moves the ticker's open legs between Pluto and Manual at their mark (books/tickerSwitch.ts).
+  const unlockedEntry = await db("shortlist_entries").where({ id: request.params.id }).whereNull("removed_at").first("ticker_id", "bot_enabled");
+  const switchPlan = unlockedEntry && Boolean(unlockedEntry.bot_enabled) !== enabled ? await planTickerSwitch(unlockedEntry.ticker_id, enabled) : null;
   const result = await db.transaction(async (trx) => {
     const entry = await trx("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").where("se.id", request.params.id).whereNull("se.removed_at").forUpdate("se").first("se.id", "se.ticker_id", "se.bot_enabled", "t.symbol");
     if (!entry) return { status: 404 as const, error: "Entry not found or already removed." };
@@ -296,6 +301,7 @@ shortlistRouter.patch("/:id/bot-enabled", requireAdmin, async (request, response
     // Switched off, Pluto stops looking at the ticker, so what Vol Farmer v4 remembers of its holdings goes stale: forgotten
     // here, the next switch-on adopts the holdings as the ledger has them then (Marcelo 2026-11-05).
     if (!enabled) await clearVolFarmerV4Memory(entry.ticker_id, trx);
+    if (switchPlan) await applyTickerSwitch(trx, entry.ticker_id, switchPlan, userId);
     return { status: 200 as const, symbol: entry.symbol as string, changed: true };
   });
   if (result.status !== 200) {
@@ -306,7 +312,29 @@ shortlistRouter.patch("/:id/bot-enabled", requireAdmin, async (request, response
     const user = await db("users").where({ id: userId }).first("display_name");
     await recordPlutoEvent(enabled ? "ticker_enabled" : "ticker_disabled", { symbol: result.symbol, by: user?.display_name ?? "an operator" });
   }
-  response.json({ botEnabled: enabled });
+  response.json({ botEnabled: enabled, transfer: result.changed ? switchPlan : null });
+});
+
+// What switching Pluto on or off for a ticker would move between the books, for the confirmation (Marcelo 2026-11-05):
+// each leg at its mark, the cash the receiving book pays, and both books' available cash after. Null before the books start.
+shortlistRouter.get("/:id/bot-enabled-preview", requireAdmin, async (request, response) => {
+  const enabled = request.query.enabled === "true";
+  const entry = await db("shortlist_entries").where({ id: request.params.id }).whereNull("removed_at").first("ticker_id");
+  if (!entry) {
+    response.status(404).json({ error: "Entry not found or already removed." });
+    return;
+  }
+  const [plan, books] = await Promise.all([planTickerSwitch(entry.ticker_id, enabled), loadBooksLiveState()]);
+  if (!plan || !books.ready) {
+    response.json({ transfer: null });
+    return;
+  }
+  const availableAfter = (book: "pluto" | "manual") => {
+    const available = books.books[book].availableCash;
+    if (available === null) return null;
+    return book === plan.toBook ? available - plan.totalValueDollars : available + plan.totalValueDollars;
+  };
+  response.json({ transfer: plan, availableCashAfter: { pluto: availableAfter("pluto"), manual: availableAfter("manual") } });
 });
 
 // A trader may remove a ticker Pluto is not switched on for; removing one it is switched on for would take it out of Pluto's
@@ -321,6 +349,8 @@ shortlistRouter.delete("/:id", async (request, response) => {
     const openPositionCount = await countOpenPositionsForTicker(entry.ticker_id, trx);
     if (openPositionCount > 0) return { openPositionCount };
     await trx("shortlist_entries").where({ id: request.params.id }).update({ removed_at: trx.fn.now() });
+    // No open position, so nothing moves between the books: Pluto's period on the ticker just ends.
+    if (entry.bot_enabled) await trx("ticker_book_periods").where({ ticker_id: entry.ticker_id }).whereNull("ended_at").update({ ended_at: trx.fn.now() });
     // A removed ticker is no longer looked at (an admin may remove one Pluto is on for): Vol Farmer v4's memory of it goes too.
     await clearVolFarmerV4Memory(entry.ticker_id, trx);
     return "removed";

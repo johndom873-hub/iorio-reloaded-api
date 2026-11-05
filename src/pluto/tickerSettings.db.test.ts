@@ -127,18 +127,18 @@ describe("ticker settings routes", () => {
 });
 
 describe("the Tickers tab's allocations and pots", () => {
-  it("gives each shortlisted ticker its allocation, its pot from last night's account value while enabled, and Pluto's budget", async () => {
+  it("gives each shortlisted ticker its allocation, its pot from last night's Pluto book value while enabled, and that value", async () => {
     const list = await call("GET", "/ticker-allocations");
     expect(list.status).toBe(200);
-    const rows = list.json as unknown as { symbol: string; enabled: boolean; allocationPct: number | null; potDollars: number | null; capitalBudgetDollars: number | null }[];
-    const settingsRow = await testDb("pluto_settings").where({ id: 1 }).first("capital_budget_pct", "excess_allowance_pct");
-    const snapshot = await testDb("account_pnl_snapshots").whereNotNull("net_liquidation_value").orderBy("snapshot_date", "desc").first("net_liquidation_value");
+    const rows = list.json as unknown as { symbol: string; enabled: boolean; allocationPct: number | null; potDollars: number | null; plutoBookValueDollars: number | null }[];
+    const settingsRow = await testDb("pluto_settings").where({ id: 1 }).first("excess_allowance_pct");
+    const snapshot = await testDb("book_value_snapshots").where({ book_key: "pluto" }).orderBy("snapshot_date", "desc").first("book_value");
     const effective = effectiveAllocationPctBySymbol(await loadEnabledPlutoTickerSettings()).get(enabledSymbol)!;
-    const accountValue = snapshot ? Number(snapshot.net_liquidation_value) : null;
-    // The pot: the account value × the allocation × (1 + the excess allowance) × Pluto's budget.
-    const expectedPot = accountValue === null ? null : (accountValue * effective * (100 + Number(settingsRow.excess_allowance_pct)) * Number(settingsRow.capital_budget_pct)) / 1_000_000;
+    const bookValue = snapshot ? Number(snapshot.book_value) : null;
+    // The pot: Pluto's book value × the allocation × (1 + the excess allowance).
+    const expectedPot = bookValue === null ? null : (bookValue * effective * (100 + Number(settingsRow.excess_allowance_pct))) / 10_000;
     const enabled = rows.find((row) => row.symbol === enabledSymbol)!;
-    expect(enabled).toMatchObject({ enabled: true, allocationPct: 12.5, capitalBudgetDollars: accountValue === null ? null : (accountValue * Number(settingsRow.capital_budget_pct)) / 100 });
+    expect(enabled).toMatchObject({ enabled: true, allocationPct: 12.5, plutoBookValueDollars: bookValue });
     if (expectedPot === null) expect(enabled.potDollars).toBeNull();
     else expect(enabled.potDollars).toBeCloseTo(expectedPot, 6);
     expect(rows.find((row) => row.symbol === otherSymbol)).toMatchObject({ enabled: false, allocationPct: null, potDollars: null });
@@ -191,11 +191,10 @@ describe("the Tickers tab's allocations save", () => {
           { by: "Ticker Settings Tester", fields: [{ field: "excessAllowancePct", from: allowanceBefore, to: 26.3158 }] },
         ]),
       );
-      // The pot: last night's account value × 20% × (1 + 26.3158%) × Pluto's budget.
-      const snapshot = await testDb("account_pnl_snapshots").whereNotNull("net_liquidation_value").orderBy("snapshot_date", "desc").first("net_liquidation_value");
-      const budgetPct = Number((await testDb("pluto_settings").where({ id: 1 }).first("capital_budget_pct")).capital_budget_pct);
+      // The pot: last night's Pluto book value × 20% × (1 + 26.3158%).
+      const snapshot = await testDb("book_value_snapshots").where({ book_key: "pluto" }).orderBy("snapshot_date", "desc").first("book_value");
       const pots = (await call("GET", "/ticker-allocations")).json as unknown as { symbol: string; potDollars: number | null }[];
-      if (snapshot) expect(pots.find((row) => row.symbol === enabledSymbol)!.potDollars).toBeCloseTo((Number(snapshot.net_liquidation_value) * 20 * 126.3158 * budgetPct) / 1_000_000, 6);
+      if (snapshot) expect(pots.find((row) => row.symbol === enabledSymbol)!.potDollars).toBeCloseTo((Number(snapshot.book_value) * 20 * 126.3158) / 10_000, 6);
     } finally {
       await testDb("pluto_ticker_settings").where({ ticker_id: tickerIds[0] }).update({ allocation_pct: enabledBefore });
       await testDb("pluto_ticker_settings").where({ ticker_id: tickerIds[1] }).update({ allocation_pct: otherBefore });

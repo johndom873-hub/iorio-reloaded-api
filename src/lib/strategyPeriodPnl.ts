@@ -1,3 +1,5 @@
+import type { BookKey } from "../books/bookKeys.js";
+import { bookOfPositionAtNightSql } from "../books/bookDashboard.js";
 import { db } from "../db/connection.js";
 import { legRealizedPnlSql } from "./legRealizedPnlSql.js";
 
@@ -37,7 +39,12 @@ function sessionDateSql(timestamp: string): string {
       AND (mc.calendar_date + time '09:30') AT TIME ZONE 'America/New_York' <= ${timestamp}), ${newYorkDate})`;
 }
 
-export async function computeStrategyDailyPnlSeries(days: number): Promise<StrategyDailyPnl[]> {
+/**
+ * `book` (the Dashboard's book switch, Marcelo 2026-11-05): only each position's daily P&L in the book its ticker belonged
+ * to that night (bookOfPositionAtNightSql), and only from the books' first date (`booksFromDate`); null = every position.
+ */
+export async function computeStrategyDailyPnlSeries(days: number, book: { book: BookKey; booksFromDate: string } | null = null): Promise<StrategyDailyPnl[]> {
+  const bookFilter = book === null ? "" : `WHERE ${bookOfPositionAtNightSql("p", "pd.d")} = ? AND pd.d >= ?::date`;
   const result = await db.raw(
     `
     WITH days AS (
@@ -101,6 +108,7 @@ export async function computeStrategyDailyPnlSeries(days: number): Promise<Strat
       SELECT p.strategy_key, pd.d, SUM(pd.daily_pnl) AS daily_pnl
       FROM position_daily pd
       JOIN positions p ON p.id = pd.position_id
+      ${bookFilter}
       GROUP BY p.strategy_key, pd.d
     )
     SELECT
@@ -112,7 +120,7 @@ export async function computeStrategyDailyPnlSeries(days: number): Promise<Strat
     LEFT JOIN strategy_daily sd ON sd.strategy_key = strategies.strategy_key AND sd.d = days.d
     ORDER BY days.d, strategies.strategy_key
     `,
-    [days],
+    book === null ? [days] : [days, book.book, book.booksFromDate],
   );
 
   return result.rows.map((row: Record<string, string>) => ({

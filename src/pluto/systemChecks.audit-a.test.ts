@@ -5,19 +5,23 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const harness = vi.hoisted(() => ({
   account: null as Record<string, unknown> | Error | null,
-  previousSnapshot: { net_liquidation_value: "1000000", snapshot_date_iso: "2026-10-06" } as Record<string, unknown> | undefined,
+  previousSnapshot: { book_value: "1000000", captured_at: new Date("2026-10-06T22:30:00Z"), snapshot_date_iso: "2026-10-06" } as Record<string, unknown> | undefined,
+  /** Pluto's book value now, or the error reading it. */
+  plutoBookValue: 990_000 as number | Error,
+  movedIntoPluto: 0,
   firstArgs: [] as unknown[][],
 }));
 
 vi.mock("../db/connection.js", () => {
   const chain = (table: string) => {
     const query: Record<string, unknown> = {};
-    for (const method of ["where", "whereNull", "orderBy", "limit"]) query[method] = () => query;
+    for (const method of ["where", "whereNull", "whereIn", "orderBy", "limit", "sum"]) query[method] = () => query;
     query.first = async (...args: unknown[]) => {
-      if (table === "account_pnl_snapshots") {
+      if (table === "book_value_snapshots") {
         harness.firstArgs.push(args);
         return harness.previousSnapshot;
       }
+      if (table === "book_cash_entries") return { total: String(harness.movedIntoPluto) };
       if (table === "job_runs") return { started_at: new Date("2026-10-07T14:55:00Z"), details: { reconciliationProblems: [] } };
       return {};
     };
@@ -33,6 +37,12 @@ vi.mock("./accountSummaryCache.js", () => ({
   },
 }));
 vi.mock("../lib/appEnvironment.js", () => ({ readAppEnvironment: () => "test" }));
+vi.mock("../books/bookFigures.js", () => ({
+  loadBooksLiveState: async () => {
+    if (harness.plutoBookValue instanceof Error) throw harness.plutoBookValue;
+    return { ready: true, books: { pluto: { bookValue: harness.plutoBookValue } } };
+  },
+}));
 vi.mock("../lib/marketSessionStatus.js", async () => {
   const { easternInstant } = await vi.importActual<typeof import("../lib/easternIsoDate.js")>("../lib/easternIsoDate.js");
   return { easternInstant, computeMarketSessionStatus: async () => ({ state: "open" }) };
@@ -50,7 +60,9 @@ const at = new Date("2026-10-07T15:00:00Z"); // 11:00 ET
 
 beforeEach(() => {
   harness.account = { netLiquidationValue: 990_000, totalCashValue: 400_000, buyingPower: null, grossPositionValue: null, excessLiquidity: null };
-  harness.previousSnapshot = { net_liquidation_value: "1000000", snapshot_date_iso: "2026-10-06" };
+  harness.previousSnapshot = { book_value: "1000000", captured_at: new Date("2026-10-06T22:30:00Z"), snapshot_date_iso: "2026-10-06" };
+  harness.plutoBookValue = 990_000;
+  harness.movedIntoPluto = 0;
   harness.firstArgs.length = 0;
 });
 
@@ -62,20 +74,28 @@ describe("runPlutoSystemChecks (audit A)", () => {
     expect(result.context.totalCashValue).toBe(400_000);
   });
 
-  it("names the previous snapshot's date as plain text in the daily-loss detail, and asks for it as text", async () => {
+  it("measures the day on Pluto's book against last night's, naming the snapshot's date as plain text", async () => {
     const result = await runPlutoSystemChecks(settings, at);
-    expect(result.checks.daily_loss!.detail).toBe("-1.00% vs 2026-10-06 close (breaker at -3%)");
+    expect(result.checks.daily_loss!.detail).toBe("-1.00% of Pluto's book vs 2026-10-06 close (breaker at -3%)");
     expect(JSON.stringify(harness.firstArgs[0])).toContain("snapshot_date::text as snapshot_date_iso");
   });
 
-  it("a failed summary fails account_data and daily_loss (fail closed) with no cash in the context", async () => {
+  it("leaves cash moved into Pluto today out of its day: $1,020,000 now with $30,000 moved in is −1.00%, and trips at −3%", async () => {
+    harness.plutoBookValue = 1_020_000;
+    harness.movedIntoPluto = 30_000;
+    expect((await runPlutoSystemChecks(settings, at)).checks.daily_loss).toEqual({ ok: true, detail: "-1.00% of Pluto's book vs 2026-10-06 close (breaker at -3%)" });
+    harness.plutoBookValue = 1_000_000;
+    expect((await runPlutoSystemChecks(settings, at)).checks.daily_loss!.ok).toBe(false);
+  });
+
+  it("a failed summary fails account_data with no cash in the context; a failed read of Pluto's book fails daily_loss (fail closed)", async () => {
     harness.account = new Error("Account summary timeout.");
     const result = await runPlutoSystemChecks(settings, at);
     expect(result.ok).toBe(false);
     expect(result.checks.account_data).toEqual({ ok: false, detail: "account summary failed: Account summary timeout." });
-    expect(result.checks.daily_loss!.ok).toBe(false);
-    expect(result.checks.daily_loss!.detail.startsWith("cannot compute")).toBe(true); // never trips the breaker
     expect(result.context.totalCashValue).toBeNull();
+    harness.plutoBookValue = new Error("ledger unreadable");
+    expect((await runPlutoSystemChecks(settings, at)).checks.daily_loss).toEqual({ ok: false, detail: "could not read Pluto's book value: ledger unreadable" });
   });
 
   it("a summary without total cash still passes account_data (free cash then sizes from 0)", async () => {

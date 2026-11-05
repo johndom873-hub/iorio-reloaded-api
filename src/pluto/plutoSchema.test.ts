@@ -37,7 +37,7 @@ describe("Pluto schema", () => {
     const settings = await db("pluto_settings");
     expect(settings).toHaveLength(1);
     // Approved 2026-10-06 for the $1M paper account: budget 50 %.
-    expect(Number(settings[0].capital_budget_pct)).toBe(50);
+    expect(settings[0]).not.toHaveProperty("capital_budget_pct"); // retired with the Pluto and Manual books (2026-11-05)
     // The model's and Edge Margin's settings are gone with Signals (dropped 2026-11-02).
     for (const dropped of ["model_id", "order_size_pct_of_budget", "max_open_positions", "daily_cost_ceiling_usd", "max_edge_margin_drift_pts", "execution_strategy", "max_edge_drift_vp"]) expect(settings[0]).not.toHaveProperty(dropped);
     expect(settings[0].day_signals_poll_seconds).toBe(1);

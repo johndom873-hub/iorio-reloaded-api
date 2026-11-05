@@ -214,7 +214,7 @@ describe("backtest routes", () => {
     const plutoRow = await testDb("pluto_settings").where({ id: 1 }).first();
     // The policy, Pluto and Kelly values are still snapshotted; no row shows them.
     expect(template.settings.kellyFraction).toBe(kellyFraction);
-    expect(template.settings.pluto.capitalBudgetPct).toBe(Number(plutoRow.capital_budget_pct));
+    expect(template.settings.pluto.excessAllowancePct).toBe(Number(plutoRow.excess_allowance_pct));
     expect(template.settings.trading).not.toHaveProperty("commissionEstimator");
     expect(template.settings).toMatchObject({ decisionMaker: labDecisionMaker, policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
     expect(template.rows.map((row) => `${row.section} · ${row.group}`)).toEqual([

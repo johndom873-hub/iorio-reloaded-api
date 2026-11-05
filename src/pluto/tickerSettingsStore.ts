@@ -78,13 +78,13 @@ export async function loadShortlistedPlutoTickerSettings(connection: Knex = db):
 export { effectiveAllocationPctBySymbol };
 
 /**
- * A ticker's pot as a share of the account's value (Marcelo 2026-10-28): its allocation of Pluto's budget raised by the
- * excess allowance, so the pots may add up to more than the budget, whose cash they share (tickerPotShare).
- * Example: a $1,000,000 account, a 50% budget, 10 tickers on an equal share (10%) and a 20% allowance: each pot is
- * 10% × 1.2 × 50% = 6% of the account, $60,000; together $600,000 on the budget's $500,000.
+ * A ticker's pot as a share of Pluto's book value (Marcelo 2026-10-28; of the book's value since the books, 2026-11-05):
+ * its allocation raised by the excess allowance, so the pots may add up to more than the book, whose cash they share
+ * (tickerPotShare). Example: Pluto worth $600,000, 10 tickers on an equal share (10%) and a 20% allowance: each pot is
+ * 10% × 1.2 = 12% of the book, $72,000; together $720,000 on the book's $600,000.
  */
-export function tickerPotFraction(allocationPct: number, settings: Pick<PlutoSettings, "capitalBudgetPct" | "excessAllowancePct">): number {
-  return tickerPotShare(allocationPct, settings.excessAllowancePct, settings.capitalBudgetPct);
+export function tickerPotFraction(allocationPct: number, settings: Pick<PlutoSettings, "excessAllowancePct">): number {
+  return tickerPotShare(allocationPct, settings.excessAllowancePct, 100);
 }
 
 export class PlutoTickerSettingsValidationError extends Error {}

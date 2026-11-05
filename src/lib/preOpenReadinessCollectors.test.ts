@@ -52,10 +52,8 @@ const mocks = vi.hoisted(() => {
     findDeadlineProblems: vi.fn(),
     loadOptionDataUniverse: vi.fn(),
     loadStoredOptionChain: vi.fn(),
-    loadPlutoSettings: vi.fn(),
+    loadBooksLiveState: vi.fn(),
     loadEnabledPlutoTickerSettings: vi.fn(),
-    computeCashLockedInCsps: vi.fn(),
-    loadInFlightNotionalsBySymbol: vi.fn(),
     loadCommittedCapitalOnSymbols: vi.fn(),
   };
 });
@@ -79,10 +77,8 @@ vi.mock("./tradingSettingsStore.js", () => ({ loadTradingSettingsForEditing: moc
 vi.mock("./platformControls.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("./platformControls.js")>()), fetchTradingHalt: mocks.fetchTradingHalt }));
 vi.mock("./opsMonitor.js", () => ({ loadLatestRunPerExpectedJob: mocks.loadLatestRunPerExpectedJob, findDeadlineProblems: mocks.findDeadlineProblems }));
 vi.mock("./optionDataUniverse.js", () => ({ loadOptionDataUniverse: mocks.loadOptionDataUniverse }));
-vi.mock("../pluto/settingsStore.js", () => ({ loadPlutoSettings: mocks.loadPlutoSettings }));
 vi.mock("../pluto/tickerSettingsStore.js", () => ({ loadEnabledPlutoTickerSettings: mocks.loadEnabledPlutoTickerSettings }));
-vi.mock("../pluto/book.js", () => ({ loadInFlightNotionalsBySymbol: mocks.loadInFlightNotionalsBySymbol }));
-vi.mock("./positionExposure.js", () => ({ computeCashLockedInCsps: mocks.computeCashLockedInCsps }));
+vi.mock("../books/bookFigures.js", () => ({ loadBooksLiveState: mocks.loadBooksLiveState }));
 vi.mock("./orderLimits.js", () => ({ loadCommittedCapitalOnSymbols: mocks.loadCommittedCapitalOnSymbols }));
 vi.mock("../ibkr/fetchOptionChain.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("../ibkr/fetchOptionChain.js")>()), loadStoredOptionChain: mocks.loadStoredOptionChain }));
 
@@ -101,7 +97,7 @@ function healthyDependencies(overrides: Partial<ReadinessDependencies> = {}): Re
     loadSettings: async () => ({ maxOrderPctOfPortfolio: 15, maxConcentrationPerTickerPct: 20, minCashReservePct: 5, deltaTargetMin: 0.2, deltaTargetMax: 0.4, recoveryDteMin: 1, recoveryDteMax: 14, minAnnualizedYieldPct: 50, commissionWarnSharePctOfPremium: 5 }),
     loadTradingHalt: async () => ({ enabled: false, reason: null, setByUserId: null, setByDisplayName: null, setAt: null }),
     loadAccount: async () => ({ netLiquidationValue: 100_000, totalCashValue: 60_000, settledCash: 60_000, settledCashIsTotalCash: false, buyingPower: 200_000, excessLiquidity: 50_000 }),
-    loadPlutoCash: async () => ({ capitalBudgetPct: 50, enabledTickerCount: 2, committedOnPlutoTickers: 20_000, cashLockedInCsps: 10_000, inFlightNotional: 0 }),
+    loadPlutoCash: async () => ({ enabledTickerCount: 2, booksStarted: true, plutoBookValue: 50_000, committedOnPlutoTickers: 20_000, availableCash: 25_000, availableSettledCash: 25_000 }),
     loadProbeContract: async () => probeContract,
     probeOrderPath: async (contract) => {
       calls.push(`probeOrderPath:${contract?.symbol}`);
@@ -204,10 +200,9 @@ describe("collectReadinessChecks", () => {
     );
     expect(checks.find((entry) => entry.name === "Account")).toMatchObject({ status: "fail" });
     expect(checks.find((entry) => entry.name === "Trading settings")).toMatchObject({ status: "fail" });
-    expect(checks.find((entry) => entry.name === "Pluto cash")).toMatchObject({ status: "warn" });
   });
 
-  it("reads the account summary once for the Account and Pluto cash checks", async () => {
+  it("reads the account summary once, and warns on Pluto's cash from Pluto's book", async () => {
     let accountReads = 0;
     const checks = await collectReadinessChecks(
       "pre_open",
@@ -217,10 +212,11 @@ describe("collectReadinessChecks", () => {
           accountReads += 1;
           return { netLiquidationValue: 100_000, totalCashValue: 11_000, settledCash: 11_000, settledCashIsTotalCash: false, buyingPower: 11_000, excessLiquidity: 11_000 };
         },
+        loadPlutoCash: async () => ({ enabledTickerCount: 2, booksStarted: true, plutoBookValue: 50_000, committedOnPlutoTickers: 20_000, availableCash: 1_000, availableSettledCash: 1_000 }),
       }),
     );
     expect(accountReads).toBe(1);
-    // $11,000 − $10,000 held by Puts = $1,000 free, 2% of the $50,000 budget.
+    // $1,000 available is 2% of Pluto's $50,000 book.
     expect(checks.find((entry) => entry.name === "Pluto cash")).toMatchObject({ status: "warn", detail: expect.stringContaining("free cash $1,000 is 2.0%") });
   });
 
@@ -460,14 +456,19 @@ describe("createDefaultReadinessDependencies", () => {
   });
 
   describe("loadPlutoCash", () => {
-    it("reads Pluto's budget, its enabled tickers' committed capital, the Puts' held cash and every working order", async () => {
-      mocks.loadPlutoSettings.mockResolvedValue({ capitalBudgetPct: 60 });
+    it("reads Pluto's enabled tickers' committed capital and Pluto's book: its value, available and settled cash", async () => {
       mocks.loadEnabledPlutoTickerSettings.mockResolvedValue([{ symbol: "AAA" }, { symbol: "BBB" }]);
-      mocks.computeCashLockedInCsps.mockResolvedValue(10_000);
-      mocks.loadInFlightNotionalsBySymbol.mockResolvedValue({ totalNotional: 700, managedNotional: 500, tickerNotionalBySymbol: new Map() });
+      mocks.loadBooksLiveState.mockResolvedValue({ ready: true, books: { pluto: { bookValue: 60_000, availableCash: 12_000, availableSettledCash: 11_000 } } });
       mocks.loadCommittedCapitalOnSymbols.mockResolvedValue(40_000);
-      expect(await createDefaultReadinessDependencies().loadPlutoCash()).toEqual({ capitalBudgetPct: 60, enabledTickerCount: 2, committedOnPlutoTickers: 40_000, cashLockedInCsps: 10_000, inFlightNotional: 700 });
+      expect(await createDefaultReadinessDependencies().loadPlutoCash()).toEqual({ enabledTickerCount: 2, booksStarted: true, plutoBookValue: 60_000, committedOnPlutoTickers: 40_000, availableCash: 12_000, availableSettledCash: 11_000 });
       expect(mocks.loadCommittedCapitalOnSymbols).toHaveBeenCalledWith(["AAA", "BBB"]);
+    });
+
+    it("says the books are not started before the cut-over", async () => {
+      mocks.loadEnabledPlutoTickerSettings.mockResolvedValue([{ symbol: "AAA" }]);
+      mocks.loadBooksLiveState.mockResolvedValue({ ready: false });
+      mocks.loadCommittedCapitalOnSymbols.mockResolvedValue(0);
+      expect(await createDefaultReadinessDependencies().loadPlutoCash()).toMatchObject({ booksStarted: false, plutoBookValue: 0, availableCash: null });
     });
   });
 

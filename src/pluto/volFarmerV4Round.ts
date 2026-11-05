@@ -7,7 +7,8 @@ import type { BacktestVolFarmerV3Settings, VolFarmerV3CallsInTheMoneyAtLastLook 
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { liveExpiryStrikes } from "../ibkr/liveOptionChainLookups.js";
 import { fetchPricesPoolFirst } from "../ibkr/pricePool.js";
-import { accountContextFromTotalCash } from "../lib/accountContext.js";
+import { loadBooksLiveState } from "../books/bookFigures.js";
+import { fetchPlutoAccountSummary } from "./accountSummaryCache.js";
 import { loadCommissionEstimator, loadStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { fetchOpenCycleSummaryRowsByTickerId } from "../lib/cycleBreakEvenQueries.js";
 import { formatWholeDollars } from "../lib/formatWholeDollars.js";
@@ -29,8 +30,7 @@ import type { PositionLegFigures } from "../lib/positionSelectors.js";
 import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { frozenSymbolSet } from "../lib/tickerFreeze.js";
 import { isLastSessionBeforeWeekend } from "../lib/tradingWeek.js";
-import { loadInFlightNotionals, loadInFlightNotionalsBySymbol, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
-import { loadTradingSettings } from "../lib/tradingSettingsStore.js";
+import { loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
 import { executePlutoOrder, watchPlutoOrder, type ExecuteInput } from "./executor.js";
 import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
 import { nextListedExpiryAfter, optionQuoteBandExpiryContracts, volFarmerV4ExpiryRule } from "./optionQuoteBandPlan.js";
@@ -196,26 +196,30 @@ export function volFarmerV4CallsToBuyBack(input: { state: VolFarmerV4SymbolState
 
 export async function runVolFarmerV4Round(input: VolFarmerV4RoundInput): Promise<VolFarmerV4RoundSummary> {
   const { settings, now } = input;
-  const [enabled, frozen, clock, optionCommissions, stockCommissions, account, settledAccount, lastFilledAtBySymbol, tradingSettings] = await Promise.all([
+  const [enabled, frozen, clock, optionCommissions, stockCommissions, books, lastFilledAtBySymbol] = await Promise.all([
     loadEnabledPlutoTickerSettings(),
     frozenSymbolSet(),
     defaultOptionQuoteBandPlannerDependencies.loadClock(input.todayIso),
     loadCommissionEstimator(),
     loadStockCommissionEstimator(),
-    accountContextFromTotalCash(input.totalCashValue),
-    accountContextFromTotalCash(input.settledCashValue),
+    // Pluto's book (Marcelo 2026-11-05): Pluto spends only its own cash, measured on its own value (src/books/bookFigures.ts).
+    loadBooksLiveState({ fetchSummary: () => fetchPlutoAccountSummary(), now }),
     loadLastFilledPlutoActionAtBySymbol(),
-    loadTradingSettings(),
   ]);
   const summary: VolFarmerV4RoundSummary = { looked: [], planned: 0, sent: 0, notes: [] };
   const v4Tickers = enabled.filter((ticker) => input.symbols.length === 0 || input.symbols.includes(ticker.symbol));
   if (v4Tickers.length === 0) return summary;
+  if (!books.ready) {
+    summary.notes.push("the Pluto and Manual books have not been started yet, so Pluto sends nothing");
+    return summary;
+  }
+  const plutoBook = books.books.pluto;
   // The tickers share Pluto's budget (Marcelo 2026-10-28): they take their turn in the day's order, so the one that finds
   // the free cash short is a different one each day.
   const turnOrder = volFarmerV4TurnOrder(v4Tickers.map((ticker) => ticker.symbol), Math.round(Date.parse(`${input.todayIso}T00:00:00Z`) / 86_400_000));
   const tickers = [...v4Tickers].sort((a, b) => turnOrder.indexOf(a.symbol) - turnOrder.indexOf(b.symbol));
   const allocationBySymbol = effectiveAllocationPctBySymbol(enabled);
-  const [bookCounts, bookCommittedAtStart, inFlightAtStart] = await Promise.all([loadSafetyLimitBookCounts(enabled, now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol)), loadInFlightNotionalsBySymbol()]);
+  const [bookCounts, bookCommittedAtStart] = await Promise.all([loadSafetyLimitBookCounts(enabled, now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol))]);
   // What the round's own orders commit is counted once: the book's commitment and the orders in flight are read at its
   // start, and each order it sends adds to them as it goes.
   const round = {
@@ -223,17 +227,17 @@ export async function runVolFarmerV4Round(input: VolFarmerV4RoundInput): Promise
     bookCommitted: bookCommittedAtStart,
     /** Cash the round's earlier orders tie up, gone for the next tickers. */
     committedThisRound: 0,
-    accountInFlightAtStart: inFlightAtStart.totalNotional,
     optionCommissionDollars: (contracts: number) => optionCommissions.perContractDollars("sell", contracts) * contracts,
     stockCommissionDollars: (shares: number) => stockCommissions.perShareDollars("buy") * shares,
     commissions: { option: optionCommissions, stock: stockCommissions },
-    accountFreeCash: account.freeCash,
-    settledFreeCash: input.settledCashValue === null ? null : settledAccount.freeCash,
-    /** The cash every opening order must leave (Risk & Limits' min cash reserve, of the account's value): the order route refuses one that goes below it. */
-    cashReserveDollars: (tradingSettings.minCashReservePct / 100) * input.netLiquidationValue,
+    plutoBookValue: plutoBook.bookValue,
+    plutoAvailableCash: plutoBook.availableCash ?? 0,
+    plutoAvailableSettledCash: plutoBook.availableSettledCash,
+    /** The cash every opening order must leave (Risk & Limits' min cash reserve, of Pluto's book value): already out of the available cash; a buyback may use it. */
+    cashReserveDollars: plutoBook.minCashReserve,
   };
   const lastRounds = new Map<string, LastRound>();
-  const potDollarsOf = (ticker: PlutoTickerSettings) => tickerPotFraction(allocationBySymbol.get(ticker.symbol) ?? 0, settings) * input.netLiquidationValue;
+  const potDollarsOf = (ticker: PlutoTickerSettings) => tickerPotFraction(allocationBySymbol.get(ticker.symbol) ?? 0, settings) * plutoBook.bookValue;
   const leapsDue: PlutoTickerSettings[] = [];
   try {
     // Every ticker's new cycle, Calls and Puts first; then, in the same order, the LEAPS due, on the free cash left.
@@ -274,14 +278,15 @@ type RoundState = {
   bookCounts: Awaited<ReturnType<typeof loadSafetyLimitBookCounts>>;
   bookCommitted: number;
   committedThisRound: number;
-  /** The notional of every order in flight on the account when the round began. */
-  accountInFlightAtStart: number;
   optionCommissionDollars(contracts: number): number;
   stockCommissionDollars(shares: number): number;
   commissions: VolFarmerV4Market["commissions"];
-  accountFreeCash: number;
-  /** IBKR's settled cash less the cash the open Puts hold; null when IBKR reported no settled cash. */
-  settledFreeCash: number | null;
+  /** Pluto's book value when the round began: its pots' and its budget's base. */
+  plutoBookValue: number;
+  /** Pluto's available cash when the round began, its own working orders, Puts and reserve already out (0 when IBKR's cash is unknown). */
+  plutoAvailableCash: number;
+  /** The same on Pluto's settled cash; null when IBKR reported no settled cash. */
+  plutoAvailableSettledCash: number | null;
   cashReserveDollars: number;
 };
 
@@ -413,14 +418,13 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
     await saveVolFarmerV4Memory(tickerId, memory, adopted);
     return nothingDue;
   }
-  const budgetFree = (settings.capitalBudgetPct / 100) * input.netLiquidationValue - round.bookCommitted;
-  // The account's and the settled cash keep the min cash reserve, as the order route does (Marcelo 2026-11-04). Example:
-  // $372,180 free, a 5% reserve on $996,217 leaves $322,369 to buy with.
-  const accountFree = round.accountFreeCash - round.accountInFlightAtStart - round.committedThisRound - round.cashReserveDollars;
-  // The cash account's settled cash left (Marcelo 2026-10-31): IBKR's settled cash less what the open Puts hold, the
-  // orders in flight and the round's earlier orders. Example: $40,000 settled, a $5,000 purchase working and $10,000
-  // bought earlier this round leave $25,000.
-  const settledFree = round.settledFreeCash === null ? 0 : round.settledFreeCash - round.accountInFlightAtStart - round.committedThisRound - round.cashReserveDollars;
+  // Pluto's book (Marcelo 2026-11-05): what its tickers commit stays within its book value, and it buys only with its own
+  // available cash, settled cash too (a cash account), both already net of its Puts, its working orders and the min cash
+  // reserve of its book value (src/books/bookFigures.ts), less what the round's earlier orders took. Example: Pluto worth
+  // $600,000 with $110,000 available and $10,000 bought earlier this round has $100,000 to buy with.
+  const budgetFree = round.plutoBookValue - round.bookCommitted;
+  const accountFree = round.plutoAvailableCash - round.committedThisRound;
+  const settledFree = round.plutoAvailableSettledCash === null ? 0 : round.plutoAvailableSettledCash - round.committedThisRound;
   const freeCash = Math.max(0, Math.min(budgetFree, accountFree, settledFree));
   lastRound.figures = { potDollars, committedDollars: tickerExposure + inFlight.tickerNotional, freeCashDollars: freeCash, leapsCapDollars: (potDollars * settings.volFarmerV4LeapsMaxAllocationPct) / 100, putsDollars: (potDollars * (100 - settings.volFarmerV4FirstPositionPct)) / 100, ...(lastRound.figures?.leapsLook === undefined ? {} : { leapsLook: lastRound.figures.leapsLook }) };
   // v4's buyback minutes (Marcelo 2026-11-02): only the Calls in the money are bought back, and nothing else is sent.
@@ -440,7 +444,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   const memoryLegIds = legIdsOf(memory.state).filter((legId) => !legId.startsWith("action:") && !legId.startsWith("planned:"));
   const openOptionLegs = openLegs.filter((leg) => leg.legType === "option" && leg.expiryDate !== null && leg.strikePrice !== null);
   const legStatusById = await loadVolFarmerV4LegStatuses([...new Set([...memoryLegIds, ...openOptionLegs.map((leg) => leg.id)])]);
-  if (round.settledFreeCash === null && pass === "cycles_calls_puts") note("IBKR reports no settled cash, so the free cash is 0: nothing is bought and no Put sold");
+  if (round.plutoAvailableSettledCash === null && pass === "cycles_calls_puts") note("IBKR reports no settled cash, so the free cash is 0: nothing is bought and no Put sold");
   const snapshot = {
     legStatusById,
     openOptionContracts: openOptionLegs.map((leg) => ({ expiry: leg.expiryDate!, strike: leg.strikePrice! })),
@@ -629,7 +633,7 @@ async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; t
     const limitPrice = twoSided ? optionMidLimitPrice(twoSided.bid, twoSided.ask, "buy") : null;
     const costDollars = limitPrice === null ? 0 : limitPrice * sharesPerContract * call.contracts + round.commissions.option.perContractDollars("buy", call.contracts) * call.contracts;
     // The settled cash left, as the look counts it, less the buybacks this round already sent.
-    const settledFree = round.settledFreeCash === null ? 0 : round.settledFreeCash - round.accountInFlightAtStart - round.committedThisRound;
+    const settledFree = round.plutoAvailableSettledCash === null ? 0 : round.plutoAvailableSettledCash + round.cashReserveDollars - round.committedThisRound;
     const positionId = positionIdByLegId.get(call.legId);
     const gateResults: PlutoGateResult[] = [
       { gate: "vol_farmer_v4", ok: true, detail: chosenBecause },
@@ -763,7 +767,7 @@ async function sendOrder(context: {
   // A Call that opens a cycle, or rebuilds the first position, buys its shares with it.
   const buysShares = item.order.kind === "covered_call" && (item.order.sale.startsCycle || item.order.sale.buysShares === true);
   const notional = limitPrice === null ? 0 : item.contract.strategyKey === "cash_secured_put" ? Math.max(0, item.contract.strike - limitPrice) * 100 * item.contracts : item.contract.strategyKey === "leaps" ? (opening ? limitPrice * 100 * item.contracts : 0) : buysShares ? item.contracts * 100 * Math.max(0, stockPrice - limitPrice) : 0;
-  const capital = opening && limitPrice !== null ? strategyBookCapitalVerdict({ committedBeforeDollars: round.bookCommitted, orderNotional: notional, budgetFraction: settings.capitalBudgetPct / 100, netLiquidationValue: input.netLiquidationValue }) : null;
+  const capital = opening && limitPrice !== null ? strategyBookCapitalVerdict({ committedBeforeDollars: round.bookCommitted, orderNotional: notional, budgetFraction: 1, netLiquidationValue: round.plutoBookValue }) : null;
   const gateResults: PlutoGateResult[] = [
     { gate: "vol_farmer_v4", ok: true, detail: item.chosenBecause },
     { gate: "live_quote", ok: twoSided !== null, detail: twoSided ? `bid ${twoSided.bid.toFixed(2)}, ask ${twoSided.ask.toFixed(2)}` : "no live two-sided quote" },
@@ -857,7 +861,7 @@ async function sendShareOrder(context: { input: VolFarmerV4RoundInput; ticker: P
   const twoSided = fresh && quote.bid !== null && quote.ask !== null && quote.bid > 0 && quote.ask >= quote.bid ? { bid: quote.bid, ask: quote.ask } : null;
   const limitPrice = twoSided ? optionMidLimitPrice(twoSided.bid, twoSided.ask, buying ? "buy" : "sell") : null;
   const notional = buying && limitPrice !== null ? limitPrice * shares : 0;
-  const capital = buying && limitPrice !== null ? strategyBookCapitalVerdict({ committedBeforeDollars: round.bookCommitted, orderNotional: notional, budgetFraction: settings.capitalBudgetPct / 100, netLiquidationValue: input.netLiquidationValue }) : null;
+  const capital = buying && limitPrice !== null ? strategyBookCapitalVerdict({ committedBeforeDollars: round.bookCommitted, orderNotional: notional, budgetFraction: 1, netLiquidationValue: round.plutoBookValue }) : null;
   const chosenBecause = buying ? order.order.chosenBecause : order.kind === "sell_shares" ? order.orders[0]!.chosenBecause : "";
   const scores = buying ? order.order.candidateScores : order.kind === "sell_shares" ? order.orders[0]!.candidateScores : {};
   const gateResults: PlutoGateResult[] = [

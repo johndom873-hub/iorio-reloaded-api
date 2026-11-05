@@ -101,11 +101,11 @@ describe("the Vol Farmer v2 card", () => {
     const figures = { potDollars: 56_957, committedDollars: 53_754, freeCashDollars: 5_000, leapsCapDollars: 5_696, putsDollars: 11_391 };
     await saveVolFarmerV4LastRound(adoptedId, { at: new Date("2026-10-28T14:30:00Z"), notes: [], figures });
     const [before] = await loadVolFarmerV4Screen();
-    // No account value recorded yet: the round's own pot stays.
+    // No Pluto book value recorded yet: the round's own pot stays.
     expect(before!.lastRoundFigures).toEqual(figures);
-    // A $1,000,000 account, a 50% budget and a 20% allowance: a 10% allocation is a pot of 10% × 1.2 × 50% × $1,000,000 = $60,000.
-    await testDb("account_pnl_snapshots").insert({ snapshot_date: "2026-10-27", net_liquidation_value: 1_000_000 });
-    await testDb("pluto_settings").where({ id: 1 }).update({ capital_budget_pct: 50, excess_allowance_pct: 20 });
+    // Pluto's book worth $500,000 and a 20% allowance: a 10% allocation is a pot of 10% × 1.2 × $500,000 = $60,000.
+    await testDb("book_value_snapshots").insert({ snapshot_date: "2026-10-27", book_key: "pluto", cash: 500_000, positions_value: 0, book_value: 500_000 });
+    await testDb("pluto_settings").where({ id: 1 }).update({ excess_allowance_pct: 20 });
     await testDb("pluto_ticker_settings").insert({ ticker_id: adoptedId, allocation_pct: 10 }).onConflict("ticker_id").merge();
     const firstPositionPct = Number((await testDb("pluto_settings").where({ id: 1 }).first("vol_farmer_v4_first_position_pct")).vol_farmer_v4_first_position_pct);
     const [after] = await loadVolFarmerV4Screen();

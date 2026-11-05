@@ -446,7 +446,7 @@ describe("POST /positions/orders/:id/confirm", () => {
     const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates-ladder" }), model_called: false }).returning("id");
     const [strategyAction] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built", execution_strategy: "vol_farmer_v4" }).returning("id");
     const [edgeAction] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built" }).returning("id");
-    const settings = await testDb("pluto_settings").where({ id: 1 }).first("capital_budget_pct", "excess_allowance_pct", "vol_farmer_v4_put_max_abs_delta");
+    const settings = await testDb("pluto_settings").where({ id: 1 }).first("excess_allowance_pct", "vol_farmer_v4_put_max_abs_delta");
     const enabledCount = Number((await testDb("shortlist_entries").whereNull("removed_at").where({ bot_enabled: true }).count({ count: "*" }))[0]!.count);
     try {
       const strategyOrder = await insertOrder(ticker.symbol, { pluto_action_id: strategyAction.id });
@@ -457,7 +457,7 @@ describe("POST /positions/orders/:id/confirm", () => {
       const context = evaluateStrategyDeltaMock.mock.calls[0]![1];
       expect(context).toMatchObject({ isEntryPut: true, minAbsDelta: 0, maxAbsDelta: Number(settings.vol_farmer_v4_put_max_abs_delta), forwardAnchor: null, riskFreeRate: 0.04 });
       // The ticker's allocation raised by the excess allowance, of Pluto's budget.
-      expect(context.potFraction).toBeCloseTo(((100 / enabledCount / 100) * (1 + Number(settings.excess_allowance_pct) / 100) * Number(settings.capital_budget_pct)) / 100, 9);
+      expect(context.potFraction).toBeCloseTo((100 / enabledCount / 100) * (1 + Number(settings.excess_allowance_pct) / 100), 9);
       expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toMatchObject({ strategy: { potFraction: context.potFraction, stockSharesBought: 0 } });
 
       evaluateStrategyDeltaMock.mockResolvedValueOnce({ compliant: false, reason: "The contract's own delta is 0.305, above the strategy's 0–0.3 delta range." });
@@ -854,17 +854,17 @@ describe("access levels: a trader's orders", () => {
     }
   }
 
-  it("judges a trader's confirm with the traders' capital cap, an admin's without, and records who confirmed", async () => {
+  it("judges a trader's confirm and an admin's by the same limits (each order on its own book's cash), and records who confirmed", async () => {
     const ticker = await createTicker();
     const traderOrder = await insertOrder(ticker.symbol);
     expect((await asTrader(() => call("POST", `/positions/orders/${traderOrder}/confirm`, {}))).status).toBe(200);
-    expect(evaluateOrderLimitsMock.mock.calls[0]![0].loadTraderCapital).toEqual(expect.any(Function));
+    expect(evaluateOrderLimitsMock.mock.calls[0]![0]).not.toHaveProperty("loadTraderCapital");
     expect(await orderRow(traderOrder)).toMatchObject({ status: "confirmed", confirmed_by_user_id: userId });
 
     evaluateOrderLimitsMock.mockClear();
     const adminOrder = await insertOrder(ticker.symbol);
     expect((await call("POST", `/positions/orders/${adminOrder}/confirm`, {})).status).toBe(200);
-    expect(evaluateOrderLimitsMock.mock.calls[0]![0].loadTraderCapital).toBeUndefined();
+    expect(evaluateOrderLimitsMock).toHaveBeenCalledTimes(1);
     expect((await call("GET", `/positions/orders/${adminOrder}`)).json).toMatchObject({ confirmedByUserId: userId, confirmedByDisplayName: expect.any(String) });
   });
 

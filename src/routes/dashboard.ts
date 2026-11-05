@@ -10,6 +10,9 @@ import { computeStrategyDailyPnlSeries } from "../lib/strategyPeriodPnl.js";
 import { computeCyclePeriodPnl } from "../lib/cyclePeriodPnl.js";
 import { fetchPositionEvents } from "../lib/positionEvents.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { bookOfPositionAtNightSql, bookOfPositionNowSql, bookPerformanceRows, loadBookDailySeries, loadBookSummary, loadBooksFirstDate, loadOpenPositionBooksNow, loadPositionBooksNow, requestedBook, type BookDailyRow } from "../books/bookDashboard.js";
+import { loadBooksLiveState } from "../books/bookFigures.js";
+import type { BookKey } from "../books/bookKeys.js";
 
 // The known strategy buckets the Dashboard breaks P&L/allocation down by —
 // "unstructured" folds leftover legs that didn't cleanly resolve into a CC
@@ -54,7 +57,86 @@ async function loadPeriodPnl() {
   return { day, week: sums.rows[0].week, month: sums.rows[0].month, year: sums.rows[0].year };
 }
 
-dashboardRouter.get("/summary", async (_request, response) => {
+// --- The book switch (Marcelo 2026-11-05; formulas in books/bookDashboard.ts): ?book=pluto|manual answers for that
+// book, from the books' first date; no book is All books, the account's own figures as before. ---
+
+const dayMs = 86_400_000;
+/** A Postgres date as YYYY-MM-DD: node-postgres reads a date as local midnight, so its local calendar date is the stored one. */
+const dateOnlyIso = (value: string | Date) => (typeof value === "string" ? value.slice(0, 10) : `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`);
+const daysSince = (startIso: string, todayIso: string) => Math.max(1, Math.round((Date.parse(`${todayIso}T12:00:00Z`) - Date.parse(`${startIso}T12:00:00Z`)) / dayMs) + 1);
+
+/** The later of the year's first day and the books' first date (null before the books start). */
+function bookYearStart(todayIso: string, booksFirstDate: string | null): string | null {
+  if (booksFirstDate === null) return null;
+  const yearStart = `${todayIso.slice(0, 4)}-01-01`;
+  return booksFirstDate > yearStart ? booksFirstDate : yearStart;
+}
+
+/** Each strategy's daily P&L in the book, summed per strategy from `fromIso` (its strategies' series, bookOfPositionAtNightSql). */
+async function loadBookStrategySeries(book: BookKey, fromIso: string, todayIso: string) {
+  return computeStrategyDailyPnlSeries(daysSince(fromIso, todayIso), { book, booksFromDate: fromIso });
+}
+
+/** Each strategy's unrealised P&L in the book since `baselineIso`: the book's own unrealised now (its cost the transfer's mark) less what it held unrealised at the last position snapshot on or before that day (the close before the books started). */
+async function loadBookUnrealizedByStrategy(book: BookKey, baselineIso: string): Promise<Map<string, number>> {
+  const [now, baseline] = await Promise.all([
+    db.raw(
+      `SELECT p.strategy_key, SUM(latest.unrealized_pnl - COALESCE((SELECT SUM(blt.realized_dollars) FROM book_leg_transfers blt JOIN position_legs pl ON pl.id = blt.position_leg_id WHERE pl.position_id = p.id AND pl.exit_at IS NULL), 0))::float AS total
+       FROM positions p
+       JOIN LATERAL (SELECT s.unrealized_pnl FROM position_pnl_snapshots s WHERE s.position_id = p.id ORDER BY s.snapshot_date DESC LIMIT 1) latest ON true
+       WHERE p.status = 'open' AND ${bookOfPositionNowSql("p")} = ?
+       GROUP BY p.strategy_key`,
+      [book],
+    ),
+    db.raw(
+      `SELECT p.strategy_key, SUM(s.unrealized_pnl)::float AS total
+       FROM position_pnl_snapshots s JOIN positions p ON p.id = s.position_id
+       WHERE s.snapshot_date = (SELECT MAX(snapshot_date) FROM position_pnl_snapshots WHERE snapshot_date <= ?::date)
+         AND ${bookOfPositionAtNightSql("p", "s.snapshot_date")} = ?
+       GROUP BY p.strategy_key`,
+      [baselineIso, book],
+    ),
+  ]);
+  const totals = new Map<string, number>();
+  for (const row of now.rows as { strategy_key: string; total: number }[]) totals.set(row.strategy_key, (totals.get(row.strategy_key) ?? 0) + row.total);
+  for (const row of baseline.rows as { strategy_key: string; total: number }[]) totals.set(row.strategy_key, (totals.get(row.strategy_key) ?? 0) - row.total);
+  return totals;
+}
+
+async function bookSummaryResponse(book: BookKey) {
+  const todayIso = easternIsoDate(new Date());
+  const [summary, booksFirstDate] = await Promise.all([loadBookSummary(book, todayIso), loadBooksFirstDate()]);
+  const fromIso = bookYearStart(todayIso, booksFirstDate);
+  const strategyTotals = new Map<string, number>();
+  let unrealizedByStrategy = new Map<string, number>();
+  if (fromIso !== null) {
+    const [series, unrealized] = await Promise.all([loadBookStrategySeries(book, fromIso, todayIso), loadBookUnrealizedByStrategy(book, fromIso === booksFirstDate ? booksFirstDate : fromIso)]);
+    for (const row of series) strategyTotals.set(row.strategyKey, (strategyTotals.get(row.strategyKey) ?? 0) + row.dailyPnl);
+    unrealizedByStrategy = unrealized;
+  }
+  const strategyBreakdown = knownStrategyKeys.map((strategyKey) => {
+    const total = strategyTotals.get(strategyKey) ?? 0;
+    const unrealizedPnl = unrealizedByStrategy.get(strategyKey) ?? 0;
+    return { strategyKey, realizedPnl: total - unrealizedPnl, unrealizedPnl };
+  });
+  const accountUnrealizedYtd = strategyBreakdown.reduce((sum, row) => sum + row.unrealizedPnl, 0);
+  return {
+    asOf: summary.asOf,
+    netLiquidationValue: summary.bookValue,
+    accountRealizedYtd: summary.periods.year - accountUnrealizedYtd,
+    accountUnrealizedYtd,
+    dayPnlPercent: summary.dayPnlPercent,
+    periods: summary.periods,
+    strategyBreakdown,
+  };
+}
+
+dashboardRouter.get("/summary", async (request, response) => {
+  const book = requestedBook(request.query);
+  if (book) {
+    response.json(await bookSummaryResponse(book));
+    return;
+  }
   const [latestAccountSnapshot, periods, strategyPeriodPnl] = await Promise.all([
     db("account_pnl_snapshots").orderBy("snapshot_date", "desc").first(),
     loadPeriodPnl(),
@@ -135,7 +217,12 @@ dashboardRouter.get("/summary", async (_request, response) => {
 // Time-weighted performance (MTD, per calendar month and year, since inception, CAGR) from the nightly snapshots,
 // with deposits, withdrawals and transfers between linked accounts removed via net_cash_flow. Formula in
 // lib/performanceReturns.ts. Computed per request: a few hundred rows a year, no stored figures to drift.
-dashboardRouter.get("/performance", async (_request, response) => {
+dashboardRouter.get("/performance", async (request, response) => {
+  const book = requestedBook(request.query);
+  if (book) {
+    response.json(summarizePerformance(bookPerformanceRows(await loadBookDailySeries(book)), easternIsoDate(new Date())));
+    return;
+  }
   const snapshotRows: { snapshotDate: string; netLiquidationValue: string | null; netCashFlow: string | null }[] = await db
     .raw(
       `
@@ -201,12 +288,16 @@ dashboardRouter.get("/available-cash", async (_request, response) => {
 // cash. CSP's exposure figure already has the cash-locked collateral baked
 // in (positionExposure.ts), so "csp" here already reflects "cash locked in
 // CSPs" the way Marcelo asked for.
-dashboardRouter.get("/portfolio", async (_request, response) => {
-  const [exposures, account, cashLockedInCsps] = await Promise.all([
+dashboardRouter.get("/portfolio", async (request, response) => {
+  const book = requestedBook(request.query);
+  const [allExposures, account, cashLockedInCsps, positionBooks, books] = await Promise.all([
     computePositionExposures(),
     fetchAccountSummary().catch(() => null),
     computeCashLockedInCsps(),
+    book ? loadOpenPositionBooksNow() : Promise.resolve(null),
+    book ? loadBooksLiveState().catch(() => null) : Promise.resolve(null),
   ]);
+  const exposures = positionBooks === null ? allExposures : allExposures.filter((row) => positionBooks.get(row.positionId) === book);
 
   const byStrategy: Record<string, number> = { covered_call: 0, cash_secured_put: 0, unstructured: 0, hedge: 0, leaps: 0 };
   for (const row of exposures) {
@@ -214,7 +305,7 @@ dashboardRouter.get("/portfolio", async (_request, response) => {
   }
 
   const totalCashValue = account?.totalCashValue ?? null;
-  const availableCash = totalCashValue !== null ? totalCashValue - cashLockedInCsps : null;
+  const availableCash = book ? (books?.ready ? books.books[book].availableCash : null) : totalCashValue !== null ? totalCashValue - cashLockedInCsps : null;
 
   response.json({
     coveredCalls: byStrategy.covered_call,
@@ -233,9 +324,15 @@ dashboardRouter.get("/portfolio", async (_request, response) => {
 // recomputed and re-sent every time streamPositionExposures reports newer
 // prices, until the client disconnects.
 dashboardRouter.get("/portfolio/stream", async (request, response) => {
-  const [account, cashLockedInCsps] = await Promise.all([fetchAccountSummary().catch(() => null), computeCashLockedInCsps()]);
+  const book = requestedBook(request.query);
+  const [account, cashLockedInCsps, positionBooks, books] = await Promise.all([
+    fetchAccountSummary().catch(() => null),
+    computeCashLockedInCsps(),
+    book ? loadOpenPositionBooksNow() : Promise.resolve(null),
+    book ? loadBooksLiveState().catch(() => null) : Promise.resolve(null),
+  ]);
   const totalCashValue = account?.totalCashValue ?? null;
-  const availableCash = totalCashValue !== null ? totalCashValue - cashLockedInCsps : null;
+  const availableCash = book ? (books?.ready ? books.books[book].availableCash : null) : totalCashValue !== null ? totalCashValue - cashLockedInCsps : null;
 
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
@@ -256,7 +353,8 @@ dashboardRouter.get("/portfolio/stream", async (request, response) => {
 
   try {
     await streamPositionExposures(
-      serializeAsyncCalls(async (exposures) => {
+      serializeAsyncCalls(async (allExposures) => {
+        const exposures = positionBooks === null ? allExposures : allExposures.filter((row) => positionBooks.get(row.positionId) === book);
         const byStrategy: Record<string, number> = { covered_call: 0, cash_secured_put: 0, unstructured: 0, hedge: 0, leaps: 0 };
         for (const row of exposures) {
           if (row.strategyKey in byStrategy) byStrategy[row.strategyKey] = (byStrategy[row.strategyKey] ?? 0) + row.exposure;
@@ -285,7 +383,12 @@ dashboardRouter.get("/portfolio/stream", async (request, response) => {
 // switched 2026-09-21; the same buckets as the Positions strategy scoreboard).
 // "residual" is the trusted account-level total minus the three known
 // buckets — see knownStrategyKeys comment above.
-dashboardRouter.get("/period-pnl-by-strategy", async (_request, response) => {
+dashboardRouter.get("/period-pnl-by-strategy", async (request, response) => {
+  const book = requestedBook(request.query);
+  if (book) {
+    response.json(await bookPeriodPnlByStrategy(book));
+    return;
+  }
   const [cyclePeriodPnl, accountPeriods] = await Promise.all([computeCyclePeriodPnl(), loadPeriodPnl()]);
 
   const totals = { day: 0, week: 0, month: 0, year: 0 };
@@ -330,12 +433,24 @@ dashboardRouter.get("/period-pnl-by-strategy", async (_request, response) => {
 // /period-pnl-by-strategy.
 dashboardRouter.get("/events", async (request, response) => {
   const limit = Math.min(Math.max(Number(request.query.limit) || 40, 1), 200);
-  const events = await fetchPositionEvents(limit);
-  response.json(events);
+  const book = requestedBook(request.query);
+  if (!book) {
+    response.json(await fetchPositionEvents(limit));
+    return;
+  }
+  // A book's: the latest events of the positions now in it, read from a wider window and cut to the limit.
+  const events = await fetchPositionEvents(200);
+  const positionBooks = await loadPositionBooksNow([...new Set(events.map((event) => event.positionId))]);
+  response.json(events.filter((event) => positionBooks.get(event.positionId) === book).slice(0, limit));
 });
 
 dashboardRouter.get("/history", async (request, response) => {
   const days = Math.min(Math.max(Number(request.query.days) || defaultHistoryDays, 1), 365);
+  const book = requestedBook(request.query);
+  if (book) {
+    response.json(await bookHistory(book, days));
+    return;
+  }
 
   const [accountResult, strategySeries] = await Promise.all([
     db.raw(
@@ -379,3 +494,73 @@ dashboardRouter.get("/history", async (request, response) => {
 
   response.json(rows);
 });
+
+/** Day, week, month and year to date of each strategy in the book (its daily series), Residual the book's own P&L less them. */
+async function bookPeriodPnlByStrategy(book: BookKey) {
+  const todayIso = easternIsoDate(new Date());
+  const [summary, booksFirstDate] = await Promise.all([loadBookSummary(book, todayIso), loadBooksFirstDate()]);
+  const zero = () => ({ day: 0, week: 0, month: 0, year: 0 });
+  const rows: Record<string, { day: number; week: number; month: number; year: number }> = Object.fromEntries(knownStrategyKeys.map((key) => [key, zero()]));
+  const fromIso = bookYearStart(todayIso, booksFirstDate);
+  if (fromIso !== null) {
+    const date = new Date(`${todayIso}T12:00:00Z`);
+    const weekStart = new Date(date);
+    weekStart.setUTCDate(date.getUTCDate() - ((date.getUTCDay() + 6) % 7));
+    const starts = { week: weekStart.toISOString().slice(0, 10), month: `${todayIso.slice(0, 7)}-01` };
+    const latestDate = summary.asOf;
+    for (const row of await loadBookStrategySeries(book, fromIso, todayIso)) {
+      const target = rows[row.strategyKey];
+      if (!target) continue;
+      const dateIso = dateOnlyIso(row.snapshotDate);
+      target.year += row.dailyPnl;
+      if (dateIso >= starts.month) target.month += row.dailyPnl;
+      if (dateIso >= starts.week) target.week += row.dailyPnl;
+      if (summary.periods.day !== null && dateIso === latestDate) target.day += row.dailyPnl;
+    }
+  }
+  const total = { day: summary.periods.day ?? 0, week: summary.periods.week, month: summary.periods.month, year: summary.periods.year };
+  const sum = (period: "day" | "week" | "month" | "year") => knownStrategyKeys.reduce((acc, key) => acc + rows[key]![period], 0);
+  return {
+    coveredCalls: rows.covered_call,
+    cashSecuredPuts: rows.cash_secured_put,
+    unstructured: rows.unstructured,
+    hedge: rows.hedge,
+    leaps: rows.leaps,
+    residual: { day: total.day - sum("day"), week: total.week - sum("week"), month: total.month - sum("month"), year: total.year - sum("year") },
+    total,
+  };
+}
+
+/** The book's P&L Over Time: its nightly values and days (from the cut-over), its strategies' daily P&L, Residual the rest. */
+async function bookHistory(book: BookKey, days: number) {
+  const todayIso = easternIsoDate(new Date());
+  const [series, booksFirstDate] = await Promise.all([loadBookDailySeries(book), loadBooksFirstDate()]);
+  const recent: BookDailyRow[] = series.slice(-days);
+  const byDateAndStrategy = new Map<string, Record<string, number>>();
+  if (booksFirstDate !== null) {
+    for (const row of await computeStrategyDailyPnlSeries(Math.min(days, daysSince(booksFirstDate, todayIso)), { book, booksFromDate: booksFirstDate })) {
+      const dateKey = dateOnlyIso(row.snapshotDate);
+      if (!byDateAndStrategy.has(dateKey)) byDateAndStrategy.set(dateKey, {});
+      byDateAndStrategy.get(dateKey)![row.strategyKey] = row.dailyPnl;
+    }
+  }
+  return recent.map((row) => {
+    const strategies = byDateAndStrategy.get(row.snapshotDate) ?? {};
+    const coveredCalls = strategies.covered_call ?? 0;
+    const cashSecuredPuts = strategies.cash_secured_put ?? 0;
+    const unstructured = strategies.unstructured ?? 0;
+    const hedge = strategies.hedge ?? 0;
+    const leaps = strategies.leaps ?? 0;
+    return {
+      snapshotDate: row.snapshotDate,
+      dailyPnl: row.dailyPnl,
+      netLiquidationValue: row.bookValue,
+      coveredCalls,
+      cashSecuredPuts,
+      unstructured,
+      hedge,
+      leaps,
+      residual: row.dailyPnl === null ? null : row.dailyPnl - coveredCalls - cashSecuredPuts - unstructured - hedge - leaps,
+    };
+  });
+}

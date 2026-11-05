@@ -1,12 +1,12 @@
 import { db } from "../db/connection.js";
-import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchPricesPoolFirst } from "../ibkr/pricePool.js";
-import { computeCashLockedInCsps, computeTickerExposure } from "./positionExposure.js";
+import { computeTickerExposure } from "./positionExposure.js";
 import { fetchAvailableUncoveredShares } from "./positionQueries.js";
 import { loadTradingSettings, type TradingSettings } from "./tradingSettingsStore.js";
 import { orderFillsPendingSql } from "./orderFills.js";
 import { formatWholeDollars } from "./formatWholeDollars.js";
+import type { BookKey } from "../books/bookKeys.js";
 
 // The three trading settings that block *placing* an order: max order size %, max concentration per ticker %
 // and min cash reserve % (table trading_settings, edited on Risk & Limits). They apply to EVERY opening or
@@ -34,10 +34,12 @@ import { formatWholeDollars } from "./formatWholeDollars.js";
 // A share purchase (Vol Farmer v4's rebalancing, Marcelo 2026-10-31) adds what it pays, shares × limit price.
 //
 // A Pluto strategy order also gets the book-wide cap: every Pluto ticker's exposure and working orders together, after
-// the order, at most Pluto's capital budget (strategyBookCapitalVerdict, Marcelo 2026-10-21).
+// the order, at most Pluto's book value (strategyBookCapitalVerdict, Marcelo 2026-10-21; the book's value since 2026-11-05).
 //
-// A trader's order also gets the traders' capital cap (capitalOutsidePluto.ts, Marcelo 2026-10-17) when the caller passes
-// loadTraderCapital.
+// The Pluto and Manual books (Marcelo 2026-11-05): a live order is measured against its own book, Pluto's for a Pluto
+// order or an order on a ticker in Pluto's book, Manual's otherwise. The portfolio value is the book's value, the cash its
+// usable cash (src/books/bookFigures.ts), the Puts and working orders its own; so an order can only use its book's cash,
+// whoever places it (this replaced the traders' capital cap of 2026-10-17).
 //
 // Fails closed: if account/portfolio data can't be verified, every check is reported as blocked rather than
 // silently skipped (Marcelo approved 2026-09-24) -- this function gates real order confirmations.
@@ -75,24 +77,14 @@ export interface OrderLimitsInput {
   strategy?: { potFraction: number | null; stockSharesBought: number; book: StrategyBookInput };
   /** A built covered-call open with a stock leg: the shares that leg buys, counted in place of the shortfall against uncovered shares held. */
   stockSharesBought?: number;
-  /** A trader's order: loads the capital cap's figures (capitalOutsidePluto.ts's loadTraderCapitalFigures). */
-  loadTraderCapital?: () => Promise<TraderCapitalFigures>;
 }
 
-/** Pluto's book (Marcelo 2026-10-21): every ticker Pluto trades, under Pluto's capital budget together. */
+/** Pluto's book (Marcelo 2026-10-21): every ticker Pluto trades, under Pluto's book value together. */
 export interface StrategyBookInput {
   /** Pluto's enabled tickers. */
   symbols: readonly string[];
-  /** Pluto's capital budget as a share of the account (0.5 = 50%). */
+  /** The cap as a share of the value it is measured on: 1 (all of Pluto's book value) since 2026-11-05. */
   budgetFraction: number;
-}
-
-/** The traders' capital cap's inputs besides the net liquidation value and the order's own notional. */
-export interface TraderCapitalFigures {
-  /** EXP $ of open positions outside Pluto's book plus the orders still working outside it. */
-  capitalInUseOutsidePluto: number;
-  /** Pluto's capital budget, % of net liquidation value: reserved for Pluto whether it runs or not. */
-  plutoCapitalBudgetPct: number;
 }
 
 export interface OrderLimitsDetails {
@@ -107,8 +99,8 @@ export interface OrderLimitsDetails {
   strategyPotDollars?: number;
   /** A strategy order: the book's committed capital after it, and Pluto's capital budget in dollars. */
   strategyBook?: StrategyBookCapitalVerdict;
-  /** A trader's order: what traders may use outside Pluto, what is in use before this order, and Pluto's budget %. */
-  traderCapital?: { availableDollars: number; inUseDollars: number; plutoCapitalBudgetPct: number };
+  /** A live order: the book it is measured against and that book's available cash before it. */
+  book?: { book: BookKey; bookValue: number; availableCash: number };
 }
 
 export interface OrderLimitsResult {
@@ -247,8 +239,8 @@ export function strategyBookCapitalVerdict(input: { committedBeforeDollars: numb
 }
 
 /** The refusal's wording, for the order gate and the round's notes. */
-export function describeStrategyBookCapitalRefusal(verdict: StrategyBookCapitalVerdict, budgetFraction: number): string {
-  return `Pluto's tickers would commit ${formatWholeDollars(verdict.committedAfterDollars)} together, above Pluto's capital budget of ${formatWholeDollars(verdict.capDollars)} (${formatPct(budgetFraction)} of portfolio value); ${formatWholeDollars(verdict.committedBeforeDollars)} is already committed, counting orders still working.`;
+export function describeStrategyBookCapitalRefusal(verdict: StrategyBookCapitalVerdict): string {
+  return `Pluto's tickers would commit ${formatWholeDollars(verdict.committedAfterDollars)} together, above Pluto's book value of ${formatWholeDollars(verdict.capDollars)}; ${formatWholeDollars(verdict.committedBeforeDollars)} is already committed, counting orders still working.`;
 }
 
 async function computeOrderNotionalForInput(input: OrderLimitsInput, spotPrice: number): Promise<number> {
@@ -259,41 +251,66 @@ async function computeOrderNotionalForInput(input: OrderLimitsInput, spotPrice: 
 }
 
 export async function evaluateOrderLimits(input: OrderLimitsInput): Promise<OrderLimitsResult> {
-  let account: Awaited<ReturnType<typeof fetchAccountSummary>>;
-  let cashLockedInCsps: number;
+  // Imported here: the books read this file's in-flight helpers.
+  const { loadBooksLiveState, loadPlutoBookSymbolsNow } = await import("../books/bookFigures.js");
+  const { bookLabels } = await import("../books/bookKeys.js");
+  let books: Awaited<ReturnType<typeof loadBooksLiveState>>;
+  let plutoSymbols: Set<string>;
   let existingTickerExposure: number;
   let settings: Awaited<ReturnType<typeof loadTradingSettings>>;
   let spotPrice: number | null;
   let inFlight: InFlightTotals;
-  let traderCapital: TraderCapitalFigures | undefined;
   let strategyBookCommitted: number | undefined;
   try {
-    [account, cashLockedInCsps, existingTickerExposure, settings, spotPrice, inFlight, traderCapital, strategyBookCommitted] = await Promise.all([
-      fetchAccountSummary(),
-      computeCashLockedInCsps(),
+    [books, plutoSymbols, existingTickerExposure, settings, spotPrice, inFlight, strategyBookCommitted] = await Promise.all([
+      loadBooksLiveState({ excludeOrderRequestId: input.excludeOrderRequestId }),
+      loadPlutoBookSymbolsNow(),
       computeTickerExposure(input.symbol),
       loadTradingSettings(),
       resolveSpotPrice(input),
       loadInFlightNotionals(input.symbol, input.excludeOrderRequestId),
-      input.loadTraderCapital ? input.loadTraderCapital() : Promise.resolve(undefined),
       input.strategy ? loadCommittedCapitalOnSymbols(input.strategy.book.symbols, input.excludeOrderRequestId) : Promise.resolve(undefined),
     ]);
   } catch (error) {
     return { blocked: true, reasons: [`Could not verify position limits: ${error instanceof Error ? error.message : String(error)}`] };
   }
 
+  if (!books.ready) {
+    return { blocked: true, reasons: ["The Pluto and Manual books have not been started yet, so no opening order can be placed."] };
+  }
   if (spotPrice === null) {
     return { blocked: true, reasons: ["Could not fetch a live stock price to verify position limits."] };
   }
 
-  const totalPortfolioValue = account.netLiquidationValue;
-  if (totalPortfolioValue === null || !(totalPortfolioValue > 0)) {
-    return { blocked: true, reasons: ["Could not verify position limits: total portfolio value is unavailable."] };
+  const book: BookKey = input.strategy || plutoSymbols.has(input.symbol) ? "pluto" : "manual";
+  const bookFigures = books.books[book];
+  if (bookFigures.availableCash === null) {
+    return { blocked: true, reasons: ["Could not verify position limits: IBKR's cash is unavailable."] };
   }
+  const totalPortfolioValue = bookFigures.bookValue;
+  if (!(totalPortfolioValue > 0)) {
+    return { blocked: true, reasons: [`The ${bookLabels[book]} book's value is ${formatWholeDollars(totalPortfolioValue)}, so it cannot open positions.`] };
+  }
+  // The book's usable cash: what is available plus what its Puts, working orders and reserve hold, which the limits take off again.
+  const usableCash = bookFigures.availableCash + bookFigures.heldAgainstPuts + bookFigures.ordersWorking + bookFigures.minCashReserve;
 
   const orderNotional = await computeOrderNotionalForInput(input, spotPrice);
   const strategyBook = input.strategy && strategyBookCommitted !== undefined ? { committedBeforeDollars: strategyBookCommitted, budgetFraction: input.strategy.book.budgetFraction } : undefined;
-  return evaluateOrderLimitFigures({ symbol: input.symbol, orderNotional, totalPortfolioValue, totalCashValue: account.totalCashValue, cashLockedInCsps, existingTickerExposure, inFlight, settings, strategyPotFraction: input.strategy?.potFraction, strategyBook, traderCapital });
+  const result = evaluateOrderLimitFigures({
+    symbol: input.symbol,
+    orderNotional,
+    totalPortfolioValue,
+    totalCashValue: usableCash,
+    cashLockedInCsps: bookFigures.heldAgainstPuts,
+    existingTickerExposure,
+    inFlight: { totalNotional: bookFigures.ordersWorking, tickerNotional: inFlight.tickerNotional },
+    settings,
+    strategyPotFraction: input.strategy?.potFraction,
+    strategyBook,
+    valueLabel: `the ${bookLabels[book]} book's value`,
+  });
+  if (result.details) result.details.book = { book, bookValue: bookFigures.bookValue, availableCash: bookFigures.availableCash };
+  return result;
 }
 
 export interface OrderLimitFigures {
@@ -313,13 +330,14 @@ export interface OrderLimitFigures {
   strategyPotFraction?: number | null;
   /** A Pluto strategy order: what Pluto's tickers commit before it (counting orders still working) and Pluto's capital budget as a share of the account. */
   strategyBook?: { committedBeforeDollars: number; budgetFraction: number };
-  /** A trader's order: the traders' capital cap applies on top of the other limits. */
-  traderCapital?: TraderCapitalFigures;
+  /** What the limits' wording calls the value they are measured on (default "portfolio value"; a live order: its book's). */
+  valueLabel?: string;
 }
 
 /** Pure: the three limits on figures already read (the live gate reads them from IBKR and the book; a backtest from its simulated book). */
 export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimitsResult {
   const { orderNotional, totalPortfolioValue, existingTickerExposure, inFlight, settings } = figures;
+  const valueLabel = figures.valueLabel ?? "portfolio value";
   const freeCash = Math.max(0, (figures.totalCashValue ?? 0) - figures.cashLockedInCsps - inFlight.totalNotional);
   const workingOrdersNote = inFlight.totalNotional > 0 ? ` (counting ${formatWholeDollars(inFlight.totalNotional)} of orders still working)` : "";
 
@@ -336,34 +354,22 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
   const strategyBook = figures.strategyBook && strategyBookCapitalVerdict({ ...figures.strategyBook, orderNotional, netLiquidationValue: totalPortfolioValue });
   if (figures.strategyPotFraction !== undefined) {
     if (strategyPotDollars !== undefined && tickerExposureAfter > strategyPotDollars) {
-      reasons.push(`${figures.symbol} would be ${formatWholeDollars(tickerExposureAfter)}, above its Pluto pot of ${formatWholeDollars(strategyPotDollars)} (${formatPct(figures.strategyPotFraction!)} of portfolio value)${workingOrdersNote}.`);
+      reasons.push(`${figures.symbol} would be ${formatWholeDollars(tickerExposureAfter)}, above its Pluto pot of ${formatWholeDollars(strategyPotDollars)} (${formatPct(figures.strategyPotFraction!)} of ${valueLabel})${workingOrdersNote}.`);
     }
-    if (strategyBook && !strategyBook.fits) reasons.push(describeStrategyBookCapitalRefusal(strategyBook, figures.strategyBook!.budgetFraction));
+    if (strategyBook && !strategyBook.fits) reasons.push(describeStrategyBookCapitalRefusal(strategyBook));
   } else {
     if (orderNotional > limitInDollars(settings.maxOrderPctOfPortfolio)) {
-      reasons.push(`This order is ${formatPct(orderSharePct)} of portfolio value, above the ${settings.maxOrderPctOfPortfolio}% max order size.`);
+      reasons.push(`This order is ${formatPct(orderSharePct)} of ${valueLabel}, above the ${settings.maxOrderPctOfPortfolio}% max order size.`);
     }
     if (tickerExposureAfter > limitInDollars(settings.maxConcentrationPerTickerPct)) {
-      reasons.push(`${figures.symbol} would be ${formatPct(concentrationAfterPct)} of portfolio value, above the ${settings.maxConcentrationPerTickerPct}% max concentration per ticker${workingOrdersNote}.`);
+      reasons.push(`${figures.symbol} would be ${formatPct(concentrationAfterPct)} of ${valueLabel}, above the ${settings.maxConcentrationPerTickerPct}% max concentration per ticker${workingOrdersNote}.`);
     }
   }
 
   const cashAfter = freeCash - orderNotional;
   const cashReserveAfterPct = cashAfter / totalPortfolioValue;
   if (cashAfter < limitInDollars(settings.minCashReservePct)) {
-    reasons.push(`Placing this order would leave only ${formatPct(cashReserveAfterPct)} of portfolio value as cash, below the ${settings.minCashReservePct}% min cash reserve${workingOrdersNote}.`);
-  }
-
-  let traderCapitalDetails: OrderLimitsDetails["traderCapital"];
-  if (figures.traderCapital) {
-    const { capitalInUseOutsidePluto, plutoCapitalBudgetPct } = figures.traderCapital;
-    const availableDollars = ((100 - plutoCapitalBudgetPct) * totalPortfolioValue) / 100;
-    const inUseAfter = capitalInUseOutsidePluto + orderNotional;
-    // An order that adds nothing (a covered call on shares already held, a call roll) passes even when the cap is already exceeded.
-    if (orderNotional > 0 && inUseAfter > availableDollars) {
-      reasons.push(`Traders may use ${formatWholeDollars(availableDollars)} outside Pluto (portfolio value less Pluto's ${plutoCapitalBudgetPct}% capital budget). ${formatWholeDollars(capitalInUseOutsidePluto)} is already in use, so this order's ${formatWholeDollars(orderNotional)} would take it to ${formatWholeDollars(inUseAfter)}.`);
-    }
-    traderCapitalDetails = { availableDollars, inUseDollars: capitalInUseOutsidePluto, plutoCapitalBudgetPct };
+    reasons.push(`Placing this order would leave only ${formatPct(cashReserveAfterPct)} of ${valueLabel} as cash, below the ${settings.minCashReservePct}% min cash reserve${workingOrdersNote}.`);
   }
 
   return {
@@ -379,7 +385,6 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
       limits: { maxOrderPctOfPortfolio: settings.maxOrderPctOfPortfolio, maxConcentrationPerTickerPct: settings.maxConcentrationPerTickerPct, minCashReservePct: settings.minCashReservePct },
       ...(strategyPotDollars === undefined ? {} : { strategyPotDollars }),
       ...(strategyBook ? { strategyBook } : {}),
-      ...(traderCapitalDetails === undefined ? {} : { traderCapital: traderCapitalDetails }),
     },
   };
 }

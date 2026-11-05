@@ -7,7 +7,7 @@ import { liveExpiryStrikes, liveListedExpirations } from "../ibkr/liveOptionChai
 import { peekPooledQuote } from "../ibkr/marketDataPool.js";
 import { fetchDividendOutlook, type DividendOutlook } from "../ibkr/fetchDividendOutlook.js";
 import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } from "../ibkr/sharedReadConnection.js";
-import { loadAccountContext } from "../lib/accountContext.js";
+import { loadBooksLiveState, loadPlutoBookSymbolsNow } from "../books/bookFigures.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { loadUpcomingMajorMacroEvents } from "../lib/macroEventCalendar.js";
 import { calendarDaysUntilExpiry } from "../lib/optionChainExpiryRange.js";
@@ -44,9 +44,10 @@ tickerTradingRouter.get("/:symbol/trading-context", async (request, response) =>
     return;
   }
   const todayIso = easternIsoDate(new Date());
-  const [freeShares, account, heldLegs, settings, macroEvents, nextEarningsDateIso] = await Promise.all([
+  const [freeShares, books, plutoSymbols, heldLegs, settings, macroEvents, nextEarningsDateIso] = await Promise.all([
     fetchAvailableUncoveredShares(ticker.id),
-    loadAccountContext().catch(() => null),
+    loadBooksLiveState().catch(() => null),
+    loadPlutoBookSymbolsNow(),
     loadOpenShortLegs(ticker.id),
     loadTradingSettings(),
     loadUpcomingMajorMacroEvents(),
@@ -56,7 +57,9 @@ tickerTradingRouter.get("/:symbol/trading-context", async (request, response) =>
     symbol: ticker.symbol,
     companyName: ticker.companyName,
     freeShares,
-    freeCash: account?.freeCash ?? null,
+    // The ticker's book's available cash (the Pluto and Manual books, 2026-11-05): what an order on it may use.
+    freeCash: books?.ready ? books.books[plutoSymbols.has(ticker.symbol) ? "pluto" : "manual"].availableCash : null,
+    freeCashBook: plutoSymbols.has(ticker.symbol) ? "pluto" : "manual",
     heldLegs,
     spreadShareCharged: settings.spreadCostChargedPct / 100,
     macroEvents,

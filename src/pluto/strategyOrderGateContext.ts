@@ -10,7 +10,8 @@ import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, tickerP
 // The order-gate context of a Pluto strategy's order request (strategyOrderGates.ts): null unless the order's Pluto action
 // was taken under Vol Farmer v4 (pluto_actions.execution_strategy; the CC + Put Ladder's retired 2026-11-02). A ticker no
 // longer enabled in Pluto has no allocation, so its pot is 0 and every opening order on it is refused. The book is every
-// ticker enabled in Pluto; a ticker's pot is its allocation raised by the excess allowance (tickerPotFraction). Vol Farmer
+// ticker enabled in Pluto, capped at Pluto's book value; a ticker's pot is its allocation raised by the excess allowance, of
+// Pluto's book value (tickerPotFraction; the order route measures a Pluto order against that book, orderLimits.ts). Vol Farmer
 // v4 (v2's rules, Marcelo 2026-10-27): its Calls are held to its Calls' |delta| range and its Puts to |delta| at most its
 // Put |delta|; a LEAPS is paid from Pluto's budget beyond the ticker's pot, so it has no pot cap and no |delta| check, only
 // the book's; a share purchase (no option leg) is held to the pot and the book like any opening order.
@@ -31,7 +32,7 @@ export async function loadStrategyOrderGateContext(orderRequest: { pluto_action_
   const isPut = optionLeg?.right === "P";
   return {
     potFraction: isLeaps ? null : tickerPotFraction(allocationPct, settings),
-    book: { symbols: enabledTickers.map((entry) => entry.symbol), budgetFraction: settings.capitalBudgetPct / 100 },
+    book: { symbols: enabledTickers.map((entry) => entry.symbol), budgetFraction: 1 },
     deltaChecked: !isLeaps,
     isEntryPut: isPut,
     minAbsDelta: isPut ? 0 : settings.volFarmerV4CallMinAbsDelta,

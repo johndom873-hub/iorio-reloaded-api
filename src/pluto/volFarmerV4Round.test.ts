@@ -27,7 +27,9 @@ const harness = vi.hoisted(() => ({
   positions: [] as unknown[],
   positionsByTickerId: new Map<string, unknown[]>(),
   accountFreeCash: 400_000,
-  /** Risk & Limits' min cash reserve, % of the account's value: 0 unless a test sets it. */
+  /** Pluto's book value (the pots' and the book cap's base since the books, 2026-11-05). */
+  plutoBookValue: 500_000,
+  /** Risk & Limits' min cash reserve, % of Pluto's book value: 0 unless a test sets it. */
   minCashReservePct: 0,
   /** IBKR's settled cash handed to the round (null: none reported), and what it leaves once the open Puts' cash is out. */
   settledCashValue: 2_000_000 as number | null,
@@ -71,7 +73,15 @@ vi.mock("../lib/liveTradingSessions.js", async () => {
 vi.mock("../lib/commissionEstimate.js", async (original) => ({ ...(await original<object>()), loadCommissionEstimator: async () => ({ perContractDollars: () => harness.optionCommission }), loadStockCommissionEstimator: async () => ({ perShareDollars: () => 0.005 }) }));
 // The round hands the account's cash (500,000) and the settled cash in turn.
 vi.mock("../lib/tradingSettingsStore.js", () => ({ loadTradingSettings: async () => ({ minCashReservePct: harness.minCashReservePct }) }));
-vi.mock("../lib/accountContext.js", () => ({ accountContextFromTotalCash: async (cash: number | null) => ({ freeCash: cash === 500_000 ? harness.accountFreeCash : harness.settledFreeCash }) }));
+// Pluto's book: its available cash is the free cash less Pluto's orders working at the round's start and the min cash
+// reserve of its value, its settled cash the same on the settled free cash (src/books/bookFigures.ts).
+vi.mock("../books/bookFigures.js", () => ({
+  loadBooksLiveState: async () => {
+    const working = workingOrders().reduce((sum, order) => sum + order.notional, 0);
+    const reserve = (harness.minCashReservePct / 100) * harness.plutoBookValue;
+    return { ready: true, books: { pluto: { bookValue: harness.plutoBookValue, minCashReserve: reserve, availableCash: harness.accountFreeCash - working - reserve, availableSettledCash: harness.settledCashValue === null ? null : harness.settledFreeCash - working - reserve } } };
+  },
+}));
 vi.mock("../lib/tickerFreeze.js", () => ({ frozenSymbolSet: async () => new Set() }));
 vi.mock("../ibkr/pricePool.js", () => ({ fetchPricesPoolFirst: async () => ({ stock: 100 }) }));
 vi.mock("../lib/tickerCalendarQueries.js", () => ({ loadPreviousClose: async () => (harness.previousClose === null ? null : { close: harness.previousClose, dateIso: "2026-10-19" }) }));
@@ -142,7 +152,7 @@ vi.mock("./volFarmerV4LookLoader.js", () => ({
 const { isVolFarmerV4BuyBackRound, runVolFarmerV4Round, volFarmerV4CallsToBuyBack, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
 
 /** v4 at its defaults: Calls expiring at today's close, 80% of the pot in shares, rebalanced. */
-const v4Settings = { ...plutoSafetyLimitsSettingsFixture, ...plutoVolFarmerV4SettingsFixture, capitalBudgetPct: 50, excessAllowancePct: 0, maxQuoteAgeMinutes: 10, burstLines: 10, telegramVerbosity: "actions" };
+const v4Settings = { ...plutoSafetyLimitsSettingsFixture, ...plutoVolFarmerV4SettingsFixture, excessAllowancePct: 0, maxQuoteAgeMinutes: 10, burstLines: 10, telegramVerbosity: "actions" };
 /** v4 with its Calls on the next expiry, at or above the break-even, |delta| at most 0.3, and half the pot in shares (v2's values). */
 const settings = { ...v4Settings, volFarmerV4OptionsExpiry: "next", volFarmerV4FirstPositionPct: 50, volFarmerV4CallMaxAbsDelta: 0.3, volFarmerV4CallStrikeFloor: "break_even" };
 let roundSettings: Record<string, unknown> = settings;
@@ -210,6 +220,7 @@ beforeEach(() => {
   harness.positionsByTickerId.clear();
   harness.accountFreeCash = 400_000;
   harness.minCashReservePct = 0;
+  harness.plutoBookValue = 500_000;
   harness.settledCashValue = 2_000_000;
   harness.settledFreeCash = 2_000_000;
   harness.stockQuote = { bid: 99.98, ask: 100.02, updatedAtMs: Date.now() };
@@ -359,9 +370,9 @@ describe("runVolFarmerV4Round", () => {
     harness.accountFreeCash = 100_000;
     harness.minCashReservePct = 5;
     await round();
-    // $100,000 free less 5% of the $1,000,000 account leaves $50,000: floor(50,000 ÷ 10,000.50) = 4 lots, not 9.
-    expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", plan: expect.objectContaining({ quantity: 4 }) })]);
-    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringContaining("the free cash ($50,000) pays for 4 of the 12 lots half the pot wants")]);
+    // $100,000 free less 5% of Pluto's $500,000 book leaves $75,000: floor(75,000 ÷ 10,000.50) = 7 lots, not 9.
+    expect(harness.executed).toEqual([expect.objectContaining({ kind: "strategy_open", plan: expect.objectContaining({ quantity: 7 }) })]);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringContaining("the free cash ($75,000) pays for 7 of the 12 lots half the pot wants")]);
   });
 
   it("gives the tickers their turn in the day's order: alphabetical, starting one ticker further each day", async () => {

@@ -6,7 +6,6 @@ import { plutoSafetyLimitsSettingsFixture, plutoVolFarmerV4SettingsFixture } fro
 const current: PlutoSettings = {
   ...plutoSafetyLimitsSettingsFixture,
   ...plutoVolFarmerV4SettingsFixture,
-  capitalBudgetPct: 30,
   excessAllowancePct: 0,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2,
   maxQuoteAgeMinutes: 10, maxFillSlippagePct: 25,
@@ -18,14 +17,14 @@ const current: PlutoSettings = {
 describe("validatePlutoSettingsInput", () => {
   it("accepts an empty change and sane values", () => {
     expect(validatePlutoSettingsInput({}, current)).toBeNull();
-    expect(validatePlutoSettingsInput({ capitalBudgetPct: 25, telegramVerbosity: "off", windowEndEt: "15:00" }, current)).toBeNull();
+    expect(validatePlutoSettingsInput({ excessAllowancePct: 25, telegramVerbosity: "off", windowEndEt: "15:00" }, current)).toBeNull();
   });
   it("rejects unknown fields, wrong kinds and out-of-range numbers", () => {
     expect(validatePlutoSettingsInput({ nope: 1 } as never, current)).toMatch(/not a Pluto setting/);
-    expect(validatePlutoSettingsInput({ capitalBudgetPct: "30" as never }, current)).toMatch(/must be a number/);
+    expect(validatePlutoSettingsInput({ excessAllowancePct: "30" as never }, current)).toMatch(/must be a number/);
     expect(validatePlutoSettingsInput({ burstLines: 2.5 }, current)).toMatch(/whole number/);
     expect(validatePlutoSettingsInput({ maxActionsPerSession: 10 } as never, current)).toMatch(/not a Pluto setting/);
-    expect(validatePlutoSettingsInput({ capitalBudgetPct: 101 }, current)).toMatch(/cannot be above 100/);
+    expect(validatePlutoSettingsInput({ dailyLossBreakerPct: 101 }, current)).toMatch(/cannot be above 100/);
     expect(validatePlutoSettingsInput({ dailyLossBreakerPct: -1 }, current)).toMatch(/cannot be below 0/);
     expect(validatePlutoSettingsInput({ minGrade: "good" } as never, current)).toMatch(/not a Pluto setting/);
   });

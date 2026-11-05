@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { isAdminRequest } from "../lib/sessionUser.js";
-import { loadTraderCapitalFigures } from "../lib/capitalOutsidePluto.js";
 import { evaluateOrderLimits } from "../lib/orderLimits.js";
 import { loadTickerBySymbol } from "../lib/tickerLookup.js";
 import { OrderAction } from "@stoqey/ib";
@@ -86,7 +85,6 @@ orderChecksRouter.get("/limits", async (request, response) => {
     spotPrice: parsedSpotPrice,
     rollFromStrike: parsedRollFromStrike,
     rollFromPremium: parsedRollFromPremium,
-    loadTraderCapital: isAdminRequest(request) ? undefined : () => loadTraderCapitalFigures(),
   });
   response.json(result);
 });

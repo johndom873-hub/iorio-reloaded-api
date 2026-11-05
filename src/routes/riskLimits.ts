@@ -2,9 +2,9 @@ import { Router, type Request, type Response } from "express";
 import { db } from "../db/connection.js";
 import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
 import { isAdminRequest } from "../lib/sessionUser.js";
-import { loadTraderCapitalFigures } from "../lib/capitalOutsidePluto.js";
-import { loadPlutoBook } from "../pluto/book.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
+import { loadOpenPositionBooksNow, requestedBook } from "../books/bookDashboard.js";
+import { loadBooksLiveState } from "../books/bookFigures.js";
 import { computeCashLockedInCsps, computePositionExposures, streamPositionExposures, type PositionExposureRow } from "../lib/positionExposure.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { fetchTradingHalt, setTradingHalt, type TradingHalt } from "../lib/platformControls.js";
@@ -92,29 +92,6 @@ riskLimitsRouter.get("/audit", requireAdmin, async (request, response) => {
   response.json(await loadRiskLimitsAudit(Math.min(500, Number(request.query.limit) || 100)));
 });
 
-// The account's two halves (Marcelo 2026-10-17): Pluto's capital budget with what its book uses (the Pluto screen's figure:
-// open positions on the tickers it trades), and the rest of the account with what people use of it (the traders' capital
-// cap's own figures, so orders still working count). Both against the live net liquidation value, as the cap is judged.
-riskLimitsRouter.get("/capital-split", async (_request, response) => {
-  const [accountResult, book, traderCapital] = await Promise.all([
-    fetchAccountSummary()
-      .then((account) => ({ netLiquidationValue: account.netLiquidationValue, accountDataError: null as string | null }))
-      .catch((error) => ({ netLiquidationValue: null, accountDataError: error instanceof Error ? error.message : "Failed to fetch live account data from IBKR." })),
-    loadPlutoBook(),
-    loadTraderCapitalFigures(),
-  ]);
-  const { netLiquidationValue, accountDataError } = accountResult;
-  const hasValue = netLiquidationValue !== null && netLiquidationValue > 0;
-  const plutoBudgetDollars = hasValue ? (traderCapital.plutoCapitalBudgetPct * netLiquidationValue) / 100 : null;
-  response.json({
-    netLiquidationValue: hasValue ? netLiquidationValue : null,
-    accountDataError,
-    plutoCapitalBudgetPct: traderCapital.plutoCapitalBudgetPct,
-    pluto: { budgetDollars: plutoBudgetDollars, inUseDollars: book.committedDollars, openPositionCount: book.openPositions.length },
-    outsidePluto: { availableDollars: hasValue ? netLiquidationValue - plutoBudgetDollars! : null, inUseDollars: traderCapital.capitalInUseOutsidePluto },
-  });
-});
-
 // Approved 2026-08-25: every concentration/allocation % on this page and
 // on the Dashboard is against total account value (net liquidation value,
 // i.e. positions + cash), not against the sum of open positions — so an
@@ -148,8 +125,11 @@ function groupByKey<K extends string>(
     .sort((a, b) => Number(b.notionalValue) - Number(a.notionalValue));
 }
 
-riskLimitsRouter.get("/exposure", async (_request, response) => {
-  const [exposures, accountResult, cashLockedInCsps] = await Promise.all([
+// ?book=pluto|manual (the Dashboard's book switch, Marcelo 2026-11-05): only the positions now in that book, against its
+// own value and available cash.
+riskLimitsRouter.get("/exposure", async (request, response) => {
+  const book = requestedBook(request.query);
+  const [allExposures, accountResult, cashLockedInCsps, positionBooks, books] = await Promise.all([
     computePositionExposures(),
     fetchAccountSummary()
       .then((account) => ({ account, accountDataError: null as string | null }))
@@ -158,13 +138,19 @@ riskLimitsRouter.get("/exposure", async (_request, response) => {
         accountDataError: error instanceof Error ? error.message : "Failed to fetch live account data from IBKR.",
       })),
     computeCashLockedInCsps(),
+    book ? loadOpenPositionBooksNow() : Promise.resolve(null),
+    book ? loadBooksLiveState().catch(() => null) : Promise.resolve(null),
   ]);
+  const exposures = positionBooks === null ? allExposures : allExposures.filter((row) => positionBooks.get(row.positionId) === book);
 
   const { account, accountDataError } = accountResult;
-  const totalAccountValue = account?.netLiquidationValue ?? null;
-  const availableCash = account?.totalCashValue !== null && account?.totalCashValue !== undefined
-    ? account.totalCashValue - cashLockedInCsps
-    : null;
+  const bookFigures = book && books?.ready ? books.books[book] : null;
+  const totalAccountValue = book ? (bookFigures?.bookValue ?? null) : (account?.netLiquidationValue ?? null);
+  const availableCash = book
+    ? (bookFigures?.availableCash ?? null)
+    : account?.totalCashValue !== null && account?.totalCashValue !== undefined
+      ? account.totalCashValue - cashLockedInCsps
+      : null;
 
   const concentrationByTicker = groupByKey(exposures, (row) => row.symbol).map((row) => ({
     symbol: row.key,

@@ -2,6 +2,7 @@ import { OrderAction, OptionType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { environment, ibkrMarketDataLinesEnabled } from "../config/env.js";
 import { settledCashForTrading } from "./accountContext.js";
+import { loadBooksLiveState } from "../books/bookFigures.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { fetchWhatIfCommissionRange } from "../ibkr/ibkrWhatIfCommission.js";
 import { marketDataFeedRefusal, pooledLineError, pooledLineState, subscribeToPooledQuote, waitForFirstReading, type PooledQuote } from "../ibkr/marketDataPool.js";
@@ -16,11 +17,8 @@ import { loadUndeliveredAlerts } from "./undeliveredAlerts.js";
 import { loadTradingSettingsForEditing } from "./tradingSettingsStore.js";
 import { fetchTradingHalt, type TradingHalt } from "./platformControls.js";
 import { easternIsoDate } from "./easternIsoDate.js";
-import { computeCashLockedInCsps } from "./positionExposure.js";
 import { loadCommittedCapitalOnSymbols } from "./orderLimits.js";
-import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { loadEnabledPlutoTickerSettings } from "../pluto/tickerSettingsStore.js";
-import { loadInFlightNotionalsBySymbol } from "../pluto/book.js";
 import type { JobRunStatus } from "./jobRunStatus.js";
 import {
   configurationExpectationsFor,
@@ -255,13 +253,14 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
       return { ok: true, probe };
     },
     loadPlutoCash: async () => {
-      const [settings, enabledTickers, cashLockedInCsps, inFlight] = await Promise.all([loadPlutoSettings(), loadEnabledPlutoTickerSettings(), computeCashLockedInCsps(), loadInFlightNotionalsBySymbol()]);
+      const [enabledTickers, books] = await Promise.all([loadEnabledPlutoTickerSettings(), loadBooksLiveState()]);
       return {
-        capitalBudgetPct: settings.capitalBudgetPct,
         enabledTickerCount: enabledTickers.length,
+        booksStarted: books.ready,
+        plutoBookValue: books.ready ? books.books.pluto.bookValue : 0,
         committedOnPlutoTickers: await loadCommittedCapitalOnSymbols(enabledTickers.map((ticker) => ticker.symbol)),
-        cashLockedInCsps,
-        inFlightNotional: inFlight.totalNotional,
+        availableCash: books.ready ? books.books.pluto.availableCash : null,
+        availableSettledCash: books.ready ? books.books.pluto.availableSettledCash : null,
       };
     },
     loadActiveOrders: async () => {

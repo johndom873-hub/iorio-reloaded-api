@@ -195,11 +195,11 @@ describe("GET /order-checks/limits: a valid call", () => {
     expect(evaluateOrderLimitsMock.mock.calls[0]![0]).not.toHaveProperty("excludeOrderRequestId");
   });
 
-  it("adds the traders' capital cap for a trader only", async () => {
+  it("checks a trader's order and an admin's alike: each is measured on its own book's cash", async () => {
     await asTrader(() => call("GET", limitsQuery()));
-    expect(evaluateOrderLimitsMock.mock.calls[0]![0].loadTraderCapital).toEqual(expect.any(Function));
     await call("GET", limitsQuery());
-    expect(evaluateOrderLimitsMock.mock.calls[1]![0].loadTraderCapital).toBeUndefined();
+    expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toEqual(evaluateOrderLimitsMock.mock.calls[1]![0]);
+    expect(evaluateOrderLimitsMock.mock.calls[0]![0]).not.toHaveProperty("loadTraderCapital");
   });
 
   it("a failure of the evaluator is a 500, never an empty pass", async () => {

@@ -50,13 +50,14 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
     db("worker_health").where({ process_name: "pluto_agent" }).first(),
     db("shortlist_entries").whereNull("removed_at").where({ bot_enabled: true }).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
     loadPlutoBook(),
-    db("account_pnl_snapshots").orderBy("snapshot_date", "desc").first("net_liquidation_value", "snapshot_date"),
+    db("book_value_snapshots").where({ book_key: "pluto" }).orderBy("snapshot_date", "desc").first("book_value", "snapshot_date"),
     db("pluto_events").where({ type: "mode_changed" }).orderBy("occurred_at", "desc").first("occurred_at", "payload"),
     db("pluto_passes").whereNotNull("system_checks").orderBy("started_at", "desc").first("id", "started_at", "system_checks"),
     loadOrderUnfilledCancelMinutes(),
   ]);
-  // The book tile uses last night's NLV (no IBKR round trip on a screen load); the agent's passes use the live figure.
-  const netLiquidationValue = lastSnapshot ? Number(lastSnapshot.net_liquidation_value) : null;
+  // The book tile uses Pluto's book value at last night's snapshot (no IBKR round trip on a screen load); the agent's
+  // passes use the live figure (src/books/bookFigures.ts).
+  const plutoBookValue = lastSnapshot ? Number(lastSnapshot.book_value) : null;
   const session = await resolvePlutoSession(new Date(), settings);
   const openPositionsBySymbol: Record<string, number> = {};
   for (const position of book.openPositions) openPositionsBySymbol[position.symbol] = (openPositionsBySymbol[position.symbol] ?? 0) + 1;
@@ -89,9 +90,8 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
       workingOrderSymbols: [...book.workingOrderSymbols].sort(),
       openPositionsBySymbol,
       workingOrdersBySymbol,
-      netLiquidationValue,
-      netLiquidationValueAsOf: lastSnapshot ? String(lastSnapshot.snapshot_date).slice(0, 10) : null,
-      capitalBudgetPct: settings.capitalBudgetPct,
+      plutoBookValue,
+      plutoBookValueAsOf: lastSnapshot ? String(lastSnapshot.snapshot_date).slice(0, 10) : null,
     },
     agent: agentHealth
       ? {

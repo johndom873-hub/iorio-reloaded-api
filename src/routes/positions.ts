@@ -1,3 +1,4 @@
+import { loadPositionBookFigures } from "../books/bookDashboard.js";
 import { Router, type Request, type Response } from "express";
 import { OptionType, OrderAction } from "@stoqey/ib";
 import { db } from "../db/connection.js";
@@ -193,11 +194,23 @@ positionsRouter.get("/", async (request, response) => {
     }
   }
 
+  // Each position's book (the Pluto and Manual books, 2026-11-05). A failure leaves them Manual's with no adjustment rather
+  // than taking the list down.
+  let bookFiguresByPositionId = new Map<string, { bookKey: "pluto" | "manual"; bookCostAdjustmentDollars: number }>();
+  try {
+    bookFiguresByPositionId = await loadPositionBookFigures(result.rows.map((row: { id: string }) => row.id));
+  } catch (error) {
+    console.error("positions: book figures failed, returning positions without them", error);
+  }
+
   response.json(
     result.rows.map((row: { id: string }) => {
       const breakEven = breakEvenByPositionId.get(row.id);
+      const bookFigures = bookFiguresByPositionId.get(row.id);
       return {
         ...row,
+        bookKey: bookFigures?.bookKey ?? "manual",
+        bookCostAdjustmentDollars: bookFigures?.bookCostAdjustmentDollars ?? 0,
         breakEven: breakEven?.breakEven ?? null,
         breakEvenUnavailableReason: breakEven?.breakEvenUnavailableReason ?? null,
         cycleBreakEven: breakEven?.cycleBreakEven ?? null,

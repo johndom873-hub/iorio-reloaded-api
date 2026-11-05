@@ -57,7 +57,7 @@ import { OptionType } from "@stoqey/ib";
 import { db } from "../src/db/connection.js";
 import { fetchAccountLedgerPnl } from "../src/ibkr/fetchAccountLedgerPnl.js";
 import { fetchAccountSummary } from "../src/ibkr/fetchAccountSummary.js";
-import { fetchFlexCashTransactions } from "../src/ibkr/fetchFlexCashTransactions.js";
+import { fetchFlexStatements } from "../src/ibkr/fetchFlexCashTransactions.js";
 import { fetchLiveGreeks, type GreeksContract } from "../src/ibkr/fetchLiveGreeks.js";
 import { fetchDailyClosingPrices } from "../src/ibkr/fetchDailyClosingPrices.js";
 import { sharedReadConnection } from "../src/ibkr/sharedReadConnection.js";
@@ -66,7 +66,9 @@ import { previousOpenSessionDate, lastCompletedSessionDate } from "../src/lib/ma
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 import { buildPnlSnapshotJobOutcome, type PnlSnapshotProblem } from "../src/lib/pnlSnapshotJobOutcome.js";
-import { assignFlowsToSnapshots } from "../src/lib/flexCashFlowAssignment.js";
+import { assignFlowsToSnapshots, extractExternalCashFlows, type FlexCashFlow } from "../src/lib/flexCashFlowAssignment.js";
+import { importStatementIntoBooks } from "../src/books/statementImport.js";
+import { writeBookValueSnapshots } from "../src/books/bookSnapshots.js";
 import { fillWorthlessExpiredOptionPrices } from "../src/lib/expiredOptionWorthlessPrice.js";
 import { fetchOpenLegsOfOpenPositions, type OpenPositionLegRow } from "../src/lib/openPositionLegsForPnlSnapshot.js";
 import { sendLeapsExpiryWarnings } from "../src/lib/leapsExpiryWarnings.js";
@@ -85,8 +87,7 @@ interface RecentAccountSnapshotRow {
  * Runs after today's row already has net_liquidation_value written, since
  * that's needed to compute today's own delta too.
  */
-async function reconcileCashFlows(snapshotDate: string): Promise<void> {
-  const flexCashFlows = await fetchFlexCashTransactions();
+async function reconcileCashFlows(snapshotDate: string, flexCashFlows: FlexCashFlow[]): Promise<void> {
 
   const recentRows: RecentAccountSnapshotRow[] = await db.raw(
     `
@@ -126,6 +127,49 @@ async function reconcileCashFlows(snapshotDate: string): Promise<void> {
       .where({ snapshot_date: row.snapshotDate })
       .update({ net_cash_flow: newCashFlow, daily_pnl: dailyPnl });
     console.log(`Reconciled cash flow for ${row.snapshotDate}: net_cash_flow=${newCashFlow} daily_pnl=${dailyPnl}`);
+  }
+}
+
+/**
+ * The nightly Flex steps, from one download of IBKR's statement (Flex is rate-limited): the deposit and withdrawal
+ * reconcile above, then the Pluto and Manual books' import and check (src/books/statementImport.ts), then each book's
+ * value at tonight's closing prices (bookSnapshots.ts). Each step's failure is reported without stopping the others.
+ */
+async function runStatementSteps(snapshotDate: string, legRows: OpenPositionLegRow[], closingPriceByLegId: Record<string, number | null>, problems: PnlSnapshotProblem[]): Promise<void> {
+  const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error)).split("\n")[0]!;
+  let statements: Awaited<ReturnType<typeof fetchFlexStatements>> | null = null;
+  try {
+    statements = await fetchFlexStatements();
+  } catch (error) {
+    console.error(`Flex statement download failed: ${describeError(error)}`);
+    problems.push({ message: `Flex cash-flow reconcile failed, so deposits and withdrawals may still count as trading P&L - ${describeError(error)}`, errorCount: 1, nothingUsable: false });
+  }
+  if (statements !== null) {
+    try {
+      await reconcileCashFlows(snapshotDate, extractExternalCashFlows(statements));
+    } catch (error) {
+      console.error(`Cash-flow reconciliation failed: ${describeError(error)}`);
+      problems.push({ message: `Flex cash-flow reconcile failed, so deposits and withdrawals may still count as trading P&L - ${describeError(error)}`, errorCount: 1, nothingUsable: false });
+    }
+    try {
+      if (statements.length !== 1) throw new Error(`expected one statement, got ${statements.length}`);
+      const result = await importStatementIntoBooks(statements[0]! as Record<string, unknown>);
+      if (result.posted) console.log(`Books: statement through ${result.toDate} posted ${result.newEntryCount} entr(ies); gap against IBKR's ending cash ${result.gap === null ? "unknown" : result.gap.toFixed(6)}.`);
+      for (const message of result.problems) problems.push({ message: `Books: ${message}`, errorCount: 1, nothingUsable: false });
+    } catch (error) {
+      console.error(`Books statement import failed: ${describeError(error)}`);
+      problems.push({ message: `Books: IBKR's statement could not be posted - ${describeError(error)}`, errorCount: 1, nothingUsable: false });
+    }
+  }
+  try {
+    const values = await writeBookValueSnapshots(
+      snapshotDate,
+      legRows.map((leg) => ({ positionId: leg.positionId, side: leg.side, quantity: leg.quantity, multiplier: leg.multiplier, closingPrice: closingPriceByLegId[leg.legId] ?? null, entryPrice: Number(leg.entryPrice) })),
+    );
+    if (values) console.log(`Books: Pluto ${values.pluto.toFixed(2)}, Manual ${values.manual.toFixed(2)} at ${snapshotDate}'s close.`);
+  } catch (error) {
+    console.error(`Book value snapshot failed: ${describeError(error)}`);
+    problems.push({ message: `Books: tonight's book values could not be saved - ${describeError(error)}`, errorCount: 1, nothingUsable: false });
   }
 }
 
@@ -232,12 +276,7 @@ async function main(): Promise<void> {
 
     if (legRows.length === 0) {
       console.log("No open positions — nothing to snapshot at the position level.");
-      try {
-        await reconcileCashFlows(snapshotDate);
-      } catch (error) {
-        console.error(`Cash-flow reconciliation failed: ${describeError(error)}`);
-        problems.push({ message: `Flex cash-flow reconcile failed, so deposits and withdrawals may still count as trading P&L - ${describeError(error).split("\n")[0]}`, errorCount: 1, nothingUsable: false });
-      }
+      await runStatementSteps(snapshotDate, legRows, {}, problems);
       if (!accountSnapshotWritten) problems.push({ message: `account-level P&L failed for ${snapshotDate} - ${accountSnapshotError}`, errorCount: 1, nothingUsable: true });
       return {
         details: { accountSnapshot: accountSnapshotWritten, accountSnapshotError, openPositionCount: 0 },
@@ -338,12 +377,7 @@ async function main(): Promise<void> {
     // fetch fails, we still want to catch up on any newly-arrived Flex
     // cash-flow data for recent days. Its own failure (Flex API down,
     // report still generating) must not fail the whole job either.
-    try {
-      await reconcileCashFlows(snapshotDate);
-    } catch (error) {
-      console.error(`Cash-flow reconciliation failed: ${describeError(error)}`);
-      problems.push({ message: `Flex cash-flow reconcile failed, so deposits and withdrawals may still count as trading P&L - ${describeError(error).split("\n")[0]}`, errorCount: 1, nothingUsable: false });
-    }
+    await runStatementSteps(snapshotDate, legRows, pricesByLegIdResult.status === "fulfilled" ? pricesByLegIdResult.value : {}, problems);
 
     // Greeks, same nightly cadence as the P&L snapshot above — piggybacks on
     // this job rather than a second scheduled IBKR round-trip. Only option

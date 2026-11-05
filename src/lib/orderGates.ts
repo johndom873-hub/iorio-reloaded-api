@@ -6,7 +6,6 @@ import { evaluateDeltaBandForOrderRequest } from "./deltaBandGate.js";
 import { evaluateStrategyDeltaForOrderRequest, type StrategyOrderGateContext } from "./strategyOrderGates.js";
 import { evaluateLimitPriceCheckForOrderRequest } from "./limitPriceCheckGate.js";
 import type { PriceCheckResult } from "./limitPriceCheck.js";
-import { loadTraderCapitalFigures } from "./capitalOutsidePluto.js";
 import { evaluateOrderLimits, type OrderLimitsResult, type OrderLimitsStrategyKey } from "./orderLimits.js";
 import { fetchTradingBlockedReason } from "./tradingGate.js";
 
@@ -105,8 +104,7 @@ export async function evaluateOrderLimitsForOrderRequest(
   if (!input) return null;
   const ticker = await db("tickers").where({ symbol: input.symbol.trim().toUpperCase() }).first("id", "symbol");
   if (!ticker) return { blocked: true, reasons: [`Could not verify position limits: ${input.symbol} is not a known ticker.`] };
-  const loadTraderCapital = options.forTrader ? () => loadTraderCapitalFigures(orderRequest.id) : undefined;
-  return evaluateOrderLimits({ ...input, symbol: ticker.symbol, tickerId: ticker.id, spotPrice: live.spotPrice, loadTraderCapital });
+  return evaluateOrderLimits({ ...input, symbol: ticker.symbol, tickerId: ticker.id, spotPrice: live.spotPrice });
 }
 
 /** Pure: the calendar warnings stored on the order, as the Order Review panel words them. */

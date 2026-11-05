@@ -30,9 +30,8 @@ import {
 export type PlutoTelegramVerbosity = "actions" | "off";
 
 export interface PlutoSettings {
-  // Capital
-  capitalBudgetPct: number;
-  /** % every ticker's pot is raised above its allocation (tickerPotFraction): the pots may add up to more than the budget. */
+  // Capital: Pluto's own book since 2026-11-05 (src/books), so no budget share of the account.
+  /** % every ticker's pot is raised above its allocation (tickerPotFraction): the pots may add up to more than Pluto's book value. */
   excessAllowancePct: number;
   // Market
   windowStartEt: string;
@@ -105,7 +104,6 @@ type ColumnKind = "number" | "integer" | "text";
 
 /** camelCase field → snake_case column, with the kind that decides parsing and validation. */
 export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedAt" | "updatedByUserId">, { column: string; kind: ColumnKind; min?: number; max?: number; oneOf?: readonly string[] }> = {
-  capitalBudgetPct: { column: "capital_budget_pct", kind: "number", min: 0, max: 100 },
   excessAllowancePct: { column: "excess_allowance_pct", kind: "number", min: 0, max: 1000 },
   maxQuoteAgeMinutes: { column: "max_quote_age_minutes", kind: "integer", min: 0 },
   windowStartEt: { column: "window_start_et", kind: "text" },

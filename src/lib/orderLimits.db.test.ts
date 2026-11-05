@@ -23,6 +23,33 @@ vi.mock("./positionExposure.js", () => ({
 const fetchPricesPoolFirstMock = vi.fn();
 vi.mock("../ibkr/pricePool.js", () => ({ fetchPricesPoolFirst: (...args: unknown[]) => fetchPricesPoolFirstMock(...args) }));
 
+// The Pluto and Manual books (2026-11-05): every order here is Manual's, and the Manual book is the mocked account (its value
+// the net liquidation value, its cash the total cash), with the real readers of the orders working and the Puts' held cash.
+vi.mock("../books/bookFigures.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../books/bookFigures.js")>();
+  return {
+    ...original,
+    loadPlutoBookSymbolsNow: async () => new Set<string>(),
+    loadBooksLiveState: async (options: { excludeOrderRequestId?: string } = {}) => {
+      const account = await fetchAccountSummaryMock();
+      const cash = account.totalCashValue;
+      const ordersWorking = await original.loadOrdersWorkingByBook(new Set(), options.excludeOrderRequestId);
+      const { books } = original.computeBookFigures({
+        ledgerCash: { pluto: 0, manual: cash ?? 0, unallocated: 0 },
+        provisionalCash: { pluto: 0, manual: 0 },
+        unsettledSaleProceeds: { pluto: 0, manual: 0 },
+        positionsValue: { pluto: 0, manual: (account.netLiquidationValue ?? 0) - (cash ?? 0) },
+        heldAgainstPuts: { pluto: 0, manual: await computeCashLockedInCspsMock() },
+        ordersWorking,
+        minCashReservePct: 0,
+        ibkrTotalCash: cash,
+        ibkrSettledCash: cash,
+      });
+      return { ready: true, books, unallocatedCash: 0, ibkrTotalCash: cash, ibkrNetLiquidationValue: account.netLiquidationValue, cashGapAgainstIbkr: 0, confirmedThrough: new Date(), minCashReservePct: 0 };
+    },
+  };
+});
+
 const { db } = await import("../db/connection.js");
 const { evaluateOrderLimits } = await import("./orderLimits.js");
 
@@ -131,14 +158,14 @@ describe("max order size: exactly at the boundary", () => {
 
     const over = await evaluateOrderLimits(cashSecuredPut("AAA", 100.01, 10));
     expect(over.blocked).toBe(true);
-    expect(over.reasons).toEqual(["This order is 10.0% of portfolio value, above the 10% max order size."]);
+    expect(over.reasons).toEqual(["This order is 10.0% of the Manual book's value, above the 10% max order size."]);
     expect(over.details?.orderNotional).toBeCloseTo(100_010, 6);
   });
 
   it("the reason carries the configured limit value, not a default", async () => {
     await setLimits({ maxOrder: 7.5 });
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 100, 10));
-    expect(result.reasons).toEqual(["This order is 10.0% of portfolio value, above the 7.5% max order size."]);
+    expect(result.reasons).toEqual(["This order is 10.0% of the Manual book's value, above the 7.5% max order size."]);
   });
 
   it("a Covered Call entry is measured as the share shortfall times the spot price", async () => {
@@ -150,7 +177,7 @@ describe("max order size: exactly at the boundary", () => {
     expect(at.details?.orderNotional).toBe(100_000);
     const over = await evaluateOrderLimits(callOrder(100.01));
     expect(over.blocked).toBe(true);
-    expect(over.reasons).toEqual(["This order is 10.0% of portfolio value, above the 10% max order size."]);
+    expect(over.reasons).toEqual(["This order is 10.0% of the Manual book's value, above the 10% max order size."]);
     expect((await evaluateOrderLimits(callOrder(99.99))).blocked).toBe(false);
   });
 
@@ -201,19 +228,19 @@ describe("exactly at the limit with values where fraction x 100 is not exact", (
     fetchAccountSummaryMock.mockResolvedValue({ netLiquidationValue: 100_000, totalCashValue: 400_000, buyingPower: null, grossPositionValue: null, excessLiquidity: null });
   });
 
-  it("an order of exactly 7% of portfolio value passes a 7% max order size", async () => {
+  it("an order of exactly 7% of the Manual book's value passes a 7% max order size", async () => {
     await setLimits({ maxOrder: 7 });
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 70, 1)); // 7,000 of 100,000
     expect(result.reasons).toEqual([]);
   });
 
-  it("a ticker at exactly 14% of portfolio value passes a 14% max concentration", async () => {
+  it("a ticker at exactly 14% of the Manual book's value passes a 14% max concentration", async () => {
     await setLimits({ maxConcentration: 14 });
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 140, 1)); // 14,000 of 100,000
     expect(result.reasons).toEqual([]);
   });
 
-  it("leaving exactly 29% of portfolio value as cash passes a 29% min cash reserve", async () => {
+  it("leaving exactly 29% of the Manual book's value as cash passes a 29% min cash reserve", async () => {
     await setLimits({ minCash: 29 });
     fetchAccountSummaryMock.mockResolvedValue({ netLiquidationValue: 100_000, totalCashValue: 60_000, buyingPower: null, grossPositionValue: null, excessLiquidity: null });
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 310, 1)); // 60,000 - 31,000 = 29,000 of 100,000
@@ -262,7 +289,7 @@ describe("max order size for rolls", () => {
     expect(at.details?.orderNotional).toBe(5_000);
     const over = await evaluateOrderLimits(cashSecuredPut("AAA", 105.01, 10, { rollFromStrike: 100 }));
     expect(over.blocked).toBe(true);
-    expect(over.reasons).toEqual(["This order is 0.5% of portfolio value, above the 0.5% max order size."]);
+    expect(over.reasons).toEqual(["This order is 0.5% of the Manual book's value, above the 0.5% max order size."]);
   });
 
   it("a cash-secured put rolled DOWN, or to the same strike, adds nothing and passes a 0% limit", async () => {
@@ -297,7 +324,7 @@ describe("max concentration per ticker: exactly at the boundary", () => {
     expect(at.details?.concentrationAfterPct).toBeCloseTo(0.2, 12);
     const over = await evaluateOrderLimits(cashSecuredPut("AAA", 100.01, 10));
     expect(over.blocked).toBe(true);
-    expect(over.reasons).toEqual(["AAA would be 20.0% of portfolio value, above the 20% max concentration per ticker."]);
+    expect(over.reasons).toEqual(["AAA would be 20.0% of the Manual book's value, above the 20% max concentration per ticker."]);
     expect((await evaluateOrderLimits(cashSecuredPut("AAA", 99.99, 10))).blocked).toBe(false);
     expect(computeTickerExposureMock).toHaveBeenCalledWith("AAA");
   });
@@ -308,7 +335,7 @@ describe("max concentration per ticker: exactly at the boundary", () => {
     expect((await evaluateOrderLimits(cashSecuredPut("AAA", 105, 10, { rollFromStrike: 100 }))).blocked).toBe(false);
     const over = await evaluateOrderLimits(cashSecuredPut("AAA", 105.01, 10, { rollFromStrike: 100 }));
     expect(over.blocked).toBe(true);
-    expect(over.reasons[0]).toMatch(/^AAA would be 20\.0% of portfolio value, above the 20% max concentration per ticker\.$/);
+    expect(over.reasons[0]).toMatch(/^AAA would be 20\.0% of the Manual book's value, above the 20% max concentration per ticker\.$/);
   });
 });
 
@@ -320,7 +347,7 @@ describe("min cash reserve: exactly at the boundary", () => {
     expect(at.details?.cashReserveAfterPct).toBeCloseTo(0.05, 12);
     const over = await evaluateOrderLimits(cashSecuredPut("AAA", 350.01, 10));
     expect(over.blocked).toBe(true);
-    expect(over.reasons).toEqual(["Placing this order would leave only 5.0% of portfolio value as cash, below the 5% min cash reserve."]);
+    expect(over.reasons).toEqual(["Placing this order would leave only 5.0% of the Manual book's value as cash, below the 5% min cash reserve."]);
     expect((await evaluateOrderLimits(cashSecuredPut("AAA", 349.99, 10))).blocked).toBe(false);
   });
 
@@ -340,15 +367,14 @@ describe("min cash reserve: exactly at the boundary", () => {
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 100, 1)); // 10k order against 0 free cash
     expect(result.blocked).toBe(true);
     expect(result.details?.cashReserveAfterPct).toBeCloseTo(-0.01, 12);
-    expect(result.reasons).toEqual(["Placing this order would leave only -1.0% of portfolio value as cash, below the 0% min cash reserve."]);
+    expect(result.reasons).toEqual(["Placing this order would leave only -1.0% of the Manual book's value as cash, below the 0% min cash reserve."]);
   });
 
-  it("a null total cash value counts as no cash at all", async () => {
+  it("blocks when IBKR reports no total cash: the book's cash cannot be checked", async () => {
     await setLimits({ minCash: 1 });
     fetchAccountSummaryMock.mockResolvedValue({ netLiquidationValue, totalCashValue: null });
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 100, 1));
-    expect(result.blocked).toBe(true);
-    expect(result.reasons).toEqual(["Placing this order would leave only -1.0% of portfolio value as cash, below the 1% min cash reserve."]);
+    expect(result).toEqual({ blocked: true, reasons: ["Could not verify position limits: IBKR's cash is unavailable."] });
   });
 });
 
@@ -358,9 +384,9 @@ describe("several limits breached at once", () => {
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 100, 10));
     expect(result.blocked).toBe(true);
     expect(result.reasons).toEqual([
-      "This order is 10.0% of portfolio value, above the 5% max order size.",
-      "AAA would be 10.0% of portfolio value, above the 6% max concentration per ticker.",
-      "Placing this order would leave only 30.0% of portfolio value as cash, below the 90% min cash reserve.",
+      "This order is 10.0% of the Manual book's value, above the 5% max order size.",
+      "AAA would be 10.0% of the Manual book's value, above the 6% max concentration per ticker.",
+      "Placing this order would leave only 30.0% of the Manual book's value as cash, below the 90% min cash reserve.",
     ]);
   });
 
@@ -377,6 +403,7 @@ describe("several limits breached at once", () => {
       cashReserveAfterPct: 0.39,
       inFlightNotional: 0,
       limits: { maxOrderPctOfPortfolio: 50, maxConcentrationPerTickerPct: 50, minCashReservePct: 5 },
+      book: { book: "manual", bookValue: 1_000_000, availableCash: 400_000 },
     });
   });
 });
@@ -478,14 +505,14 @@ describe("orders still in flight", () => {
     await setLimits({ maxOrder: 100, maxConcentration: 5, minCash: 60 });
     const without = await evaluateOrderLimits(cashSecuredPut("SAMETK", 100, 10));
     expect(without.reasons).toEqual([
-      "SAMETK would be 10.0% of portfolio value, above the 5% max concentration per ticker.",
-      "Placing this order would leave only 30.0% of portfolio value as cash, below the 60% min cash reserve.",
+      "SAMETK would be 10.0% of the Manual book's value, above the 5% max concentration per ticker.",
+      "Placing this order would leave only 30.0% of the Manual book's value as cash, below the 60% min cash reserve.",
     ]);
     await insertOrder("open_cash_secured_put", "submitted", putOpenPayload("SAMETK", 100, 5));
     const withInFlight = await evaluateOrderLimits(cashSecuredPut("SAMETK", 100, 10));
     expect(withInFlight.reasons).toEqual([
-      "SAMETK would be 15.0% of portfolio value, above the 5% max concentration per ticker (counting $50,000 of orders still working).",
-      "Placing this order would leave only 25.0% of portfolio value as cash, below the 60% min cash reserve (counting $50,000 of orders still working).",
+      "SAMETK would be 15.0% of the Manual book's value, above the 5% max concentration per ticker (counting $50,000 of orders still working).",
+      "Placing this order would leave only 25.0% of the Manual book's value as cash, below the 60% min cash reserve (counting $50,000 of orders still working).",
     ]);
   });
 
@@ -493,7 +520,7 @@ describe("orders still in flight", () => {
     await setLimits({ maxOrder: 1 });
     await insertOrder("open_cash_secured_put", "confirmed", putOpenPayload("INF", 100, 5));
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 100, 10));
-    expect(result.reasons[0]).toBe("This order is 10.0% of portfolio value, above the 1% max order size.");
+    expect(result.reasons[0]).toBe("This order is 10.0% of the Manual book's value, above the 1% max order size.");
   });
 
   it("two orders confirmed back to back where only one fits: the second blocks once the first is in flight", async () => {
@@ -512,7 +539,7 @@ describe("orders still in flight", () => {
     const secondAfter = await evaluateOrderLimits(secondInput);
     expect(secondAfter.blocked).toBe(true);
     expect(secondAfter.details?.inFlightNotional).toBe(200_000);
-    expect(secondAfter.reasons).toEqual(["Placing this order would leave only 0.0% of portfolio value as cash, below the 5% min cash reserve (counting $200,000 of orders still working)."]);
+    expect(secondAfter.reasons).toEqual(["Placing this order would leave only 0.0% of the Manual book's value as cash, below the 5% min cash reserve (counting $200,000 of orders still working)."]);
     // The first, evaluated again, is not blocked by itself.
     expect((await evaluateOrderLimits(firstInput)).blocked).toBe(false);
 
@@ -547,10 +574,11 @@ describe("fail closed", () => {
     }
   });
 
-  for (const [label, netLiquidation] of [["null", null], ["zero", 0], ["negative", -5]] as const) {
-    it(`blocks when net liquidation value is ${label}`, async () => {
+  // The order's book worth nothing or less: its cash 400,000 and its positions −400,000 or −400,005.
+  for (const [label, netLiquidation, reason] of [["zero", 0, "$0"], ["negative", -5, "−$5"]] as const) {
+    it(`blocks when the order's book value is ${label}`, async () => {
       fetchAccountSummaryMock.mockResolvedValue({ netLiquidationValue: netLiquidation, totalCashValue: 400_000 });
-      expect(await evaluateOrderLimits(cashSecuredPut("AAA", 1, 1))).toEqual({ blocked: true, reasons: ["Could not verify position limits: total portfolio value is unavailable."] });
+      expect(await evaluateOrderLimits(cashSecuredPut("AAA", 1, 1))).toEqual({ blocked: true, reasons: [`The Manual book's value is ${reason}, so it cannot open positions.`] });
     });
   }
 

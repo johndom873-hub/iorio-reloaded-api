@@ -31,14 +31,10 @@ vi.mock("../db/connection.js", async () => {
 });
 vi.mock("../ibkr/fetchAccountSummary.js", () => ({ fetchAccountSummary: vi.fn() }));
 vi.mock("../lib/positionExposure.js", () => ({ computeCashLockedInCsps: vi.fn(), computePositionExposures: vi.fn(), streamPositionExposures: vi.fn() }));
-vi.mock("../pluto/book.js", () => ({ loadPlutoBook: vi.fn() }));
-vi.mock("../lib/capitalOutsidePluto.js", () => ({ loadTraderCapitalFigures: vi.fn() }));
 
 const { db } = await import("../db/connection.js");
 const { riskLimitsRouter } = await import("./riskLimits.js");
 const { fetchAccountSummary } = await import("../ibkr/fetchAccountSummary.js");
-const { loadPlutoBook } = await import("../pluto/book.js");
-const { loadTraderCapitalFigures } = await import("../lib/capitalOutsidePluto.js");
 
 const testDb: Knex = db;
 
@@ -391,27 +387,6 @@ describe("access levels on /risk-limits/settings", () => {
     expect(history.status).toBe(200);
     const mine = (history.json as { field: string; oldValue: string; newValue: string; userDisplayName: string }[]).filter((row) => row.userDisplayName === "Risk Settings Tester");
     expect(mine.map((row) => [row.field, row.oldValue, row.newValue])).toEqual([["minCashReservePct", "5", "1"]]);
-  });
-});
-
-describe("GET /risk-limits/capital-split", () => {
-  it("splits the account into Pluto's budget with what its book uses, and the rest with what people use, for anyone signed in", async () => {
-    vi.mocked(fetchAccountSummary).mockResolvedValue({ netLiquidationValue: 200_000 } as Awaited<ReturnType<typeof fetchAccountSummary>>);
-    vi.mocked(loadPlutoBook).mockResolvedValue({ committedDollars: 30_000, openPositions: [{}, {}] } as unknown as Awaited<ReturnType<typeof loadPlutoBook>>);
-    vi.mocked(loadTraderCapitalFigures).mockResolvedValue({ capitalInUseOutsidePluto: 120_000, plutoCapitalBudgetPct: 40 });
-    const response = await asTrader(() => call("GET", "/risk-limits/capital-split"));
-    expect(response).toEqual({
-      status: 200,
-      json: { netLiquidationValue: 200_000, accountDataError: null, plutoCapitalBudgetPct: 40, pluto: { budgetDollars: 80_000, inUseDollars: 30_000, openPositionCount: 2 }, outsidePluto: { availableDollars: 120_000, inUseDollars: 120_000 } },
-    });
-  });
-
-  it("answers the figures it has, with nulls and the reason, when IBKR's account value cannot be read", async () => {
-    vi.mocked(fetchAccountSummary).mockRejectedValue(new Error("worker offline"));
-    vi.mocked(loadPlutoBook).mockResolvedValue({ committedDollars: 30_000, openPositions: [] } as unknown as Awaited<ReturnType<typeof loadPlutoBook>>);
-    vi.mocked(loadTraderCapitalFigures).mockResolvedValue({ capitalInUseOutsidePluto: 5_000, plutoCapitalBudgetPct: 50 });
-    const response = await call("GET", "/risk-limits/capital-split");
-    expect(response.json).toMatchObject({ netLiquidationValue: null, accountDataError: "worker offline", pluto: { budgetDollars: null, inUseDollars: 30_000 }, outsidePluto: { availableDollars: null, inUseDollars: 5_000 } });
   });
 });
 

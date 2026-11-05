@@ -11,7 +11,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 const settings: PlutoSettings = {
   ...plutoSafetyLimitsSettingsFixture,
   ...plutoVolFarmerV4SettingsFixture,
-  capitalBudgetPct: 50, excessAllowancePct: 20,
+  excessAllowancePct: 20,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2,
   maxQuoteAgeMinutes: 10, maxFillSlippagePct: 5,
   bandQuotePollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, maxEnabledTickers: 15,
@@ -23,7 +23,7 @@ const figures = { unfilledOrderCancelMinutes: 15, tickers: [{ symbol: "HOOD", al
 describe("buildPlutoHowItWorks", () => {
   it("quotes every number the tab shows, at today's defaults and constants", () => {
     const { volFarmerV4: _volFarmerV4, ...rest } = buildPlutoHowItWorks(settings, figures);
-    expect(rest).toEqual({ shared: { windowStartEt: "10:45", windowEndEt: "15:30", windowEndMinutesBeforeCloseAtLeast: 30, capitalBudgetPct: 50, excessAllowancePct: 20, dailyLossBreakerPct: 2, unfilledOrderCancelMinutes: 15, premiumYieldSessionsPerYear: 252, openingLookFallbackEt: "10:30" },
+    expect(rest).toEqual({ shared: { windowStartEt: "10:45", windowEndEt: "15:30", windowEndMinutesBeforeCloseAtLeast: 30, excessAllowancePct: 20, dailyLossBreakerPct: 2, unfilledOrderCancelMinutes: 15, premiumYieldSessionsPerYear: 252, openingLookFallbackEt: "10:30" },
       safetyLimits: { maxWorkingOrdersPerTicker: 10, maxOrdersPerTickerPerDay: 30, maxOpenPositionsPerTicker: 30, maxOpenPositions: 120, maxOrdersPerDay: 100, spyStressBreakerPct: 5, tickerCooldownMinutes: 0 },
     });
   });
@@ -45,7 +45,7 @@ describe("buildPlutoHowItWorks", () => {
     // lots are bought, 19 × 10,000.50 + 8 × 7,000.50 = 246,013.50 in. At 15:29 the 19 $100 Calls, the stock at $101, are bought
     // back at the $1.10 mid: 19 × 110 = 2,090, plus 19 × $0.68 = 12.92 commission.
     expect(example).toMatchObject({
-      accountValue: 2_000_000, allocationPct: 20, pot: 240_000, stockPrice: 100, lots: 19, targetDollars: 192_000, bandDollars: 48_000,
+      plutoBookValue: 1_000_000, allocationPct: 20, pot: 240_000, stockPrice: 100, lots: 19, targetDollars: 192_000, bandDollars: 48_000,
       fallPrice: 70, valueAfterFall: 133_000, lotsAfterFallTopUp: 27, topUpCapDollars: null, moneyInAfterFallTopUp: 246_013.5, risePrice: 130, valueAfterRise: 247_000, lotsAfterRiseTrim: 14,
       firstBreakEven: 96, impliedVolatilityPct: 60, leapsCap: 24_000,
       buyBackTimeEt: "15:29", buyBackStockPrice: 101, buyBackMid: 1.1, buyBackCostDollars: 2_090, buyBackCommissionDollars: 12.92,
@@ -72,13 +72,13 @@ describe("buildPlutoHowItWorks", () => {
   it("times the buyback from the window's end, and quotes the setting as it is", () => {
     const values = buildPlutoHowItWorks({ ...settings, windowEndEt: "15:00", volFarmerV4CallsInTheMoneyAtLastLook: "bought_back_before_weekends" }, figures).volFarmerV4;
     expect(values).toMatchObject({ callsInTheMoneyAtLastLook: "bought_back_before_weekends", buyBackStartsEt: "14:58", buyBackCancelledAtEt: "15:58", example: { buyBackTimeEt: "14:59" } });
-    // A 100% budget, as on staging: pot 480,000, 38 lots, the mockup's $4,180 + $25.84.
-    expect(buildPlutoHowItWorks({ ...settings, capitalBudgetPct: 100 }, figures).volFarmerV4.example).toMatchObject({ lots: 38, buyBackCostDollars: 4_180, buyBackCommissionDollars: 25.84 });
+    // A 140% allowance doubles the pot to 480,000: 38 lots, the mockup's $4,180 + $25.84.
+    expect(buildPlutoHowItWorks({ ...settings, excessAllowancePct: 140 }, figures).volFarmerV4.example).toMatchObject({ pot: 480_000, lots: 38, buyBackCostDollars: 4_180, buyBackCommissionDollars: 25.84 });
   });
 
   it("raises the example's pot by the excess allowance", () => {
     const values = buildPlutoHowItWorks({ ...settings, excessAllowancePct: 0 }, figures);
-    // Without it, the pot is the allocation alone, 2,000,000 × 20% × 50% = 200,000: floor(160,000 ÷ 10,000.50) = 15 lots; the LEAPS cap 10% of 200,000.
+    // Without it, the pot is the allocation alone, 1,000,000 × 20% = 200,000: floor(160,000 ÷ 10,000.50) = 15 lots; the LEAPS cap 10% of 200,000.
     expect(values.shared.excessAllowancePct).toBe(0);
     expect(values.volFarmerV4.example).toMatchObject({ pot: 200_000, lots: 15, leapsCap: 20_000 });
   });

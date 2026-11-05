@@ -212,52 +212,53 @@ export function evaluateAccount(account: AccountFigures | null, maxOrderPctOfPor
 
 // --- Pluto's cash (Marcelo 2026-10-28): a warning, never a stop ---
 
-/** Pluto's free cash below this share of its capital budget cuts or skips its new Puts and cycles. */
+/** Pluto's free cash below this share of its book value cuts or skips its new Puts and cycles. */
 export const plutoLowCashWarningPctOfBudget = 5;
 
 export interface PlutoCashFigures {
-  capitalBudgetPct: number;
   enabledTickerCount: number;
+  /** False until the Pluto and Manual books are started (books_cutover): Pluto then sends nothing. */
+  booksStarted: boolean;
+  /** Pluto's book value now. */
+  plutoBookValue: number;
   /** EXP $ of the open positions on Pluto's tickers plus the orders working on them. */
   committedOnPlutoTickers: number;
-  /** The strikes the account's open cash-secured Puts hold. */
-  cashLockedInCsps: number;
-  /** Every order still working on the account. */
-  inFlightNotional: number;
+  /** Pluto's available cash, its Puts, working orders and min cash reserve out (src/books/bookFigures.ts); null when IBKR's cash is unknown. */
+  availableCash: number | null;
+  /** The same on settled cash; null when IBKR reports none. */
+  availableSettledCash: number | null;
 }
 
 /**
- * Pluto's free cash as its rounds measure it (volFarmerV4Round.ts), the smallest of
- *   budget left   = capital budget % × net liquidation value − committed on Pluto's tickers
- *   account free  = cash − the open Puts' strikes − the orders working
- *   settled free  = settled cash − the open Puts' strikes − the orders working (the cash account, Marcelo 2026-10-31; none
- *                   reported: 0; on the paper account the total cash stands in)
- * judged against plutoLowCashWarningPctOfBudget of the budget.
+ * Pluto's free cash as its rounds measure it (volFarmerV4Round.ts, the books since 2026-11-05), the smallest of
+ *   book left       = Pluto's book value − committed on Pluto's tickers
+ *   available       = Pluto's available cash (its cash less its Puts, its working orders and the min cash reserve)
+ *   settled         = the same on its settled cash (the cash account; none reported: 0; on paper the total cash stands in)
+ * judged against plutoLowCashWarningPctOfBudget of the book's value.
  */
 export function evaluatePlutoCash(account: AccountFigures | null, pluto: PlutoCashFigures | null): ReadinessCheck {
   const name = "Pluto cash";
   if (!pluto) return check(name, "warn", "could not be measured: Pluto's settings or book could not be read");
-  if (pluto.enabledTickerCount === 0 || !(pluto.capitalBudgetPct > 0)) return check(name, "ok", "Pluto has no tickers or no capital budget");
-  if (!account || account.netLiquidationValue === null || !(account.netLiquidationValue > 0) || account.totalCashValue === null) {
-    return check(name, "warn", "could not be measured: the account's net liquidation value or cash is missing");
-  }
-  const budget = (pluto.capitalBudgetPct / 100) * account.netLiquidationValue;
-  const budgetLeft = budget - pluto.committedOnPlutoTickers;
-  const accountFree = Math.max(0, account.totalCashValue - pluto.cashLockedInCsps) - pluto.inFlightNotional;
-  const settledFree = account.settledCash === null ? 0 : Math.max(0, account.settledCash - pluto.cashLockedInCsps) - pluto.inFlightNotional;
-  const freeCash = Math.max(0, Math.min(budgetLeft, accountFree, settledFree));
-  const budgetLeftNote = `the budget has ${formatWholeDollars(Math.max(0, budgetLeft))} left`;
+  if (pluto.enabledTickerCount === 0) return check(name, "ok", "Pluto has no tickers");
+  if (!pluto.booksStarted) return check(name, "warn", "the Pluto and Manual books have not been started yet, so Pluto sends nothing");
+  if (!(pluto.plutoBookValue > 0)) return check(name, "warn", `Pluto's book is worth ${formatWholeDollars(pluto.plutoBookValue)}, so Pluto sends nothing`);
+  if (pluto.availableCash === null) return check(name, "warn", "could not be measured: IBKR's cash is missing");
+  const bookLeft = pluto.plutoBookValue - pluto.committedOnPlutoTickers;
+  const settled = pluto.availableSettledCash ?? 0;
+  const freeCash = Math.max(0, Math.min(bookLeft, pluto.availableCash, settled));
+  const bookLeftNote = `the book has ${formatWholeDollars(Math.max(0, bookLeft))} uncommitted`;
   const limitedBy =
-    account.settledCash === null
-      ? `IBKR reporting no settled cash, so Pluto buys nothing and sells no Put; ${budgetLeftNote}`
-      : settledFree < accountFree && settledFree < budgetLeft
-        ? `the settled cash left (settled cash less the open Puts' strikes and the orders working); ${budgetLeftNote}`
-        : accountFree < budgetLeft
-          ? `the account's free cash; ${budgetLeftNote}`
-          : "the budget left";
-  const standInNote = account.settledCashIsTotalCash ? "; IBKR reports no settled cash on the paper account, so the total cash stands in" : "";
-  const detail = `free cash ${formatWholeDollars(freeCash)} is ${((freeCash / budget) * 100).toFixed(1)}% of Pluto's ${formatWholeDollars(budget)} budget (${pluto.capitalBudgetPct}% of net liquidation), limited by ${limitedBy}${standInNote}`;
-  if ((freeCash / budget) * 100 < plutoLowCashWarningPctOfBudget) {
+    pluto.availableSettledCash === null
+      ? `IBKR reporting no settled cash, so Pluto buys nothing and sells no Put; ${bookLeftNote}`
+      : settled < pluto.availableCash && settled < bookLeft
+        ? `Pluto's settled cash left (its settled cash less its Puts, its working orders and the min cash reserve); ${bookLeftNote}`
+        : pluto.availableCash < bookLeft
+          ? `Pluto's available cash (its cash less its Puts, its working orders and the min cash reserve); ${bookLeftNote}`
+          : "what Pluto's book has uncommitted";
+  const standInNote = account?.settledCashIsTotalCash ? "; IBKR reports no settled cash on the paper account, so the total cash stands in" : "";
+  const sharePct = (freeCash / pluto.plutoBookValue) * 100;
+  const detail = `free cash ${formatWholeDollars(freeCash)} is ${sharePct.toFixed(1)}% of Pluto's ${formatWholeDollars(pluto.plutoBookValue)} book, limited by ${limitedBy}${standInNote}`;
+  if (sharePct < plutoLowCashWarningPctOfBudget) {
     return check(name, "warn", `${detail}. Below ${plutoLowCashWarningPctOfBudget}%: Pluto's new Puts and cycles will be cut or skipped`);
   }
   return check(name, "ok", detail);

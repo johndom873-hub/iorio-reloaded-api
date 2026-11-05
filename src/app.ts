@@ -6,6 +6,7 @@ import { environment } from "./config/env.js";
 import { handleGenosukeWebhook } from "./genosuke/bot.js";
 import { sessionMiddleware } from "./middleware/session.js";
 import { authRouter } from "./routes/auth.js";
+import { booksRouter } from "./routes/books.js";
 import { calendarEventsRouter } from "./routes/calendarEvents.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 import { genosukePreferencesRouter } from "./routes/genosukePreferences.js";
@@ -90,6 +91,7 @@ app.use("/order-checks", orderChecksRouter);
 app.use("/system-health", systemHealthRouter);
 app.use("/calendar-events", calendarEventsRouter);
 app.use("/dashboard", dashboardRouter);
+app.use("/books", booksRouter);
 // Model backtesting is local only (docs/backtesting/): mounted only when BACKTEST_DATA_DIR is set, and loaded lazily so
 // staging and prod never load it.
 if (readBacktestDataDirectory()) {
