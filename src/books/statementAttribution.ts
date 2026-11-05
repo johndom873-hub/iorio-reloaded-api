@@ -68,6 +68,19 @@ export function statementSectionRows(section: unknown): StatementRow[] {
     .filter((row): row is StatementRow => typeof row === "object" && row !== null);
 }
 
+/**
+ * Why the statement's base currency is not the US dollar, or null when it is (Marcelo 2026-11-05: Iorio reports
+ * everything in USD). The books are in dollars and the statement's ending cash is in its base currency, so a USD row
+ * converted to base at anything but 1 means the statement cannot be used. A statement with no USD row cannot tell.
+ */
+export function statementBaseCurrencyProblem(statement: Record<string, unknown>): string | null {
+  for (const section of ["Trades", "CashTransactions", "SalesTaxes", "Transfers"]) {
+    const row = statementSectionRows(statement[section]).find((candidate) => candidate.currency === "USD" && candidate.fxRateToBase !== undefined && candidate.fxRateToBase !== "" && Number(candidate.fxRateToBase) !== 1);
+    if (row) return `IBKR's statement is not in US dollars (a USD row converts to its base at ${row.fxRateToBase}), so the books cannot use it`;
+  }
+  return null;
+}
+
 function isoFromFlexDate(flexDate: string): string {
   return `${flexDate.slice(0, 4)}-${flexDate.slice(4, 6)}-${flexDate.slice(6, 8)}`;
 }

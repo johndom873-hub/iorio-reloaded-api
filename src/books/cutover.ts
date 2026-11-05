@@ -4,7 +4,7 @@ import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { fetchFlexStatements } from "../ibkr/fetchFlexCashTransactions.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { loadOpenLegMarketValues } from "../lib/positionExposure.js";
-import { attributeStatement, statementCutOffAt, statementSectionRows } from "./statementAttribution.js";
+import { attributeStatement, statementBaseCurrencyProblem, statementCutOffAt, statementSectionRows } from "./statementAttribution.js";
 import { missingStatementSections } from "./statementImport.js";
 import { strategiesAlwaysInManualBook } from "./tickerBookPeriods.js";
 
@@ -71,6 +71,8 @@ export async function planBooksCutover(plutoStartingValue: number, options: { wi
   const statement = statements[0]! as Record<string, unknown>;
   const missing = missingStatementSections(statement);
   if (missing.length > 0) throw new Error(`IBKR's statement lacks ${missing.join(", ")}; add them to the Flex query, or start with --without-statement.`);
+  const currencyProblem = statementBaseCurrencyProblem(statement);
+  if (currencyProblem !== null) throw new Error(`${currencyProblem}.`);
   const toDate = String(statement.toDate);
   const toDateIso = `${toDate.slice(0, 4)}-${toDate.slice(4, 6)}-${toDate.slice(6, 8)}`;
   const cashReport = statementSectionRows(statement.CashReport).find((row) => row.levelOfDetail === "BaseCurrency");

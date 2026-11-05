@@ -17,42 +17,72 @@ export interface AccountSummary {
   settledCash: number | null;
 }
 
-const requestedTags = "NetLiquidation,BuyingPower,TotalCashValue,SettledCash,GrossPositionValue,ExcessLiquidity";
+// $LEDGER:USD adds the account's USD ledger, whose ExchangeRate is the account's base currency per US dollar.
+const requestedTags = "NetLiquidation,BuyingPower,TotalCashValue,SettledCash,GrossPositionValue,ExcessLiquidity,$LEDGER:USD";
+
+const summaryFieldOfTag: Record<string, keyof AccountSummary> = {
+  NetLiquidation: "netLiquidationValue",
+  BuyingPower: "buyingPower",
+  TotalCashValue: "totalCashValue",
+  GrossPositionValue: "grossPositionValue",
+  ExcessLiquidity: "excessLiquidity",
+  SettledCash: "settledCash",
+};
+
+export type ReportedAccountFigures = Partial<Record<keyof AccountSummary, { value: number; currency: string }>>;
+
+/**
+ * Every figure in US dollars (Marcelo 2026-11-05). IBKR sends them in the account's base currency: USD on prod, SGD on
+ * staging's paper account (linked to Juan's account). A figure in another currency is divided by IBKR's exchange rate
+ * (that currency per US dollar); with no usable rate the summary fails rather than show another currency as dollars.
+ * Example: NetLiquidation 982,977 SGD at 1.2762 SGD per USD → $770,237.
+ */
+export function accountFiguresInUsd(reported: ReportedAccountFigures, usdExchangeRate: number | null): AccountSummary {
+  const summary: AccountSummary = { netLiquidationValue: null, buyingPower: null, totalCashValue: null, grossPositionValue: null, excessLiquidity: null, settledCash: null };
+  for (const field of Object.keys(summary) as (keyof AccountSummary)[]) {
+    const figure = reported[field];
+    if (figure === undefined) continue;
+    if (figure.currency === "USD") {
+      summary[field] = figure.value;
+      continue;
+    }
+    if (usdExchangeRate === null || !Number.isFinite(usdExchangeRate) || !(usdExchangeRate > 0)) {
+      throw new Error(`IBKR reports the account in ${figure.currency || "an unnamed currency"} and sent no exchange rate to the US dollar, so its figures cannot be shown in dollars.`);
+    }
+    summary[field] = figure.value / usdExchangeRate;
+  }
+  return summary;
+}
 
 function requestAccountSummary(ib: IBApi, reqId: number): Promise<AccountSummary> {
   return new Promise<AccountSummary>((resolve, reject) => {
-    const summary: AccountSummary = {
-      netLiquidationValue: null,
-      buyingPower: null,
-      totalCashValue: null,
-      grossPositionValue: null,
-      excessLiquidity: null,
-      settledCash: null,
-    };
+    const reported: ReportedAccountFigures = {};
+    let usdExchangeRate: number | null = null;
 
     const timer = setTimeout(() => {
       cleanup();
       reject(new Error("Account summary timeout."));
     }, 15_000);
 
-    function onAccountSummary(id: number, _account: string, tag: string, value: string) {
+    function onAccountSummary(id: number, _account: string, tag: string, value: string, currency: string) {
       if (id !== reqId) return;
       // An empty string is "no value", not zero: Number("") is 0, which would record a figure IBKR never sent.
       if (value.trim() === "") return;
       const numericValue = Number(value);
       if (Number.isNaN(numericValue)) return;
-      if (tag === "NetLiquidation") summary.netLiquidationValue = numericValue;
-      if (tag === "BuyingPower") summary.buyingPower = numericValue;
-      if (tag === "TotalCashValue") summary.totalCashValue = numericValue;
-      if (tag === "GrossPositionValue") summary.grossPositionValue = numericValue;
-      if (tag === "ExcessLiquidity") summary.excessLiquidity = numericValue;
-      if (tag === "SettledCash") summary.settledCash = numericValue;
+      if (tag === "$LEDGER-ExchangeRate" && currency === "USD") usdExchangeRate = numericValue;
+      const field = summaryFieldOfTag[tag];
+      if (field) reported[field] = { value: numericValue, currency };
     }
 
     function onAccountSummaryEnd(id: number) {
       if (id !== reqId) return;
       cleanup();
-      resolve(summary);
+      try {
+        resolve(accountFiguresInUsd(reported, usdExchangeRate));
+      } catch (error) {
+        reject(error);
+      }
     }
 
     function cleanup() {

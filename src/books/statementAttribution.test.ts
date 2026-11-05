@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attributeStatement, interestPeriodOf, statementCutOffAt, type StatementAttributionContext } from "./statementAttribution.js";
+import { attributeStatement, interestPeriodOf, statementBaseCurrencyProblem, statementCutOffAt, type StatementAttributionContext } from "./statementAttribution.js";
 import { splitAmountByWeights } from "./proRataSplit.js";
 import { bookOfLegAt, bookOfTickerAt } from "./tickerBookPeriods.js";
 
@@ -138,5 +138,15 @@ describe("ticker book periods", () => {
   it("keeps a hedge in Manual on a Pluto ticker", () => {
     expect(bookOfLegAt(periods, "amd", "hedge", new Date("2026-11-05T15:00:00Z"))).toBe("manual");
     expect(bookOfLegAt(periods, "amd", "covered_call", new Date("2026-11-05T15:00:00Z"))).toBe("pluto");
+  });
+});
+
+describe("the statement's base currency", () => {
+  it("accepts a USD-based statement (USD rows at a rate of 1)", () => {
+    expect(statementBaseCurrencyProblem({ Trades: { Trade: [{ currency: "USD", fxRateToBase: "1" }] }, CashTransactions: "" })).toBeNull();
+  });
+
+  it("refuses a statement whose USD rows convert to another base", () => {
+    expect(statementBaseCurrencyProblem({ Trades: { Trade: { currency: "USD", fxRateToBase: "1.2762" } } })).toBe("IBKR's statement is not in US dollars (a USD row converts to its base at 1.2762), so the books cannot use it");
   });
 });

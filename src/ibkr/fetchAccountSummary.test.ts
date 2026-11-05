@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./sharedReadConnection.js", () => ({ sharedReadConnection: { borrow: mocks.borrow, allocateReqId: mocks.allocateReqId } }));
 vi.mock("./connectIbkr.js", () => ({ connectToIbkrGateway: mocks.connect }));
 
-import { fetchAccountSummary } from "./fetchAccountSummary.js";
+import { accountFiguresInUsd, fetchAccountSummary } from "./fetchAccountSummary.js";
 
 class FakeIbApi extends EventEmitter {
   reqAccountSummary = vi.fn();
@@ -39,7 +39,7 @@ describe("fetchAccountSummary on the shared read connection", () => {
   it("requests the six tags for all accounts under an allocated request id and maps them to numbers", async () => {
     const result = fetchAccountSummary();
     await vi.advanceTimersByTimeAsync(0);
-    expect(ib.reqAccountSummary).toHaveBeenCalledWith(555, "All", "NetLiquidation,BuyingPower,TotalCashValue,SettledCash,GrossPositionValue,ExcessLiquidity");
+    expect(ib.reqAccountSummary).toHaveBeenCalledWith(555, "All", "NetLiquidation,BuyingPower,TotalCashValue,SettledCash,GrossPositionValue,ExcessLiquidity,$LEDGER:USD");
     summaryValue(555, "NetLiquidation", "100000.5");
     summaryValue(555, "BuyingPower", "400000");
     summaryValue(555, "TotalCashValue", "-2500.25");
@@ -119,6 +119,36 @@ describe("fetchAccountSummary on the shared read connection", () => {
     expect(ib.reqAccountSummary).toHaveBeenCalledTimes(1);
     ib.emit(EventName.accountSummaryEnd, 555);
     expect(await first).toBe(await second);
+  });
+});
+
+describe("fetchAccountSummary in US dollars", () => {
+  it("divides an SGD account's figures by IBKR's SGD-per-USD rate from the USD ledger", async () => {
+    const result = fetchAccountSummary();
+    await vi.advanceTimersByTimeAsync(0);
+    ib.emit(EventName.accountSummary, 555, "DUR854038", "NetLiquidation", "982976.84", "SGD");
+    ib.emit(EventName.accountSummary, 555, "DUR854038", "TotalCashValue", "355619.01", "SGD");
+    ib.emit(EventName.accountSummary, 555, "DUR854038", "$LEDGER-CashBalance", "-505787.51", "USD");
+    ib.emit(EventName.accountSummary, 555, "DUR854038", "$LEDGER-ExchangeRate", "1.2762129", "USD");
+    ib.emit(EventName.accountSummaryEnd, 555);
+    const summary = await result;
+    expect(summary.netLiquidationValue).toBeCloseTo(770229.51, 1);
+    expect(summary.totalCashValue).toBeCloseTo(278651.79, 1);
+    expect(summary.buyingPower).toBeNull();
+  });
+
+  it("fails rather than show another currency as dollars when no exchange rate came", async () => {
+    const captured = fetchAccountSummary().catch((error: Error) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    ib.emit(EventName.accountSummary, 555, "DUR854038", "NetLiquidation", "982976.84", "SGD");
+    ib.emit(EventName.accountSummaryEnd, 555);
+    expect(((await captured) as Error).message).toBe("IBKR reports the account in SGD and sent no exchange rate to the US dollar, so its figures cannot be shown in dollars.");
+  });
+
+  it("keeps USD figures as they are, with or without a rate", () => {
+    expect(accountFiguresInUsd({ netLiquidationValue: { value: 100, currency: "USD" } }, null).netLiquidationValue).toBe(100);
+    expect(accountFiguresInUsd({ netLiquidationValue: { value: 100, currency: "USD" } }, 1).netLiquidationValue).toBe(100);
+    expect(() => accountFiguresInUsd({ totalCashValue: { value: 100, currency: "SGD" } }, 0)).toThrow(/no exchange rate/);
   });
 });
 

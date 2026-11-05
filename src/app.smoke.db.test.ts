@@ -185,6 +185,7 @@ const guardedMounts = [
   "/calendar-events",
   "/dashboard",
   "/pluto",
+  "/books",
 ];
 const publicByDesignMounts = [
   // Login page: GET /config, POST /login, POST /logout, GET /session (answers 401 itself), /passkey/* (own gates).

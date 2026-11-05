@@ -3,7 +3,7 @@ import { db } from "../db/connection.js";
 import { easternInstant, easternIsoDate } from "../lib/easternIsoDate.js";
 import type { BookKey } from "./bookKeys.js";
 import { loadBooksCutover } from "./bookLedger.js";
-import { attributeStatement, statementCutOffAt, type StatementAttributionContext, type StatementEntryDraft } from "./statementAttribution.js";
+import { attributeStatement, statementBaseCurrencyProblem, statementCutOffAt, type StatementAttributionContext, type StatementEntryDraft } from "./statementAttribution.js";
 import { bookOfTickerAt, loadTickerBookPeriods } from "./tickerBookPeriods.js";
 
 // Posts IBKR's nightly statement to the books' ledger and checks it against IBKR's ending cash (Marcelo 2026-11-05).
@@ -103,6 +103,8 @@ export async function importStatementIntoBooks(statement: Record<string, unknown
   if (missing.length > 0 || toDate === null) {
     return { posted: false, toDate, newEntryCount: 0, gap: null, needsReviewCount: 0, problems: [`IBKR's statement lacks ${missing.join(", ") || "its end date"}: the books keep counting from the app's own fills`] };
   }
+  const currencyProblem = statementBaseCurrencyProblem(statement);
+  if (currencyProblem !== null) return { posted: false, toDate, newEntryCount: 0, gap: null, needsReviewCount: 0, problems: [currencyProblem] };
   const cutOffAt = statementCutOffAt(toDate);
   if (cutOffAt.getTime() <= cutover.cutOverAt.getTime()) return { posted: false, toDate, newEntryCount: 0, gap: null, needsReviewCount: 0, problems: [] };
 
