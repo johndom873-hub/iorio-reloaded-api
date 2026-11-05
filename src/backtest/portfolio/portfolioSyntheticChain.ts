@@ -43,7 +43,9 @@ export function syntheticMid(stockPrice: number, strike: number, yearsToExpiry: 
  * at today's price, 30-day IV and time to the expiry, price × exp(sd × the 30-day IV × √T), to the cent; so the chain keeps
  * the real one's strikes against the price wherever the path has taken it. Each strike is priced at the 30-day IV × the IV
  * ratio of the observed contract nearest it with one, and quotes and trades like the observed contract nearest it: its
- * spread, its previous session's volume and its bid size (v4 sells no more than the bid size, Marcelo 2026-11-05).
+ * spread and its previous session's volume. Its sizes are ones no order reaches: the simulator sells as Pluto does, with
+ * no size limit (Marcelo 2026-11-05; the lab caps a sale at the bid size, which on a drawn chain falls on other days than
+ * the real ones and ran 7 points of CAGR low against the engine).
  * Example: an observed strike 1.44 standard deviations up, on $66 at a 20% IV six hours out: $66 × exp(1.44 × 0.2 × 0.0262) = $66.50.
  */
 export function syntheticExpiryChain(input: { expiry: string; stockPrice: number; yearsToExpiry: number; riskFreeRate: number; volatility: number; strikeSpacing: number; observed?: { day: ObservedChainDay; thirtyDayVolatility: number } }): { quotes: SymbolFileQuote[]; previousSessionVolumeByContract: Map<string, number> } {
@@ -69,7 +71,7 @@ export function syntheticExpiryChain(input: { expiry: string; stockPrice: number
       const mid = syntheticMid(stockPrice, strike, yearsToExpiry, riskFreeRate, ratio === null ? volatility : observed.thirtyDayVolatility * ratio, right === "C");
       if (mid === null) continue;
       const like = quoteLikeObserved(mid, nearest)!;
-      const quote = { expiry, strike, right, bid: like.bid, ask: like.ask, bidSize: nearest.bidSize, askSize: syntheticQuoteSize };
+      const quote = { expiry, strike, right, bid: like.bid, ask: like.ask, bidSize: syntheticQuoteSize, askSize: syntheticQuoteSize };
       quotes.push(quote);
       if (like.previousSessionVolume > 0) previousSessionVolumeByContract.set(contractKey(quote), like.previousSessionVolume);
     }

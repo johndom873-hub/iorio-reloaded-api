@@ -25,8 +25,6 @@ export interface ObservedContract {
   halfSpreadShare: number | null;
   /** The previous session's volume; 0 with none recorded. */
   previousSessionVolume: number;
-  /** Its bid size at the look, in contracts (v4 sells no more than it, Marcelo 2026-11-05); 0 with none. */
-  bidSize: number;
 }
 
 export interface ObservedChainDay {
@@ -58,7 +56,6 @@ export function observedChainDayOf(input: { dateIso: string; expiry: string; quo
           impliedVolatilityRatio: impliedVolatility === null ? null : impliedVolatility / input.impliedVolatility,
           halfSpreadShare: twoSided ? (quote.ask! - quote.bid!) / (quote.ask! + quote.bid!) : null,
           previousSessionVolume: volumeByContract.get(contractKey(quote)) ?? 0,
-          bidSize: quote.bidSize ?? 0,
         };
       })
       .sort((a, b) => a.standardDeviations - b.standardDeviations);
