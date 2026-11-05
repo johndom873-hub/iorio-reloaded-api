@@ -5,7 +5,7 @@ import { db } from "../db/connection.js";
 // or a disable made in the database applies on their next request without signing them out.
 //   admin   everything
 //   trader  everything except changing risk limits or Pluto, lifting a trading halt, starting or resuming Pluto,
-//           removing Shortlist tickers and restarting the IBKR Gateway; its opening and rolling orders are held to the
+//           removing a Shortlist ticker Pluto is switched on for and restarting the IBKR Gateway; its opening and rolling orders are held to the
 //           capital outside Pluto's budget and kept off the tickers Pluto trades (Marcelo 2026-10-17)
 
 export type AccessLevel = "admin" | "trader";
@@ -52,3 +52,6 @@ export function isAdminRequest(request: Request): boolean {
 
 /** The refusal every admin-only action answers a trader with. */
 export const adminOnlyRefusal = "Only an admin can do this.";
+
+/** What a trader is told when removing a Shortlist ticker Pluto is switched on for (the API's 403 and the screen's disabled reason). */
+export const plutoEnabledRemovalRefusal = "Pluto is switched on for this ticker, so only an admin can remove it. Ask an admin to switch Pluto off for it first.";

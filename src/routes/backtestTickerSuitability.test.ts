@@ -9,7 +9,7 @@ import knexLibrary, { type Knex } from "knex";
 import type { BacktestOverview, BacktestTickerSuitability } from "../backtest/backtestTypes.js";
 
 // The Data files table's suitability marks on the real backtest router against the test database: an admin's mark stored
-// and read back through the overview, a second mark replacing it, a trader refused, and the body and symbol checks.
+// and read back through the overview, a second mark replacing it, a trader's mark stored too, and the body and symbol checks.
 const dataDirectory = mkdtempSync(path.join(os.tmpdir(), "backtest-suitability-route-test-"));
 process.env.BACKTEST_DATA_DIR = dataDirectory;
 
@@ -86,12 +86,13 @@ describe("ticker suitability routes", () => {
     expect(await testDb("backtest_ticker_suitability").where({ symbol }).count({ count: "*" }).first()).toEqual({ count: "1" });
   });
 
-  it("refuses a trader and leaves the mark as it was", async () => {
+  it("stores a trader's mark too: the lab has no access levels", async () => {
     signedInUserId = traderId;
-    const refused = await call<{ error: string }>("PUT", `/ticker-suitability/${symbol}`, { status: "suitable", note: "From a trader." });
-    expect(refused.status).toBe(403);
+    const stored = await call<BacktestTickerSuitability>("PUT", `/ticker-suitability/${symbol}`, { status: "suitable", note: "From a trader." });
+    expect(stored.status).toBe(200);
+    expect((await testDb("backtest_ticker_suitability").where({ symbol }).first())).toMatchObject({ status: "suitable", updated_by_user_id: traderId });
     signedInUserId = adminId;
-    expect((await testDb("backtest_ticker_suitability").where({ symbol }).first()).status).toBe("unsuitable");
+    await call("PUT", `/ticker-suitability/${symbol}`, { status: "unsuitable", note: "" });
   });
 
   it("refuses a status other than suitable or unsuitable, a missing note, an overlong note and a symbol without a data file", async () => {

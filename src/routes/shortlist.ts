@@ -3,7 +3,7 @@ import { recordPlutoEvent } from "../pluto/ledger.js";
 import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
-import { isAdminRequest } from "../lib/sessionUser.js";
+import { isAdminRequest, plutoEnabledRemovalRefusal } from "../lib/sessionUser.js";
 import { searchTickers } from "../ibkr/searchTickers.js";
 import { findOrCreateTicker, addTickerToShortlist, UnknownSymbolError } from "../ibkr/findOrCreateTicker.js";
 import { fetchAndStoreFiveYearHistory, getLatestBackfillRun, startTickerBackfill, type TickerBackfillRun } from "../ibkr/tickerBackfillPipeline.js";
@@ -305,13 +305,15 @@ shortlistRouter.patch("/:id/bot-enabled", requireAdmin, async (request, response
   response.json({ botEnabled: enabled });
 });
 
-shortlistRouter.delete("/:id", requireAdmin, async (request, response) => {
-  // Refused while the ticker has an open position; the UI greys Remove out
-  // for the same reason, this covers direct API calls and stale tabs. Checked in the
-  // same transaction as the removal so a position opening in between can't slip past.
-  const outcome = await db.transaction(async (trx): Promise<"removed" | "not_found" | { openPositionCount: number }> => {
-    const entry = await trx("shortlist_entries").where({ id: request.params.id }).whereNull("removed_at").first(["ticker_id"]);
+// A trader may remove a ticker Pluto is not switched on for; removing one it is switched on for would take it out of Pluto's
+// book and capital, which is the admin's call (Marcelo 2026-11-05). Refused while the ticker has an open position; the UI greys
+// Remove out for the same reasons, this covers direct API calls and stale tabs. Checked in the same transaction (the row
+// locked) as the removal so a position opening, or Pluto's switch going on, in between can't slip past.
+shortlistRouter.delete("/:id", async (request, response) => {
+  const outcome = await db.transaction(async (trx): Promise<"removed" | "not_found" | "pluto_enabled" | { openPositionCount: number }> => {
+    const entry = await trx("shortlist_entries").where({ id: request.params.id }).whereNull("removed_at").forUpdate().first(["ticker_id", "bot_enabled"]);
     if (!entry) return "not_found";
+    if (entry.bot_enabled && !isAdminRequest(request)) return "pluto_enabled";
     const openPositionCount = await countOpenPositionsForTicker(entry.ticker_id, trx);
     if (openPositionCount > 0) return { openPositionCount };
     await trx("shortlist_entries").where({ id: request.params.id }).update({ removed_at: trx.fn.now() });
@@ -320,6 +322,10 @@ shortlistRouter.delete("/:id", requireAdmin, async (request, response) => {
 
   if (outcome === "not_found") {
     response.status(404).json({ error: "Entry not found or already removed." });
+    return;
+  }
+  if (outcome === "pluto_enabled") {
+    response.status(403).json({ error: plutoEnabledRemovalRefusal });
     return;
   }
   if (outcome !== "removed") {

@@ -19,6 +19,7 @@ import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import knexLibrary, { type Knex } from "knex";
+import { plutoEnabledRemovalRefusal } from "../lib/sessionUser.js";
 
 // The real shortlistRouter on a small express app against the test database. Every IBKR / network boundary the router and the helpers
 // it calls reach is mocked (symbol search, new-ticker lookup, the backfill pipeline, the shared read connection, daily-bar and
@@ -936,14 +937,28 @@ describe("backfill progress routes", () => {
   });
 });
 
-describe("access levels: a trader cannot change Pluto or remove tickers", () => {
-  it("refuses a trader's Pluto switch either way, and a trader's removal, leaving the entry as it was", async () => {
+describe("access levels: a trader cannot change Pluto or remove a ticker Pluto is switched on for", () => {
+  it("refuses a trader's Pluto switch either way, and a trader's removal while Pluto is on for the ticker, leaving the entry as it was", async () => {
     const ticker = await insertTicker();
     const entryId = await insertEntry(ticker.id);
     expect(await asTrader(() => call("PATCH", `/${entryId}/bot-enabled`, { enabled: true }))).toMatchObject({ status: 403, json: { error: "Only an admin can do this." } });
     await testDb("shortlist_entries").where({ id: entryId }).update({ bot_enabled: true });
     expect((await asTrader(() => call("PATCH", `/${entryId}/bot-enabled`, { enabled: false }))).status).toBe(403);
-    expect((await asTrader(() => call("DELETE", `/${entryId}`))).status).toBe(403);
+    expect(await asTrader(() => call("DELETE", `/${entryId}`))).toMatchObject({ status: 403, json: { error: plutoEnabledRemovalRefusal } });
     expect((await readEntries(ticker.id))[0]).toMatchObject({ bot_enabled: true, removed_at: null });
   });
+
+  it("lets a trader remove a ticker Pluto is not switched on for, and an admin remove one it is", async () => {
+    const plain = await insertTicker();
+    const plainEntryId = await insertEntry(plain.id);
+    expect((await asTrader(() => call("DELETE", `/${plainEntryId}`))).status).toBe(204);
+    expect((await readEntries(plain.id))[0].removed_at).not.toBeNull();
+
+    const plutoTicker = await insertTicker();
+    const plutoEntryId = await insertEntry(plutoTicker.id);
+    await testDb("shortlist_entries").where({ id: plutoEntryId }).update({ bot_enabled: true });
+    expect((await call("DELETE", `/${plutoEntryId}`)).status).toBe(204);
+    expect((await readEntries(plutoTicker.id))[0].removed_at).not.toBeNull();
+  });
 });
+

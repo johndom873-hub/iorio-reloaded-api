@@ -1,5 +1,5 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
-import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
+import { requireAuth } from "../middleware/requireAuth.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtest/backtestDataDirectory.js";
 import type { BacktestLabSettingsView, BacktestOverview, BacktestSessionEstimateResponse, BacktestSettingsTemplate, CreateBacktestBatchResponse } from "../backtest/backtestTypes.js";
 import { listBacktestDataFileSymbols, readBacktestDataFileContents, readBacktestDataFilePeriodContents, summarizeBacktestDataFiles } from "../backtest/dataFileSummary.js";
@@ -107,8 +107,8 @@ backtestRouter.post("/market-indices/refresh", async (_request, response) => {
   response.json(summarizeMarketIndexFiles(dataDirectory));
 });
 
-// Body: { status: "suitable" | "unsuitable", note }. Admin only; the ticker must have a data file.
-backtestRouter.put("/ticker-suitability/:symbol", requireAdmin, async (request: Request<{ symbol: string }>, response: Response) => {
+// Body: { status: "suitable" | "unsuitable", note }. Any signed-in user (the lab runs only on Marcelo's Mac, so no access levels there, Marcelo 2026-11-05); the ticker must have a data file.
+backtestRouter.put("/ticker-suitability/:symbol", async (request: Request<{ symbol: string }>, response: Response) => {
   let symbol: string;
   try {
     symbol = normalizeBacktestSymbol(request.params.symbol ?? "");
