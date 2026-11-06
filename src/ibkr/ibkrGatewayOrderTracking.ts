@@ -110,6 +110,7 @@ export function handleOrderErrorEvent(error: Error, code: number, reqId: number,
     console.log(`Order ${reqId} informational message: ${code} ${error.message}`);
     return Promise.resolve();
   }
+  console.log(`Order ${reqId} IBKR event: ${code} ${error.message}`);
   if (code === ibkrOrderCanceledErrorCode) {
     return recordIbkrOrderCanceled(reqId, error.message, {
       executedOutcome: (orderRequestId, payload) => executedOutcomeForOrderRequest(orderRequestId, payload, db),
@@ -124,18 +125,36 @@ export function handleOrderErrorEvent(error: Error, code: number, reqId: number,
     .update({ status: "error", error_message: `IBKR error ${code}: ${error.message}`, updated_at: db.fn.now() })
     .returning(["id"])
     .then(async (rows) => {
-      if (!rows[0]) return;
+      if (!rows[0]) return addIbkrReasonToInactiveRejection(reqId, `IBKR error ${code}: ${error.message}`, dependencies);
       console.error(`Order ${reqId} errored: ${code} ${error.message}`);
       await dependencies.publishNotification({ type: "order_status", orderId: rows[0].id });
     })
     .catch((dbError) => console.error(`Failed to record order error for ${reqId}: ${dbError}`));
 }
 
+/**
+ * IBKR sends the order's Inactive status and its error (the reason) as separate events, in either order. When the status
+ * came first the order is already rejected with only the generic Inactive text; the error arriving seconds later replaces
+ * that text with IBKR's own reason. Only a row rejected in the last minute with the generic text is touched, so an old
+ * error naming a reused order id changes nothing.
+ */
+async function addIbkrReasonToInactiveRejection(ibkrOrderId: number, errorMessage: string, dependencies: OrderTrackingDependencies): Promise<void> {
+  const { db } = dependencies;
+  const rows: { id: string }[] = await db("order_requests")
+    .where({ ibkr_order_id: ibkrOrderId, status: "rejected", error_message: ibkrInactiveOrderMessage })
+    .andWhere("updated_at", ">", db.raw("now() - interval '1 minute'"))
+    .update({ error_message: errorMessage, updated_at: db.fn.now() })
+    .returning(["id"]);
+  if (!rows[0]) return;
+  console.error(`Order ${ibkrOrderId} rejection reason: ${errorMessage}`);
+  await dependencies.publishNotification({ type: "order_status", orderId: rows[0].id });
+}
+
 /** An IBKR refusal (ibkrOrderRejectionErrorCodes) ends a working order as rejected, or as a cancel after a partial fill. */
 async function recordIbkrOrderRejection(ibkrOrderId: number, errorMessage: string, dependencies: OrderTrackingDependencies): Promise<void> {
   const { db } = dependencies;
   const row = await db("order_requests").where({ ibkr_order_id: ibkrOrderId }).whereIn("status", workingOrderRequestStatuses).orderBy("created_at", "desc").first("id", "status");
-  if (!row) return;
+  if (!row) return addIbkrReasonToInactiveRejection(ibkrOrderId, errorMessage, dependencies);
   const nextStatus = requestStatusForIbkrRejection(row.status);
   await db.transaction(async (transaction) => {
     await transaction("order_requests").where({ id: row.id }).update({ status: nextStatus, error_message: errorMessage, updated_at: db.fn.now() });

@@ -24,6 +24,7 @@ const {
   openingFillReconciliationDelayMs,
   reconcileStaleOrderRequests,
 } = await import("./ibkrGatewayOrderTracking.js");
+const { ibkrInactiveOrderMessage } = await import("./ibkrGatewayOrderStatus.js");
 const testDb: Knex = db;
 
 let userId: string;
@@ -278,6 +279,19 @@ describe("handleOrderErrorEvent", () => {
     const { id, ibkrOrderId } = await insertOrder();
     await handleOrderErrorEvent(new Error("Unknown problem"), 10_999, ibkrOrderId, dependencies);
     expect((await rowOf(id)).status).toBe("error");
+  });
+
+  it.each([201, 10_999])("an error %i arriving after the Inactive status replaces the generic text with IBKR's reason", async (code) => {
+    const { id, ibkrOrderId } = await insertOrder({ status: "rejected", error_message: ibkrInactiveOrderMessage });
+    await handleOrderErrorEvent(new Error("No Trading Permission"), code, ibkrOrderId, dependencies);
+    expect(await rowOf(id)).toMatchObject({ status: "rejected", error_message: `IBKR error ${code}: No Trading Permission` });
+    expect(notifications).toEqual([{ type: "order_status", orderId: id }]);
+  });
+
+  it("an old error naming a reused id does not rewrite a rejection from long ago", async () => {
+    const { id, ibkrOrderId } = await insertOrder({ status: "rejected", error_message: ibkrInactiveOrderMessage, updated_at: daysAgo(2) });
+    await handleOrderErrorEvent(new Error("boom"), 201, ibkrOrderId, dependencies);
+    expect((await rowOf(id)).error_message).toBe(ibkrInactiveOrderMessage);
   });
 
   it("leaves an order that is not submitted alone (an old error naming a reused id)", async () => {
