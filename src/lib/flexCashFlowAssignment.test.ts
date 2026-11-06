@@ -12,6 +12,7 @@ const liveTransferRow = {
   direction: "IN",
   positionAmount: "0",
   cashTransfer: "100000",
+  currency: "USD",
 };
 
 const snapshot = (snapshotDate: string, capturedAtUtc: string): SnapshotCaptureTime => ({ snapshotDate, capturedAt: new Date(capturedAtUtc) });
@@ -33,21 +34,29 @@ describe("parseFlexDateTime", () => {
 
 describe("cashFlowFromTransferRow", () => {
   it("turns the live transfer in into a +100,000 flow", () => {
-    const parsed = cashFlowFromTransferRow(liveTransferRow);
+    const parsed = cashFlowFromTransferRow(liveTransferRow, {});
     expect(parsed?.amount).toBe(100_000);
     expect(parsed?.isoDate).toBe("2026-09-23");
   });
   it("makes a transfer out negative whatever sign the amount arrives with", () => {
-    expect(cashFlowFromTransferRow({ ...liveTransferRow, direction: "OUT" })?.amount).toBe(-100_000);
-    expect(cashFlowFromTransferRow({ ...liveTransferRow, direction: "OUT", cashTransfer: "-100000" })?.amount).toBe(-100_000);
+    expect(cashFlowFromTransferRow({ ...liveTransferRow, direction: "OUT" }, {})?.amount).toBe(-100_000);
+    expect(cashFlowFromTransferRow({ ...liveTransferRow, direction: "OUT", cashTransfer: "-100000" }, {})?.amount).toBe(-100_000);
   });
-  it("converts to the base currency", () => {
-    expect(cashFlowFromTransferRow({ ...liveTransferRow, cashTransfer: "1000", fxRateToBase: "1.1" })?.amount).toBeCloseTo(1_100, 9);
+  it("counts a USD row as dollars, and converts another currency through the statement's USD rate nearest the flow", () => {
+    expect(cashFlowFromTransferRow({ ...liveTransferRow, cashTransfer: "1000", fxRateToBase: "1.28" }, {})?.amount).toBe(1_000);
+    const sgdAccountStatement = {
+      Trades: { Trade: [
+        { currency: "USD", fxRateToBase: "1.20", dateTime: "20260901;100000" },
+        { currency: "USD", fxRateToBase: "1.28", dateTime: "20260923;120000" },
+      ] },
+    };
+    expect(cashFlowFromTransferRow({ ...liveTransferRow, currency: "SGD", cashTransfer: "1280" }, sgdAccountStatement)?.amount).toBeCloseTo(1_000, 9);
+    expect(() => cashFlowFromTransferRow({ ...liveTransferRow, currency: "SGD" }, {})).toThrow("no US dollar rate");
   });
   it("leaves rows that move securities, or are unreadable, alone", () => {
-    expect(cashFlowFromTransferRow({ ...liveTransferRow, assetCategory: "STK" })).toBeNull();
-    expect(cashFlowFromTransferRow({ ...liveTransferRow, direction: undefined })).toBeNull();
-    expect(cashFlowFromTransferRow({ ...liveTransferRow, cashTransfer: "n/a" })).toBeNull();
+    expect(cashFlowFromTransferRow({ ...liveTransferRow, assetCategory: "STK" }, {})).toBeNull();
+    expect(cashFlowFromTransferRow({ ...liveTransferRow, direction: undefined }, {})).toBeNull();
+    expect(cashFlowFromTransferRow({ ...liveTransferRow, cashTransfer: "n/a" }, {})).toBeNull();
   });
 });
 
@@ -118,14 +127,14 @@ describe("extractExternalCashFlows", () => {
   });
 
   it("reads the Deposits/Withdrawals spelling too, ignoring case and surrounding spaces", () => {
-    const parsed = parse(`<FlexQueryResponse><FlexStatements><FlexStatement><CashTransactions><CashTransaction type="Deposits/Withdrawals" amount="2500" dateTime="20260925;101500" /><CashTransaction type=" deposits/withdrawals " amount="-500" dateTime="20260926;101500" /><CashTransaction type="Dividends" amount="9" dateTime="20260926;101500" /></CashTransactions></FlexStatement></FlexStatements></FlexQueryResponse>`);
+    const parsed = parse(`<FlexQueryResponse><FlexStatements><FlexStatement><CashTransactions><CashTransaction type="Deposits/Withdrawals" currency="USD" amount="2500" dateTime="20260925;101500" /><CashTransaction type=" deposits/withdrawals " currency="USD" amount="-500" dateTime="20260926;101500" /><CashTransaction type="Dividends" amount="9" dateTime="20260926;101500" /></CashTransactions></FlexStatement></FlexStatements></FlexQueryResponse>`);
     expect(extractExternalCashFlows(parsed).map((flow) => flow.amount)).toEqual([2500, -500]);
   });
 
   it("reads a Deposits & Withdrawals row, one or many, and a report with neither section", () => {
-    const single = parse(`<FlexQueryResponse><FlexStatements><FlexStatement><CashTransactions><CashTransaction type="Deposits &amp; Withdrawals" amount="2500" dateTime="20260925;101500" /></CashTransactions></FlexStatement></FlexStatements></FlexQueryResponse>`);
+    const single = parse(`<FlexQueryResponse><FlexStatements><FlexStatement><CashTransactions><CashTransaction type="Deposits &amp; Withdrawals" currency="USD" amount="2500" dateTime="20260925;101500" /></CashTransactions></FlexStatement></FlexStatements></FlexQueryResponse>`);
     expect(extractExternalCashFlows(single).map((flowRow) => flowRow.amount)).toEqual([2_500]);
-    const many = parse(`<FlexQueryResponse><FlexStatements><FlexStatement><CashTransactions><CashTransaction type="Deposits &amp; Withdrawals" amount="2500" dateTime="20260925;101500" /><CashTransaction type="Deposits &amp; Withdrawals" amount="-500" dateTime="20260926;101500" /></CashTransactions></FlexStatement></FlexStatements></FlexQueryResponse>`);
+    const many = parse(`<FlexQueryResponse><FlexStatements><FlexStatement><CashTransactions><CashTransaction type="Deposits &amp; Withdrawals" currency="USD" amount="2500" dateTime="20260925;101500" /><CashTransaction type="Deposits &amp; Withdrawals" currency="USD" amount="-500" dateTime="20260926;101500" /></CashTransactions></FlexStatement></FlexStatements></FlexQueryResponse>`);
     expect(extractExternalCashFlows(many).map((flowRow) => flowRow.amount)).toEqual([2_500, -500]);
     expect(extractExternalCashFlows(parse(`<FlexQueryResponse><FlexStatements><FlexStatement accountId="U1"></FlexStatement></FlexStatements></FlexQueryResponse>`))).toEqual([]);
   });

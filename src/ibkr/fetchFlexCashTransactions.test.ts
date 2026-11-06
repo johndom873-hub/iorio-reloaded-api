@@ -41,7 +41,7 @@ const stillGeneratingAsIbkrSendsIt = sendRequestFailure("1019", "Statement gener
 const statementXml = (accountId: string | null, sections = "") => `<FlexStatement${accountId === null ? "" : ` accountId="${accountId}"`} fromDate="20260906" toDate="20261005">${sections}</FlexStatement>`;
 const reportXml = (...statements: string[]) => `<FlexQueryResponse queryName="Cash" type="AF"><FlexStatements count="${statements.length}">${statements.join("")}</FlexStatements></FlexQueryResponse>`;
 const cashSection = (...rows: string[]) => `<CashTransactions>${rows.join("")}</CashTransactions>`;
-const cashRow = (type: string, amount: string, dateTime: string) => `<CashTransaction type="${type}" amount="${amount}" dateTime="${dateTime}" />`;
+const cashRow = (type: string, amount: string, dateTime: string) => `<CashTransaction type="${type}" currency="USD" fxRateToBase="1" amount="${amount}" dateTime="${dateTime}" />`;
 const transferSection = (...rows: string[]) => `<Transfers>${rows.join("")}</Transfers>`;
 
 const liveWorker = { ibkr_account_ids: ["U21518308"], updated_at: new Date(fixedNow.getTime() - 30_000) };
@@ -367,11 +367,11 @@ describe("cash flow extraction from the parsed report", () => {
     ]);
   });
 
-  it("reads cash rows of the Transfers section: IN positive, OUT negative, converted to base currency", async () => {
+  it("reads cash rows of the Transfers section: IN positive, OUT negative, another currency converted to US dollars", async () => {
     const flows = await flowsFrom(
       transferSection(
-        '<Transfer assetCategory="CASH" direction="IN" cashTransfer="10000" fxRateToBase="1" dateTime="20260923;223815" />',
-        '<Transfer assetCategory="CASH" direction="OUT" cashTransfer="-200" fxRateToBase="1.25" dateTime="20260924;090000" />',
+        '<Transfer assetCategory="CASH" direction="IN" cashTransfer="10000" currency="USD" fxRateToBase="1" dateTime="20260923;223815" />',
+        '<Transfer assetCategory="CASH" direction="OUT" cashTransfer="-200" currency="EUR" fxRateToBase="1.25" dateTime="20260924;090000" />',
         '<Transfer assetCategory="STK" direction="IN" cashTransfer="0" dateTime="20260924;090000" />',
       ),
     );
@@ -381,14 +381,14 @@ describe("cash flow extraction from the parsed report", () => {
     ]);
   });
 
-  it("falls back to the transfer's date attribute and a rate of 1 when no dateTime or rate is present", async () => {
-    expect(await flowsFrom(transferSection('<Transfer assetCategory="CASH" direction="IN" cashTransfer="300" date="20260930" />'))).toEqual([{ isoDate: "2026-09-30", occurredAt: null, amount: 300 }]);
+  it("falls back to the transfer's date attribute when no dateTime is present", async () => {
+    expect(await flowsFrom(transferSection('<Transfer assetCategory="CASH" direction="IN" cashTransfer="300" currency="USD" date="20260930" />'))).toEqual([{ isoDate: "2026-09-30", occurredAt: null, amount: 300 }]);
   });
 
   it("combines Cash Transactions and Transfers from the same statement, cash transactions first", async () => {
     const flows = await flowsFrom(
       cashSection(cashRow("Deposits &amp; Withdrawals", "1000", "20260901;100000")) +
-        transferSection('<Transfer assetCategory="CASH" direction="IN" cashTransfer="50" dateTime="20260902;100000" />'),
+        transferSection('<Transfer assetCategory="CASH" direction="IN" cashTransfer="50" currency="USD" dateTime="20260902;100000" />'),
     );
     expect((flows as { amount: number }[]).map((flow) => flow.amount)).toEqual([1000, 50]);
   });
@@ -397,8 +397,8 @@ describe("cash flow extraction from the parsed report", () => {
     expect(
       await flowsFrom(
         transferSection(
-          '<Transfer assetCategory="CASH" direction="SIDEWAYS" cashTransfer="50" dateTime="20260902;100000" />',
-          '<Transfer assetCategory="CASH" direction="IN" cashTransfer="abc" dateTime="20260902;100000" />',
+          '<Transfer assetCategory="CASH" direction="SIDEWAYS" cashTransfer="50" currency="USD" dateTime="20260902;100000" />',
+          '<Transfer assetCategory="CASH" direction="IN" cashTransfer="abc" currency="USD" dateTime="20260902;100000" />',
         ),
       ),
     ).toEqual([]);

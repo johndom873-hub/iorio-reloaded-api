@@ -13,8 +13,56 @@ export interface FlexCashFlow {
   isoDate: string;
   /** The moment of the flow; null when the timestamp carried no time of day. */
   occurredAt: Date | null;
-  /** Deposits and transfers in are positive, withdrawals and transfers out negative, in the account's base currency. */
+  /** Deposits and transfers in are positive, withdrawals and transfers out negative, in US dollars (the account values are). */
   amount: number;
+}
+
+export type StatementRow = Record<string, string>;
+
+/** The rows of a parsed XML section: `{ Trade: row | row[] }` → row[]; an empty section ("") → []. */
+export function statementSectionRows(section: unknown): StatementRow[] {
+  if (typeof section !== "object" || section === null) return [];
+  return Object.values(section as Record<string, unknown>)
+    .flatMap((value) => [value].flat())
+    .filter((row): row is StatementRow => typeof row === "object" && row !== null);
+}
+
+const sectionsCarryingUsdRates = ["Trades", "CashTransactions", "SalesTaxes", "Transfers"];
+
+/**
+ * IBKR's rate from US dollars to the statement's base currency (base per dollar) near a moment: the fxRateToBase of the
+ * statement's USD row closest in time. 1 on a USD account; about 1.28 on staging's SGD paper account. Null when the
+ * statement has no dated USD row with a rate.
+ */
+export function usdRateToBaseNear(statement: Record<string, unknown>, moment: Date): number | null {
+  let closest: { rate: number; distanceMs: number } | null = null;
+  for (const section of sectionsCarryingUsdRates) {
+    for (const row of statementSectionRows(statement[section])) {
+      const rate = Number(row.fxRateToBase);
+      const timestamp = row.dateTime ?? row.date;
+      if (row.currency !== "USD" || row.fxRateToBase === undefined || row.fxRateToBase === "" || !(rate > 0) || !timestamp) continue;
+      const { isoDate, occurredAt } = parseFlexDateTime(timestamp);
+      const distanceMs = Math.abs((occurredAt ?? easternInstant(isoDate, 0, 0)).getTime() - moment.getTime());
+      if (closest === null || distanceMs < closest.distanceMs) closest = { rate, distanceMs };
+    }
+  }
+  return closest?.rate ?? null;
+}
+
+/**
+ * A flow's amount in US dollars. A USD row is already in dollars. Any other row is taken to the base currency by its own
+ * fxRateToBase (1 when absent: the row is in base), then to dollars by the statement's USD rate nearest the flow. With no
+ * USD rate it throws rather than count another currency as dollars. Example: a 10,000 SGD deposit on an SGD account
+ * (rate to base 1) with USD rows at 1.28 → $7,812.50.
+ */
+function flowAmountInUsd(amount: number, row: { currency?: string; fxRateToBase?: string }, flowDate: { isoDate: string; occurredAt: Date | null }, statement: Record<string, unknown>): number {
+  if (row.currency === "USD") return amount;
+  const rateToBase = row.fxRateToBase === undefined || row.fxRateToBase === "" ? 1 : Number(row.fxRateToBase);
+  const usdRateToBase = usdRateToBaseNear(statement, flowDate.occurredAt ?? easternInstant(flowDate.isoDate, 0, 0));
+  if (usdRateToBase === null || Number.isNaN(rateToBase)) {
+    throw new Error(`IBKR's statement has a ${row.currency || "currency-less"} cash flow of ${amount} on ${flowDate.isoDate} and no US dollar rate to convert it with`);
+  }
+  return (amount * rateToBase) / usdRateToBase;
 }
 
 export interface SnapshotCaptureTime {
@@ -38,25 +86,26 @@ export interface FlexTransferRow {
   assetCategory?: string;
   direction?: string;
   cashTransfer?: string;
+  currency?: string;
   fxRateToBase?: string;
   date?: string;
   dateTime?: string;
 }
 
 /**
- * A cash row of the Flex "Transfers" section (including transfers between linked accounts) as a flow. Rows that move
- * securities rather than cash are not handled yet and return null, as do rows missing a usable amount or timestamp.
+ * A cash row of the Flex "Transfers" section (including transfers between linked accounts) as a flow in US dollars;
+ * `statement` supplies the dollar rate for a row in another currency. Rows that move securities rather than cash are not
+ * handled yet and return null, as do rows missing a usable amount or timestamp.
  */
-export function cashFlowFromTransferRow(row: FlexTransferRow): FlexCashFlow | null {
+export function cashFlowFromTransferRow(row: FlexTransferRow, statement: Record<string, unknown>): FlexCashFlow | null {
   if (row.assetCategory !== "CASH") return null;
   const cashAmount = Number(row.cashTransfer);
-  const rateToBase = row.fxRateToBase === undefined || row.fxRateToBase === "" ? 1 : Number(row.fxRateToBase);
   const timestamp = row.dateTime ?? row.date;
-  if (Number.isNaN(cashAmount) || Number.isNaN(rateToBase) || !timestamp) return null;
+  if (Number.isNaN(cashAmount) || !timestamp) return null;
   const direction = row.direction?.toUpperCase();
   if (direction !== "IN" && direction !== "OUT") return null;
-  const { isoDate, occurredAt } = parseFlexDateTime(timestamp);
-  return { isoDate, occurredAt, amount: (direction === "IN" ? 1 : -1) * Math.abs(cashAmount) * rateToBase };
+  const flowDate = parseFlexDateTime(timestamp);
+  return { ...flowDate, amount: flowAmountInUsd((direction === "IN" ? 1 : -1) * Math.abs(cashAmount), row, flowDate, statement) };
 }
 
 /**
@@ -76,8 +125,16 @@ export function assignFlowsToSnapshots(flows: FlexCashFlow[], snapshots: Snapsho
   return netFlowBySnapshotDate;
 }
 
+interface FlexCashTransactionRow {
+  type: string;
+  amount: string;
+  dateTime: string;
+  currency?: string;
+  fxRateToBase?: string;
+}
+
 export interface FlexStatementCashSections {
-  CashTransactions?: { CashTransaction?: { type: string; amount: string; dateTime: string } | { type: string; amount: string; dateTime: string }[] };
+  CashTransactions?: { CashTransaction?: FlexCashTransactionRow | FlexCashTransactionRow[] };
   Transfers?: { Transfer?: FlexTransferRow | FlexTransferRow[] };
 }
 
@@ -87,21 +144,23 @@ const depositWithdrawalTypes = new Set(["deposits & withdrawals", "deposits/with
 
 /**
  * Every external cash movement in a parsed Flex report: Deposits/Withdrawals rows of the Cash Transactions section and
- * cash rows of the Transfers section. Dividends, interest and fees are trading-adjacent P&L, not external flow.
+ * cash rows of the Transfers section, in US dollars. Dividends, interest and fees are trading-adjacent P&L, not external flow.
  */
 export function extractExternalCashFlows(statements: FlexStatementCashSections[]): FlexCashFlow[] {
   const cashFlows: FlexCashFlow[] = [];
   for (const statement of statements) {
+    const statementRecord = statement as Record<string, unknown>;
     const transactions = [statement.CashTransactions?.CashTransaction ?? []].flat();
     for (const transaction of transactions) {
       if (!depositWithdrawalTypes.has(String(transaction.type).trim().toLowerCase())) continue;
       const amount = Number(transaction.amount);
       if (Number.isNaN(amount)) continue;
-      cashFlows.push({ ...parseFlexDateTime(transaction.dateTime), amount });
+      const flowDate = parseFlexDateTime(transaction.dateTime);
+      cashFlows.push({ ...flowDate, amount: flowAmountInUsd(amount, transaction, flowDate, statementRecord) });
     }
     const transfers = [statement.Transfers?.Transfer ?? []].flat();
     for (const transfer of transfers) {
-      const cashFlow = cashFlowFromTransferRow(transfer);
+      const cashFlow = cashFlowFromTransferRow(transfer, statementRecord);
       if (cashFlow) cashFlows.push(cashFlow);
     }
   }

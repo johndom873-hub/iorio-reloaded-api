@@ -5,7 +5,8 @@ import { fetchFlexStatements } from "../ibkr/fetchFlexCashTransactions.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { lastCompletedSessionDate } from "../lib/marketSessionStatus.js";
 import { loadOpenLegMarketValues } from "../lib/positionExposure.js";
-import { attributeStatement, statementBaseCurrencyProblem, statementCutOffAt, statementSectionRows } from "./statementAttribution.js";
+import { statementSectionRows } from "../lib/flexCashFlowAssignment.js";
+import { attributeStatement, statementBaseCurrencyProblem, statementCutOffAt } from "./statementAttribution.js";
 import { missingStatementSections } from "./statementImport.js";
 import { strategiesAlwaysInManualBook } from "./tickerBookPeriods.js";
 

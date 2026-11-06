@@ -1,5 +1,5 @@
 import { easternInstant } from "../lib/easternIsoDate.js";
-import { parseFlexDateTime } from "../lib/flexCashFlowAssignment.js";
+import { parseFlexDateTime, statementSectionRows, type StatementRow } from "../lib/flexCashFlowAssignment.js";
 import type { BookKey, LedgerBookKey } from "./bookKeys.js";
 import { splitAmountByWeights } from "./proRataSplit.js";
 
@@ -56,16 +56,6 @@ export interface ParsedStatement {
   problems: string[];
   /** Every row key in the statement, posted or not (the cut-over keeps those already in its opening cash). */
   rowKeys: string[];
-}
-
-type StatementRow = Record<string, string>;
-
-/** The rows of a parsed XML section: `{ Trade: row | row[] }` → row[]; an empty section ("") → []. */
-export function statementSectionRows(section: unknown): StatementRow[] {
-  if (typeof section !== "object" || section === null) return [];
-  return Object.values(section as Record<string, unknown>)
-    .flatMap((value) => [value].flat())
-    .filter((row): row is StatementRow => typeof row === "object" && row !== null);
 }
 
 /**
