@@ -10,7 +10,7 @@ import { listBacktestDataFileSymbols } from "../dataFileSummary.js";
 import { drawDayPaths, marketDayHistoryOf, sharedLeftoverDays, tradingDaysPerYear, type DayPath, type MarketDayHistory } from "./portfolioDayHistory.js";
 import type { ProjectionInput } from "./portfolioDayProjection.js";
 import { savedProjectionKey } from "./portfolioProjectionCache.js";
-import { runPathValuesInParallel } from "./portfolioProjectionPool.js";
+import { runPathValuesAtAccountsInParallel } from "./portfolioProjectionPool.js";
 import { loadTickerWithHistory, projectionTickerOf } from "./portfolioProjectionTickers.js";
 import { loadProjectionContext, projectionSeed, type ProjectionContext } from "./portfolioProjectionContext.js";
 
@@ -99,6 +99,15 @@ export function loneRunInput(context: ProjectionContext, ticker: ProjectionInput
   };
 }
 
+/**
+ * A ticker's lone runs at every pot level on `paths`, one array per level in libraryPotLevelsDollars' order: the levels'
+ * inputs differ only in their account, so each path is run once for all of them (runPathValuesAtAccounts).
+ */
+export async function libraryTickerLevels(context: ProjectionContext, ticker: ProjectionInput["tickers"][number], paths: readonly DayPath[], onPathDone?: (done: number, total: number) => void): Promise<Float32Array[]> {
+  const accountsDollars = libraryPotLevelsDollars.map((potDollars) => loneRunInput(context, ticker, potDollars).accountDollars);
+  return runPathValuesAtAccountsInParallel(loneRunInput(context, ticker, libraryPotLevelsDollars[0]), accountsDollars, paths, onPathDone);
+}
+
 export interface LibraryBuildHooks {
   reportProgress(done: number, total: number, label: string): Promise<void> | void;
   isCancelled(): boolean;
@@ -135,46 +144,62 @@ export async function buildPortfolioLibrary(hooks: LibraryBuildHooks, connection
   const fileSymbols = listBacktestDataFileSymbols();
   const symbols = hooks.onlySymbols ? fileSymbols.filter((symbol) => hooks.onlySymbols!.includes(symbol)) : fileSymbols;
   const totalRuns = symbols.length * libraryPotLevelsDollars.length;
-  let runsDone = 0;
-  for (const symbol of symbols) {
-    if (hooks.isCancelled()) break;
-    let input: ProjectionInput["tickers"][number];
-    let inputKey: string;
-    let lastFileDay: string;
+  /** A ticker's lone-run input with what it was built from, or why it could not be loaded. */
+  const loadTickerInput = async (symbol: string): Promise<{ input: ProjectionInput["tickers"][number]; inputKey: string; lastFileDay: string } | { failed: string }> => {
     try {
       const ticker = await loadTickerWithHistory(symbol, market, context.rates, { nowPct: context.riskFreeNowPct, averagePct: context.riskFreeAveragePct }, connection);
-      const source = ticker.source;
-      input = projectionTickerOf(ticker, market, sharedLeftoverDays([ticker.history]));
-      inputKey = savedProjectionKey(input, globalKey);
-      lastFileDay = source.lastFileDay;
+      const input = projectionTickerOf(ticker, market, sharedLeftoverDays([ticker.history]));
+      return { input, inputKey: savedProjectionKey(input, globalKey), lastFileDay: ticker.source.lastFileDay };
     } catch (error) {
-      manifest.failed[symbol] = error instanceof Error ? error.message : String(error);
+      return { failed: error instanceof Error ? error.message : String(error) };
+    }
+  };
+  let runsDone = 0;
+  // The next ticker's input is read while the workers run this one's paths (its data file alone takes seconds).
+  let nextLoad = symbols.length > 0 ? loadTickerInput(symbols[0]!) : null;
+  for (let index = 0; index < symbols.length; index++) {
+    if (hooks.isCancelled()) break;
+    const symbol = symbols[index]!;
+    const loaded = await nextLoad!;
+    const loadFollowing = () => {
+      nextLoad = index + 1 < symbols.length ? loadTickerInput(symbols[index + 1]!) : null;
+    };
+    if ("failed" in loaded) {
+      manifest.failed[symbol] = loaded.failed;
       delete manifest.tickers[symbol];
       runsDone += libraryPotLevelsDollars.length;
+      loadFollowing();
       continue;
     }
+    const { input, inputKey, lastFileDay } = loaded;
     const kept = manifest.tickers[symbol];
     if (kept?.inputKey === inputKey && libraryPotLevelsDollars.every((pot) => existsSync(levelFile(dataDirectory, symbol, pot)))) {
       runsDone += libraryPotLevelsDollars.length;
+      loadFollowing();
       continue;
     }
     delete manifest.tickers[symbol];
     mkdirSync(path.join(libraryFolder(dataDirectory), symbol), { recursive: true });
-    let cancelled = false;
-    for (const potDollars of libraryPotLevelsDollars) {
-      if (hooks.isCancelled()) {
-        cancelled = true;
-        break;
-      }
-      const label = `${symbol} at a $${potDollars / 1000}k pot`;
-      await hooks.reportProgress(runsDone, totalRuns, label);
-      const values = await runPathValuesInParallel(loneRunInput(context, input, potDollars), paths);
+    // Progress in runs (a ticker at one pot level), as the paths of all six levels go by; one update at a time, in order.
+    const label = `${symbol} at every pot level`;
+    let progressReported = Promise.resolve(hooks.reportProgress(runsDone, totalRuns, label));
+    let runsReported = 0;
+    const levelsRun = libraryTickerLevels(context, input, paths, (pathsDone, pathCount) => {
+      const runs = Math.floor((libraryPotLevelsDollars.length * pathsDone) / pathCount);
+      if (runs === runsReported || runs === libraryPotLevelsDollars.length) return;
+      runsReported = runs;
+      progressReported = progressReported.then(() => hooks.reportProgress(runsDone + runs, totalRuns, label));
+    });
+    loadFollowing();
+    const levels = await levelsRun;
+    await progressReported;
+    libraryPotLevelsDollars.forEach((potDollars, level) => {
+      const values = levels[level]!;
       const filePath = levelFile(dataDirectory, symbol, potDollars);
       writeFileSync(`${filePath}.partial`, Buffer.from(values.buffer, values.byteOffset, values.byteLength));
       renameSync(`${filePath}.partial`, filePath);
-      runsDone += 1;
-    }
-    if (cancelled) break;
+    });
+    runsDone += libraryPotLevelsDollars.length;
     manifest.tickers[symbol] = { inputKey, lastFileDay };
     writeLibraryManifest(dataDirectory, manifest);
   }

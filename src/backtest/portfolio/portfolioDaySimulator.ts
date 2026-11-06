@@ -102,24 +102,56 @@ const symbolOfLeg = (ledger: SimulatedLedger, leg: LedgerLeg) => requirePosition
 
 /** Runs the book over the days: the lab's v4 look on synthetic chains, settled and marked as the session runner does. */
 export async function simulateBookDays(input: DaySimulationInput): Promise<DaySimulationResult> {
-  const { dates, tickers, settings, startingValue } = input;
+  const { startingValue, ...shared } = input;
+  return (await simulateBookDaysAtStartingValues(shared, [startingValue]))[0]!;
+}
+
+/** One account's own state through the days: its ledger, marks and running figures. */
+interface SimulatedAccount {
+  startingValue: number;
+  ledger: SimulatedLedger;
+  priceByLegId: Map<string, number>;
+  figures: SimulatedTickerFigures[];
+  figuresBySymbol: Map<string, SimulatedTickerFigures>;
+  accountValues: Float64Array;
+  interestDollars: number;
+  dividendsDollars: number;
+  callsDollars: number;
+  putsDollars: number;
+  actionNumber: number;
+}
+
+/**
+ * The same book run on the same days from several starting values at once (the suggestions' library's pot levels): each
+ * account keeps its own ledger and figures, and every account reads the same day, so a day's prices and synthetic chains
+ * are worked out once for all of them. Each account's result is the one simulateBookDays gives for its starting value.
+ */
+export async function simulateBookDaysAtStartingValues(input: Omit<DaySimulationInput, "startingValue">, startingValues: readonly number[]): Promise<DaySimulationResult[]> {
+  const { dates, tickers, settings } = input;
   const ratePercentOn = (dateIso: string) => input.riskFreeRatePercentOn?.(dateIso) ?? input.riskFreeRatePercent;
   let riskFreeRate = ratePercentOn(dates[0]!) / 100;
-  const ledger = createSimulatedLedger(startingValue, new Date(lookInstantMs(dates[0]!, captureLookTimeEt) - millisecondsPerDay));
+  const ledgerStartMs = lookInstantMs(dates[0]!, captureLookTimeEt) - millisecondsPerDay;
   const calendar = new BacktestTradingCalendar(dates.map((tradingDate) => ({ tradingDate, status: "complete" as const })), []);
-  const priceByLegId = new Map<string, number>();
   const closeBySymbolAndDate = new Map<string, number>();
   const sectorBySymbol = new Map(tickers.map((ticker) => [ticker.symbol, null]));
-  const figures = tickers.map<SimulatedTickerFigures>((ticker) => ({ symbol: ticker.symbol, premiumDollars: 0, callsSold: 0, callAways: 0, daysWithoutShares: 0 }));
-  const figuresBySymbol = new Map(figures.map((entry) => [entry.symbol, entry]));
   const tickerIndexBySymbol = new Map(tickers.map((ticker, index) => [ticker.symbol, index]));
   const sameDayOptionsOnly = settings.volFarmerV4.optionsExpiry === "today";
-  const accountValues = new Float64Array(dates.length + 1);
-  let interestDollars = 0;
-  let dividendsDollars = 0;
-  let callsDollars = 0;
-  let putsDollars = 0;
-  let actionNumber = 0;
+  const accounts = startingValues.map<SimulatedAccount>((startingValue) => {
+    const figures = tickers.map<SimulatedTickerFigures>((ticker) => ({ symbol: ticker.symbol, premiumDollars: 0, callsSold: 0, callAways: 0, daysWithoutShares: 0 }));
+    return {
+      startingValue,
+      ledger: createSimulatedLedger(startingValue, new Date(ledgerStartMs)),
+      priceByLegId: new Map<string, number>(),
+      figures,
+      figuresBySymbol: new Map(figures.map((entry) => [entry.symbol, entry])),
+      accountValues: new Float64Array(dates.length + 1),
+      interestDollars: 0,
+      dividendsDollars: 0,
+      callsDollars: 0,
+      putsDollars: 0,
+      actionNumber: 0,
+    };
+  });
 
   for (let dayIndex = 0; dayIndex < dates.length; dayIndex++) {
     const todayIso = dates[dayIndex]!;
@@ -129,59 +161,14 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
     // The rate known at 10:00: the latest before today, as the session reads DTB3.
     const riskFreeRatePercent = ratePercentOn(previousIso ?? todayIso);
     riskFreeRate = riskFreeRatePercent / 100;
-
-    // a. Options that expired at an earlier close settle on that close.
-    if (previousIso !== null) {
-      for (const leg of ledgerLegsDueForSettlement(ledger, previousIso)) {
-        const symbol = symbolOfLeg(ledger, leg);
-        const outcome = settleExpiry(ledger, { legId: leg.id, expiryClose: closeBySymbolAndDate.get(`${symbol} ${leg.expiryDate}`)! });
-        if (outcome === "call_away") figuresBySymbol.get(symbol)!.callAways += 1;
-      }
-      for (const leg of ledgerLeapsLegsDueForSettlement(ledger, previousIso)) {
-        const symbol = symbolOfLeg(ledger, leg);
-        settleLeapsCall(ledger, { legId: leg.id, expiryClose: closeBySymbolAndDate.get(`${symbol} ${leg.expiryDate}`)! });
-      }
-      // b. Interest on the cash since the previous day.
-      const calendarDays = Math.round((Date.parse(`${todayIso}T00:00:00Z`) - Date.parse(`${previousIso}T00:00:00Z`)) / millisecondsPerDay);
-      const dollars = computeInterestDollars(ledger.cash, riskFreeRatePercent, calendarDays);
-      interestDollars += dollars;
-      creditInterest(ledger, at, dollars);
-      // V3: each ticker's dividend yield on the shares held after the settlements, at the previous close, a 252th a day.
-      for (const ticker of tickers) {
-        if (!ticker.dividendYield) continue;
-        dividendsDollars += creditDividend(ledger, { symbol: ticker.symbol, amountPerShare: (closeBySymbolAndDate.get(`${ticker.symbol} ${previousIso}`)! * ticker.dividendYield) / 252, at });
-      }
-    }
-
-    // c. Every open leg marked at 10:00, as the runner marks it at the quotes' mid: shares at the price, a sold Call or Put
-    // on the day's chain (the 30-day IV × u), a LEAPS on the 30-day IV.
-    const sharesHeld = new Set<string>();
-    for (const leg of unexitedLegsOf(ledger)) {
-      const position = requirePosition(ledger, leg.positionId);
-      const tickerIndex = tickerIndexBySymbol.get(position.symbol)!;
-      const day = days[tickerIndex]!;
-      if (leg.legType === "stock") {
-        priceByLegId.set(leg.id, day.tenOclockPrice);
-        if (leg.quantity > 0) sharesHeld.add(position.symbol);
-      } else if (leg.strikePrice !== null && leg.expiryDate !== null) {
-        const isCall = leg.optionType === "call";
-        const volatility = position.strategyKey === "leaps" ? day.impliedVolatility : day.impliedVolatility * tickers[tickerIndex]!.sameDayVolatilityUplift;
-        const yearsToExpiry = Math.max(0, expirySettlementInstant(leg.expiryDate).getTime() - at.getTime()) / millisecondsPerYear;
-        const forward = day.tenOclockPrice * Math.exp(riskFreeRate * yearsToExpiry);
-        const intrinsic = Math.max(0, isCall ? day.tenOclockPrice - leg.strikePrice : leg.strikePrice - day.tenOclockPrice);
-        priceByLegId.set(leg.id, yearsToExpiry > 0 ? blackScholesPriceOnForward(forward, leg.strikePrice, yearsToExpiry, riskFreeRate, volatility, isCall) : intrinsic);
-      }
-    }
-    accountValues[dayIndex] = ledgerNetLiquidationValue(ledger, priceByLegId);
-    for (const ticker of tickers) if (!sharesHeld.has(ticker.symbol)) figuresBySymbol.get(ticker.symbol)!.daysWithoutShares += 1;
-
-    // d. The lab's v4 look at 10:00 on the day's synthetic chain. Selling only options expiring today, v4 reads nothing of
-    // a day's quotes but whether a Call expires today (volFarmerV4Steps.ts): on another day the chain is left empty.
-    const lookSymbols: BacktestLookSymbol[] = tickers.map((ticker, index) => {
+    const yearsToExpiry = (expiry: string) => Math.max(0, expirySettlementInstant(expiry).getTime() - at.getTime()) / millisecondsPerYear;
+    // The day's synthetic chain of each ticker, the same for every account (the steps only read it). Selling only options
+    // expiring today, v4 reads nothing of a day's quotes but whether a Call expires today (volFarmerV4Steps.ts): on another
+    // day the chain is left empty.
+    const chains = tickers.map((ticker, index) => {
       const day = days[index]!;
-      const yearsToExpiry = (expiry: string) => Math.max(0, expirySettlementInstant(expiry).getTime() - at.getTime()) / millisecondsPerYear;
       const chainUnread = sameDayOptionsOnly && day.nextExpiry !== todayIso;
-      const { quotes, previousSessionVolumeByContract } = chainUnread ? { quotes: [], previousSessionVolumeByContract: new Map<string, number>() } : syntheticExpiryChain({
+      return chainUnread ? [] : syntheticExpiryChain({
         expiry: day.nextExpiry,
         stockPrice: day.tenOclockPrice,
         yearsToExpiry: yearsToExpiry(day.nextExpiry),
@@ -190,38 +177,92 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
         strikeSpacing: day.strikeSpacing,
         ...(day.observedChain === null ? {} : { observed: { day: day.observedChain.day, thirtyDayVolatility: day.observedChain.volatilityAnchor } }),
       });
-      return {
-        profile: { tickerId: ticker.symbol, symbol: ticker.symbol, companyName: null, sector: null, calendarChecksApply: false, earningsCalendarResolved: true, earnings: [], exDividends: [] },
-        bars: new BacktestBarHistory(previousIso === null ? [] : [{ tradingDate: previousIso, open: null, high: null, low: null, close: null, volume: null, impliedVolatility: day.impliedVolatility }]),
-        market: { todayIso, quotes, previousSessionVolumeByContract, stockPrice: day.tenOclockPrice, riskFreeRatePercent },
-        splitFactorToday: 1,
-        optionContractsRepresentable: true,
-        adjustedDailyClosesBeforeToday: [],
-        leapsCallQuotes: syntheticLeapsSource({ todayIso, stockPrice: day.tenOclockPrice, riskFreeRate, volatility: day.impliedVolatility, strikeSpacing: day.strikeSpacing, yearsToExpiry }),
-      };
     });
-    const look = await runVolFarmerV4Look({
-      todayIso,
-      lookTimeEt: captureLookTimeEt,
-      symbols: lookSymbols,
-      sectorBySymbol,
-      calendar,
-      settings,
-      ledger,
-      previousSessionDateIso: previousIso,
-      priceByLegId,
-      nextActionId: () => `simulated-${(actionNumber += 1)}`,
-      sessionDayIndex: dayIndex,
-    });
-    input.onLookSummary?.(todayIso, look.summary);
-    for (const sale of look.optionSales) {
-      const entry = figuresBySymbol.get(sale.symbol)!;
-      const netPremium = sale.fillPrice * sale.contracts * 100 - sale.commissionDollars;
-      entry.premiumDollars += netPremium;
-      if (sale.optionRight === "C") {
-        entry.callsSold += 1;
-        callsDollars += netPremium;
-      } else putsDollars += netPremium;
+
+    for (const account of accounts) {
+      const { ledger, priceByLegId, figuresBySymbol } = account;
+      // a. Options that expired at an earlier close settle on that close.
+      if (previousIso !== null) {
+        for (const leg of ledgerLegsDueForSettlement(ledger, previousIso)) {
+          const symbol = symbolOfLeg(ledger, leg);
+          const outcome = settleExpiry(ledger, { legId: leg.id, expiryClose: closeBySymbolAndDate.get(`${symbol} ${leg.expiryDate}`)! });
+          if (outcome === "call_away") figuresBySymbol.get(symbol)!.callAways += 1;
+        }
+        for (const leg of ledgerLeapsLegsDueForSettlement(ledger, previousIso)) {
+          const symbol = symbolOfLeg(ledger, leg);
+          settleLeapsCall(ledger, { legId: leg.id, expiryClose: closeBySymbolAndDate.get(`${symbol} ${leg.expiryDate}`)! });
+        }
+        // b. Interest on the cash since the previous day.
+        const calendarDays = Math.round((Date.parse(`${todayIso}T00:00:00Z`) - Date.parse(`${previousIso}T00:00:00Z`)) / millisecondsPerDay);
+        const dollars = computeInterestDollars(ledger.cash, riskFreeRatePercent, calendarDays);
+        account.interestDollars += dollars;
+        creditInterest(ledger, at, dollars);
+        // V3: each ticker's dividend yield on the shares held after the settlements, at the previous close, a 252th a day.
+        for (const ticker of tickers) {
+          if (!ticker.dividendYield) continue;
+          account.dividendsDollars += creditDividend(ledger, { symbol: ticker.symbol, amountPerShare: (closeBySymbolAndDate.get(`${ticker.symbol} ${previousIso}`)! * ticker.dividendYield) / 252, at });
+        }
+      }
+
+      // c. Every open leg marked at 10:00, as the runner marks it at the quotes' mid: shares at the price, a sold Call or Put
+      // on the day's chain (the 30-day IV × u), a LEAPS on the 30-day IV.
+      const sharesHeld = new Set<string>();
+      for (const leg of unexitedLegsOf(ledger)) {
+        const position = requirePosition(ledger, leg.positionId);
+        const tickerIndex = tickerIndexBySymbol.get(position.symbol)!;
+        const day = days[tickerIndex]!;
+        if (leg.legType === "stock") {
+          priceByLegId.set(leg.id, day.tenOclockPrice);
+          if (leg.quantity > 0) sharesHeld.add(position.symbol);
+        } else if (leg.strikePrice !== null && leg.expiryDate !== null) {
+          const isCall = leg.optionType === "call";
+          const volatility = position.strategyKey === "leaps" ? day.impliedVolatility : day.impliedVolatility * tickers[tickerIndex]!.sameDayVolatilityUplift;
+          const legYearsToExpiry = Math.max(0, expirySettlementInstant(leg.expiryDate).getTime() - at.getTime()) / millisecondsPerYear;
+          const forward = day.tenOclockPrice * Math.exp(riskFreeRate * legYearsToExpiry);
+          const intrinsic = Math.max(0, isCall ? day.tenOclockPrice - leg.strikePrice : leg.strikePrice - day.tenOclockPrice);
+          priceByLegId.set(leg.id, legYearsToExpiry > 0 ? blackScholesPriceOnForward(forward, leg.strikePrice, legYearsToExpiry, riskFreeRate, volatility, isCall) : intrinsic);
+        }
+      }
+      account.accountValues[dayIndex] = ledgerNetLiquidationValue(ledger, priceByLegId);
+      for (const ticker of tickers) if (!sharesHeld.has(ticker.symbol)) figuresBySymbol.get(ticker.symbol)!.daysWithoutShares += 1;
+
+      // d. The lab's v4 look at 10:00 on the day's synthetic chain.
+      const lookSymbols: BacktestLookSymbol[] = tickers.map((ticker, index) => {
+        const day = days[index]!;
+        return {
+          profile: { tickerId: ticker.symbol, symbol: ticker.symbol, companyName: null, sector: null, calendarChecksApply: false, earningsCalendarResolved: true, earnings: [], exDividends: [] },
+          bars: new BacktestBarHistory(previousIso === null ? [] : [{ tradingDate: previousIso, open: null, high: null, low: null, close: null, volume: null, impliedVolatility: day.impliedVolatility }]),
+          // No previous-session volumes: v4 sells with no size limit, so it never reads them.
+          market: { todayIso, quotes: chains[index]!, previousSessionVolumeByContract: null, stockPrice: day.tenOclockPrice, riskFreeRatePercent },
+          splitFactorToday: 1,
+          optionContractsRepresentable: true,
+          adjustedDailyClosesBeforeToday: [],
+          leapsCallQuotes: syntheticLeapsSource({ todayIso, stockPrice: day.tenOclockPrice, riskFreeRate, volatility: day.impliedVolatility, strikeSpacing: day.strikeSpacing, yearsToExpiry }),
+        };
+      });
+      const look = await runVolFarmerV4Look({
+        todayIso,
+        lookTimeEt: captureLookTimeEt,
+        symbols: lookSymbols,
+        sectorBySymbol,
+        calendar,
+        settings,
+        ledger,
+        previousSessionDateIso: previousIso,
+        priceByLegId,
+        nextActionId: () => `simulated-${(account.actionNumber += 1)}`,
+        sessionDayIndex: dayIndex,
+      });
+      input.onLookSummary?.(todayIso, look.summary);
+      for (const sale of look.optionSales) {
+        const entry = figuresBySymbol.get(sale.symbol)!;
+        const netPremium = sale.fillPrice * sale.contracts * 100 - sale.commissionDollars;
+        entry.premiumDollars += netPremium;
+        if (sale.optionRight === "C") {
+          entry.callsSold += 1;
+          account.callsDollars += netPremium;
+        } else account.putsDollars += netPremium;
+      }
     }
     tickers.forEach((ticker, index) => closeBySymbolAndDate.set(`${ticker.symbol} ${todayIso}`, days[index]!.close));
   }
@@ -229,23 +270,26 @@ export async function simulateBookDays(input: DaySimulationInput): Promise<DaySi
   // The last day's close: shares at the close, options expiring that day at their intrinsic value, a LEAPS at its value then.
   const lastIso = dates.at(-1)!;
   const closeAt = expirySettlementInstant(lastIso);
-  const closePriceByLegId = new Map(priceByLegId);
-  for (const leg of unexitedLegsOf(ledger)) {
-    const position = requirePosition(ledger, leg.positionId);
-    const close = closeBySymbolAndDate.get(`${position.symbol} ${lastIso}`)!;
-    if (leg.legType === "stock") closePriceByLegId.set(leg.id, close);
-    else if (leg.strikePrice !== null && leg.expiryDate !== null) {
-      const intrinsic = Math.max(0, leg.optionType === "call" ? close - leg.strikePrice : leg.strikePrice - close);
-      const yearsToExpiry = Math.max(0, expirySettlementInstant(leg.expiryDate).getTime() - closeAt.getTime()) / millisecondsPerYear;
-      const day = input.dayOf(tickerIndexBySymbol.get(position.symbol)!, dates.length - 1);
-      closePriceByLegId.set(leg.id, yearsToExpiry > 0 ? blackScholesPriceOnForward(close * Math.exp(riskFreeRate * yearsToExpiry), leg.strikePrice, yearsToExpiry, riskFreeRate, day.impliedVolatility, leg.optionType === "call") : intrinsic);
+  return accounts.map((account) => {
+    const { ledger, priceByLegId, figures, accountValues, startingValue, interestDollars, dividendsDollars, callsDollars, putsDollars } = account;
+    const closePriceByLegId = new Map(priceByLegId);
+    for (const leg of unexitedLegsOf(ledger)) {
+      const position = requirePosition(ledger, leg.positionId);
+      const close = closeBySymbolAndDate.get(`${position.symbol} ${lastIso}`)!;
+      if (leg.legType === "stock") closePriceByLegId.set(leg.id, close);
+      else if (leg.strikePrice !== null && leg.expiryDate !== null) {
+        const intrinsic = Math.max(0, leg.optionType === "call" ? close - leg.strikePrice : leg.strikePrice - close);
+        const yearsToExpiry = Math.max(0, expirySettlementInstant(leg.expiryDate).getTime() - closeAt.getTime()) / millisecondsPerYear;
+        const day = input.dayOf(tickerIndexBySymbol.get(position.symbol)!, dates.length - 1);
+        closePriceByLegId.set(leg.id, yearsToExpiry > 0 ? blackScholesPriceOnForward(close * Math.exp(riskFreeRate * yearsToExpiry), leg.strikePrice, yearsToExpiry, riskFreeRate, day.impliedVolatility, leg.optionType === "call") : intrinsic);
+      }
     }
-  }
-  accountValues[dates.length] = ledgerNetLiquidationValue(ledger, closePriceByLegId);
-  const isLeaps = (positionId: string | null) => positionId !== null && requirePosition(ledger, positionId).strategyKey === "leaps";
-  let leapsDollars = 0;
-  for (const entry of ledger.cashJournal) if (isLeaps(entry.positionId)) leapsDollars += entry.amount;
-  for (const leg of unexitedLegsOf(ledger)) if (isLeaps(leg.positionId)) leapsDollars += (closePriceByLegId.get(leg.id) ?? leg.entryPrice) * leg.quantity * leg.multiplier * (leg.side === "short" ? -1 : 1);
-  const sharesDollars = accountValues[dates.length]! - startingValue - callsDollars - putsDollars - leapsDollars - interestDollars - dividendsDollars;
-  return { accountValues, premiumDollars: figures.reduce((sum, entry) => sum + entry.premiumDollars, 0), interestDollars, byTicker: figures, sources: { callsDollars, putsDollars, leapsDollars, interestDollars, dividendsDollars, sharesDollars } };
+    accountValues[dates.length] = ledgerNetLiquidationValue(ledger, closePriceByLegId);
+    const isLeaps = (positionId: string | null) => positionId !== null && requirePosition(ledger, positionId).strategyKey === "leaps";
+    let leapsDollars = 0;
+    for (const entry of ledger.cashJournal) if (isLeaps(entry.positionId)) leapsDollars += entry.amount;
+    for (const leg of unexitedLegsOf(ledger)) if (isLeaps(leg.positionId)) leapsDollars += (closePriceByLegId.get(leg.id) ?? leg.entryPrice) * leg.quantity * leg.multiplier * (leg.side === "short" ? -1 : 1);
+    const sharesDollars = accountValues[dates.length]! - startingValue - callsDollars - putsDollars - leapsDollars - interestDollars - dividendsDollars;
+    return { accountValues, premiumDollars: figures.reduce((sum, entry) => sum + entry.premiumDollars, 0), interestDollars, byTicker: figures, sources: { callsDollars, putsDollars, leapsDollars, interestDollars, dividendsDollars, sharesDollars } };
+  });
 }

@@ -71,25 +71,24 @@ describe("a synthetic contract quoted like an observed one", () => {
   // Observed Calls at 0 and 1.44 standard deviations, put back at $66, a 20% 30-day IV, six hours out: $66 and $66.50.
   it("lists the observed day's own strikes at today's price, each priced at the 30-day IV × its observed IV ratio", () => {
     const day = { dateIso: "2026-10-30", daysToExpiry: 0, calls: [0, 1.44].map((standardDeviations, index) => ({ standardDeviations, impliedVolatilityRatio: [1.5, 3.0][index]!, halfSpreadShare: 0.2, previousSessionVolume: 500 })), puts: [] };
-    const chain = syntheticExpiryChain({ expiry: "2026-10-30", stockPrice: 66, yearsToExpiry: sixHours, riskFreeRate: 0.04, volatility: 0.3, strikeSpacing: 0.5, observed: { day, thirtyDayVolatility: 0.2 } });
-    expect(chain.quotes.every((quote) => quote.right === "C")).toBe(true);
-    expect(chain.quotes.map((quote) => quote.strike)).toEqual([66, 66.5]);
+    const quotes = syntheticExpiryChain({ expiry: "2026-10-30", stockPrice: 66, yearsToExpiry: sixHours, riskFreeRate: 0.04, volatility: 0.3, strikeSpacing: 0.5, observed: { day, thirtyDayVolatility: 0.2 } });
+    expect(quotes.every((quote) => quote.right === "C")).toBe(true);
+    expect(quotes.map((quote) => quote.strike)).toEqual([66, 66.5]);
     const forward = 66 * Math.exp(0.04 * sixHours);
     const midOf = (strike: number, ratio: number) => Math.round(blackScholesPriceOnForward(forward, strike, sixHours, 0.04, 0.2 * ratio, true) * 100) / 100;
-    const sixtySix = chain.quotes.find((quote) => quote.strike === 66)!;
+    const sixtySix = quotes.find((quote) => quote.strike === 66)!;
     expect(Math.round(((sixtySix.bid! + sixtySix.ask!) / 2) * 100) / 100).toBeCloseTo(midOf(66, 1.5), 2);
-    expect([...chain.previousSessionVolumeByContract.values()].every((volume) => volume === 500)).toBe(true);
     // Sizes no order reaches: the simulator sells as Pluto does, with no size limit.
-    expect(chain.quotes.every((quote) => quote.bidSize === 1_000_000)).toBe(true);
+    expect(quotes.every((quote) => quote.bidSize === 1_000_000)).toBe(true);
   });
 
   // The same day on a path at $33, double the IV: the strikes stand as far out in standard deviations, not on the $0.50 grid.
   it("keeps the observed strikes' distance in standard deviations wherever the path's price and IV are", () => {
     const day = { dateIso: "2026-10-30", daysToExpiry: 0, calls: [-1, 0, 1].map((standardDeviations) => ({ standardDeviations, impliedVolatilityRatio: 1, halfSpreadShare: 0.2, previousSessionVolume: 500 })), puts: [{ standardDeviations: -2, impliedVolatilityRatio: 1, halfSpreadShare: 0.2, previousSessionVolume: 500 }] };
-    const chain = syntheticExpiryChain({ expiry: "2026-10-30", stockPrice: 33, yearsToExpiry: sixHours, riskFreeRate: 0.04, volatility: 0.4, strikeSpacing: 0.5, observed: { day, thirtyDayVolatility: 0.4 } });
+    const quotes = syntheticExpiryChain({ expiry: "2026-10-30", stockPrice: 33, yearsToExpiry: sixHours, riskFreeRate: 0.04, volatility: 0.4, strikeSpacing: 0.5, observed: { day, thirtyDayVolatility: 0.4 } });
     const scale = 0.4 * Math.sqrt(sixHours);
     const expected = [-2, -1, 0, 1].map((standardDeviations) => Math.round(33 * Math.exp(standardDeviations * scale) * 100) / 100);
-    expect([...new Set(chain.quotes.map((quote) => quote.strike))].sort((a, b) => a - b)).toEqual(expected);
+    expect([...new Set(quotes.map((quote) => quote.strike))].sort((a, b) => a - b)).toEqual(expected);
   });
 
   it("prices at the nearest observed contract with an IV ratio when the nearest has none", () => {

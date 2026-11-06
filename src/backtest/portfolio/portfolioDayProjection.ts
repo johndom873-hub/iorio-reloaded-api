@@ -1,6 +1,6 @@
 import type { EffectiveBacktestSettings } from "../backtestTypes.js";
 import { tickerPathPrices, tradingDaysPerYear, type DayPath, type TickerDayHistory, type VolatilityStart } from "./portfolioDayHistory.js";
-import { simulateBookDays, type SimulatedTickerFigures, type SimulationSources } from "./portfolioDaySimulator.js";
+import { simulateBookDays, simulateBookDaysAtStartingValues, type SimulatedTickerFigures, type SimulationSources } from "./portfolioDaySimulator.js";
 import { anchorFactorAt, observedDaysNearest, type AnchorCurve, type ObservedChainDay } from "./portfolioObservedChain.js";
 
 // The portfolio simulator's projection (D1–D6, Marcelo 2026-11-03): each path is the book run through v4's own day
@@ -152,9 +152,16 @@ export function maxDrawdownOf(values: ArrayLike<number>): { maxDrawdown: number;
 
 /** One path through v4's own day on `dates` (the path as long as them): the simulator's result. */
 export async function simulatePath(input: ProjectionInput, path: DayPath, pathIndex: number, dates: readonly string[], expiriesByTicker: readonly string[][]) {
+  const { simulation, prices } = pathSimulationOf(input, path, pathIndex, dates, expiriesByTicker);
+  const result = await simulateBookDays({ ...simulation, startingValue: input.accountDollars });
+  return { result, prices };
+}
+
+/** One path's simulation input (every account's but the starting value) and its prices. */
+function pathSimulationOf(input: ProjectionInput, path: DayPath, pathIndex: number, dates: readonly string[], expiriesByTicker: readonly string[][]) {
   const prices = input.tickers.map((ticker) => tickerPathPrices(ticker.history, path, ticker.todaysPrice, input.drift, ticker.leftoverDays, ticker.volatilityStart));
   const drawKeys = input.tickers.map((ticker) => tickerDrawKey(ticker.symbol));
-  const result = await simulateBookDays({
+  const simulation: Omit<Parameters<typeof simulateBookDays>[0], "startingValue"> = {
     dates,
     tickers: input.tickers.map((ticker) => ({ symbol: ticker.symbol, sameDayVolatilityUplift: ticker.sameDayVolatilityUplift, dividendYield: ticker.dividendYield })),
     dayOf: (tickerIndex, day) => {
@@ -180,10 +187,9 @@ export async function simulatePath(input: ProjectionInput, path: DayPath, pathIn
       };
     },
     settings: input.settings,
-    startingValue: input.accountDollars,
     riskFreeRatePercent: input.riskFreeRatePercent,
-  });
-  return { result, prices };
+  };
+  return { simulation, prices };
 }
 
 /**
@@ -265,20 +271,27 @@ export async function runProjectionPaths(input: ProjectionInput, paths: readonly
 }
 
 /**
- * Each path's account value every simulated day as a share of the starting value, one path after another (the
- * suggestions' library, portfolioLibrary.ts); `onPathDone` after each.
+ * Each path's account value every simulated day as a share of the starting value, one path after another, for each of
+ * `accountsDollars` in place of the input's accountDollars (the suggestions' library's pot levels, portfolioLibrary.ts):
+ * every path is run once for all of them (simulateBookDaysAtStartingValues). One array per account, in their order;
+ * `onPathDone` after each path.
  */
-export async function runPathValues(input: ProjectionInput, paths: readonly DayPath[], firstPathIndex: number, onPathDone?: () => void): Promise<Float32Array> {
+export async function runPathValuesAtAccounts(input: ProjectionInput, accountsDollars: readonly number[], paths: readonly DayPath[], firstPathIndex: number, onPathDone?: () => void): Promise<Float32Array[]> {
   const horizonDays = Math.round(input.horizonYears * tradingDaysPerYear);
   const dates = simulatedSessionsAfter(input.asOfIso, horizonDays);
   const expiriesByTicker = input.tickers.map((ticker) => nextExpiriesOf(dates, ticker.expiryWeekdays));
-  const values = new Float32Array(paths.length * horizonDays);
+  const valuesByAccount = accountsDollars.map(() => new Float32Array(paths.length * horizonDays));
   for (let offset = 0; offset < paths.length; offset++) {
-    const { result } = await simulatePath(input, paths[offset]!, firstPathIndex + offset, dates, expiriesByTicker);
-    for (let day = 0; day < horizonDays; day++) values[offset * horizonDays + day] = result.accountValues[day]! / input.accountDollars;
+    const { simulation } = pathSimulationOf(input, paths[offset]!, firstPathIndex + offset, dates, expiriesByTicker);
+    const results = await simulateBookDaysAtStartingValues(simulation, accountsDollars);
+    results.forEach((result, account) => {
+      const values = valuesByAccount[account]!;
+      const accountDollars = accountsDollars[account]!;
+      for (let day = 0; day < horizonDays; day++) values[offset * horizonDays + day] = result.accountValues[day]! / accountDollars;
+    });
     onPathDone?.();
   }
-  return values;
+  return valuesByAccount;
 }
 
 export interface ReplayWindow {
