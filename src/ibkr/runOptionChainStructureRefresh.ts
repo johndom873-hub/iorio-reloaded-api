@@ -22,6 +22,10 @@ type IbkrApi = Parameters<typeof refreshStoredOptionChain>[0];
 // throttled by IBKR, and the stall takes the whole Gateway session with it.
 export const structureGridMaxAgeDays = 7;
 
+// The expiries Pluto sells (today's, or the next listed) are looked up every run, fresh grid or not (Marcelo
+// 2026-11-07): strikes IBKR adds near spot after a big move are otherwise missed for up to structureGridMaxAgeDays.
+export const structureGridAlwaysLookUpWithinDays = 7;
+
 export type OptionChainStructureEvent =
   | { type: "tickerDone"; symbol: string; expiryCount: number; strikeCount: number; timings: OptionChainRefreshTimings }
   | { type: "tickerError"; symbol: string; message: string }
@@ -86,6 +90,7 @@ export async function runOptionChainStructureRefresh(
         const chain = await dependencies.refreshStoredOptionChain(ib, { tickerId: ticker.tickerId, symbol: ticker.symbol, contractId: ticker.contractId }, todayIso, {
           maxAgeDays: structureGridMaxAgeDays,
           spotPrice: spotBySymbol.get(ticker.symbol) ?? null,
+          alwaysLookUpWithinDays: structureGridAlwaysLookUpWithinDays,
         });
         const strikeCount = [...chain.strikesByExpiry.values()].reduce((sum, strikes) => sum + strikes.length, 0);
         // An empty structure is stored as valid by the fetch (IBKR error 200 becomes zero strikes), so a

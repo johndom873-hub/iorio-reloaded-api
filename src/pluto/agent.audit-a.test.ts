@@ -15,6 +15,11 @@ const harness = vi.hoisted(() => ({
   insideWindow: true,
   connected: true,
   finishedCycles: [] as { symbol: string; finishedAtMs: number }[],
+  workingOrders: [] as Record<string, unknown>[],
+  /** Runs while loadWorkingPlutoOrders reads, before it returns. */
+  duringWorkingOrdersRead: null as (() => void) | null,
+  /** Each runPlutoPass call waits for this, when set, before it returns. */
+  holdRound: null as Promise<void> | null,
 }));
 
 vi.mock("../db/connection.js", () => {
@@ -47,7 +52,13 @@ vi.mock("../lib/notifyTelegram.js", () => ({
   notifyTelegram: vi.fn(async () => true),
 }));
 vi.mock("../lib/readGitSha.js", () => ({ readGitSha: () => "abc1234" }));
-vi.mock("./executor.js", () => ({ loadWorkingPlutoOrders: async () => [], watchPlutoOrder: vi.fn() }));
+vi.mock("./executor.js", () => ({
+  loadWorkingPlutoOrders: async () => {
+    harness.duringWorkingOrdersRead?.();
+    return harness.workingOrders;
+  },
+  watchPlutoOrder: vi.fn(() => new Promise(() => {})),
+}));
 vi.mock("./ledger.js", () => ({
   closeAbandonedPlutoPasses: vi.fn(async () => 0),
   recordPlutoEvent: vi.fn(async (type: string, payload: Record<string, unknown> = {}) => {
@@ -67,6 +78,7 @@ vi.mock("./passRunner.js", () => ({
   PlutoRoundFailedAfterModelCallError: class PlutoRoundFailedAfterModelCallError extends Error {},
   runPlutoPass: vi.fn(async (request: Record<string, unknown>) => {
     harness.passRequests.push(request);
+    if (harness.holdRound) await harness.holdRound;
     const next = harness.passScript.length > 0 ? harness.passScript.shift()! : null;
     if (next instanceof Error) throw next;
     return { passId: `pass-${harness.passRequests.length}`, modelCalled: next === null, skippedReason: next, outcome: next === null ? "no_trade" : null };
@@ -114,6 +126,9 @@ beforeEach(() => {
   harness.insideWindow = true;
   harness.connected = true;
   harness.finishedCycles = [];
+  harness.workingOrders = [];
+  harness.duringWorkingOrdersRead = null;
+  harness.holdRound = null;
 });
 
 afterEach(() => {
@@ -378,5 +393,46 @@ describe("PlutoAgent agent lease", () => {
     expect(await agent.runRoundSafely(request)).toBe("completed");
     expect(harness.passRequests).toHaveLength(1);
     expect(lease.confirmHeld).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("PlutoAgent adopting working orders", () => {
+  const leftover = { orderId: "order-1", actionId: "action-1", symbol: "NVDA", kind: "open_covered_call", createdAtMs: Date.parse("2026-10-07T14:00:00Z"), reference: { price: 1.5, side: "sell", multiplier: 100 }, description: "NVDA Sell $192.5 Call · 7 Oct (0DTE) · 3× @ 1.50" };
+  const adoptedOrderIds = () => harness.events.filter((event) => event.type === "order_adopted").map((event) => event.payload.orderId);
+  const roundRequest = { trigger: "band_quotes_update", triggerDetail: {}, symbols: ["NVDA"], force: false };
+
+  it("adopts a working order no watch covers when no round is running, and only once", async () => {
+    harness.workingOrders = [leftover];
+    const agent = makeAgent();
+    await agent.adoptWorkingOrders();
+    await agent.adoptWorkingOrders();
+    expect(adoptedOrderIds()).toEqual(["order-1"]);
+  });
+
+  it("leaves an unwatched order alone while a round runs (it may be the round's own, not yet confirmed), and adopts it once the round has ended", async () => {
+    harness.workingOrders = [leftover];
+    let releaseRound!: () => void;
+    harness.holdRound = new Promise<void>((resolve) => (releaseRound = resolve));
+    const agent = makeAgent();
+    const round = agent.runRoundSafely(roundRequest);
+    await vi.waitFor(() => expect(harness.passRequests).toHaveLength(1));
+    await agent.adoptWorkingOrders();
+    expect(adoptedOrderIds()).toEqual([]);
+    releaseRound();
+    expect(await round).toBe("completed");
+    await agent.adoptWorkingOrders();
+    expect(adoptedOrderIds()).toEqual(["order-1"]);
+  });
+
+  it("drops a read during which a round started", async () => {
+    harness.workingOrders = [leftover];
+    const agent = makeAgent();
+    harness.duringWorkingOrdersRead = () => {
+      harness.duringWorkingOrdersRead = null;
+      void agent.runRoundSafely(roundRequest);
+    };
+    await agent.adoptWorkingOrders();
+    expect(harness.passRequests).toHaveLength(1);
+    expect(adoptedOrderIds()).toEqual([]);
   });
 });

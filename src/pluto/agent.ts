@@ -64,6 +64,10 @@ export class PlutoAgent {
   private wakeLoop: (() => void) | null = null;
   private readonly watches = new Set<Promise<unknown>>();
   private readonly watchedOrderIds = new Set<string>();
+  /** A round is running: its orders may be working before their watches start (adoptWorkingOrders). */
+  private roundInFlight = false;
+  /** Rounds started by this process: adoptWorkingOrders drops a read that a round started during. */
+  private roundsStarted = 0;
   private openingLook: OpeningLookProgress = { doneFor: null, incompleteFor: null };
   /** The opening look queued or running: it counts as done only once its round has run (a failed one is re-queued by housekeeping). */
   private pendingOpeningLook: { todayIso: string; decision: OpeningLookDecision } | null = null;
@@ -347,11 +351,17 @@ export class PlutoAgent {
    * Orders IBKR may still be working that no watch in this process covers — after a restart, or a
    * deploy mid-session. Each gets a watch with its original clock, so the unfilled-cancel timeout and
    * the cancel-by-close still apply. Runs on boot and every housekeeping tick.
+   *
+   * Not while a round runs: a round's order is working from the moment it is built, but its watch starts only once
+   * IBKR has confirmed it, so until the round ends an unwatched order may be its own. Rounds run one at a time, so an
+   * unwatched order with no round running (and none started during the read) is a real leftover.
    */
   private async adoptWorkingOrders(): Promise<void> {
-    if (!this.settings) return;
+    if (!this.settings || this.roundInFlight) return;
     try {
+      const roundsStartedBeforeRead = this.roundsStarted;
       const working = await loadWorkingPlutoOrders();
+      if (this.roundsStarted !== roundsStartedBeforeRead) return;
       const orphans = working.filter((order) => !this.watchedOrderIds.has(order.orderId));
       if (orphans.length === 0) return;
       const session = await resolvePlutoSession(new Date(), this.settings);
@@ -525,6 +535,8 @@ export class PlutoAgent {
     // Not while another agent holds the lease (this process stops when it learns that), nor while the renewal cannot reach the database.
     if (this.lease && !(await this.lease.confirmHeld())) return "failed";
     let result: "completed" | "skipped_on_system_checks" | "failed" = "completed";
+    this.roundInFlight = true;
+    this.roundsStarted += 1;
     try {
       const summary = await runPlutoPass(request, this.context);
       if (summary.skippedOnSystemChecks) result = "skipped_on_system_checks";
@@ -533,6 +545,8 @@ export class PlutoAgent {
       result = "failed";
       console.error(`Pluto round failed: ${error instanceof Error ? error.stack ?? error.message : error}`);
       await recordPlutoEvent("warning", { message: `analysis round failed: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
+    } finally {
+      this.roundInFlight = false;
     }
     const completed = result === "completed" || result === "skipped_on_system_checks";
     const outcome = recordRoundOutcome(this.roundFailures, completed);

@@ -314,10 +314,15 @@ export interface StoredGridReuse {
   maxAgeDays: number;
   /** A stored grid is only reused while spot sits inside its strike range; null = decide on age alone. */
   spotPrice: number | null;
+  /**
+   * An expiry this many calendar days away or fewer is looked up every run, however fresh its stored grid: after a
+   * big move IBKR lists new strikes near spot, which a grid still spanning spot from far below to far above cannot show.
+   */
+  alwaysLookUpWithinDays: number;
 }
 
-/** Pure: whether a stored strike grid can stand in for a fresh wildcard lookup. */
-export function canReuseStoredGrid(stored: { strikes: number[]; fetchedAt: Date } | undefined, reuse: StoredGridReuse, now: Date): boolean {
+/** Pure: whether a stored strike grid can stand in for a fresh wildcard lookup (on its age and the spot alone). */
+export function canReuseStoredGrid(stored: { strikes: number[]; fetchedAt: Date } | undefined, reuse: Pick<StoredGridReuse, "maxAgeDays" | "spotPrice">, now: Date): boolean {
   if (!stored || stored.strikes.length === 0) return false;
   if (now.getTime() - stored.fetchedAt.getTime() > reuse.maxAgeDays * 86_400_000) return false;
   if (reuse.spotPrice === null) return true;
@@ -331,7 +336,8 @@ export function canReuseStoredGrid(stored: { strikes: number[]; fetchedAt: Date 
  * lands so a failure part-way keeps the expiries already done.
  *
  * With `reuse` (the daily structure job), a stored grid that is still fresh is
- * kept instead of looked up: a run of ~180 back-to-back wildcard lookups got
+ * kept instead of looked up, except for the nearest expiries (alwaysLookUpWithinDays):
+ * a run of ~180 back-to-back wildcard lookups got
  * throttled by IBKR, stalling the whole Gateway session. Without it
  * (new-ticker warmup, the shortlist route), every expiry is looked up.
  *
@@ -367,7 +373,7 @@ export async function refreshStoredOptionChain(
   const now = new Date();
   for (const expiry of expiriesInWindow) {
     const storedGrid = storedGrids.get(expiry);
-    if (reuse && canReuseStoredGrid(storedGrid, reuse, now)) {
+    if (reuse && calendarDaysUntilExpiry(todayIso, expiry) > reuse.alwaysLookUpWithinDays && canReuseStoredGrid(storedGrid, reuse, now)) {
       strikesByExpiry.set(expiry, storedGrid!.strikes);
       expiryTimings.push({ expiry, strikeCount: storedGrid!.strikes.length, elapsedMs: 0, reused: true });
       continue;

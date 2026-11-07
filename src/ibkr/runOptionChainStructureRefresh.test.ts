@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { IbkrLookupTimeoutError, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
-import { buildStructureJobOutcome, runOptionChainStructureRefresh, structureGridMaxAgeDays, type OptionChainStructureDependencies, type OptionChainStructureEvent } from "./runOptionChainStructureRefresh.js";
+import { buildStructureJobOutcome, runOptionChainStructureRefresh, structureGridAlwaysLookUpWithinDays, structureGridMaxAgeDays, type OptionChainStructureDependencies, type OptionChainStructureEvent } from "./runOptionChainStructureRefresh.js";
 import type { OptionDataTicker } from "../lib/optionDataUniverse.js";
 
 const fakeIb = {} as never;
@@ -39,9 +39,9 @@ describe("runOptionChainStructureRefresh", () => {
     const refreshStoredOptionChain = vi.fn(async () => refreshResult([{ expiry: "20261016", strikeCount: 5 }]));
     const dependencies = runDependencies({ refreshStoredOptionChain, loadUniverse: async () => [ticker("AAA", 42), ticker("BBB", 43)] });
     await runOptionChainStructureRefresh(undefined, dependencies);
-    expect(refreshStoredOptionChain).toHaveBeenCalledWith(fakeIb, { tickerId: "id-AAA", symbol: "AAA", contractId: 42 }, "2026-09-23", { maxAgeDays: structureGridMaxAgeDays, spotPrice: 101 });
+    expect(refreshStoredOptionChain).toHaveBeenCalledWith(fakeIb, { tickerId: "id-AAA", symbol: "AAA", contractId: 42 }, "2026-09-23", { maxAgeDays: structureGridMaxAgeDays, spotPrice: 101, alwaysLookUpWithinDays: structureGridAlwaysLookUpWithinDays });
     // No known spot: the reuse rule falls back to age alone.
-    expect(refreshStoredOptionChain).toHaveBeenCalledWith(fakeIb, { tickerId: "id-BBB", symbol: "BBB", contractId: 43 }, "2026-09-23", { maxAgeDays: structureGridMaxAgeDays, spotPrice: null });
+    expect(refreshStoredOptionChain).toHaveBeenCalledWith(fakeIb, { tickerId: "id-BBB", symbol: "BBB", contractId: 43 }, "2026-09-23", { maxAgeDays: structureGridMaxAgeDays, spotPrice: null, alwaysLookUpWithinDays: structureGridAlwaysLookUpWithinDays });
   });
 
   it("counts a ticker with no expirations, or expirations without any strikes, as failed instead of complete", async () => {

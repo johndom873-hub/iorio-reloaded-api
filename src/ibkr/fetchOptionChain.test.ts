@@ -584,7 +584,7 @@ describe("refreshStoredOptionChain", () => {
     it("reuses a fresh grid that contains spot: no IBKR lookup, no write for it, timing marked reused", async () => {
       database.state.rowsByTable.option_chain_expiry_strikes = [storedRow("20261016", [90, 100, 110], "2026-10-05T00:00:00Z")];
       const ib = connectedIb(["20261016"], {});
-      const result = await refreshStoredOptionChain(asIb(ib), ticker, today, { maxAgeDays: 7, spotPrice: 100 });
+      const result = await refreshStoredOptionChain(asIb(ib), ticker, today, { maxAgeDays: 7, spotPrice: 100, alwaysLookUpWithinDays: 7 });
       expect(ib.reqContractDetails).not.toHaveBeenCalled();
       expect(result.strikesByExpiry.get("20261016")).toEqual([90, 100, 110]);
       expect(result.timings.expiries).toEqual([{ expiry: "20261016", strikeCount: 3, elapsedMs: 0, reused: true }]);
@@ -594,10 +594,22 @@ describe("refreshStoredOptionChain", () => {
     it("looks an expiry up again when its stored grid is too old, or spot has left its range", async () => {
       database.state.rowsByTable.option_chain_expiry_strikes = [storedRow("20261016", [90, 100, 110], "2026-09-01T00:00:00Z"), storedRow("20261023", [90, 100, 110], "2026-10-05T00:00:00Z")];
       const ib = connectedIb(["20261016", "20261023"], { "20261016": [100], "20261023": [150] });
-      const result = await refreshStoredOptionChain(asIb(ib), ticker, today, { maxAgeDays: 7, spotPrice: 150 });
+      const result = await refreshStoredOptionChain(asIb(ib), ticker, today, { maxAgeDays: 7, spotPrice: 150, alwaysLookUpWithinDays: 7 });
       expect(ib.reqContractDetails).toHaveBeenCalledTimes(2);
       expect(result.strikesByExpiry.get("20261016")).toEqual([100]);
       expect(result.strikesByExpiry.get("20261023")).toEqual([150]);
+    });
+
+    it("looks up an expiry up to alwaysLookUpWithinDays away even when its grid is fresh and spans spot, and reuses one a day further", async () => {
+      // Today 2026-10-06: 13 Oct is 7 days away (looked up, new strikes 56-59 near spot), 14 Oct is 8 (reused).
+      database.state.rowsByTable.option_chain_expiry_strikes = [storedRow("20261013", [25, 55, 60, 200], "2026-10-05T00:00:00Z"), storedRow("20261014", [25, 55, 60, 200], "2026-10-05T00:00:00Z")];
+      const ib = connectedIb(["20261013", "20261014"], { "20261013": [55, 56, 57, 58, 59, 60] });
+      const result = await refreshStoredOptionChain(asIb(ib), ticker, today, { maxAgeDays: 7, spotPrice: 56, alwaysLookUpWithinDays: 7 });
+      expect(ib.reqContractDetails).toHaveBeenCalledTimes(1);
+      expect(result.strikesByExpiry.get("20261013")).toEqual([55, 56, 57, 58, 59, 60]);
+      expect(gridInsertFor("20261013")).toBeDefined();
+      expect(result.strikesByExpiry.get("20261014")).toEqual([25, 55, 60, 200]);
+      expect(result.timings.expiries).toContainEqual({ expiry: "20261014", strikeCount: 4, elapsedMs: 0, reused: true });
     });
 
     it("never reuses without a policy, even for a brand-new grid", async () => {
@@ -610,7 +622,7 @@ describe("refreshStoredOptionChain", () => {
     it("reads stored grids keyed by YYYYMMDD even when the stored expiry carries dashes", async () => {
       database.state.rowsByTable.option_chain_expiry_strikes = [storedRow("2026-10-16", [90, 100, 110], "2026-10-05T00:00:00Z")];
       const ib = connectedIb(["20261016"], {});
-      await refreshStoredOptionChain(asIb(ib), ticker, today, { maxAgeDays: 7, spotPrice: null });
+      await refreshStoredOptionChain(asIb(ib), ticker, today, { maxAgeDays: 7, spotPrice: null, alwaysLookUpWithinDays: 7 });
       expect(ib.reqContractDetails).not.toHaveBeenCalled();
     });
   });
