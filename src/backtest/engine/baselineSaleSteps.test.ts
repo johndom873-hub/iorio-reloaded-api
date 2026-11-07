@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib/commissionEstimate.js";
-import { baselineSaleYield, hedgePutCostYield, hedgePutCostYieldOnCalendarDays } from "./baselineSaleSteps.js";
+import { baselineSaleYield, hedgePutCostYield, hedgePutCostYieldOnCalendarDays, selectBaselineCandidates, volFarmerV4SaleFill, type BaselineSaleFill } from "./baselineSaleSteps.js";
 
 const commissionDollarsPerContract = 0.68;
 
@@ -40,5 +40,35 @@ describe("hedgePutCostYield", () => {
     expect(hedgePutCostYieldOnCalendarDays({ fillPrice: 16.3, strike: 55, stockPrice: 57.81, dte: 105, commissionDollarsPerContract })).toBeCloseTo(0.98055, 5);
     expect(hedgePutCostYieldOnCalendarDays({ fillPrice: 0.5, strike: 50, stockPrice: 50, dte: 0, commissionDollarsPerContract })).toBeCloseTo(((50 + 0.68) / 5_000) * 365, 10);
     expect(hedgePutCostYieldOnCalendarDays({ fillPrice: 2, strike: 60, stockPrice: 57, dte: 30, commissionDollarsPerContract })).toBeNull();
+  });
+});
+
+describe("selectBaselineCandidates: how a sale fills", () => {
+  // One Call a week out, quoted 1.49 / 1.52 (mid 1.505).
+  const fillOf = (saleFill: BaselineSaleFill) =>
+    selectBaselineCandidates({
+      quotes: [{ expiry: "2026-03-20", strike: 105, right: "C", bid: 1.49, ask: 1.52, bidSize: 10, askSize: 10 }],
+      forwardAnchors: new Map(),
+      commissions: { option: flatCommissionEstimator, stock: flatStockCommissionEstimator },
+      right: "C",
+      todayIso: "2026-03-13",
+      yearsToTodaysClose: 0,
+      stockPrice: 100,
+      riskFreeRate: 0.04,
+      previousSessionVolumeByContract: null,
+      sizeLimit: "none",
+      settings: { minAbsDelta: 0.01, maxAbsDelta: 0.99, minDte: 0, maxDte: 30, maxSpreadPctOfMid: 50 },
+      saleFill,
+      isHeld: () => false,
+      tradingSessionsThrough: () => 6,
+    }).candidates[0]!.fillPrice;
+
+  it("Vol Farmer v4: one cent past the mid, the mid rounded up to the cent less a cent (1.51 − 0.01 = 1.50)", () => {
+    expect(fillOf(volFarmerV4SaleFill)).toBe(1.5);
+  });
+
+  it("the Steady Stake: the mid less its spread share of the half-spread, as before", () => {
+    expect(fillOf({ rule: "spread_share", spreadShareCharged: 0 })).toBeCloseTo(1.505, 12);
+    expect(fillOf({ rule: "spread_share", spreadShareCharged: 0.5 })).toBeCloseTo(1.505 - 0.5 * 0.015, 12);
   });
 });

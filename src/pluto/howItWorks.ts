@@ -3,6 +3,8 @@ import { volFarmerV4ImpliedMoveStep, volFarmerV4LeapsBudget, volFarmerV4PutStrik
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { regularCloseEt } from "../lib/marketSessionStatus.js";
 import { roundToCents } from "../lib/positionOrderRules.js";
+import { optionLimitCentsGivenUp, optionLimitPriceGivingUpOneCent } from "../lib/optionLimitPrice.js";
+import { followTheMidCheckIntervalSeconds, maxLimitPriceChangesPerOrder } from "../lib/orderLimitPriceChanges.js";
 import { tradingSessionsPerYear } from "../lib/tradingSessionsHeld.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
 import { openingLookFallbackEtMinutes } from "./openingLook.js";
@@ -28,9 +30,13 @@ const volFarmerV4ExampleFallPrice = 70;
 const volFarmerV4ExampleRisePrice = 130;
 const volFarmerV4ExamplePlutoBookValue = 1_000_000;
 const volFarmerV4ExampleAllocationPct = 20;
-/** The buyback's example (Marcelo 2026-11-02): a minute before the window's end the stock is at $101, the lots' Calls struck at $100 quoted around a $1.10 mid. */
+/** The buyback's example (Marcelo 2026-11-02): a minute before the window's end the stock is at $101, the lots' Calls struck at $100 quoted 1.05 / 1.15. */
 const volFarmerV4ExampleBuyBackStockPrice = 101;
-const volFarmerV4ExampleBuyBackMid = 1.1;
+const volFarmerV4ExampleBuyBackBid = 1.05;
+const volFarmerV4ExampleBuyBackAsk = 1.15;
+/** The order price's example (Marcelo 2026-11-07): a Call quoted 1.49 / 1.52. */
+const volFarmerV4ExampleSaleBid = 1.49;
+const volFarmerV4ExampleSaleAsk = 1.52;
 
 export interface PlutoHowItWorks {
   shared: {
@@ -58,13 +64,18 @@ export interface PlutoHowItWorks {
     tickerCooldownMinutes: number;
   };
   volFarmerV4: {
-    /** The Calls' |delta| range, spread limit and bid minimum (a sale has no size limit: it is a limit at the live mid). */
+    /** The Calls' |delta| range, spread limit and bid minimum (a sale has no size limit: it is a limit at the live quote). */
     callMinAbsDelta: number;
     callMaxAbsDelta: number;
     maxSpreadPctOfMid: number;
     minimumBid: number;
     /** No Call is sold whose commission is more than this % of its premium. */
     callMaxCommissionPctOfPremium: number;
+    /** A Call, Put or buyback goes this many cents past the mid, never past the bid or ask; a LEAPS at the mid (optionLimitPrice.ts). */
+    optionCentsGivenUp: number;
+    /** Follow the mid: a working Call on shares held, Put or buyback is checked every this many seconds and its limit moved, at most maxLimitChangesPerOrder times. */
+    followTheMidCheckSeconds: number;
+    maxLimitChangesPerOrder: number;
     /** % of the pot the first position's shares are bought with; the Puts sell on the rest. */
     firstPositionPct: number;
     putsStartCallYieldPct: number;
@@ -125,10 +136,16 @@ export interface PlutoHowItWorks {
       /** How far below B-E2 the LEAPS is bought: half the Step, percent (Marcelo 2026-10-28). */
       leapsEntryBelowSecondBreakEvenPct: number;
       leapsCap: number;
-      /** The buyback: at buyBackTimeEt the stock is at buyBackStockPrice, above the lots' Calls struck at stockPrice, bought back at buyBackMid for the lots × 100 × the mid plus the commission. */
+      /** The order price: a Call quoted saleBid / saleAsk is sold at saleLimit. */
+      saleBid: number;
+      saleAsk: number;
+      saleLimit: number;
+      /** The buyback: at buyBackTimeEt the stock is at buyBackStockPrice, above the lots' Calls struck at stockPrice, quoted buyBackBid / buyBackAsk, bought back at buyBackLimit for the lots × 100 × the limit plus the commission. */
       buyBackTimeEt: string;
       buyBackStockPrice: number;
-      buyBackMid: number;
+      buyBackBid: number;
+      buyBackAsk: number;
+      buyBackLimit: number;
       buyBackCostDollars: number;
       buyBackCommissionDollars: number;
     };
@@ -185,6 +202,9 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       maxSpreadPctOfMid: settings.volFarmerV4MaxSpreadPctOfMid,
       minimumBid: baselineMinimumBid,
       callMaxCommissionPctOfPremium: percent(volFarmerV4CallMaxCommissionShareOfPremium),
+      optionCentsGivenUp: optionLimitCentsGivenUp,
+      followTheMidCheckSeconds: followTheMidCheckIntervalSeconds,
+      maxLimitChangesPerOrder: maxLimitPriceChangesPerOrder,
       firstPositionPct: settings.volFarmerV4FirstPositionPct,
       putsStartCallYieldPct: settings.volFarmerV4PutsStartCallYieldPct,
       putMaxAbsDelta: settings.volFarmerV4PutMaxAbsDelta,
@@ -235,9 +255,14 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
         leapsEntryBelowSecondBreakEvenPct: volFarmerV4Step / 2,
         leapsCap: volFarmerV4LeapsBudget(Number.POSITIVE_INFINITY, pot, settings.volFarmerV4LeapsMaxAllocationPct),
         buyBackTimeEt: hhmmMinutesBefore(settings.windowEndEt, 1),
+        saleBid: volFarmerV4ExampleSaleBid,
+        saleAsk: volFarmerV4ExampleSaleAsk,
+        saleLimit: optionLimitPriceGivingUpOneCent(volFarmerV4ExampleSaleBid, volFarmerV4ExampleSaleAsk, "sell"),
         buyBackStockPrice: volFarmerV4ExampleBuyBackStockPrice,
-        buyBackMid: volFarmerV4ExampleBuyBackMid,
-        buyBackCostDollars: roundToCents(volFarmerV4ExampleBuyBackMid * 100 * lots),
+        buyBackBid: volFarmerV4ExampleBuyBackBid,
+        buyBackAsk: volFarmerV4ExampleBuyBackAsk,
+        buyBackLimit: optionLimitPriceGivingUpOneCent(volFarmerV4ExampleBuyBackBid, volFarmerV4ExampleBuyBackAsk, "buy"),
+        buyBackCostDollars: roundToCents(optionLimitPriceGivingUpOneCent(volFarmerV4ExampleBuyBackBid, volFarmerV4ExampleBuyBackAsk, "buy") * 100 * lots),
         buyBackCommissionDollars: roundToCents(flatCommissionEstimator.perContractDollars("buy", lots) * lots),
       },
     },

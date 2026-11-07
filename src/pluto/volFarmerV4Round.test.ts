@@ -242,16 +242,16 @@ beforeEach(() => {
 
 describe("runVolFarmerV4Round", () => {
   it("sells no Call whose commission is more than 20% of its premium, and records the one it would have sold for the activity", async () => {
-    // The best Call, the $105 at 1.4849, brings $148.49 a contract; a $40 commission is 27% of it, and every other Call brings
-    // less: the flat ticker opens no cycle, and the activity hears of the $105.
+    // The best Call, the $105 quoted around a 1.4849 mid, planned one cent past it at 1.48, brings $148 a contract; a $40
+    // commission is 27% of it, and every other Call brings less: the flat ticker opens no cycle, and the activity hears of the $105.
     harness.optionCommission = 40;
     const summary = await round();
     expect(harness.executed).toEqual([]);
     expect(summary.sent).toBe(0);
     expect(harness.events.filter((event) => event.type === "call_skipped_commission")).toEqual([
-      { type: "call_skipped_commission", detail: expect.objectContaining({ symbol: "VFT", position: "first", strike: 105, premiumDollars: 148.49, commissionDollars: 40, maxShareOfPremium: 0.2, tradingDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) }) },
+      { type: "call_skipped_commission", detail: expect.objectContaining({ symbol: "VFT", position: "first", strike: 105, premiumDollars: 148, commissionDollars: 40, maxShareOfPremium: 0.2, tradingDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) }) },
     ]);
-    expect(harness.lastRounds.get("t-VFT")!.notes.join(" ")).toMatch(/first position: the \$\d+ Call .* not sold: its commission \$40\.00 is 27% of its \$148\.49 premium, over 20%/);
+    expect(harness.lastRounds.get("t-VFT")!.notes.join(" ")).toMatch(/first position: the \$\d+ Call .* not sold: its commission \$40\.00 is 27% of its \$148\.00 premium, over 20%/);
   });
 
   it("opens a cycle on a flat ticker: one Covered Call with its shares, recorded under v4 and kept as pending", async () => {
@@ -680,13 +680,13 @@ describe("runVolFarmerV4Round: the buyback in the window's last minutes", () => 
   }
   const buyBacks = () => harness.executed.filter((order) => order.kind === "call_buy_back");
 
-  it("on the last session before a weekend, in the last 2 minutes, buys back a Call expiring today in the money at the mid, and sends nothing else", async () => {
+  it("on the last session before a weekend, in the last 2 minutes, buys back a Call expiring today in the money one cent past the mid (quoted 1.05 / 1.15: 1.11), and sends nothing else", async () => {
     holdingTodaysCall("2026-10-30", 99, "bought_back_before_weekends");
     await round(false, "2026-10-30", at("2026-10-30", "19:28:30"));
     expect(harness.executed).toEqual([
-      expect.objectContaining({ kind: "call_buy_back", legId: "c1", positionId: "position-of-c1", contract: { expiry: "2026-10-30", strike: 99, right: "C", dte: 0 }, plan: expect.objectContaining({ quantity: 19, limitPrice: 1.1 }) }),
+      expect.objectContaining({ kind: "call_buy_back", legId: "c1", positionId: "position-of-c1", contract: { expiry: "2026-10-30", strike: 99, right: "C", dte: 0 }, plan: expect.objectContaining({ quantity: 19, limitPrice: 1.11 }) }),
     ]);
-    expect(harness.actions).toEqual([expect.objectContaining({ kind: "close_leg", outcome: "validated", quantity: 19, limitPrice: 1.1, contract: { strategyKey: "covered_call", expiry: "2026-10-30", strike: 99, right: "C" } })]);
+    expect(harness.actions).toEqual([expect.objectContaining({ kind: "close_leg", outcome: "validated", quantity: 19, limitPrice: 1.11, contract: { strategyKey: "covered_call", expiry: "2026-10-30", strike: 99, right: "C" } })]);
     expect((harness.memory.get("t-VFT") as VolFarmerV4Memory).pending).toEqual([expect.objectContaining({ kind: "buy_back_call", boughtBackLegId: "c1", contracts: 19, contractsByPosition: { first: 19, second: 0 } })]);
     // The screen keeps the ticker's figures through the weekend.
     expect(harness.lastRounds.get("t-VFT")!.figures).toMatchObject({ potDollars: 250_000, freeCashDollars: expect.any(Number) });
@@ -741,8 +741,8 @@ describe("runVolFarmerV4Round: the buyback in the window's last minutes", () => 
     harness.settledFreeCash = 2_000;
     await round(false, "2026-10-30", at("2026-10-30", "19:28:30"));
     expect(harness.executed).toEqual([]);
-    expect(harness.actions).toEqual([expect.objectContaining({ kind: "close_leg", outcome: "blocked", blockReason: "settled_cash: the buyback costs $2,102, the settled cash left is $2,000" })]);
-    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringMatching(/^the buyback of 19× \$99 Call · 30 Oct \(0DTE\) is not sent \(the buyback costs \$2,102, the settled cash left is \$2,000\): the Call is left to be assigned/)]);
+    expect(harness.actions).toEqual([expect.objectContaining({ kind: "close_leg", outcome: "blocked", blockReason: "settled_cash: the buyback costs $2,121, the settled cash left is $2,000" })]);
+    expect(harness.lastRounds.get("t-VFT")!.notes).toEqual([expect.stringMatching(/^the buyback of 19× \$99 Call · 30 Oct \(0DTE\) is not sent \(the buyback costs \$2,121, the settled cash left is \$2,000\): the Call is left to be assigned/)]);
   });
 
   it("goes under SPY's stress: a buyback opens nothing", async () => {

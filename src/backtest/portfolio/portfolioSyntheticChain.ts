@@ -8,8 +8,9 @@ import { impliedVolatilityRatioNear, nearestObservedContract, quoteLikeObserved,
 // expiry is priced at IBKR's 30-day IV × u (u: how much higher a same-day Call's own IV ran than the 30-day IV in the
 // ticker's backtest), the LEAPS at the 30-day IV. With an observed day of the ticker's own chain (portfolioObservedChain.ts)
 // the next expiry is priced and quoted like it instead, u then standing in only where the observed day has no IV to read;
-// without one, and for the LEAPS, quotes are a cent either side of the mid (the steps need an ask above the bid; the lab
-// and Pluto fill at the mid). No previous-session volumes: v4 sells with no size limit (salesSizeLimit "none").
+// without one, and for the LEAPS, quotes are a cent either side of the mid (the steps need an ask above the bid). v4 sells
+// and buys back one cent past the mid, so on such a quote at the bid or the ask (2026-11-07); a LEAPS at its own spread
+// share. No previous-session volumes: v4 sells with no size limit (salesSizeLimit "none").
 
 /** A synthetic quote's size, bid and ask: the LEAPS is capped at its ask's size in the lab. */
 const syntheticQuoteSize = 1_000_000;

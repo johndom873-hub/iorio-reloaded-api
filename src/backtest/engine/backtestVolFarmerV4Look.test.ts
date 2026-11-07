@@ -377,7 +377,7 @@ describe("Vol Farmer v4 at the looks", () => {
     expect(spent.result.summary).toMatch(/no top-up: .*the cap \(45% of the pot, \$[\d,]+\) leaves \$0 over the \$40,00\d in, which pays for none of the 3 lots/);
   });
 
-  it("Vol Farmer v3: buys back a Call expiring today in the money at the day's last look at its mid, the shares kept through the night", async () => {
+  it("Vol Farmer v3: buys back a Call expiring today in the money at the day's last look one cent past its mid, the shares kept through the night", async () => {
     const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
     const marks = new Map<string, number>();
     const sameDay = { optionsExpiry: "today" } as const;
@@ -389,22 +389,22 @@ describe("Vol Farmer v4 at the looks", () => {
     const callLeg = openOption(ledger, "call")[0]!;
     const openShares = () => ledger.legs.filter((leg) => leg.legType === "stock" && leg.exitAt === null).reduce((sum, leg) => sum + leg.quantity, 0);
     const buyBack = (stockPrice: number, quote: { bid: number; ask: number } | undefined) =>
-      buyBackVolFarmerV4CallsInTheMoney({ ledger, todayIso: "2026-03-13", lookTimeEt: "15:30", symbol, stockPrice, splitFactorToday: 1, spreadShareCharged: 0, quoteOf: (quoted) => (Math.abs(quoted - strike) < 1e-9 ? quote : undefined), priceByLegId: marks, nextActionId, gate: "vol_farmer_v4" });
+      buyBackVolFarmerV4CallsInTheMoney({ ledger, todayIso: "2026-03-13", lookTimeEt: "15:30", symbol, stockPrice, splitFactorToday: 1, quoteOf: (quoted) => (Math.abs(quoted - strike) < 1e-9 ? quote : undefined), priceByLegId: marks, nextActionId, gate: "vol_farmer_v4" });
     // Under the strike at 15:30: left to the close. In the money with a one-sided quote: left too, and said.
     expect(buyBack(strike - 0.01, { bid: 1.95, ask: 2.05 }).actions).toEqual([]);
     expect(buyBack(strike + 2, undefined).notes[0]).toContain("in the money at 15:30");
     expect(callLeg.exitAt).toBeNull();
-    // At the strike + 2, quoted 1.95 / 2.05: the 4 contracts bought back at 2.00 and $0.68 each; the 400 shares stay.
+    // At the strike + 2, quoted 1.95 / 2.05: the 4 contracts bought back at 2.01 (the mid 2.00 plus a cent) and $0.68 each; the 400 shares stay.
     const cashBefore = ledger.cash;
     const bought = buyBack(strike + 2, { bid: 1.95, ask: 2.05 });
-    expect(bought.actions.map((action) => [action.kind, action.quantity, action.fillPrice])).toEqual([["close_leg", 4, 2]]);
+    expect(bought.actions.map((action) => [action.kind, action.quantity, action.fillPrice])).toEqual([["close_leg", 4, 2.01]]);
     expect(bought.actions[0]!.description).toContain("first position: " + (strike + 2).toFixed(2) + " at 15:30, at or above the strike; the shares kept");
-    expect([callLeg.exitPrice, callLeg.settledAs ?? null]).toEqual([2, null]);
+    expect([callLeg.exitPrice, callLeg.settledAs ?? null]).toEqual([2.01, null]);
     expect(openShares()).toBe(400);
-    expect(ledger.cash).toBeCloseTo(cashBefore - 2 * 400 - optionCommissionDollars(4), 6);
+    expect(ledger.cash).toBeCloseTo(cashBefore - 2.01 * 400 - optionCommissionDollars(4), 6);
     // The run's P&L by position counts the buyback against the Call's premium.
     const callsPnl = Number(/Calls (−?)\$([\d,]+)/.exec(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer v4", marks)!)!.slice(1).join("").replace("−", "-").replace(/,/g, ""));
-    expect(Math.abs(callsPnl - (sale.fillPrice! * 400 - optionCommissionDollars(4) - (2 * 400 + optionCommissionDollars(4))))).toBeLessThanOrEqual(1);
+    expect(Math.abs(callsPnl - (sale.fillPrice! * 400 - optionCommissionDollars(4) - (2.01 * 400 + optionCommissionDollars(4))))).toBeLessThanOrEqual(1);
 
     // Monday 16 March, an expiry day: the Call is gone, not assigned, and the 400 shares held sell the day's Call; no new cycle.
     const monday = await lookV3(ledger, marks, "2026-03-16", strike + 1, "2026-03-16", {}, sameDay);
@@ -415,16 +415,16 @@ describe("Vol Farmer v4 at the looks", () => {
     expect(openShares()).toBe(400);
   });
 
-  it("Vol Farmer v3: pays the session's spread cost share on the last look's buyback, as any buyback", async () => {
+  it("Vol Farmer v4: buys back one cent past the mid, never above the ask (2026-11-07), whatever the session's spread cost share", async () => {
     const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
     const marks = new Map<string, number>();
     const opened = await lookV3(ledger, marks, "2026-03-13", 100, "2026-03-13", {}, { optionsExpiry: "today" });
     const strike = opened.actions[0]!.contract!.strike!;
     const cashBefore = ledger.cash;
-    // Quoted 1.95 / 2.05 with half the half-spread charged: 2.00 + 0.5 × 0.05 = 2.025 a share, on 4 contracts.
-    const bought = buyBackVolFarmerV4CallsInTheMoney({ ledger, todayIso: "2026-03-13", lookTimeEt: "15:30", symbol, stockPrice: strike + 2, splitFactorToday: 1, spreadShareCharged: 0.5, quoteOf: () => ({ bid: 1.95, ask: 2.05 }), priceByLegId: marks, nextActionId, gate: "vol_farmer_v4" });
-    expect(bought.actions[0]!.fillPrice).toBeCloseTo(2.025, 9);
-    expect(ledger.cash).toBeCloseTo(cashBefore - 2.025 * 400 - optionCommissionDollars(4), 6);
+    // Quoted 1.49 / 1.52: the mid 1.505 rounded down to 1.50, plus a cent, 1.51 a share, on 4 contracts.
+    const bought = buyBackVolFarmerV4CallsInTheMoney({ ledger, todayIso: "2026-03-13", lookTimeEt: "15:30", symbol, stockPrice: strike + 2, splitFactorToday: 1, quoteOf: () => ({ bid: 1.49, ask: 1.52 }), priceByLegId: marks, nextActionId, gate: "vol_farmer_v4" });
+    expect(bought.actions[0]!.fillPrice).toBe(1.51);
+    expect(ledger.cash).toBeCloseTo(cashBefore - 1.51 * 400 - optionCommissionDollars(4), 6);
   });
 
   it("Vol Farmer v3: counts the open Puts' cash and the second position's assigned strikes as money in", () => {

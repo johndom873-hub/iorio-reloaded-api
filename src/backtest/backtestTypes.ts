@@ -397,8 +397,8 @@ export interface BacktestVolFarmerV2Settings {
   /**
    * LEAPS fills (Marcelo 2026-10-28): the share of the half-spread a LEAPS purchase or sale gives up, percent, and the price
    * a held LEAPS is valued at, what selling it would bring. The lab's 33 is about two-thirds of the way across the spread:
-   * bid $10, ask $13 buys at $11.995 and sells (and values) at $11.005. Calls and Puts fill and are valued at
-   * trading.spreadCostChargedPct.
+   * bid $10, ask $13 buys at $11.995 and sells (and values) at $11.005. Vol Farmer v4's Calls, Puts and buybacks fill one
+   * cent past the mid (2026-11-07; v2's and v3's at trading.spreadCostChargedPct) and are valued at the mid.
    */
   leapsSpreadCostChargedPct: number;
   /**
@@ -490,10 +490,11 @@ export interface BacktestVolFarmerV3Settings {
   topUpCapPctOfPot: number;
   /**
    * A Call expiring at today's close still open at the day's last look (15:30 on a full day) with the price at or above its
-   * strike (Marcelo 2026-11-02): "assigned", left to the close; "bought_back", bought back on that look's quotes as any
-   * buyback fills (trading.spreadCostChargedPct applies) with its commission, the shares kept through the night instead of
-   * called away and bought again at the next look. A Call without a two-sided quote then is left to the close. NVDA 220
-   * Call, NVDA 223.99 at 15:30, mid 4.025 on 2,500 shares, no spread cost: $10,062.50 paid, the shares kept. Older
+   * strike (Marcelo 2026-11-02): "assigned", left to the close; "bought_back", bought back on that look's quotes one cent
+   * past the mid (2026-11-07, optionLimitPriceGivingUpOneCent; v3 at trading.spreadCostChargedPct) with its commission, the
+   * shares kept through the night instead of called away and bought again at the next look. A Call without a two-sided
+   * quote then is left to the close. NVDA 220 Call, NVDA 223.99 at 15:30, quoted 3.95 / 4.10 (mid 4.025) on 2,500 shares:
+   * bought back at 4.03, $10,075.00 paid, the shares kept. Older
    * snapshots have none: assigned. "bought_back_before_weekends" (Marcelo 2026-11-02): bought back only at the last session
    * before a weekend (a Friday, or the Thursday before a Friday holiday), left to be assigned on the other days.
    */

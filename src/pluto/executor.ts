@@ -10,6 +10,17 @@ import type { PlutoOrderPlan } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { classifyRoutineOrderProblem, routineOrderProblemLabels } from "./routineOrderProblems.js";
 import { tripPlutoBreaker } from "./stateStore.js";
+import { followTheMidCheckIntervalSeconds, maxLimitPriceChangesPerOrder, type LimitPriceChange, type LimitPriceChangeRequest } from "../lib/orderLimitPriceChanges.js";
+import { limitChangeableOrderStatuses } from "../lib/orderRequestStatuses.js";
+
+/**
+ * Follow the mid (Marcelo 2026-11-07): for a working single-leg option order, the price the strategy would send now, or null
+ * to leave the order where it is (no usable live quote, the strategy's quote rules fail, Pluto paused). The watch asks every
+ * followTheMidCheckIntervalSeconds and changes the order's limit when the price has moved by a cent or more.
+ */
+export interface PlutoFollowTheMid {
+  priceNow(): Promise<number | null>;
+}
 
 // Execution (design round 3, items 6 and 22): the agent never writes an order row itself. It builds
 // through the same route the screens use — POST /positions/orders — with the
@@ -26,7 +37,7 @@ import { tripPlutoBreaker } from "./stateStore.js";
 interface OrderRequestResponse {
   id: string;
   status: string;
-  payload?: { legs?: { role: "stock" | "option"; action: string; unitPrice: number; quantity: number }[] };
+  payload?: { legs?: { role: "stock" | "option"; action: string; unitPrice: number; quantity: number }[]; limitPriceChangeRequest?: LimitPriceChangeRequest; limitPriceChanges?: LimitPriceChange[] };
   errorMessage: string | null;
   updatedAt?: string | null;
 }
@@ -361,7 +372,7 @@ export async function loadOrderFills(orderId: string): Promise<PlutoFill[]> {
 export async function watchPlutoOrder(
   api: InternalApiClient,
   settings: PlutoSettings,
-  input: { actionId: string; orderId: string; symbol: string; reference: PlutoFillReference; description: string; cancelByMs?: number | null; startedAtMs?: number },
+  input: { actionId: string; orderId: string; symbol: string; reference: PlutoFillReference; description: string; cancelByMs?: number | null; startedAtMs?: number; followTheMid?: PlutoFollowTheMid },
   options: { pollIntervalMs?: number; now?: () => number } = {},
 ): Promise<WatchResult> {
   const pollIntervalMs = options.pollIntervalMs ?? 5_000;
@@ -372,6 +383,8 @@ export async function watchPlutoOrder(
   // (Marcelo 2026-10-05). Pluto only adds the cancel shortly before the session close, which the sweep does not know.
   const cancelAtMs = input.cancelByMs ?? Number.POSITIVE_INFINITY;
   let cancelRequested = false;
+  let nextFollowAtMs = startedAt + followTheMidCheckIntervalSeconds * 1000;
+  let following = input.followTheMid !== undefined;
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     let order: OrderRequestResponse;
@@ -390,10 +403,13 @@ export async function watchPlutoOrder(
       // A new contract's fills are written only once the reconciliation creates its position: wait for all of them.
       if (filledStatus && shouldWaitForFills(order.status, orderLegs, fills, order.updatedAt ? new Date(order.updatedAt) : new Date(startedAt), now())) continue;
       // Judged only on complete fills: a roll recorded half-way would read as a huge slippage on one leg.
-      const comparison = fills.length > 0 && fillsAreComplete(order.status, orderLegs, fills) ? compareFillsWithReference(input.reference, fills) : null;
+      // A followed order is judged against the limit it filled at, not the one it was sent with.
+      const finalLimit = input.followTheMid && orderLegs.length === 1 ? Number(orderLegs[0]!.unitPrice) : null;
+      const reference = finalLimit !== null && Number.isFinite(finalLimit) ? { ...input.reference, price: finalLimit } : input.reference;
+      const comparison = fills.length > 0 && fillsAreComplete(order.status, orderLegs, fills) ? compareFillsWithReference(reference, fills) : null;
       if (filledStatus && comparison === null) await recordPlutoEvent("warning", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, message: "the order's fills were not all recorded in time, so its fill price and slippage are not checked" });
       const fillPrice = comparison?.chosenLegFillPrice ?? null;
-      const impliedFillPrice = comparison ? impliedChosenLegPrice(input.reference, otherLegOrderPrices(input.reference, order.payload?.legs ?? []), fills) : null;
+      const impliedFillPrice = comparison ? impliedChosenLegPrice(reference, otherLegOrderPrices(reference, order.payload?.legs ?? []), fills) : null;
       // A routine problem (routineOrderProblems.ts) is a blocked action, planned afresh at the next look: no breaker.
       const routineProblem = outcome === "rejected" || outcome === "error" ? classifyRoutineOrderProblem(order.errorMessage) : null;
       const routineReason = routineProblem === null ? null : `${routineOrderProblemLabels[routineProblem]}: ${order.errorMessage}`;
@@ -413,7 +429,7 @@ export async function watchPlutoOrder(
         // was wrong. Either way a human looks before the next order.
         const where = input.reference.otherLegs?.length
           ? `net ${comparison.fillNetDollars.toFixed(2)} vs reference net ${comparison.referenceNetDollars.toFixed(2)}`
-          : `filled at ${comparison.chosenLegFillPrice.toFixed(2)} vs reference ${input.reference.price.toFixed(2)}`;
+          : `filled at ${comparison.chosenLegFillPrice.toFixed(2)} vs reference ${reference.price.toFixed(2)}`;
         const detail = `${input.description}: ${where} (${comparison.slippagePct.toFixed(1)}%${input.reference.otherLegs?.length ? " of the option's reference value" : ""} past it, limit ${settings.maxFillSlippagePct}%)`;
         await tripPlutoBreaker("fill_slippage", detail);
         await recordPlutoEvent("breaker_tripped", { name: "fill_slippage", detail });
@@ -423,6 +439,10 @@ export async function watchPlutoOrder(
         await notifyPlutoTelegram(`🪐 Pluto order ${outcome}: ${input.description}${fillText}`);
       }
       return { outcome, detail: order.errorMessage ?? outcome };
+    }
+    if (following && !cancelRequested && now() >= nextFollowAtMs && now() <= cancelAtMs) {
+      nextFollowAtMs = now() + followTheMidCheckIntervalSeconds * 1000;
+      following = await followTheMidOnce(api, input, order);
     }
     if (!cancelRequested && now() > cancelAtMs) {
       cancelRequested = true;
@@ -434,5 +454,40 @@ export async function watchPlutoOrder(
         console.warn(`Pluto watch: cancel request failed for ${input.orderId} — ${error instanceof Error ? error.message : error}`);
       }
     }
+  }
+}
+
+/**
+ * One follow-the-mid check of a working order: asks the strategy's price now and, when it differs from the order's limit by
+ * a cent or more, asks the route to change the limit (POST /positions/orders/:id/reprice). Answers whether to keep following:
+ * not after the order's last allowed change, nor after the route refuses (halted, the lease lost, no longer working).
+ */
+export async function followTheMidOnce(api: InternalApiClient, input: { actionId: string; orderId: string; symbol: string; followTheMid?: PlutoFollowTheMid }, order: OrderRequestResponse): Promise<boolean> {
+  const legs = order.payload?.legs ?? [];
+  if (!input.followTheMid || legs.length !== 1 || !(limitChangeableOrderStatuses as readonly string[]).includes(order.status)) return true;
+  if ((order.payload?.limitPriceChanges?.length ?? 0) >= maxLimitPriceChangesPerOrder) return false;
+  // The worker has not sent the previous change yet.
+  if (order.payload?.limitPriceChangeRequest) return true;
+  const currentLimit = Number(legs[0]!.unitPrice);
+  let priceNow: number | null;
+  try {
+    priceNow = await input.followTheMid.priceNow();
+  } catch (error) {
+    console.warn(`Pluto watch: no price now for order ${input.orderId} — ${error instanceof Error ? error.message : error}`);
+    return true;
+  }
+  if (priceNow === null || Math.abs(priceNow - currentLimit) < 0.005) return true;
+  try {
+    await api.post(`/positions/orders/${input.orderId}/reprice`, { limitPrice: priceNow });
+    await recordPlutoEvent("order_repriced", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, from: currentLimit, to: priceNow });
+    return true;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (error instanceof InternalApiError && error.status === 409) {
+      await recordPlutoEvent("warning", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, message: `the limit is no longer followed: ${detail}` });
+      return false;
+    }
+    console.warn(`Pluto watch: changing the limit of ${input.orderId} failed — ${detail}`);
+    return true;
   }
 }

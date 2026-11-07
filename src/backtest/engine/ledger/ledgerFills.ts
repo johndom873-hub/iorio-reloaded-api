@@ -7,6 +7,8 @@ import { computeSaleFillPrice } from "../backtestBook.js";
 //
 //   option sale      = mid − spread cost share × (ask − bid) ÷ 2
 //   option purchase  = mid + spread cost share × (ask − bid) ÷ 2
+//   Vol Farmer v4's Calls, Puts and buybacks = one cent past the mid, as Pluto's orders (optionLimitPriceGivingUpOneCent,
+//                    Marcelo 2026-11-07: baselineSaleSteps.ts volFarmerV4SaleFill, backtestVolFarmerV4Look.ts); its LEAPS above
 //   shares bought or sold = the stock price at the look (Marcelo 2026-10-15)
 //   commission       = $0.68 per option contract, $0.005 per share; none at expiry or assignment
 

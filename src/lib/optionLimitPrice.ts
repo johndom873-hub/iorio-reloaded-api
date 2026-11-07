@@ -14,3 +14,17 @@ export function roundOptionPriceToCent(price: number, side: "sell" | "buy"): num
 export function optionMidLimitPrice(bid: number, ask: number, side: "sell" | "buy"): number {
   return Math.min(ask, Math.max(bid, roundOptionPriceToCent((bid + ask) / 2, side)));
 }
+
+// Vol Farmer v4's option price (Marcelo 2026-11-07, its Calls, Puts and buybacks, in Pluto's orders and planning and in the
+// lab): a mid order on a one- or two-cent spread sat unfilled, so v4 gives up one cent past the mid, never past the bid or ask.
+export const optionLimitCentsGivenUp = 1;
+
+/**
+ * The mid to the cent (optionMidLimitPrice), then one cent towards the other side, kept inside the market: a sell one cent
+ * lower but not below the bid, a buy one cent higher but not above the ask. Bid 0.67 / ask 0.68 sells at 0.67; 1.49 / 1.52
+ * sells at 1.50 and buys at 1.51; 2.81 / 3.15 sells at 2.97.
+ */
+export function optionLimitPriceGivingUpOneCent(bid: number, ask: number, side: "sell" | "buy"): number {
+  const midCents = Math.round(optionMidLimitPrice(bid, ask, side) * 100);
+  return side === "sell" ? Math.max(bid, (midCents - optionLimitCentsGivenUp) / 100) : Math.min(ask, (midCents + optionLimitCentsGivenUp) / 100);
+}

@@ -23,7 +23,7 @@ import { describePriceAdjustment } from "../ibkr/dailyBarSplitCheck.js";
 import { noticePlutoTicker } from "./plutoTickerNotices.js";
 import { strategyDeltaVerdict, type StrategyDeltaContext } from "../lib/strategyOrderGates.js";
 import { daysToExpiry, describeExpiry, describeOptionContract } from "../lib/optionContractLabel.js";
-import { optionMidLimitPrice } from "../lib/optionLimitPrice.js";
+import { optionLimitPriceGivingUpOneCent, optionMidLimitPrice } from "../lib/optionLimitPrice.js";
 import { strategyBookCapitalVerdict, loadCommittedCapitalOnSymbols } from "../lib/orderLimits.js";
 import { computeTickerExposure } from "../lib/positionExposure.js";
 import type { PositionLegFigures } from "../lib/positionSelectors.js";
@@ -31,7 +31,8 @@ import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { frozenSymbolSet } from "../lib/tickerFreeze.js";
 import { isLastSessionBeforeWeekend } from "../lib/tradingWeek.js";
 import { loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
-import { executePlutoOrder, watchPlutoOrder, type ExecuteInput } from "./executor.js";
+import { executePlutoOrder, watchPlutoOrder, type ExecuteInput, type PlutoFollowTheMid } from "./executor.js";
+import { loadPlutoState } from "./stateStore.js";
 import { defaultOptionQuoteBandPlannerDependencies } from "./optionQuoteBandPlanLoader.js";
 import { nextListedExpiryAfter, optionQuoteBandExpiryContracts, volFarmerV4ExpiryRule } from "./optionQuoteBandPlan.js";
 import { loadFinishedOptionQuoteBandCycle, loadOptionQuoteBandQuotes } from "./optionQuoteBandQuotes.js";
@@ -67,7 +68,8 @@ import { loadVolFarmerV4LeapsLook, loadVolFarmerV4LeftoverStockLeg, loadVolFarme
 // Safety Limits' caps (safetyLimits.ts; Marcelo 2026-10-27, answer d): the
 // ticker's working orders, orders a day and open positions, the book's open positions and orders a day, and Pluto's
 // capital budget. Each option order is re-quoted live, held to v4's spread limit and |delta| ranges (a LEAPS to its spread
-// limit only), priced at the mid on the option's tick and sent through Pluto's executor; one that fails a check, or a cap
+// limit only), priced one cent past the mid (a LEAPS at the mid; optionLimitPrice.ts, Marcelo 2026-11-07) and sent through
+// Pluto's executor, a single-leg one then following the mid while it works (executor.ts); one that fails a check, or a cap
 // holds, is undone and planned afresh at a later round. While SPY's stress level holds, v4 opens nothing; a sale of LEAPS
 // or shares still goes. A LEAPS is quoted when the steps ask for one: the strikes of its expiry (stored, else looked up
 // live) whose Black-Scholes |delta| at IBKR's 30-day IV is nearest the LEAPS |delta|, as many as a quote burst takes.
@@ -84,7 +86,7 @@ import { loadVolFarmerV4LeapsLook, loadVolFarmerV4LeftoverStockLeg, loadVolFarme
 // reported, nothing is bought and no Put sold, except on the paper account (a margin account), where the total cash stands in.
 // v4's buyback (Marcelo 2026-11-02, the lab's callsInTheMoneyAtLastLook): in the trading window's last 2 minutes, on a day
 // the setting buys back (every day, or only the last session before a weekend), each of its Calls expiring today with the
-// stock at or above its strike is bought back at the mid through the close route, its shares kept, if the settled cash left
+// stock at or above its strike is bought back one cent past the mid through the close route, its shares kept, if the settled cash left
 // pays for it; nothing else is sent for the ticker in those minutes, so no new Call covers the shares kept. One unfilled
 // at the cancel before the close (or after the platform's unfilled-order sweep) is left to be assigned.
 
@@ -471,7 +473,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   const marketWith = (leapsQuotesByExpiry: ReadonlyMap<string, SymbolFileQuote[]>, missing: Set<string>): VolFarmerV4Market => ({
     symbol,
     todayIso: clock.todayIso,
-    // Pluto sells limits at the live mid, re-checked on a live quote just before and at the order route: no size limit (Marcelo 2026-11-05).
+    // Pluto sells limits at the live quote, re-checked on a live quote just before and at the order route: no size limit (Marcelo 2026-11-05).
     salesSizeLimit: "none",
     stockPrice,
     riskFreeRate: clock.riskFreeRate,
@@ -492,7 +494,6 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
     tradingSessionsThrough: liveSessions.sessionsHeldTo,
     priceToCycleScale: 1,
     optionContractsRepresentable: true,
-    spreadShareCharged: 0,
     commissions: round.commissions,
     optionCommissionDollars: round.optionCommissionDollars,
     stockCommissionDollars: round.stockCommissionDollars,
@@ -604,11 +605,11 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
 }
 
 /**
- * v4's buyback (Marcelo 2026-11-02): each Call to buy back, quoted live and bought back at the mid on the cent through the
+ * v4's buyback (Marcelo 2026-11-02): each Call to buy back, quoted live and bought back one cent past the mid (optionLimitPriceGivingUpOneCent) through the
  * close route, its shares kept, if the settled cash left pays for it (contracts × 100 × the limit, with commission). One
  * without a two-sided live quote, or that the settled cash can't pay for, is left to be assigned (tried again at a later
  * round of the minutes); one sent is pending until it settles. Example: 38 $100 Calls, the stock at $101.00, quoted
- * 1.05 / 1.15: bought back at 1.10, $4,180 + $25.84 commission, with $40,000 of settled cash left.
+ * 1.05 / 1.15: bought back at 1.11, $4,218 + $25.84 commission, with $40,000 of settled cash left.
  */
 async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; ticker: PlutoTickerSettings; memory: VolFarmerV4Memory; openLegs: readonly PositionLegFigures[]; stockPrice: number; clock: { todayIso: string }; round: RoundState; summary: VolFarmerV4RoundSummary; note: (text: string) => void }): Promise<void> {
   const { input, ticker, memory, stockPrice, clock, round, summary, note } = context;
@@ -630,7 +631,7 @@ async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; t
     summary.planned += 1;
     const [live] = await input.marketWatch.burst(ticker.symbol, [contract]);
     const twoSided = live && live.bid !== null && live.ask !== null && live.bid > 0 && live.ask > live.bid ? { bid: live.bid, ask: live.ask } : null;
-    const limitPrice = twoSided ? optionMidLimitPrice(twoSided.bid, twoSided.ask, "buy") : null;
+    const limitPrice = twoSided ? optionLimitPriceGivingUpOneCent(twoSided.bid, twoSided.ask, "buy") : null;
     const costDollars = limitPrice === null ? 0 : limitPrice * sharesPerContract * call.contracts + round.commissions.option.perContractDollars("buy", call.contracts) * call.contracts;
     // The settled cash left, as the look counts it, less the buybacks this round already sent.
     const settledFree = round.plutoAvailableSettledCash === null ? 0 : round.plutoAvailableSettledCash + round.cashReserveDollars - round.committedThisRound;
@@ -686,11 +687,30 @@ async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; t
     round.committedThisRound += costDollars;
     memory.pending.push(pendingVolFarmerV4CallBuyBack(actionId, call));
     input.trackWatch(
-      watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: "buy", multiplier: 100 }, description: result.detail, cancelByMs: input.cancelByMs }),
+      watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: "buy", multiplier: 100 }, description: result.detail, cancelByMs: input.cancelByMs, followTheMid: followTheMidOf(input, ticker.symbol, contract, "buy", null) }),
       result.orderId,
       ticker.symbol,
     );
   }
+}
+
+/**
+ * Follow the mid for one of v4's single-leg option orders (Marcelo 2026-11-07): the live quote's price one cent past the mid,
+ * or null to leave the order where it is (no two-sided quote; a sale whose quote fails v4's bid minimum or spread limit,
+ * when `maxSpreadPctOfMid` is given; Pluto off or paused).
+ */
+function followTheMidOf(input: VolFarmerV4RoundInput, symbol: string, contract: { expiry: string; strike: number; right: "C" | "P" }, side: "sell" | "buy", maxSpreadPctOfMid: number | null): PlutoFollowTheMid {
+  return {
+    priceNow: async () => {
+      const state = await loadPlutoState();
+      if (state.mode !== "on" || state.paused) return null;
+      const [live] = await input.marketWatch.burst(symbol, [contract]);
+      const twoSided = live && live.bid !== null && live.ask !== null && live.bid > 0 && live.ask > live.bid ? { bid: live.bid, ask: live.ask } : null;
+      if (twoSided === null) return null;
+      if (maxSpreadPctOfMid !== null && baselineQuoteRejection(twoSided, maxSpreadPctOfMid) !== null) return null;
+      return optionLimitPriceGivingUpOneCent(twoSided.bid, twoSided.ask, side);
+    },
+  };
 }
 
 /** Every leg reference the state holds. */
@@ -725,7 +745,8 @@ async function ordersToSend(order: VolFarmerV4PlannedOrder): Promise<VolFarmerV4
 }
 
 /**
- * One option order: the caps (an opening order), the live quote, v4's checks on it, the mid on the tick, then the executor.
+ * One option order: the caps (an opening order), the live quote, v4's checks on it, the limit (a Call or Put one cent past the
+ * mid, a LEAPS at the mid), then the executor.
  * Answers the action recorded (null when the caps held it before any action), whether an order went to IBKR, and why not.
  */
 async function sendOrder(context: {
@@ -755,9 +776,9 @@ async function sendOrder(context: {
   const [live] = await input.marketWatch.burst(ticker.symbol, [contract]);
   const now = new Date();
   const twoSided = live && live.bid !== null && live.ask !== null && live.bid > 0 && live.ask > live.bid ? { bid: live.bid, ask: live.ask } : null;
-  const limitPrice = twoSided ? optionMidLimitPrice(twoSided.bid, twoSided.ask, item.side) : null;
-  const quoteRejection = twoSided ? baselineQuoteRejection(twoSided, farmer.maxSpreadPctOfMid) : null;
   const isLeaps = item.contract.strategyKey === "leaps";
+  const limitPrice = twoSided ? (isLeaps ? optionMidLimitPrice : optionLimitPriceGivingUpOneCent)(twoSided.bid, twoSided.ask, item.side) : null;
+  const quoteRejection = twoSided ? baselineQuoteRejection(twoSided, farmer.maxSpreadPctOfMid) : null;
   const isPut = item.contract.right === "P";
   // The Calls are held to v4's Calls' range, the Puts to |delta| at most its Put |delta|; a LEAPS has no range.
   const deltaContext: StrategyDeltaContext = { minAbsDelta: isPut ? 0 : farmer.callMinAbsDelta, maxAbsDelta: isPut ? v2.putMaxAbsDelta : farmer.callMaxAbsDelta, forwardAnchor: context.forwardAnchors.get(item.contract.expiry) ?? null, riskFreeRate: clock.riskFreeRate, todayIso: clock.todayIso, closeMinutesEt: clock.closeMinutesEt };
@@ -823,7 +844,16 @@ async function sendOrder(context: {
     round.committedThisRound += item.contract.strategyKey === "cash_secured_put" ? item.contract.strike * 100 * item.contracts : item.contract.strategyKey === "leaps" ? limitPrice! * 100 * item.contracts : buysShares ? stockPrice * 100 * item.contracts : 0;
   }
   input.trackWatch(
-    watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: item.side, multiplier: 100, ...(result.otherReferenceLegs ? { otherLegs: result.otherReferenceLegs } : {}) }, description: result.detail, cancelByMs: input.cancelByMs }),
+    watchPlutoOrder(input.api, settings, {
+      actionId,
+      orderId: result.orderId,
+      symbol: ticker.symbol,
+      reference: { price: limitPrice!, side: item.side, multiplier: 100, ...(result.otherReferenceLegs ? { otherLegs: result.otherReferenceLegs } : {}) },
+      description: result.detail,
+      cancelByMs: input.cancelByMs,
+      // A Call on shares held or a Put follows the mid; a Call that buys its shares with it (two legs) and a LEAPS do not.
+      ...(!isLeaps && !buysShares ? { followTheMid: followTheMidOf(input, ticker.symbol, contract, item.side, farmer.maxSpreadPctOfMid) } : {}),
+    }),
     result.orderId,
     ticker.symbol,
   );

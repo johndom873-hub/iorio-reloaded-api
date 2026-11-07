@@ -61,12 +61,12 @@ describe("hashAnalysisLabValues", () => {
     expect(hashAnalysisLabValues({ ...base, settings })).not.toBe(hashAnalysisLabValues({ ...base, trial: { accountDollars: 500_000 }, settings }));
   });
 
-  it("covers only what an analysis reads: v4's section, the fills' spread share and Pluto's window", () => {
+  it("covers only what an analysis reads: v4's section and Pluto's window, not the Spread cost share (v4 fills one cent past the mid)", () => {
     const settings = { kellyFraction: 0.5, decisionMaker: "vol_farmer_v4", pluto, trading, baseline: { ladderRungs: 5 }, volFarmerV4: { firstPositionPct: 80 } } as unknown as BacktestSettings;
     const hash = hashAnalysisLabValues({ ...base, settings });
     const elsewhere = { ...settings, kellyFraction: 0.25, decisionMaker: "baseline", baseline: { ladderRungs: 4 }, pluto: { ...pluto, capitalBudgetPct: 80 }, trading: { ...trading, maxOrderPctOfPortfolio: 20 } } as unknown as BacktestSettings;
     expect(hashAnalysisLabValues({ ...base, settings: elsewhere })).toBe(hash);
-    expect(hashAnalysisLabValues({ ...base, settings: { ...settings, trading: { ...trading, spreadCostChargedPct: 50 } } as unknown as BacktestSettings })).not.toBe(hash);
+    expect(hashAnalysisLabValues({ ...base, settings: { ...settings, trading: { ...trading, spreadCostChargedPct: 50 } } as unknown as BacktestSettings })).toBe(hash);
     expect(hashAnalysisLabValues({ ...base, settings: { ...settings, volFarmerV4: { firstPositionPct: 70 } } as unknown as BacktestSettings })).not.toBe(hash);
   });
 

@@ -32,6 +32,7 @@ describe("buildPlutoHowItWorks", () => {
     const { example, ...values } = buildPlutoHowItWorks(settings, figures).volFarmerV4;
     expect(values).toEqual({
       callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, minimumBid: 0.05, callMaxCommissionPctOfPremium: 20, firstPositionPct: 80,
+      optionCentsGivenUp: 1, followTheMidCheckSeconds: 30, maxLimitChangesPerOrder: 10,
       putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepRule: "implied_move_at_put_sale", stepBelowFirstBreakEvenPct: 15,
       leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAllocationPct: 10,
       rebalanceBandPct: 20, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45,
@@ -43,12 +44,14 @@ describe("buildPlutoHowItWorks", () => {
     // floor(192,000 ÷ 13,000.50) = 14. Step 60% × √(21 ÷ 252) = 17.32%, so the Puts are struck at most 96 × (1 − 17.32%) =
     // 79.37. The LEAPS is bought half a Step, 8.66%, below B-E2 and spends at most 10% of the 240,000. No top-up cap (0): all eight
     // lots are bought, 19 × 10,000.50 + 8 × 7,000.50 = 246,013.50 in. At 15:29 the 19 $100 Calls, the stock at $101, are bought
-    // back at the $1.10 mid: 19 × 110 = 2,090, plus 19 × $0.68 = 12.92 commission.
+    // back one cent past the mid of 1.05 / 1.15, at 1.11: 19 × 111 = 2,109, plus 19 × $0.68 = 12.92 commission. A Call quoted
+    // 1.49 / 1.52 is sold at 1.50 (the mid 1.505 rounded up, less a cent).
     expect(example).toMatchObject({
       plutoBookValue: 1_000_000, allocationPct: 20, pot: 240_000, stockPrice: 100, lots: 19, targetDollars: 192_000, bandDollars: 48_000,
       fallPrice: 70, valueAfterFall: 133_000, lotsAfterFallTopUp: 27, topUpCapDollars: null, moneyInAfterFallTopUp: 246_013.5, risePrice: 130, valueAfterRise: 247_000, lotsAfterRiseTrim: 14,
       firstBreakEven: 96, impliedVolatilityPct: 60, leapsCap: 24_000,
-      buyBackTimeEt: "15:29", buyBackStockPrice: 101, buyBackMid: 1.1, buyBackCostDollars: 2_090, buyBackCommissionDollars: 12.92,
+      saleBid: 1.49, saleAsk: 1.52, saleLimit: 1.5,
+      buyBackTimeEt: "15:29", buyBackStockPrice: 101, buyBackBid: 1.05, buyBackAsk: 1.15, buyBackLimit: 1.11, buyBackCostDollars: 2_109, buyBackCommissionDollars: 12.92,
     });
     expect(example.stepPct).toBeCloseTo(17.3205, 4);
     expect(example.putStrikeCap).toBeCloseTo(79.3723, 4);
@@ -72,8 +75,8 @@ describe("buildPlutoHowItWorks", () => {
   it("times the buyback from the window's end, and quotes the setting as it is", () => {
     const values = buildPlutoHowItWorks({ ...settings, windowEndEt: "15:00", volFarmerV4CallsInTheMoneyAtLastLook: "bought_back_before_weekends" }, figures).volFarmerV4;
     expect(values).toMatchObject({ callsInTheMoneyAtLastLook: "bought_back_before_weekends", buyBackStartsEt: "14:58", buyBackCancelledAtEt: "15:58", example: { buyBackTimeEt: "14:59" } });
-    // A 140% allowance doubles the pot to 480,000: 38 lots, the mockup's $4,180 + $25.84.
-    expect(buildPlutoHowItWorks({ ...settings, excessAllowancePct: 140 }, figures).volFarmerV4.example).toMatchObject({ pot: 480_000, lots: 38, buyBackCostDollars: 4_180, buyBackCommissionDollars: 25.84 });
+    // A 140% allowance doubles the pot to 480,000: 38 lots, 38 × 111 = $4,218 + $25.84.
+    expect(buildPlutoHowItWorks({ ...settings, excessAllowancePct: 140 }, figures).volFarmerV4.example).toMatchObject({ pot: 480_000, lots: 38, buyBackCostDollars: 4_218, buyBackCommissionDollars: 25.84 });
   });
 
   it("raises the example's pot by the excess allowance", () => {

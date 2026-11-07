@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { optionMidLimitPrice, roundOptionPriceToCent } from "./optionLimitPrice.js";
+import { optionLimitPriceGivingUpOneCent, optionMidLimitPrice, roundOptionPriceToCent } from "./optionLimitPrice.js";
 
 describe("roundOptionPriceToCent", () => {
   it("rounds a sell up and a buy down to the cent, so neither gives up anything past the mid", () => {
@@ -24,5 +24,21 @@ describe("optionMidLimitPrice", () => {
     expect(optionMidLimitPrice(3.2, 3.23, "sell")).toBe(3.22);
     expect(optionMidLimitPrice(1.1, 1.2, "sell")).toBe(1.15);
     expect(optionMidLimitPrice(0.01, 0.02, "buy")).toBe(0.01);
+  });
+});
+
+describe("optionLimitPriceGivingUpOneCent", () => {
+  it("gives up one cent past the rounded mid", () => {
+    expect(optionLimitPriceGivingUpOneCent(1.49, 1.52, "sell")).toBe(1.5);
+    expect(optionLimitPriceGivingUpOneCent(1.49, 1.52, "buy")).toBe(1.51);
+    expect(optionLimitPriceGivingUpOneCent(2.81, 3.15, "sell")).toBe(2.97);
+    expect(optionLimitPriceGivingUpOneCent(2.81, 3.15, "buy")).toBe(2.99);
+  });
+
+  it("stops at the bid for a sell and at the ask for a buy", () => {
+    expect(optionLimitPriceGivingUpOneCent(0.67, 0.68, "sell")).toBe(0.67);
+    expect(optionLimitPriceGivingUpOneCent(1.49, 1.51, "sell")).toBe(1.49);
+    expect(optionLimitPriceGivingUpOneCent(0.67, 0.68, "buy")).toBe(0.68);
+    expect(optionLimitPriceGivingUpOneCent(1.0, 1.0, "sell")).toBe(1.0);
   });
 });

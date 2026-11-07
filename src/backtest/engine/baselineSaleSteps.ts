@@ -2,6 +2,7 @@ import { yieldOnExposure } from "../../lib/contractValuation.js";
 import { blackScholesDelta, forwardAtSpot, impliedVolatilityFromPrice, parityImpliedForward, yearsBetweenIsoDates } from "../../lib/impliedVolatilitySurface.js";
 import { daysToExpiry } from "../../lib/optionContractLabel.js";
 import { contractKey } from "../../lib/optionContractKey.js";
+import { optionLimitPriceGivingUpOneCent } from "../../lib/optionLimitPrice.js";
 import type { BacktestBaselineSettings } from "../backtestTypes.js";
 import { computeSaleFillPrice, sharesPerContract } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
@@ -16,6 +17,21 @@ import type { CommissionEstimator, StockCommissionEstimator } from "../../lib/co
 export const baselineMinimumBid = 0.05;
 export const baselineMaxVolumeShare = 0.2;
 export const roundedStrike = (strike: number) => Math.round(strike * 10_000) / 10_000;
+
+/**
+ * How a sale the candidates rank fills (per share, as traded). "spread_share": the mid less spreadShareCharged of the
+ * half-spread (the Steady Stake: trading.spreadCostChargedPct ÷ 100; 0 is the mid). "one_cent_past_mid": Vol Farmer v4's
+ * price (Marcelo 2026-11-07), the one Pluto's orders carry (optionLimitPriceGivingUpOneCent): the mid rounded up to the
+ * cent, less a cent, never below the bid. Bid 1.49 / ask 1.52 sells at 1.50; 0.67 / 0.68 at 0.67.
+ */
+export type BaselineSaleFill = { rule: "spread_share"; spreadShareCharged: number } | { rule: "one_cent_past_mid" };
+
+/** Vol Farmer v4's Calls and Puts, in the lab, the Analyse window and Pluto's planning alike. */
+export const volFarmerV4SaleFill: BaselineSaleFill = { rule: "one_cent_past_mid" };
+
+export function baselineSaleFillPrice(bid: number, ask: number, saleFill: BaselineSaleFill): number {
+  return saleFill.rule === "one_cent_past_mid" ? optionLimitPriceGivingUpOneCent(bid, ask, "sell") : computeSaleFillPrice(bid, ask, saleFill.spreadShareCharged);
+}
 
 export interface BaselineCandidate {
   expiry: string;
@@ -122,8 +138,8 @@ export interface BaselineCandidateInput {
    */
   sizeLimit?: "bid_size" | "none";
   settings: Pick<BacktestBaselineSettings, "minAbsDelta" | "maxAbsDelta" | "minDte" | "maxDte" | "maxSpreadPctOfMid">;
-  /** λ: the share of the half-spread a fill gives up. */
-  spreadShareCharged: number;
+  /** How a sale fills: the price its premium yield is ranked on and the fill the book records. */
+  saleFill: BaselineSaleFill;
   isHeld(contract: { expiry: string; strike: number }): boolean;
   /** The trading sessions from today's to an expiry's, both in full (tradingSessionsHeld.ts): what a premium yield is annualized over. */
   tradingSessionsThrough(expiry: string): number;
@@ -247,7 +263,7 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
       rejections.alreadyHeld++;
       continue;
     }
-    const fillPrice = computeSaleFillPrice(bid, ask, input.spreadShareCharged);
+    const fillPrice = baselineSaleFillPrice(bid, ask, input.saleFill);
     // Worked out once a contract of the expiry has passed the range checks: only those are annualized.
     const sessionsHeld = (expiryFigures.sessionsHeld ??= input.tradingSessionsThrough(quote.expiry));
     const { timeValue, premiumYield } = baselineSaleYield({ isCall, fillPrice, strike: quote.strike, stockPrice: input.stockPrice, sessionsHeld, commissions: input.commissions });

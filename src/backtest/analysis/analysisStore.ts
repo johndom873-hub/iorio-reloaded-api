@@ -91,12 +91,13 @@ export function analysisVolFarmerV4Of({ settings, tickerValues, trial }: Pick<An
 /**
  * The lab values an analysis reads: v4's section as it runs it (analysisVolFarmerV4Of: in the code's shape, withCodeKeys,
  * so a setting added at its default or one removed leaves runs current; with the ticker's own values on top, so a lab
- * change to a value the ticker holds leaves its analysis current), the spread share fills give up, Pluto's window the
- * looks keep to, and the default account. A change to anything else leaves the hash as it was.
+ * change to a value the ticker holds leaves its analysis current), Pluto's window the looks keep to, and the default
+ * account. A change to anything else leaves the hash as it was; the Spread cost share is not read since v4's Calls, Puts
+ * and buybacks fill one cent past the mid (2026-11-07).
  */
 function analysisReadValues(values: AnalysisHashedValues) {
   const { settings, defaultPotDollars, trial } = values;
-  return { defaultPotDollars, trial, settings: { volFarmerV4: analysisVolFarmerV4Of(values), trading: { spreadCostChargedPct: settings?.trading?.spreadCostChargedPct }, pluto: { windowStartEt: settings?.pluto?.windowStartEt, windowEndEt: settings?.pluto?.windowEndEt } } };
+  return { defaultPotDollars, trial, settings: { volFarmerV4: analysisVolFarmerV4Of(values), pluto: { windowStartEt: settings?.pluto?.windowStartEt, windowEndEt: settings?.pluto?.windowEndEt } } };
 }
 
 export const hashAnalysisLabValues = (values: AnalysisHashedValues) => createHash("sha256").update(stableJson(analysisReadValues(values))).digest("hex").slice(0, 32);
@@ -142,7 +143,7 @@ export function analysisLabValuesOf(lab: { settings: BacktestSettings; defaultPo
   const potShareOfAccount = oneTickerPotShareOfAccount(v4);
   return {
     ...stored,
-    effective: { accountDollars, potDollars: accountDollars * potShareOfAccount, potShareOfAccount, firstPositionShare: v4.firstPositionPct / 100, v4, spreadShareCharged: lab.settings.trading.spreadCostChargedPct / 100 },
+    effective: { accountDollars, potDollars: accountDollars * potShareOfAccount, potShareOfAccount, firstPositionShare: v4.firstPositionPct / 100, v4 },
     hash: hashAnalysisLabValues(stored),
   };
 }

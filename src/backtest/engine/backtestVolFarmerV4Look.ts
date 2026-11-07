@@ -1,5 +1,6 @@
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib/commissionEstimate.js";
 import { formatWholeDollars } from "../../lib/formatWholeDollars.js";
+import { optionLimitPriceGivingUpOneCent } from "../../lib/optionLimitPrice.js";
 import { describeOptionContract } from "../../lib/optionContractLabel.js";
 import { effectiveAllocationPctBySymbol, tickerPotShare } from "../../lib/tickerAllocation.js";
 import { openCandidateId } from "./candidateIds.js";
@@ -11,7 +12,7 @@ import { markOfTwoSidedQuote } from "./backtestOptionMarks.js";
 import { captureLookTimeEt, lookInstantMs } from "./backtestTickerInputs.js";
 import { noteBaselineForwardAnchors, roundedStrike, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
 import { buyBackCoveredCallKeepingShares, buyLeapsCall, buyShares, expirySettlementInstant, openCashSecuredPut, openCoveredCall, sellLeapsCall, sellShares } from "./ledger/ledgerEvents.js";
-import { optionCommissionDollars, optionPurchaseFillPrice, stockCommissionDollars } from "./ledger/ledgerFills.js";
+import { optionCommissionDollars, stockCommissionDollars } from "./ledger/ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerFreeCash, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
 import { cycleSplitFactorFor, cycleStartSplitFactor, findLeg, isSymbolFlat, legsOfPosition, positionOrdinalOf, positionsOfSymbol, requirePosition, unexitedLegsOf, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { newVolFarmerV4SymbolState, runVolFarmerV4Turn, volFarmerV4BreakEven, volFarmerV4TurnOrder, type VolFarmerV4Book, type VolFarmerV4CashCut, type VolFarmerV4Market, type VolFarmerV4Position, type VolFarmerV4PositionCashFlow, type VolFarmerV4SymbolState, type VolFarmerV4SharesOrder } from "./volFarmerV4Steps.js";
@@ -135,7 +136,6 @@ function marketOf(context: BacktestLookContext, lookSymbol: BacktestLookSymbol, 
     tradingSessionsThrough: (expiry) => context.calendar.sessionsHeld(todayIso, expiry),
     priceToCycleScale: cycleSplitFactorFor(ledger, symbol, lookSymbol.splitFactorToday, at) / lookSymbol.splitFactorToday,
     optionContractsRepresentable: lookSymbol.optionContractsRepresentable,
-    spreadShareCharged: context.settings.trading.spreadCostChargedPct / 100,
     commissions: volFarmerV2Commissions,
     optionCommissionDollars,
     stockCommissionDollars,
@@ -147,10 +147,11 @@ function marketOf(context: BacktestLookContext, lookSymbol: BacktestLookSymbol, 
 /**
  * Vol Farmer v3's buyback at the day's last look (Marcelo 2026-11-02; callsInTheMoneyAtLastLook "bought_back"): each Call
  * of the symbol's positions expiring today, still open with the look's price at or above its strike, is bought back on the
- * look's quotes as any buyback fills (mid + spread cost share × half-spread) with its commission, its shares kept through
- * the night as when it expires worthless; the position's P&L and break-even take the cost. A Call without a two-sided quote
- * at the look is left to the close. NVDA 220 Call, NVDA 223.99 at 15:30, quoted 3.95 / 4.10, spread cost share 0: 25
- * contracts bought back at 4.025, $10,062.50 + $17.00.
+ * look's quotes one cent past the mid as Pluto's buyback order is priced (Marcelo 2026-11-07, optionLimitPriceGivingUpOneCent:
+ * the mid rounded down to the cent, plus a cent, never above the ask, on the quote as traded) with its commission, its
+ * shares kept through the night as when it expires worthless; the position's P&L and break-even take the cost. A Call
+ * without a two-sided quote at the look is left to the close. NVDA 220 Call, NVDA 223.99 at 15:30, quoted 3.95 / 4.10
+ * (mid 4.025): 25 contracts bought back at 4.03, $10,075.00 + $17.00.
  */
 export function buyBackVolFarmerV4CallsInTheMoney(input: {
   ledger: SimulatedLedger;
@@ -160,8 +161,6 @@ export function buyBackVolFarmerV4CallsInTheMoney(input: {
   /** The look's price as traded today. */
   stockPrice: number;
   splitFactorToday: number;
-  /** The share of the half-spread a fill gives up (trading.spreadCostChargedPct ÷ 100): 0 buys back at the mid. */
-  spreadShareCharged: number;
   /** The look's two-sided quote of a Call of today's expiry (strike as traded), when it has one. */
   quoteOf: (strike: number) => { bid: number; ask: number } | undefined;
   priceByLegId: Map<string, number>;
@@ -188,7 +187,7 @@ export function buyBackVolFarmerV4CallsInTheMoney(input: {
         notes.push(`${symbol}: ${contractLabel} in the money at ${lookTimeEt} (${stockPrice.toFixed(2)}) but quoted on one side only: left to the close`);
         continue;
       }
-      const fillPrice = optionPurchaseFillPrice(quote.bid, quote.ask, input.spreadShareCharged);
+      const fillPrice = optionLimitPriceGivingUpOneCent(quote.bid, quote.ask, "buy");
       const contracts = leg.quantity;
       const cost = fillPrice * sharesPerContract * contracts + optionCommissionDollars(contracts);
       const actionId = input.nextActionId();

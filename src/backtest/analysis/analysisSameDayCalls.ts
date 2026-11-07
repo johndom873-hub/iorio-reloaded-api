@@ -1,5 +1,5 @@
 import type { BacktestSymbolFile } from "../engine/backtestSymbolFile.js";
-import { noteBaselineForwardAnchors, selectBaselineCandidates, type BaselineCommissions, type BaselineForwardAnchor } from "../engine/baselineSaleSteps.js";
+import { noteBaselineForwardAnchors, selectBaselineCandidates, volFarmerV4SaleFill, type BaselineCommissions, type BaselineForwardAnchor } from "../engine/baselineSaleSteps.js";
 import { captureLookTimeEt, lookInstantMs } from "../engine/backtestTickerInputs.js";
 import { expirySettlementInstant } from "../engine/ledger/ledgerEvents.js";
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib/commissionEstimate.js";
@@ -19,8 +19,6 @@ export interface SameDayCallScanSettings {
   callMinAbsDelta: number;
   callMaxAbsDelta: number;
   maxSpreadPctOfMid: number;
-  /** λ: the share of the half-spread a fill gives up (the lab's trading.spreadCostChargedPct ÷ 100; 0 = the mid). */
-  spreadShareCharged: number;
 }
 
 export interface SameDayCallScanDay {
@@ -79,7 +77,8 @@ export function scanSameDayCalls(file: BacktestSymbolFile, day: SameDayCallScanD
     previousSessionVolumeByContract: null,
     sizeLimit: "bid_size",
     settings: { minAbsDelta: settings.callMinAbsDelta, maxAbsDelta: settings.callMaxAbsDelta, minDte: 0, maxDte: 0, maxSpreadPctOfMid: settings.maxSpreadPctOfMid },
-    spreadShareCharged: settings.spreadShareCharged,
+    // Priced as v4 sells (Marcelo 2026-11-07): one cent past the mid, never below the bid.
+    saleFill: volFarmerV4SaleFill,
     isHeld: () => false,
     tradingSessionsThrough: (expiry) => sessionsHeldAmong(openDays, day.date, expiry),
   });

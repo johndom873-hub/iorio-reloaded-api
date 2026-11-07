@@ -1156,7 +1156,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
             .map((leg) => ({ expiry: todayIso, strike: leg.strikePrice! / priceToCycleScale, right: "C" as const }));
           if (heldCalls.length === 0) continue;
           const quoteByContract = twoSidedQuoteByContract(intradayQuotesOfContracts(entry, lastLookTimeEt, heldCalls, range), new Set(heldCalls.map((contract) => roundedStrike(contract.strike))));
-          const bought = buyBackVolFarmerV4CallsInTheMoney({ ledger, todayIso, lookTimeEt: lastLookTimeEt, symbol: entry.symbol, stockPrice: adjustedPrice * splitFactorToday(entry), splitFactorToday: splitFactor, spreadShareCharged: settings.trading.spreadCostChargedPct / 100, quoteOf: (strike) => quoteByContract.get(markKey(todayIso, strike, "C")), priceByLegId, nextActionId, gate: settings.decisionMaker });
+          const bought = buyBackVolFarmerV4CallsInTheMoney({ ledger, todayIso, lookTimeEt: lastLookTimeEt, symbol: entry.symbol, stockPrice: adjustedPrice * splitFactorToday(entry), splitFactorToday: splitFactor, quoteOf: (strike) => quoteByContract.get(markKey(todayIso, strike, "C")), priceByLegId, nextActionId, gate: settings.decisionMaker });
           actions.push(...bought.actions);
           notes.push(...bought.notes);
           boughtBack += bought.actions.length;

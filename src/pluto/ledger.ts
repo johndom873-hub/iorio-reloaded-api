@@ -174,6 +174,7 @@ export type PlutoEventType =
   | "connection_restored"
   | "stress_override_changed"
   | "order_adopted"
+  | "order_repriced"
   | "holdings_adopted"
   | "call_skipped_commission"
   | "readiness_check"
@@ -217,6 +218,7 @@ export const plutoEventCategoryByType: Record<PlutoEventType | LegacyPlutoEventT
   order_confirmed: "trading",
   order_outcome: "trading",
   order_adopted: "trading",
+  order_repriced: "trading",
   call_skipped_commission: "trading",
   pass_started: "info",
   pass_skipped: "info",

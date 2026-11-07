@@ -7,12 +7,14 @@ import {
   buildAdaptiveAlgoFields,
   buildIbkrOrder,
   cancelSubmittedOrder,
+  changeSubmittedOrderLimit,
   gcd,
   placeConfirmedOrder,
   resolveLegContractIds,
   type OrderPlacementDependencies,
 } from "./ibkrGatewayOrderPlacement.js";
 import type { OrderLegPayload, OrderRequestPayload } from "./ibkrGatewayOrderPayload.js";
+import { RecentLimitPriceChanges } from "./ibkrGatewayRecentLimitPriceChanges.js";
 
 config();
 if (!process.env.TEST_DATABASE_URL) throw new Error("TEST_DATABASE_URL must be set to run the order placement tests.");
@@ -263,6 +265,12 @@ describe("order placement against order_requests", () => {
       publishPulse: async (edgeId) => void publishedPulses.push(edgeId),
       resolveContractId: state.resolver.resolveContractId,
       allocateContractResolutionRequestId: state.resolver.allocateContractResolutionRequestId,
+      limitPriceRefusal: async () => {
+        callOrder.push("limitPriceRefusal");
+        return state.priceBlock?.reason ?? null;
+      },
+      fetchTradingHalt: async () => ({ enabled: false, reason: null }),
+      recentLimitPriceChanges: new RecentLimitPriceChanges(),
     };
   });
 
@@ -475,6 +483,63 @@ describe("order placement against order_requests", () => {
         await cancelSubmittedOrder(orderId, dependencies);
       }
       expect(ib.cancelOrder).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("changeSubmittedOrderLimit (follow the mid)", () => {
+    const request = { limitPrice: 1.29, requestedAt: "2026-11-09T15:01:30.000Z" };
+    const waitingChange = (): OrderRequestPayload => ({ ...singleLegPayload(), limitPriceChangeRequest: request });
+
+    beforeEach(() => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      state.binding = { status: "ok" as never, reason: "ok" };
+    });
+
+    it("sends the same IBKR order again at the new limit after the live check, and records the change", async () => {
+      const orderId = await insertOrder("submitted", waitingChange(), { ibkr_order_id: 7790 });
+      await changeSubmittedOrderLimit(orderId, dependencies);
+      expect(callOrder).toContain("limitPriceRefusal");
+      expect(ib.placeOrder).toHaveBeenCalledTimes(1);
+      const [ibkrOrderId, , order] = ib.placeOrder.mock.calls[0]!;
+      expect(ibkrOrderId).toBe(7790);
+      expect(order).toMatchObject({ orderType: OrderType.LMT, lmtPrice: 1.29, totalQuantity: 2, account: "DU1234567" });
+      const row = await rowOf(orderId);
+      expect(row.status).toBe("submitted");
+      expect(row.payload.legs[0].unitPrice).toBe(1.29);
+      expect(row.payload.limitPriceChangeRequest).toBeUndefined();
+      expect(row.payload.limitPriceChanges).toEqual([{ at: expect.any(String), from: 1.3, to: 1.29 }]);
+      expect(dependencies.recentLimitPriceChanges).toBeInstanceOf(RecentLimitPriceChanges);
+      expect((dependencies.recentLimitPriceChanges as RecentLimitPriceChanges).take(7790)).toEqual({ orderRequestId: orderId, from: 1.3, to: 1.29, sentAtMs: expect.any(Number) });
+    });
+
+    it("drops a change the live check refuses: nothing sent, the order keeps its limit, the change says why", async () => {
+      const orderId = await insertOrder("submitted", waitingChange(), { ibkr_order_id: 7791 });
+      state.priceBlock = { reason: "Limit price 1.29 is 0.10 below the live mid 1.39", ended: false };
+      await changeSubmittedOrderLimit(orderId, dependencies);
+      expect(ib.placeOrder).not.toHaveBeenCalled();
+      const row = await rowOf(orderId);
+      expect(row.payload.legs[0].unitPrice).toBe(1.3);
+      expect(row.payload.limitPriceChangeRequest).toBeUndefined();
+      expect(row.payload.limitPriceChanges).toEqual([{ at: expect.any(String), from: 1.3, to: 1.29, refused: "Limit price 1.29 is 0.10 below the live mid 1.39" }]);
+    });
+
+    it("sends no change while trading is halted", async () => {
+      const orderId = await insertOrder("submitted", waitingChange(), { ibkr_order_id: 7792 });
+      dependencies.fetchTradingHalt = async () => ({ enabled: true, reason: "drill" });
+      await changeSubmittedOrderLimit(orderId, dependencies);
+      expect(ib.placeOrder).not.toHaveBeenCalled();
+      expect((await rowOf(orderId)).payload.limitPriceChanges[0].refused).toBe("trading is halted (drill)");
+    });
+
+    it("changes nothing on an order no longer working, nor on a two-leg order", async () => {
+      const filled = await insertOrder("filled", waitingChange(), { ibkr_order_id: 7793 });
+      await changeSubmittedOrderLimit(filled, dependencies);
+      const combo = await insertOrder("submitted", { ...payloadOf([stockLeg(), optionLeg()]), limitPriceChangeRequest: request }, { ibkr_order_id: 7794 });
+      await changeSubmittedOrderLimit(combo, dependencies);
+      expect(ib.placeOrder).not.toHaveBeenCalled();
+      expect((await rowOf(filled)).payload.limitPriceChangeRequest).toEqual(request);
+      expect((await rowOf(combo)).payload.limitPriceChanges).toBeUndefined();
+      expect((await rowOf(combo)).payload.limitPriceChangeRequest).toBeUndefined();
     });
   });
 });

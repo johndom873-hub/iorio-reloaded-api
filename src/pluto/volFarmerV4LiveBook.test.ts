@@ -66,7 +66,6 @@ function marketOf(stockPrice: number): VolFarmerV4Market {
     tradingSessionsThrough: () => 9,
     priceToCycleScale: 1,
     optionContractsRepresentable: true,
-    spreadShareCharged: 0,
     commissions: { option: flatCommissionEstimator, stock: flatStockCommissionEstimator },
     optionCommissionDollars,
     stockCommissionDollars,

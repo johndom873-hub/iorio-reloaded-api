@@ -10,7 +10,10 @@ import { readGitSha } from "./lib/readGitSha.js";
 import { getCurrentAccountBinding, getExpectedAccountId, initializeAccountBinding, startAccountBindingWatch } from "./ibkr/ibkrGatewayAccountBinding.js";
 import { readExpirySettlementMode } from "./lib/expirySettlementAudit.js";
 import { persistentIbkrConnection } from "./ibkr/ibkrGatewayPersistentConnection.js";
-import { cancelSubmittedOrder, placeConfirmedOrder, type OrderPlacementDependencies } from "./ibkr/ibkrGatewayOrderPlacement.js";
+import { cancelSubmittedOrder, changeSubmittedOrderLimit, placeConfirmedOrder, type OrderPlacementDependencies } from "./ibkr/ibkrGatewayOrderPlacement.js";
+import { limitChangeableOrderStatuses } from "./lib/orderRequestStatuses.js";
+import { RecentLimitPriceChanges } from "./ibkr/ibkrGatewayRecentLimitPriceChanges.js";
+import { fetchTradingHalt } from "./lib/platformControls.js";
 import { createExecutionRecorder, handleOrderErrorEvent, handleOrderStatusEvent, reconcileStaleOrderRequests as reconcileStaleOrders } from "./ibkr/ibkrGatewayOrderTracking.js";
 import { resolveContractId } from "./ibkr/ibkrGatewayResolveContractId.js";
 import { allocateContractResolutionRequestId } from "./ibkr/contractResolutionRequestIds.js";
@@ -26,7 +29,7 @@ import { clearDownState, notifyDownThrottled } from "./lib/throttledAlert.js";
 import { formatDurationHuman } from "./lib/formatDurationHuman.js";
 import { publishNotification, publishPulse } from "./lib/notificationChannel.js";
 import { endOrderIfPlacementBlocked } from "./lib/orderPlacementEnforcement.js";
-import { endOrderIfLimitPriceUnsafe } from "./ibkr/ibkrGatewayLimitPriceCheck.js";
+import { endOrderIfLimitPriceUnsafe, limitPriceRefusal } from "./ibkr/ibkrGatewayLimitPriceCheck.js";
 import { captureExecutionQuote } from "./ibkr/ibkrGatewayExecutionQuotes.js";
 import { requestCancelOfUnfilledOrders } from "./ibkr/ibkrGatewayUnfilledOrderSweep.js";
 import { alertOnStaleOrderRequests } from "./ibkr/ibkrGatewayStaleOrderAlert.js";
@@ -108,6 +111,9 @@ function notifyTelegramDeliveredWithinTimeout(message: string): Promise<boolean>
   return Promise.race([notifyTelegram(message), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), telegramNotifyTimeoutMs))]);
 }
 
+// The limit changes this process just sent (follow the mid): read by the error listener to tell a refused change from a failed order.
+const recentLimitPriceChanges = new RecentLimitPriceChanges();
+
 // Order placement lives in ibkr/ibkrGatewayOrderPlacement.ts (testable without this process); this wires in the real collaborators.
 const orderPlacementDependencies: OrderPlacementDependencies = {
   db,
@@ -121,6 +127,9 @@ const orderPlacementDependencies: OrderPlacementDependencies = {
   publishPulse,
   resolveContractId,
   allocateContractResolutionRequestId,
+  limitPriceRefusal: (payload, ib) => limitPriceRefusal(payload, ib),
+  fetchTradingHalt: () => fetchTradingHalt(db),
+  recentLimitPriceChanges,
 };
 
 function processCancelRequest(orderRequestId: string): Promise<void> {
@@ -131,10 +140,14 @@ function processOrderRequest(orderRequestId: string): Promise<void> {
   return placeConfirmedOrder(orderRequestId, orderPlacementDependencies);
 }
 
+function processLimitChange(orderRequestId: string): Promise<void> {
+  return changeSubmittedOrderLimit(orderRequestId, orderPlacementDependencies);
+}
+
 /**
- * The web dyno NOTIFYs the same channel for both a fresh confirm and a
- * cancel request, distinguished by the row's current status — dispatches to
- * whichever this row actually needs.
+ * The web dyno NOTIFYs the same channel for a fresh confirm, a cancel request
+ * and a limit change (follow the mid), distinguished by the row's current
+ * status — dispatches to whichever this row actually needs.
  */
 async function handleOrderRequestNotification(orderRequestId: string, knownStatus?: string): Promise<void> {
   // Don't start new order/cancel handling once a SIGTERM is draining the process for a deploy/restart
@@ -149,6 +162,8 @@ async function handleOrderRequestNotification(orderRequestId: string, knownStatu
     const status = knownStatus ?? (await db("order_requests").where({ id: orderRequestId }).first())?.status;
     if (status === "cancel_requested") {
       await processCancelRequest(orderRequestId);
+    } else if ((limitChangeableOrderStatuses as readonly string[]).includes(status ?? "")) {
+      await processLimitChange(orderRequestId);
     } else {
       await processOrderRequest(orderRequestId);
     }
@@ -236,6 +251,8 @@ async function listenForOrderRequests(): Promise<void> {
     try {
       const stuck = await db("order_requests").whereIn("status", ["confirmed", "cancel_requested"]).select("id", "status");
       for (const row of stuck) await handleOrderRequestNotification(row.id, row.status);
+      const changesWaiting = await db("order_requests").whereIn("status", limitChangeableOrderStatuses).whereRaw("payload \\? 'limitPriceChangeRequest'").select("id", "status");
+      for (const row of changesWaiting) await handleOrderRequestNotification(row.id, row.status);
       for (const id of await requestCancelOfUnfilledOrders()) {
         console.log(`Order ${id} has rested unfilled at IBKR past the Risk & Limits limit — cancelling.`);
         await publishNotification({ type: "order_status", orderId: id }).catch(() => {});
@@ -280,7 +297,7 @@ function setupOrderTrackingListeners(): void {
 
   // A rejected/errored order surfaces only as an error event keyed by the order id (see handleOrderErrorEvent).
   ib.on(EventName.error, (error, code, reqId) => {
-    void handleOrderErrorEvent(error, code, reqId, orderTrackingDependencies);
+    void handleOrderErrorEvent(error, code, reqId, { ...orderTrackingDependencies, recentLimitPriceChanges });
   });
 }
 

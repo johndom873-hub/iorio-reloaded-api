@@ -23,7 +23,7 @@ type RowDefinition = Omit<BacktestSettingRow, "now" | "group" | "section" | "app
 const rowDefinitionsBeforeVolFarmerV4: readonly RowDefinition[] = [
   { path: "fixed.earningsDateKnownCalendarDaysAhead", label: "Earnings dates known 30 days ahead", unit: "days", editable: false, note: "a report's date is seen from 30 calendar days before it: expiries spanning it are skipped only from then", fixedValue: earningsDateKnownCalendarDaysAhead },
 
-  { path: "trading.spreadCostChargedPct", label: "Spread cost share", unit: "percent", editable: true, note: "how much of the half-spread a fill gives up" },
+  { path: "trading.spreadCostChargedPct", label: "Spread cost share", unit: "percent", editable: true, note: "how much of the half-spread a Steady Stake fill gives up. Vol Farmer v4 does not use it: its Calls, Puts and buybacks fill one cent past the mid, as Pluto's orders are priced (bid 1.49, ask 1.52: a sale at 1.50, a buyback at 1.51), and its LEAPS have their own share" },
 
   { path: "pluto.windowStartEt", label: "Looks from", unit: "time", editable: false, note: "ET; a look every 30 minutes where the data files hold quotes (10:00 to 15:30)" },
   { path: "pluto.windowEndEt", label: "Looks until", unit: "time", editable: false, note: "ET; never later than 30 minutes before the close (12:30 on a 13:00 day)" },
@@ -740,6 +740,9 @@ const volFarmerV4Notes: Readonly<Record<string, string>> = {
   callMinAbsDelta: "the Call sold is the one with the highest premium yield (annualized) inside this |delta| range, on the expiry Calls and Puts expire sets, struck as Calls struck at least sets; |delta| from each quote's own implied volatility",
   putsStartCallYieldPct: "% a year: Puts start while the first position's Calls yield under this. At each look where the first position needs a new Call (none open), the best Call it can sell (the Calls' |delta| range, the expiry sold, struck as Calls struck at least sets) is measured by its premium yield; under this (no Call: 0%), Puts are sold with the rest of the pot (after the First position), beside the Calls",
   putMaxAbsDelta: "the Puts' highest |delta|: the Put sold is the one with the highest premium yield of the expiry sold (Calls and Puts expire) up to this |delta|, struck as Puts struck at most sets; as many contracts as the rest of the pot secures (strike × 100 each)",
+  leapsSpreadCostChargedPct: "how much of the half-spread a LEAPS purchase or sale gives up; a held LEAPS is valued at what selling it would bring. 33: about two-thirds of the way across the spread, bid $10 and ask $13 buy at $11.995 and sell at $11.005 (0 to 100). The Calls, Puts and buybacks don't use it: they fill one cent past the mid",
+  callsInTheMoneyAtLastLook:
+    "a Call expiring at today's close still open at the day's last look (15:30 on a full day) with the price at or above its strike: left to be assigned at the close, or bought back on that look's quotes one cent past the mid (the mid rounded down to the cent, plus a cent, never above the ask), the shares kept through the night (a Call quoted on one side only is left to the close), or bought back so only at the last session before a weekend (a Friday, or the Thursday before a Friday holiday). NVDA 220 Call, NVDA 223.99 at 15:30, quoted 3.95 / 4.10 (mid 4.025) on 2,500 shares: bought back at 4.03, $10,075.00 paid, the shares kept",
 };
 
 const volFarmerV4RowDefinitions: readonly RowDefinition[] = volFarmerV4SourcePaths.map((sourcePath) => {

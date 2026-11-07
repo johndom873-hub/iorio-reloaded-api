@@ -7,6 +7,8 @@ import type { PlacementBlock } from "../lib/orderPlacementEnforcement.js";
 import type { StoredGateEvaluation } from "../lib/orderPlacementGuard.js";
 import type { LimitPriceBlock } from "./ibkrGatewayLimitPriceCheck.js";
 import { buildContractFromConId, buildLegContract, computeNetLimitPrice, type AdaptivePriority, type OrderLegPayload, type OrderRequestPayload } from "./ibkrGatewayOrderPayload.js";
+import type { RecentLimitPriceChanges } from "./ibkrGatewayRecentLimitPriceChanges.js";
+import { limitChangeableOrderStatuses } from "../lib/orderRequestStatuses.js";
 
 // The worker's order placement, kept apart from ibkrGatewayWorker.ts (which starts the worker as soon as it is imported) and
 // taking everything it touches as parameters, so every guard, status transition and order shape can be tested without a
@@ -25,6 +27,12 @@ export interface OrderPlacementDependencies {
   publishPulse(edgeId: PulseEdgeId): Promise<void>;
   resolveContractId(ib: IBApi, contract: Contract, requestId: number): Promise<number | null>;
   allocateContractResolutionRequestId(): number;
+  /** The live limit-price check (ibkrGatewayLimitPriceCheck.ts) without ending the order: a limit change it refuses is dropped. */
+  limitPriceRefusal(payload: OrderRequestPayload, ib: IBApi): Promise<string | null>;
+  /** The trading halt as it is now: no limit change is sent while it is on. */
+  fetchTradingHalt(): Promise<{ enabled: boolean; reason: string | null }>;
+  /** The limit changes just sent, so an IBKR error on one reads as the change refused (handleOrderErrorEvent). */
+  recentLimitPriceChanges: Pick<RecentLimitPriceChanges, "remember" | "forget">;
 }
 
 export type ContractResolutionDependencies = Pick<OrderPlacementDependencies, "resolveContractId" | "allocateContractResolutionRequestId">;
@@ -236,5 +244,69 @@ export async function placeConfirmedOrder(orderRequestId: string, dependencies: 
       .where({ id: orderRequestId })
       .update({ status: "error", error_message: message, updated_at: db.fn.now() });
     await dependencies.notify(`🔥 Order request errored while placing with IBKR: ${payload.symbol} (id ${orderRequestId}).\n${message}`);
+  }
+}
+
+
+/**
+ * Changes a working single-leg order's limit at IBKR (follow the mid, lib/orderLimitPriceChanges.ts; route POST
+ * /orders/:id/reprice, which records the request on the payload and NOTIFYs). The same IBKR order is sent again with the
+ * new limit (placeOrder with its own order id), after the live limit-price check. The payload's limit and its change list
+ * are written before sending, conditioned on the order still working and the request being the one read, so a fill or a
+ * newer request wins. A change that is not sent is dropped with its reason in the list; the order keeps working.
+ */
+export async function changeSubmittedOrderLimit(orderRequestId: string, dependencies: OrderPlacementDependencies): Promise<void> {
+  const { db } = dependencies;
+  const ib = dependencies.getIb();
+  if (!ib) {
+    console.error(`processLimitChange(${orderRequestId}): no IBKR connection — change not sent, will retry on the next LISTEN/poll cycle.`);
+    return;
+  }
+  const orderRequest = await db("order_requests").where({ id: orderRequestId }).whereIn("status", limitChangeableOrderStatuses).first();
+  const payload = orderRequest?.payload as OrderRequestPayload | undefined;
+  const request = payload?.limitPriceChangeRequest;
+  if (!orderRequest || !payload || !request) return;
+  const leg = payload.legs.length === 1 ? payload.legs[0] : undefined;
+  const from = leg?.unitPrice ?? null;
+  const at = new Date().toISOString();
+  const { limitPriceChangeRequest: _sent, ...withoutRequest } = payload;
+  const stillTheRequest = (builder: ReturnType<typeof db>) =>
+    builder.where({ id: orderRequestId }).whereIn("status", limitChangeableOrderStatuses).whereRaw("payload->'limitPriceChangeRequest'->>'requestedAt' = ?", [request.requestedAt]);
+  const drop = async (reason: string) => {
+    console.warn(`processLimitChange(${orderRequestId}): limit change to ${request.limitPrice} not sent — ${reason}`);
+    const changes = from === null ? withoutRequest.limitPriceChanges : [...(withoutRequest.limitPriceChanges ?? []), { at, from, to: request.limitPrice, refused: reason }];
+    await stillTheRequest(db("order_requests")).update({ payload: { ...withoutRequest, ...(changes ? { limitPriceChanges: changes } : {}) }, updated_at: db.fn.now() });
+  };
+
+  if (!leg || from === null) return drop("only a single-leg order's limit is changed");
+  if (!orderRequest.ibkr_order_id) return drop("the order has no IBKR order id");
+  if (from === request.limitPrice) return drop("the limit is already that price");
+  const halt = await dependencies.fetchTradingHalt();
+  if (halt.enabled) return drop(`trading is halted${halt.reason ? ` (${halt.reason})` : ""}`);
+  if (dependencies.getCurrentAccountBinding().status !== "ok") return drop("the account binding is not confirmed");
+
+  const changedPayload: OrderRequestPayload = { ...withoutRequest, legs: [{ ...leg, unitPrice: request.limitPrice }] };
+  const refusal = await dependencies.limitPriceRefusal(changedPayload, ib);
+  if (refusal) return drop(refusal);
+  const built = await buildIbkrOrder(changedPayload, ib, dependencies);
+  if (!built) return drop("could not resolve the contract id");
+
+  const changes = [...(withoutRequest.limitPriceChanges ?? []), { at, from, to: request.limitPrice }];
+  const claimed = await stillTheRequest(db("order_requests")).update({ payload: { ...changedPayload, limitPriceChanges: changes }, updated_at: db.fn.now() }).returning("id");
+  if (claimed.length === 0) return; // filled, cancelled or asked again meanwhile: that wins
+
+  dependencies.recentLimitPriceChanges.remember(orderRequest.ibkr_order_id, { orderRequestId, from, to: request.limitPrice });
+  built.order.account = dependencies.getExpectedAccountId();
+  try {
+    console.log(`processLimitChange(${orderRequestId}): changing IBKR order ${orderRequest.ibkr_order_id} (${payload.symbol}) from ${from} to ${request.limitPrice}.`);
+    ib.placeOrder(orderRequest.ibkr_order_id, built.contract, built.order);
+    dependencies.publishPulse("ibkr-gateway").catch(() => {});
+  } catch (error) {
+    dependencies.recentLimitPriceChanges.forget(orderRequest.ibkr_order_id);
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`processLimitChange(${orderRequestId}): sending the change failed — ${reason}`);
+    await db("order_requests")
+      .where({ id: orderRequestId })
+      .update({ payload: { ...changedPayload, legs: [{ ...leg, unitPrice: from }], limitPriceChanges: [...changes.slice(0, -1), { at, from, to: request.limitPrice, refused: reason }] }, updated_at: db.fn.now() });
   }
 }

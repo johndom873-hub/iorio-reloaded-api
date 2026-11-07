@@ -38,6 +38,9 @@ import { fetchOrderLegFillsByOrderId } from "../lib/orderFills.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
 import { getCycleMarksHandler } from "./positionCycleMarks.js";
 import { agentLeaseRefusal, plutoAgentHolderHeader } from "../pluto/agentLease.js";
+import { isOptionLimitPriceOnTheCent, maxLimitPriceChangesPerOrder, type LimitPriceChangeRequest } from "../lib/orderLimitPriceChanges.js";
+import { limitChangeableOrderStatuses } from "../lib/orderRequestStatuses.js";
+import { fetchTradingHalt } from "../lib/platformControls.js";
 import { loadStrategyOrderGateContext } from "../pluto/strategyOrderGateContext.js";
 import type { StrategyOrderGateContext } from "../lib/strategyOrderGates.js";
 import { computeUnderlyingStockPriceByPosition, computeUnrealizedPnlByPosition, normalizeExpiryDate, roundToCents, sumSharesCommittedByCoveredCallPayloads, underlyingStockPriceKey, validateCoveredCallCoverage } from "../lib/positionOrderRules.js";
@@ -1740,6 +1743,52 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
         ? "Cancellation already requested for this order."
         : "This order has already reached a final status and can't be cancelled.",
   });
+});
+
+// Follow the mid (lib/orderLimitPriceChanges.ts): a working single-leg option order's limit changed at IBKR. The request is
+// recorded on the payload and the worker NOTIFYed; it runs the live limit-price check and sends the same IBKR order again
+// at the new limit (changeSubmittedOrderLimit), or drops the change with its reason. Not while trading is halted, at most
+// maxLimitPriceChangesPerOrder per order, and a Pluto order only from the agent holding Pluto's lease.
+positionsRouter.post("/orders/:id/reprice", async (request, response) => {
+  const limitPrice = request.body?.limitPrice;
+  if (!isOptionLimitPriceOnTheCent(limitPrice)) {
+    response.status(400).json({ error: "limitPrice must be a positive price on the cent." });
+    return;
+  }
+  const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
+  if (!orderRequest) {
+    response.status(404).json({ error: "Order not found." });
+    return;
+  }
+  const payload = orderRequest.payload as OrderRequestPayload;
+  const refusal = !(limitChangeableOrderStatuses as readonly string[]).includes(orderRequest.status)
+    ? "Only an order working at IBKR can have its limit changed."
+    : payload.legs.length !== 1 || payload.legs[0]!.role !== "option"
+      ? "Only a single-leg option order can have its limit changed."
+      : (payload.limitPriceChanges?.length ?? 0) >= maxLimitPriceChangesPerOrder
+        ? `This order's limit has already been changed ${maxLimitPriceChangesPerOrder} times.`
+        : (await fetchTradingHalt()).enabled
+          ? "Trading is halted."
+          : orderRequest.pluto_action_id
+            ? await db.transaction((transaction) => agentLeaseRefusal(transaction, request.get(plutoAgentHolderHeader)))
+            : null;
+  if (refusal) {
+    response.status(409).json({ error: refusal });
+    return;
+  }
+  const changeRequest: LimitPriceChangeRequest = { limitPrice, requestedAt: new Date().toISOString() };
+  const updatedRows = await db("order_requests")
+    .where({ id: orderRequest.id })
+    .whereIn("status", limitChangeableOrderStatuses)
+    .update({ payload: db.raw("jsonb_set(payload, '{limitPriceChangeRequest}', ?::jsonb)", [JSON.stringify(changeRequest)]), updated_at: db.fn.now() })
+    .returning("id");
+  if (updatedRows.length === 0) {
+    response.status(409).json({ error: "Only an order working at IBKR can have its limit changed." });
+    return;
+  }
+  await db.raw("SELECT pg_notify(?, ?)", [orderRequestsChannel, orderRequest.id]);
+  const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
+  response.json(serializeOrderRequest(updated));
 });
 
 positionsRouter.get("/:id", async (request, response) => {

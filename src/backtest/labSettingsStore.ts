@@ -143,5 +143,5 @@ export async function noteLabAuditAnalysesRerun(auditIds: readonly number[], cou
 }
 
 /** The global values a ticker's analysis reads: it runs Vol Farmer v4 whatever the lab's decision maker (Marcelo 2026-11-01). */
-const analysisReadPaths: ReadonlySet<string> = new Set(["lab.defaultPotDollars", "trading.spreadCostChargedPct", "pluto.windowStartEt", "pluto.windowEndEt"]);
+const analysisReadPaths: ReadonlySet<string> = new Set(["lab.defaultPotDollars", "pluto.windowStartEt", "pluto.windowEndEt"]);
 export const analysisReadsLabPath = (path: string) => path.startsWith("volFarmerV4.") || analysisReadPaths.has(path);

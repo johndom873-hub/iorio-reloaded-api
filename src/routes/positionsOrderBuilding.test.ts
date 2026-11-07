@@ -1379,3 +1379,48 @@ describe("access levels: a trader's roll", () => {
     }
   });
 });
+
+describe("POST /positions/orders/:id/reprice (follow the mid)", () => {
+  it("refuses a limit that is not a positive price on the cent, and an unknown order", async () => {
+    for (const limitPrice of [1.234, 0, -1, "1.20", null]) {
+      expect((await call("POST", `/positions/orders/${missingId}/reprice`, { limitPrice })).status).toBe(400);
+    }
+    expect((await call("POST", `/positions/orders/${missingId}/reprice`, { limitPrice: 1.2 })).status).toBe(404);
+  });
+
+  for (const status of ["submitted", "partially_filled"]) {
+    it(`records the change on a ${status} single-leg option order and tells the worker once`, async () => {
+      const ticker = await createTicker();
+      const orderId = await insertOrder(ticker.symbol, { status });
+      const response = await call("POST", `/positions/orders/${orderId}/reprice`, { limitPrice: 1.49 });
+      expect(response.status).toBe(200);
+      const row = await orderRow(orderId);
+      expect(row.status).toBe(status);
+      expect(row.payload.legs[0].unitPrice).toBe(1.5);
+      expect(row.payload.limitPriceChangeRequest).toEqual({ limitPrice: 1.49, requestedAt: expect.any(String) });
+      await waitForNotificationCount(1);
+      await settle();
+      expect(notifiedOrderIds).toEqual([orderId]);
+    });
+  }
+
+  it("refuses an order not working at IBKR, a two-leg order, and one already changed 10 times, telling the worker nothing", async () => {
+    const ticker = await createTicker();
+    const confirmed = await insertOrder(ticker.symbol, { status: "confirmed" });
+    const filled = await insertOrder(ticker.symbol, { status: "filled" });
+    const combo = await insertOrder(ticker.symbol, { status: "submitted" }, { symbol: ticker.symbol, strategyKey: "covered_call", legs: [{ role: "stock", action: "BUY", symbol: ticker.symbol, quantity: 100, unitPrice: 50 }, { role: "option", action: "SELL", symbol: ticker.symbol, quantity: 1, unitPrice: 1.5, strike: 55, expiry: "20261120", right: "C" }] });
+    const changes = Array.from({ length: 10 }, (_, index) => ({ at: "2026-11-09T15:00:00.000Z", from: 1.6 - index / 100, to: 1.59 - index / 100 }));
+    const changedTenTimes = await insertOrder(ticker.symbol, { status: "submitted" }, { symbol: ticker.symbol, strategyKey: "cash_secured_put", legs: [{ role: "option", action: "SELL", symbol: ticker.symbol, quantity: 2, unitPrice: 1.5, strike: 90, expiry: "20261120", right: "P" }], limitPriceChanges: changes });
+    const errorOf = async (orderId: string) => {
+      const response = await call("POST", `/positions/orders/${orderId}/reprice`, { limitPrice: 1.45 });
+      expect(response.status).toBe(409);
+      return (response.json as { error: string }).error;
+    };
+    expect(await errorOf(confirmed)).toBe("Only an order working at IBKR can have its limit changed.");
+    expect(await errorOf(filled)).toBe("Only an order working at IBKR can have its limit changed.");
+    expect(await errorOf(combo)).toBe("Only a single-leg option order can have its limit changed.");
+    expect(await errorOf(changedTenTimes)).toBe("This order's limit has already been changed 10 times.");
+    await settle();
+    expect(notifiedOrderIds).toEqual([]);
+  });
+});

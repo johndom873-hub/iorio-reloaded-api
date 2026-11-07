@@ -25,6 +25,7 @@ const {
   reconcileStaleOrderRequests,
 } = await import("./ibkrGatewayOrderTracking.js");
 const { ibkrInactiveOrderMessage } = await import("./ibkrGatewayOrderStatus.js");
+const { RecentLimitPriceChanges } = await import("./ibkrGatewayRecentLimitPriceChanges.js");
 const testDb: Knex = db;
 
 let userId: string;
@@ -43,7 +44,8 @@ const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000);
 
 const notifications: AppNotification[] = [];
 const publishNotification = async (notification: AppNotification) => void notifications.push(notification);
-const dependencies = { db: testDb, publishNotification };
+const noRecentLimitPriceChanges = { take: () => null };
+const dependencies = { db: testDb, publishNotification, recentLimitPriceChanges: noRecentLimitPriceChanges };
 
 const coveredCallPayload: OrderRequestPayload = {
   symbol: "TRK",
@@ -260,6 +262,46 @@ describe("handleOrderErrorEvent", () => {
       await handleOrderErrorEvent(new Error("boom"), code, ibkrOrderId, dependencies);
       expect((await rowOf(id)).status).toBe("error");
     }
+  });
+
+  describe("after a limit change (follow the mid)", () => {
+    const changedPayload: OrderRequestPayload = {
+      symbol: "TRK",
+      strategyKey: "covered_call",
+      legs: [{ role: "option", action: "SELL" as never, symbol: "TRK", quantity: 3, unitPrice: 1.49 }],
+      limitPriceChanges: [{ at: "2026-11-09T15:01:30.000Z", from: 1.5, to: 1.49 }],
+    };
+
+    it("an error inside the window is the change refused: the order keeps working at its previous limit, the change says why", async () => {
+      const { id, ibkrOrderId } = await insertOrder({ payload: changedPayload });
+      const recentLimitPriceChanges = new RecentLimitPriceChanges();
+      recentLimitPriceChanges.remember(ibkrOrderId, { orderRequestId: id, from: 1.5, to: 1.49 });
+      await handleOrderErrorEvent(new Error("Unable to modify this order as its already filled"), 104, ibkrOrderId, { ...dependencies, recentLimitPriceChanges });
+      const row = await rowOf(id);
+      expect(row.status).toBe("submitted");
+      expect(row.payload.legs[0].unitPrice).toBe(1.5);
+      expect(row.payload.limitPriceChanges).toEqual([{ at: "2026-11-09T15:01:30.000Z", from: 1.5, to: 1.49, refused: "IBKR error 104: Unable to modify this order as its already filled" }]);
+      expect(notifications).toEqual([{ type: "order_status", orderId: id }]);
+    });
+
+    it("an error after the window is read as before: the order is in error", async () => {
+      const { id, ibkrOrderId } = await insertOrder({ payload: changedPayload });
+      let nowMs = Date.parse("2026-11-09T15:01:30.000Z");
+      const recentLimitPriceChanges = new RecentLimitPriceChanges(() => nowMs);
+      recentLimitPriceChanges.remember(ibkrOrderId, { orderRequestId: id, from: 1.5, to: 1.49 });
+      nowMs += 15_001;
+      await handleOrderErrorEvent(new Error("boom"), 2099, ibkrOrderId, { ...dependencies, recentLimitPriceChanges });
+      expect((await rowOf(id)).status).toBe("error");
+    });
+
+    it("a cancel (202) inside the window is still the order cancelled", async () => {
+      const { id, ibkrOrderId } = await insertOrder({ payload: changedPayload });
+      const recentLimitPriceChanges = new RecentLimitPriceChanges();
+      recentLimitPriceChanges.remember(ibkrOrderId, { orderRequestId: id, from: 1.5, to: 1.49 });
+      await handleOrderErrorEvent(new Error("Order Canceled - reason:"), 202, ibkrOrderId, { ...dependencies, recentLimitPriceChanges });
+      expect((await rowOf(id)).payload.legs[0].unitPrice).toBe(1.49);
+      expect((await rowOf(id)).payload.limitPriceChanges[0].refused).toBeUndefined();
+    });
   });
 
   it("an IBKR refusal (201) ends a submitted order as rejected with IBKR's code and text, and publishes it", async () => {

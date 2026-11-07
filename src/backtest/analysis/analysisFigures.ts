@@ -58,7 +58,7 @@ import { sameDayMonthsBefore, sharesPerLot } from "./analysisSuitabilityRule.js"
 // backtest's figures (analysisBacktest.ts). The formulas are in FORMULAS.md, "Analyse window (Vol Farmer v4)".
 
 /** Bumped when a formula or the figures' shape changes: a stored analysis with an older version shows as such. */
-export const analysisFormulasVersion = 8;
+export const analysisFormulasVersion = 9;
 
 export type AnalysisStep = "bars" | "calls" | "earnings_correlation" | "saving" | "backtest";
 export const analysisSteps: readonly AnalysisStep[] = ["bars", "calls", "earnings_correlation", "saving", "backtest"];
@@ -74,8 +74,6 @@ export interface AnalysisFigureValues {
   /** The first position's share of the pot (firstPositionPct ÷ 100: 0.8). */
   firstPositionShare: number;
   v4: BacktestVolFarmerV4Settings;
-  /** trading.spreadCostChargedPct ÷ 100: the share of the half-spread a fill gives up (0 = the mid). */
-  spreadShareCharged: number;
 }
 
 /** F1: the whole weeks with an expiry day, and the month steady weeklies start in. */
@@ -598,7 +596,7 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
   const rows = await scanSameDayCallsInParallel({
     filePath: backtestDataFilePath(symbol),
     days: buildSameDayCallScanDays({ completeDays, scannedDays, intradayPrices, schedule, rates }),
-    settings: { callMinAbsDelta: values.v4.callMinAbsDelta, callMaxAbsDelta: values.v4.callMaxAbsDelta, maxSpreadPctOfMid: values.v4.maxSpreadPctOfMid, spreadShareCharged: values.spreadShareCharged },
+    settings: { callMinAbsDelta: values.v4.callMinAbsDelta, callMaxAbsDelta: values.v4.callMaxAbsDelta, maxSpreadPctOfMid: values.v4.maxSpreadPctOfMid },
     openDays,
     onChunkDone: (daysDone) => report("calls", daysDone, scannedDays.length),
   });

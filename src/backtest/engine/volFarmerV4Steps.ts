@@ -4,7 +4,7 @@ import { daysToExpiry, describeOptionContract, describeOrderSize } from "../../l
 import { alwaysHoldsTheStock, type BacktestVolFarmerSettings, type BacktestVolFarmerV2Settings, type BacktestVolFarmerV3Settings } from "../backtestTypes.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
-import { baselineQuoteRejection, describeRejections, roundedStrike, selectBaselineCandidates, type BaselineCandidate, type BaselineCommissionCapped, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
+import { baselineQuoteRejection, describeRejections, roundedStrike, selectBaselineCandidates, volFarmerV4SaleFill, type BaselineCandidate, type BaselineCommissionCapped, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
 import { optionCommissionDollars as ledgerOptionCommissionDollars, optionPurchaseFillPrice, optionSaleFillPrice } from "./ledger/ledgerFills.js";
 
 // Vol Farmer v2's steps (Marcelo 2026-10-27) with Vol Farmer v3's rules, as Vol Farmer v4 runs them: two Covered Calls
@@ -274,8 +274,6 @@ export interface VolFarmerV4Market {
   priceToCycleScale: number;
   /** False when the open cycle spans a split whose contracts do not fit its share scale. */
   optionContractsRepresentable: boolean;
-  /** The share of the half-spread a fill pays (0: the mid). */
-  spreadShareCharged: number;
   /** The rates the candidates are ranked with. */
   commissions: BaselineCommissions;
   /** The commissions the book charges. */
@@ -578,7 +576,8 @@ export function runVolFarmerV4Turn(input: VolFarmerV4LookInput): VolFarmerV4Turn
       previousSessionVolumeByContract: market.previousSessionVolumeByContract,
       sizeLimit: market.salesSizeLimit,
       settings: { minAbsDelta: limits.minAbsDelta, maxAbsDelta: limits.maxAbsDelta, minDte: dte, maxDte: dte, maxSpreadPctOfMid: farmer.maxSpreadPctOfMid },
-      spreadShareCharged: market.spreadShareCharged,
+      // One cent past the mid (Marcelo 2026-11-07), the price Pluto's orders carry: what the yields rank on and the book records.
+      saleFill: volFarmerV4SaleFill,
       isHeld: (contract) => limits.heldExcluded && heldContracts.has(contractKeyOf(contract)),
       tradingSessionsThrough: market.tradingSessionsThrough,
       ...(limits.minimumStrike === undefined ? {} : { minimumStrike: limits.minimumStrike }),

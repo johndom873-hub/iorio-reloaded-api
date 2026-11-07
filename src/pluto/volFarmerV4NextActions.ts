@@ -93,7 +93,6 @@ export function volFarmerV4ShareTrades(input: {
       tradingSessionsThrough: () => 1,
       priceToCycleScale: 1,
       optionContractsRepresentable: true,
-      spreadShareCharged: 0,
       commissions: { option: flatCommissionEstimator, stock: flatStockCommissionEstimator },
       optionCommissionDollars: () => 0,
       stockCommissionDollars: input.stockCommissionDollars,

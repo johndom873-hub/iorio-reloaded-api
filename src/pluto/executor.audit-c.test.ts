@@ -16,8 +16,8 @@ vi.mock("../lib/notifyTelegram.js", () => ({ notifyTelegram: vi.fn(async () => t
 vi.mock("./ledger.js", () => ({ recordPlutoEvent: vi.fn(async () => {}), updatePlutoAction: vi.fn(async () => {}) }));
 vi.mock("./stateStore.js", () => ({ tripPlutoBreaker: vi.fn(async () => {}) }));
 
-const { compareFillsWithReference, watchPlutoOrder } = await import("./executor.js");
-const { updatePlutoAction } = await import("./ledger.js");
+const { compareFillsWithReference, followTheMidOnce, watchPlutoOrder } = await import("./executor.js");
+const { recordPlutoEvent, updatePlutoAction } = await import("./ledger.js");
 const { tripPlutoBreaker } = await import("./stateStore.js");
 const { notifyPlutoTelegram } = await import("../lib/notifyTelegram.js");
 const { InternalApiError } = await import("../lib/internalApiClient.js");
@@ -120,3 +120,50 @@ describe("watchPlutoOrder — fills recorded after the status (2026-10-08)", () 
   });
 });
 
+
+describe("follow the mid (Marcelo 2026-11-07)", () => {
+  const working = (unitPrice: number, extra: Record<string, unknown> = {}) => ({ id: "o1", status: "submitted", errorMessage: null, payload: { legs: [{ role: "option" as const, action: "SELL", unitPrice, quantity: 3 }], ...extra } });
+  const followed = (priceNow: number | null) => ({ actionId: "a1", orderId: "o1", symbol: "NVDA", followTheMid: { priceNow: async () => priceNow } });
+  const apiPosting = (post: () => Promise<unknown> = async () => ({})) => ({ get: vi.fn(), post: vi.fn(post) }) as never as { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => vi.mocked(recordPlutoEvent).mockClear());
+
+  it("asks for the price now when it is a cent or more from the limit, and records the change", async () => {
+    const api = apiPosting();
+    expect(await followTheMidOnce(api as never, followed(1.07), working(1.5) as never)).toBe(true);
+    expect(api.post).toHaveBeenCalledExactlyOnceWith("/positions/orders/o1/reprice", { limitPrice: 1.07 });
+    expect(vi.mocked(recordPlutoEvent)).toHaveBeenCalledWith("order_repriced", { actionId: "a1", orderId: "o1", symbol: "NVDA", from: 1.5, to: 1.07 });
+  });
+
+  it("leaves the order alone: same price, no price, a change still waiting for the worker", async () => {
+    const api = apiPosting();
+    expect(await followTheMidOnce(api as never, followed(1.5), working(1.5) as never)).toBe(true);
+    expect(await followTheMidOnce(api as never, followed(null), working(1.5) as never)).toBe(true);
+    expect(await followTheMidOnce(api as never, followed(1.4), working(1.5, { limitPriceChangeRequest: { limitPrice: 1.45, requestedAt: "x" } }) as never)).toBe(true);
+    expect(api.post).not.toHaveBeenCalled();
+  });
+
+  it("stops following after the order's 10th change, or when the route refuses (409)", async () => {
+    const changes = Array.from({ length: 10 }, () => ({ at: "x", from: 1.5, to: 1.49 }));
+    expect(await followTheMidOnce(apiPosting() as never, followed(1.4), working(1.5, { limitPriceChanges: changes }) as never)).toBe(false);
+    const refusing = apiPosting(async () => {
+      throw new InternalApiError(409, "Trading is halted.");
+    });
+    expect(await followTheMidOnce(refusing as never, followed(1.4), working(1.5) as never)).toBe(false);
+    expect(vi.mocked(recordPlutoEvent)).toHaveBeenCalledWith("warning", expect.objectContaining({ orderId: "o1", message: expect.stringContaining("no longer followed") }));
+  });
+
+  it("the watch follows every 30 s, and judges the fill against the limit it filled at", async () => {
+    // Sent at 1.50, changed to 1.40 and filled there: 6.7% under the first limit would trip the 5% breaker, 0% under its own does not.
+    fillRows.push({ side: "SELL", quantity: 3, price: "1.40", multiplier: 100 });
+    const responses = [working(1.5), working(1.4), { ...working(1.4), status: "filled", updatedAt: new Date().toISOString() }];
+    const api = { get: vi.fn(async () => responses.shift()), post: vi.fn(async () => ({})) };
+    let clock = 0;
+    await watchPlutoOrder(api as never, settings, { actionId: "a1", orderId: "o1", symbol: "NVDA", reference: { price: 1.5, side: "sell", multiplier: 100 }, description: "Sell 3× NVDA $190 Call", followTheMid: { priceNow: async () => 1.4 } }, { pollIntervalMs: 0, now: () => (clock += 31_000) });
+    expect(api.post).toHaveBeenCalledExactlyOnceWith("/positions/orders/o1/reprice", { limitPrice: 1.4 });
+    expect(vi.mocked(tripPlutoBreaker)).not.toHaveBeenCalled();
+    const update = vi.mocked(updatePlutoAction).mock.calls.at(-1)![1] as { outcome: string; fillPrice: number };
+    expect(update.outcome).toBe("filled");
+    expect(update.fillPrice).toBeCloseTo(1.4, 9);
+  });
+});

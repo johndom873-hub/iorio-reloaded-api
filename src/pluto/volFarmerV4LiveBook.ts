@@ -35,7 +35,8 @@ import type { PlutoTickerSettings } from "./tickerSettingsStore.js";
 //   adoption  a ticker holding shares when v4 first looks at it (Marcelo 2026-10-27): every share is the first
 //             position's, its break-even the open cycle's (the Wheel cycles' B-E, its premiums counted there), its open
 //             Calls the first position's and its open Puts the second's; a ticker holding only Puts waits for them.
-//   fills     orders at the mid (spread share 0); a LEAPS is not held to its ask's size, a partial fill is topped up.
+//   fills     the steps plan a Call or Put one cent past the mid (Marcelo 2026-11-07, the price its order carries), a
+//             LEAPS at the mid; a LEAPS is not held to its ask's size, a partial fill is topped up.
 //   buyback   a Call bought back in the window's last minutes (Marcelo 2026-11-02; volFarmerV4Round.ts sends it): its cost
 //             goes against the position's premiums once it fills, and the Call leaves the position at the next look,
 //             closed and not assigned, its shares kept.

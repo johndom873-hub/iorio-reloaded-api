@@ -1,5 +1,6 @@
 import { OptionType, OrderAction, SecType } from "@stoqey/ib";
 import type { Contract } from "@stoqey/ib";
+import type { LimitPriceChange, LimitPriceChangeRequest } from "../lib/orderLimitPriceChanges.js";
 
 // Shared between src/routes/positions.ts (builds these payloads into
 // order_requests rows) and src/ibkrGatewayWorker.ts (consumes them to place real IBKR
@@ -36,6 +37,10 @@ export interface OrderRequestPayload {
    * older rows and anywhere it isn't set explicitly — buildOrder in
    * ibkrGatewayWorker.ts falls back to "Normal" in that case. */
   adaptivePriority?: AdaptivePriority;
+  /** A limit change waiting for the worker (follow the mid, lib/orderLimitPriceChanges.ts); absent otherwise. */
+  limitPriceChangeRequest?: LimitPriceChangeRequest;
+  /** Every limit change the worker sent, oldest first; absent on an order never changed. */
+  limitPriceChanges?: LimitPriceChange[];
 }
 
 const ibkrExpiryPattern = /^\d{8}$/;

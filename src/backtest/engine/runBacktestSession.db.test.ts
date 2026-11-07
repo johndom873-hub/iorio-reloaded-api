@@ -6,6 +6,7 @@ import knexLibrary, { type Knex } from "knex";
 import { environment } from "../../config/env.js";
 import { BacktestCancelledError, computeSessionMetrics, runBacktestSession, type BacktestRunHooks } from "./runBacktestSession.js";
 import { retiredBacktestDecisionMakerMessage } from "../backtestTypes.js";
+import { optionLimitPriceGivingUpOneCent } from "../../lib/optionLimitPrice.js";
 import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile } from "./testSupport/syntheticBacktestData.js";
 
 if (!environment.testDatabaseUrl) {
@@ -110,8 +111,8 @@ describe("runBacktestSession", () => {
     for (const trade of trades) {
       const contracts = Number(trade.contracts);
       expect(contracts).toBeGreaterThanOrEqual(1);
-      // Sold at the mid less half the half-spread (spread cost share 50%), $0.68 a contract.
-      expect(Number(trade.fill_price)).toBeCloseTo((Number(trade.bid) + Number(trade.ask)) / 2 - (0.5 * (Number(trade.ask) - Number(trade.bid))) / 2, 4);
+      // Vol Farmer v4 sells one cent past the mid, whatever the spread cost share (Marcelo 2026-11-07), $0.68 a contract.
+      expect(Number(trade.fill_price)).toBeCloseTo(optionLimitPriceGivingUpOneCent(Number(trade.bid), Number(trade.ask), "sell"), 4);
       expect(Number(trade.commission_dollars)).toBeCloseTo(0.68 * contracts, 2);
       expect(trade.leg_id).toMatch(/^leg-\d+$/);
       // No Signals model: no grade or Edge figures.

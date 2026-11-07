@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import knexLibrary, { type Knex } from "knex";
 import { syntheticOptionQuotes, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile } from "../backtest/engine/testSupport/syntheticBacktestData.js";
-import type { AnalysisFileFigures } from "../backtest/analysis/analysisFigures.js";
+import { analysisFormulasVersion, type AnalysisFileFigures } from "../backtest/analysis/analysisFigures.js";
 import { treasuryBillCachePath, treasuryBillSeriesId, type TreasuryBillCache } from "../backtest/engine/treasuryBillRates.js";
 import type { AnalysisRunView, TickerAnalysisView } from "../backtest/analysis/analysisStore.js";
 
@@ -140,7 +140,7 @@ describe("analysis routes", () => {
     const started = await call<AnalysisRunView>("POST", `/analyses/${symbol}`, {});
     expect(started.status).toBe(202);
     savedRunId = started.body.id;
-    expect(started.body).toMatchObject({ symbol, reason: "manual", status: "running", sessionId: null, formulasVersion: 8 });
+    expect(started.body).toMatchObject({ symbol, reason: "manual", status: "running", sessionId: null, formulasVersion: analysisFormulasVersion });
     const view = await call<TickerAnalysisView>("GET", `/analyses/${symbol}`);
     expect(started.body.labValuesHash).toBe(view.body.currentHash);
     const { trial, defaultPotDollars, effective } = started.body.labValues;
@@ -207,7 +207,7 @@ describe("analysis routes", () => {
     expect(view.body.active).toEqual([]);
 
     const table = await call<{ labSavedAt: string; outOfDate: string[]; bySymbol: Record<string, unknown> }>("GET", "/analyses");
-    expect(table.body.bySymbol[symbol]).toMatchObject({ status: "succeeded", optionLastDate: "2026-03-04", formulasVersion: 8, outOfDate: false, tableFigures });
+    expect(table.body.bySymbol[symbol]).toMatchObject({ status: "succeeded", optionLastDate: "2026-03-04", formulasVersion: analysisFormulasVersion, outOfDate: false, tableFigures });
     expect(table.body.outOfDate).not.toContain(symbol);
   });
 

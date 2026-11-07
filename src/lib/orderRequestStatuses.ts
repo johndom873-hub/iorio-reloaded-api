@@ -4,6 +4,9 @@ export const activeOrderRequestStatuses = ["pending_confirmation", "confirmed", 
 /** Statuses after which an order never changes again (partially_filled is still working; a cancel after a partial fill is cancelled_partially_filled). */
 export const finalOrderRequestStatuses = ["filled", "cancelled", "cancelled_partially_filled", "rejected", "error"] as const;
 
+/** Statuses in which an order's limit can be changed (follow the mid): working at IBKR. */
+export const limitChangeableOrderStatuses = ["submitted", "partially_filled"] as const;
+
 export function isFinalOrderRequestStatus(status: string): boolean {
   return (finalOrderRequestStatuses as readonly string[]).includes(status);
 }

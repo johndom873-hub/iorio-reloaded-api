@@ -5,6 +5,7 @@ import { finalOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { ibkrInactiveOrderMessage, ibkrOrderCanceledErrorCode, ibkrOrderRejectionErrorCodes, requestStatusForIbkrRejection, requestStatusForOrderStatusEvent } from "./ibkrGatewayOrderStatus.js";
 import { recordIbkrCancellationReason, recordIbkrOrderCanceled, workingOrderRequestStatuses, type ExecutedOutcome } from "./ibkrGatewayCancellationRecording.js";
 import type { OrderRequestPayload } from "./ibkrGatewayOrderPayload.js";
+import type { RecentLimitPriceChange, RecentLimitPriceChanges } from "./ibkrGatewayRecentLimitPriceChanges.js";
 
 interface SourceOrderRequest {
   id: string;
@@ -37,6 +38,11 @@ import { closingTradeOtherThanSettlementSql } from "../lib/settlementExecution.j
 export interface OrderTrackingDependencies {
   db: Knex;
   publishNotification(notification: AppNotification): Promise<void>;
+}
+
+export interface OrderErrorDependencies extends OrderTrackingDependencies {
+  /** The limit changes the worker just sent: an error on one of those orders is the change refused (follow the mid). */
+  recentLimitPriceChanges: Pick<RecentLimitPriceChanges, "take">;
 }
 
 export interface OrderStatusEvent {
@@ -103,7 +109,7 @@ export function handleOrderStatusEvent(event: OrderStatusEvent, dependencies: Or
  * order that was still accepted, and IBKR's own convention is that 2100-2169 are informational system messages. Those never
  * flip an order to "error". reqId -1 is a connection-status notice. Never rejects: a failure is logged.
  */
-export function handleOrderErrorEvent(error: Error, code: number, reqId: number, dependencies: OrderTrackingDependencies): Promise<void> {
+export function handleOrderErrorEvent(error: Error, code: number, reqId: number, dependencies: OrderErrorDependencies): Promise<void> {
   const { db } = dependencies;
   if (reqId === -1) return Promise.resolve();
   if (code === 399 || (code >= 2100 && code <= 2169)) {
@@ -116,6 +122,12 @@ export function handleOrderErrorEvent(error: Error, code: number, reqId: number,
       executedOutcome: (orderRequestId, payload) => executedOutcomeForOrderRequest(orderRequestId, payload, db),
       notify: (orderRequestId) => dependencies.publishNotification({ type: "order_status", orderId: orderRequestId }),
     }).catch((dbError) => console.error(`Failed to record IBKR cancel for ${reqId}: ${dbError}`));
+  }
+  // Any other error inside the refusal window of a limit change is IBKR refusing that change (an order that has just
+  // filled cannot be changed); the order keeps working at its previous limit and its own statuses still arrive.
+  const change = dependencies.recentLimitPriceChanges.take(reqId);
+  if (change) {
+    return recordLimitPriceChangeRefused(change, `IBKR error ${code}: ${error.message}`, dependencies).catch((dbError) => console.error(`Failed to record the refused limit change of ${reqId}: ${dbError}`));
   }
   if (ibkrOrderRejectionErrorCodes.has(code)) {
     return recordIbkrOrderRejection(reqId, `IBKR error ${code}: ${error.message}`, dependencies).catch((dbError) => console.error(`Failed to record IBKR refusal for ${reqId}: ${dbError}`));
@@ -130,6 +142,24 @@ export function handleOrderErrorEvent(error: Error, code: number, reqId: number,
       await dependencies.publishNotification({ type: "order_status", orderId: rows[0].id });
     })
     .catch((dbError) => console.error(`Failed to record order error for ${reqId}: ${dbError}`));
+}
+
+/** A refused limit change: the order's limit goes back to the one IBKR kept, and the change records why. */
+async function recordLimitPriceChangeRefused(change: RecentLimitPriceChange, reason: string, dependencies: OrderTrackingDependencies): Promise<void> {
+  const { db } = dependencies;
+  const updated = await db.transaction(async (transaction) => {
+    const row: { payload: OrderRequestPayload } | undefined = await transaction("order_requests").where({ id: change.orderRequestId }).forUpdate().first("payload");
+    if (!row) return false;
+    const changes = [...(row.payload.limitPriceChanges ?? [])];
+    const last = changes.at(-1);
+    if (last && last.to === change.to && last.refused === undefined) changes[changes.length - 1] = { ...last, refused: reason };
+    const legs = row.payload.legs.map((leg, index) => (index === 0 && leg.unitPrice === change.to ? { ...leg, unitPrice: change.from } : leg));
+    await transaction("order_requests").where({ id: change.orderRequestId }).update({ payload: { ...row.payload, legs, limitPriceChanges: changes }, updated_at: db.fn.now() });
+    return true;
+  });
+  if (!updated) return;
+  console.warn(`Order request ${change.orderRequestId}: IBKR refused the limit change ${change.from} → ${change.to} (${reason}); it keeps working at ${change.from}.`);
+  await dependencies.publishNotification({ type: "order_status", orderId: change.orderRequestId });
 }
 
 /**

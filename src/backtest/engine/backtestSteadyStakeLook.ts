@@ -119,7 +119,7 @@ export async function runSteadyStakeLook(context: BacktestLookContext): Promise<
         riskFreeRate,
         previousSessionVolumeByContract: lookSymbol.market.previousSessionVolumeByContract,
         settings: { minAbsDelta: Math.max(0.0001, targetAbsDelta - stake.deltaTolerance), maxAbsDelta: Math.min(1, targetAbsDelta + stake.deltaTolerance), minDte: 0, maxDte: 0, maxSpreadPctOfMid: stake.maxSpreadPctOfMid },
-        spreadShareCharged,
+        saleFill: { rule: "spread_share", spreadShareCharged },
         isHeld: (contract) => heldContracts.has(heldKey(contract)),
         tradingSessionsThrough: (expiry) => context.calendar.sessionsHeld(todayIso, expiry),
       });

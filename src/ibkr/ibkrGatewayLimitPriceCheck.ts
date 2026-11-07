@@ -27,12 +27,33 @@ export function describeLimitPriceRefusal(result: PriceCheckResult, notes: strin
   return notes.length > 0 ? `${base} (${notes.join("; ")})` : base;
 }
 
+type LimitPriceCheckIb = Pick<IBApi, "on" | "removeListener" | "reqMarketDataType" | "reqMktData" | "cancelMktData">;
+
 export async function endOrderIfLimitPriceUnsafe(
   orderRequest: { id: string; payload: OrderRequestPayload },
-  ib: Pick<IBApi, "on" | "removeListener" | "reqMarketDataType" | "reqMktData" | "cancelMktData">,
+  ib: LimitPriceCheckIb,
   dependencies: LimitPriceCheckDependencies = { fetchQuotes: (legs) => fetchLegQuoteSnapshots(ib, legs) },
 ): Promise<LimitPriceBlock | null> {
-  const { legs } = orderRequest.payload;
+  const reason = await limitPriceRefusal(orderRequest.payload, ib, dependencies);
+  if (!reason) return null;
+
+  // Conditioned on still being confirmed, like the placement claim: a cancel that just landed keeps its own status.
+  const endedRows = await db("order_requests")
+    .where({ id: orderRequest.id, status: "confirmed" })
+    .update({ status: "error", error_message: reason, updated_at: db.fn.now() })
+    .returning("id");
+  const ended = endedRows.length > 0;
+  if (ended) await publishNotification({ type: "order_status", orderId: orderRequest.id }).catch(() => {});
+  return { reason, ended };
+}
+
+/** Why the payload's limit prices fail the live-quote check, or null when they pass. Fail closed: no quote or a failure is a refusal. */
+export async function limitPriceRefusal(
+  payload: OrderRequestPayload,
+  ib: LimitPriceCheckIb,
+  dependencies: LimitPriceCheckDependencies = { fetchQuotes: (legs) => fetchLegQuoteSnapshots(ib, legs) },
+): Promise<string | null> {
+  const { legs } = payload;
   if (!legs || legs.length === 0) return null;
 
   let reason: string | null;
@@ -51,14 +72,5 @@ export async function endOrderIfLimitPriceUnsafe(
   } catch (error) {
     reason = `The order's limit price could not be checked against a live quote at placement (${error instanceof Error ? error.message : String(error)}).`;
   }
-  if (!reason) return null;
-
-  // Conditioned on still being confirmed, like the placement claim: a cancel that just landed keeps its own status.
-  const endedRows = await db("order_requests")
-    .where({ id: orderRequest.id, status: "confirmed" })
-    .update({ status: "error", error_message: reason, updated_at: db.fn.now() })
-    .returning("id");
-  const ended = endedRows.length > 0;
-  if (ended) await publishNotification({ type: "order_status", orderId: orderRequest.id }).catch(() => {});
-  return { reason, ended };
+  return reason;
 }
