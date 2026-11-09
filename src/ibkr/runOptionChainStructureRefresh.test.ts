@@ -22,6 +22,7 @@ function runDependencies(overrides: Partial<OptionChainStructureDependencies> = 
     connect: async () => ({ ib: fakeIb, disconnect }),
     refreshStoredOptionChain: async () => refreshResult([{ expiry: "20261016", strikeCount: 5 }]),
     loadSpotPrices: async () => new Map([["AAA", 101]]),
+    loadPlutoTickerIds: async () => new Set(),
     ...overrides,
   };
 }
@@ -33,6 +34,21 @@ describe("runOptionChainStructureRefresh", () => {
     const result = await runOptionChainStructureRefresh((event) => events.push(event), dependencies);
     expect(result).toEqual({ tickersAttempted: 2, tickersComplete: 2, tickersFailed: 0, ...emptyTotals, gridLookups: 2 });
     expect(events.filter((event) => event.type === "tickerDone").map((event) => (event as { symbol: string }).symbol)).toEqual(["AAA", "BBB"]);
+  });
+
+  it("refreshes Pluto's tickers first, so a timeout on another ticker never skips them", async () => {
+    const refreshStoredOptionChain = vi.fn(async (_ib: unknown, tickerArg: { symbol: string }) => {
+      if (tickerArg.symbol === "KORU") throw new IbkrLookupTimeoutError("strike grid lookup for KORU 20261218 timed out after 30s");
+      return refreshResult([{ expiry: "20261016", strikeCount: 5 }]);
+    });
+    const dependencies = runDependencies({
+      refreshStoredOptionChain,
+      loadUniverse: async () => [ticker("AMD"), ticker("KORU"), ticker("NVDA"), ticker("SPCX"), ticker("XLE")],
+      loadPlutoTickerIds: async () => new Set(["id-AMD", "id-NVDA", "id-SPCX"]),
+    });
+    const result = await runOptionChainStructureRefresh(undefined, dependencies);
+    expect(refreshStoredOptionChain.mock.calls.map((call) => call[1].symbol)).toEqual(["AMD", "NVDA", "SPCX", "KORU"]);
+    expect(result).toMatchObject({ tickersComplete: 3, failedSymbols: ["KORU"], skippedSymbols: ["XLE"] });
   });
 
   it("passes each ticker's id/symbol/contractId, today's Eastern date and the grid-reuse rule with its spot to the refresh call", async () => {

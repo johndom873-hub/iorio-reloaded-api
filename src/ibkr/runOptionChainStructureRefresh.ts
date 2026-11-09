@@ -2,6 +2,7 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { IbkrLookupTimeoutError, refreshStoredOptionChain, type OptionChainRefreshTimings } from "./fetchOptionChain.js";
 import { loadOptionDataUniverse, type OptionDataTicker } from "../lib/optionDataUniverse.js";
 import { loadFallbackStockPrices } from "../lib/priceService.js";
+import { loadEnabledPlutoTickerSettings } from "../pluto/tickerSettingsStore.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import type { JobResult } from "../lib/runJob.js";
 
@@ -63,11 +64,14 @@ export interface OptionChainStructureDependencies {
   connect: () => Promise<{ ib: IbkrApi; disconnect: () => void }>;
   refreshStoredOptionChain: typeof refreshStoredOptionChain;
   loadSpotPrices: (symbols: string[]) => Promise<Map<string, number>>;
+  /** The tickers Pluto trades: refreshed first, so a timeout on another ticker, which ends the run, never skips them. */
+  loadPlutoTickerIds: () => Promise<Set<string>>;
 }
 
 const defaultDependencies: OptionChainStructureDependencies = {
   now: () => new Date(),
   loadUniverse: () => loadOptionDataUniverse({ excludeBeingPrepared: true }),
+  loadPlutoTickerIds: async () => new Set((await loadEnabledPlutoTickerSettings()).map((ticker) => ticker.tickerId)),
   connect: connectToIbkrGateway,
   refreshStoredOptionChain,
   loadSpotPrices: async (symbols) => new Map([...(await loadFallbackStockPrices(symbols))].map(([symbol, known]) => [symbol, known.price])),
@@ -78,7 +82,8 @@ export async function runOptionChainStructureRefresh(
   dependencies: OptionChainStructureDependencies = defaultDependencies,
 ): Promise<OptionChainStructureResult> {
   const todayIso = easternIsoDate(dependencies.now());
-  const universe = await dependencies.loadUniverse();
+  const [loadedUniverse, plutoTickerIds] = await Promise.all([dependencies.loadUniverse(), dependencies.loadPlutoTickerIds()]);
+  const universe = [...loadedUniverse.filter((ticker) => plutoTickerIds.has(ticker.tickerId)), ...loadedUniverse.filter((ticker) => !plutoTickerIds.has(ticker.tickerId))];
   const result: OptionChainStructureResult = { tickersAttempted: universe.length, tickersComplete: 0, tickersFailed: 0, failedSymbols: [], skippedSymbols: [], gridLookups: 0, gridsReused: 0 };
   const spotBySymbol = await dependencies.loadSpotPrices(universe.map((ticker) => ticker.symbol));
 
