@@ -14,12 +14,13 @@ booksRouter.use(requireAuth);
 
 /** Deposits and withdrawals in Unallocated that no split has allocated yet. */
 async function loadPendingTransfers() {
-  const rows: { id: string; amount: string; effective_at: Date; description: string }[] = await db("book_cash_entries as e")
+  const rows: { id: string; amount: string; effective_at: Date; description: string; source_row_key: string | null }[] = await db("book_cash_entries as e")
     .where({ "e.book_key": "unallocated", "e.kind": "external_transfer" })
     .whereNotExists(db("book_cash_entries as s").whereRaw("s.allocates_entry_id = e.id"))
     .orderBy("e.effective_at")
-    .select("e.id", "e.amount", "e.effective_at", "e.description");
-  return rows.map((row) => ({ entryId: row.id, amountDollars: Number(row.amount), at: new Date(row.effective_at).toISOString(), description: row.description }));
+    .select("e.id", "e.amount", "e.effective_at", "e.description", "e.source_row_key");
+  // A deposit an admin recorded before IBKR's statement holds it has no statement row yet (src/books/recordedDeposits.ts).
+  return rows.map((row) => ({ entryId: row.id, amountDollars: Number(row.amount), at: new Date(row.effective_at).toISOString(), description: row.description, recordedBeforeStatement: row.source_row_key === null }));
 }
 
 booksRouter.get("/", async (_request, response) => {
