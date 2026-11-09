@@ -6,6 +6,7 @@ import { environment } from "../config/env.js";
 import { computeInFlightOrderNotional, inFlightOrderRequestsQuery } from "../lib/orderLimits.js";
 import { loadOpenLegMarketValues } from "../lib/positionExposure.js";
 import { loadTradingSettings } from "../lib/tradingSettingsStore.js";
+import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { bookKeys, otherBook, type BookKey } from "./bookKeys.js";
 import { loadBooksCutover, loadConfirmedLedgerCutOffAt, loadLedgerCashByBook, loadProvisionalCashMovements, loadUnsettledSaleProceedsByBook } from "./bookLedger.js";
 import { bookOfLegAt, loadTickerBookPeriods, strategiesAlwaysInManualBook } from "./tickerBookPeriods.js";
@@ -15,7 +16,8 @@ import { bookOfLegAt, loadTickerBookPeriods, strategiesAlwaysInManualBook } from
 //   book value(B)    = cash(B) + market value of B's open legs (short legs negative; a Put's collateral is cash, not counted twice)
 //   usable cash(B)   = the smaller of cash(B) and IBKR's live total cash − cash(O) − Unallocated
 //   settled(B)       = cash(B) − B's sale proceeds not settled yet; usable settled the same way against IBKR's settled cash
-//   available(B)     = usable cash(B) − what B's open Puts hold − B's orders still working − min cash reserve % × book value(B)
+//   available(B)     = usable cash(B) − what B's open Puts hold − B's orders still working − B's min cash reserve % × book value(B)
+//                      (Pluto's reserve is its own setting, the Manual book's Risk & Limits', Marcelo 2026-11-09)
 // The guard (usable cash) means a book's own records running ahead of IBKR only ever block that book, never let it
 // spend the other's cash. Example: Pluto's ledger says $220,000, Manual's $150,000, nothing unallocated, IBKR $360,000
 // (a Pluto assignment not seen yet) → Pluto may use $210,000.
@@ -47,7 +49,8 @@ export type BooksLiveState =
       /** IBKR's live cash − (both books + Unallocated); null when IBKR's cash is unknown. */
       cashGapAgainstIbkr: number | null;
       confirmedThrough: Date;
-      minCashReservePct: number;
+      /** Each book's min cash reserve, % of its book value: Pluto's own setting, Manual's Risk & Limits'. */
+      minCashReservePctByBook: Record<BookKey, number>;
     };
 
 export interface BookFiguresInput {
@@ -57,7 +60,7 @@ export interface BookFiguresInput {
   positionsValue: Record<BookKey, number>;
   heldAgainstPuts: Record<BookKey, number>;
   ordersWorking: Record<BookKey, number>;
-  minCashReservePct: number;
+  minCashReservePctByBook: Record<BookKey, number>;
   ibkrTotalCash: number | null;
   ibkrSettledCash: number | null;
 }
@@ -71,7 +74,7 @@ export function computeBookFigures(input: BookFiguresInput): { books: Record<Boo
   for (const book of bookKeys) {
     const other = otherBook(book);
     const bookValue = cash[book] + input.positionsValue[book];
-    const minCashReserve = (input.minCashReservePct / 100) * bookValue;
+    const minCashReserve = (input.minCashReservePctByBook[book] / 100) * bookValue;
     const commitments = input.heldAgainstPuts[book] + input.ordersWorking[book] + minCashReserve;
     const accountCashLeft = input.ibkrTotalCash === null ? null : input.ibkrTotalCash - cash[other] - unallocated;
     const accountSettledLeft = input.ibkrSettledCash === null ? null : input.ibkrSettledCash - settled[other] - unallocated;
@@ -136,6 +139,8 @@ export interface LoadBooksLiveStateOptions {
   fetchSummary?: () => Promise<AccountSummary>;
   /** An order being checked, left out of the orders still working (it is not working against itself). */
   excludeOrderRequestId?: string;
+  /** Book values only (the screens' pots): IBKR's account summary is not read, so the cash figures against IBKR are unknown. */
+  withoutAccountSummary?: boolean;
 }
 
 /** Both books' live figures; `ready: false` until the cut-over has run (opening orders are then refused). */
@@ -145,16 +150,18 @@ export async function loadBooksLiveState(options: LoadBooksLiveStateOptions = {}
   if (!cutover) return { ready: false };
   const periods = await loadTickerBookPeriods();
   const confirmedThrough = await loadConfirmedLedgerCutOffAt(cutover);
-  const [ledgerCash, provisional, legValues, heldAgainstPuts, plutoSymbolsNow, tradingSettings, summary] = await Promise.all([
+  const [ledgerCash, provisional, legValues, heldAgainstPuts, plutoSymbolsNow, tradingSettings, plutoSettings, summary] = await Promise.all([
     loadLedgerCashByBook(null),
     loadProvisionalCashMovements(confirmedThrough, periods),
     loadOpenLegMarketValues(),
     loadHeldAgainstPutsByBook(periods, now),
     loadPlutoBookSymbolsNow(),
     loadTradingSettings(),
-    (options.fetchSummary ?? fetchAccountSummary)().catch(() => null),
+    loadPlutoSettings(),
+    options.withoutAccountSummary ? Promise.resolve(null) : (options.fetchSummary ?? fetchAccountSummary)().catch(() => null),
   ]);
   const [unsettledSaleProceeds, ordersWorking] = await Promise.all([loadUnsettledSaleProceedsByBook(provisional, now), loadOrdersWorkingByBook(plutoSymbolsNow, options.excludeOrderRequestId)]);
+  const minCashReservePctByBook: Record<BookKey, number> = { pluto: plutoSettings.minCashReservePct, manual: tradingSettings.minCashReservePct };
   const provisionalCash = zeroByBook();
   for (const movement of provisional) provisionalCash[movement.book] += movement.amount;
   const positionsValue = zeroByBook();
@@ -167,7 +174,7 @@ export async function loadBooksLiveState(options: LoadBooksLiveStateOptions = {}
     positionsValue,
     heldAgainstPuts,
     ordersWorking,
-    minCashReservePct: tradingSettings.minCashReservePct,
+    minCashReservePctByBook,
     ibkrTotalCash: summary?.totalCashValue ?? null,
     ibkrSettledCash: settled,
   });
@@ -179,6 +186,6 @@ export async function loadBooksLiveState(options: LoadBooksLiveStateOptions = {}
     ibkrNetLiquidationValue: summary?.netLiquidationValue ?? null,
     cashGapAgainstIbkr,
     confirmedThrough,
-    minCashReservePct: tradingSettings.minCashReservePct,
+    minCashReservePctByBook,
   };
 }

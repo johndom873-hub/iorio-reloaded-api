@@ -11,7 +11,7 @@ const mockupInput: BookFiguresInput = {
   positionsValue: { pluto: 380_000, manual: 250_000 },
   heldAgainstPuts: { pluto: 80_000, manual: 60_000 },
   ordersWorking: { pluto: 0, manual: 5_000 },
-  minCashReservePct: 5,
+  minCashReservePctByBook: { pluto: 5, manual: 5 },
   ibkrTotalCash: 420_000,
   ibkrSettledCash: 420_000,
 };

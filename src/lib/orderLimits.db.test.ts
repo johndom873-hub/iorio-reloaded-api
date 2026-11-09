@@ -41,11 +41,14 @@ vi.mock("../books/bookFigures.js", async (importOriginal) => {
         positionsValue: { pluto: 0, manual: (account.netLiquidationValue ?? 0) - (cash ?? 0) },
         heldAgainstPuts: { pluto: 0, manual: await computeCashLockedInCspsMock() },
         ordersWorking,
-        minCashReservePct: 0,
+        minCashReservePctByBook: { pluto: 0, manual: 0 },
         ibkrTotalCash: cash,
         ibkrSettledCash: cash,
       });
-      return { ready: true, books, unallocatedCash: 0, ibkrTotalCash: cash, ibkrNetLiquidationValue: account.netLiquidationValue, cashGapAgainstIbkr: 0, confirmedThrough: new Date(), minCashReservePct: 0 };
+      // The Manual book's reserve is Risk & Limits' (the test's trading_settings row), as the real reader takes it.
+      const { loadTradingSettings } = await import("./tradingSettingsStore.js");
+      const minCashReservePctByBook = { pluto: 0, manual: (await loadTradingSettings()).minCashReservePct };
+      return { ready: true, books, unallocatedCash: 0, ibkrTotalCash: cash, ibkrNetLiquidationValue: account.netLiquidationValue, cashGapAgainstIbkr: 0, confirmedThrough: new Date(), minCashReservePctByBook };
     },
   };
 });

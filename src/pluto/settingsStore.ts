@@ -33,6 +33,8 @@ export interface PlutoSettings {
   // Capital: Pluto's own book since 2026-11-05 (src/books), so no budget share of the account.
   /** % every ticker's pot is raised above its allocation (tickerPotFraction): the pots may add up to more than Pluto's book value. */
   excessAllowancePct: number;
+  /** % of Pluto's book value its opening orders leave as cash (Marcelo 2026-11-09); Risk & Limits' reserve is the Manual book's. */
+  minCashReservePct: number;
   // Market
   windowStartEt: string;
   windowEndEt: string;
@@ -105,6 +107,7 @@ type ColumnKind = "number" | "integer" | "text";
 /** camelCase field → snake_case column, with the kind that decides parsing and validation. */
 export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedAt" | "updatedByUserId">, { column: string; kind: ColumnKind; min?: number; max?: number; oneOf?: readonly string[] }> = {
   excessAllowancePct: { column: "excess_allowance_pct", kind: "number", min: 0, max: 1000 },
+  minCashReservePct: { column: "min_cash_reserve_pct", kind: "number", min: 0, max: 100 },
   maxQuoteAgeMinutes: { column: "max_quote_age_minutes", kind: "integer", min: 0 },
   windowStartEt: { column: "window_start_et", kind: "text" },
   windowEndEt: { column: "window_end_et", kind: "text" },

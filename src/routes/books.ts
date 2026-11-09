@@ -47,7 +47,7 @@ booksRouter.get("/", async (_request, response) => {
     ibkrNetLiquidationValue: state.ibkrNetLiquidationValue,
     cashGapAgainstIbkr: state.cashGapAgainstIbkr,
     confirmedThrough: state.confirmedThrough.toISOString(),
-    minCashReservePct: state.minCashReservePct,
+    minCashReservePctByBook: state.minCashReservePctByBook,
     /** The tickers in Pluto's book now: an order or position on any other is Manual's (hedges always are). */
     plutoSymbols: [...plutoSymbols].sort(),
     pendingTransfers,

@@ -101,10 +101,14 @@ describe("the Vol Farmer v2 card", () => {
     const figures = { potDollars: 56_957, committedDollars: 53_754, freeCashDollars: 5_000, leapsCapDollars: 5_696, putsDollars: 11_391 };
     await saveVolFarmerV4LastRound(adoptedId, { at: new Date("2026-10-28T14:30:00Z"), notes: [], figures });
     const [before] = await loadVolFarmerV4Screen();
-    // No Pluto book value recorded yet: the round's own pot stays.
+    // The books not started: no Pluto book value, so the round's own pot stays.
     expect(before!.lastRoundFigures).toEqual(figures);
-    // Pluto's book worth $500,000 and a 20% allowance: a 10% allocation is a pot of 10% × 1.2 × $500,000 = $60,000.
-    await testDb("book_value_snapshots").insert({ snapshot_date: "2026-10-27", book_key: "pluto", cash: 500_000, positions_value: 0, book_value: 500_000 });
+    // Pluto's book worth $500,000 now (its live value, not last night's snapshot) and a 20% allowance: a 10% allocation
+    // is a pot of 10% × 1.2 × $500,000 = $60,000.
+    const cutOverAt = new Date("2026-10-27T04:00:00Z");
+    await testDb("books_cutover").insert({ id: true, cut_over_at: cutOverAt, statement_to_date: null, ibkr_cash: 500_000, pluto_starting_value: 500_000, pluto_positions_value: 0, statement_row_keys: JSON.stringify([]) });
+    await testDb("book_cash_entries").insert({ book_key: "pluto", amount: 500_000, effective_at: cutOverAt, kind: "opening_balance", group_id: crypto.randomUUID(), description: "Opening cash" });
+    if (!(await testDb("trading_settings").first("id"))) await testDb("trading_settings").insert({ max_order_pct_of_portfolio: 25, max_concentration_per_ticker_pct: 40, min_cash_reserve_pct: 5, delta_target_min: 0.1, delta_target_max: 0.5, recovery_dte_min: 1, recovery_dte_max: 14, commission_warn_share_of_premium_pct: 5 });
     await testDb("pluto_settings").where({ id: 1 }).update({ excess_allowance_pct: 20 });
     await testDb("pluto_ticker_settings").insert({ ticker_id: adoptedId, allocation_pct: 10 }).onConflict("ticker_id").merge();
     const firstPositionPct = Number((await testDb("pluto_settings").where({ id: 1 }).first("vol_farmer_v4_first_position_pct")).vol_farmer_v4_first_position_pct);

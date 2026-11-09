@@ -57,6 +57,22 @@ describe("requestCancelOfUnfilledOrders", () => {
     expect((await read(id)).status).toBe("cancel_requested");
   });
 
+  it("leaves Pluto's Call buybacks to Pluto's own cancel before the close, and still cancels its other orders", async () => {
+    const [pass] = await db("pluto_passes").insert({ trigger: "test" }).returning("id");
+    const [buyBack] = await db("pluto_actions").insert({ pass_id: pass.id, kind: "close_leg", symbol: "INTC", outcome: "validated", contract: JSON.stringify({ right: "C", expiry: "2026-10-05", strike: 50, strategyKey: "covered_call" }) }).returning("id");
+    const [callSale] = await db("pluto_actions").insert({ pass_id: pass.id, kind: "open_covered_call", symbol: "INTC", outcome: "validated", contract: JSON.stringify({ right: "C", expiry: "2026-10-05", strike: 52, strategyKey: "covered_call" }) }).returning("id");
+    try {
+      const buyBackOrder = await insertOrder({ placed_at: minutesAgo(20), pluto_action_id: buyBack.id });
+      const saleOrder = await insertOrder({ placed_at: minutesAgo(20), pluto_action_id: callSale.id });
+      expect(await sweepAt(15)).toEqual([saleOrder]);
+      expect((await read(buyBackOrder)).status).toBe("submitted");
+    } finally {
+      await db("order_requests").whereIn("id", createdOrderIds.splice(0)).del();
+      await db("pluto_actions").where({ pass_id: pass.id }).del();
+      await db("pluto_passes").where({ id: pass.id }).del();
+    }
+  });
+
   it("does nothing when the limit is 0 (never)", async () => {
     const id = await insertOrder({ placed_at: minutesAgo(600) });
     expect(await sweepAt(0)).toEqual([]);

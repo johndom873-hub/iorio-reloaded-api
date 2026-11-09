@@ -46,6 +46,8 @@ export interface PlutoHowItWorks {
     windowEndMinutesBeforeCloseAtLeast: number;
     /** Every ticker's pot is its allocation of Pluto's book value raised by this share (tickerPotFraction). */
     excessAllowancePct: number;
+    /** Pluto's own min cash reserve, % of its book value (2026-11-09). */
+    minCashReservePct: number;
     dailyLossBreakerPct: number;
     unfilledOrderCancelMinutes: number;
     /** A premium yield a year is the sale's return × this ÷ the trading sessions it is held (tradingSessionsHeld.ts). */
@@ -185,6 +187,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       windowEndEt: settings.windowEndEt,
       windowEndMinutesBeforeCloseAtLeast: closeMarginMinutes,
       excessAllowancePct: settings.excessAllowancePct,
+      minCashReservePct: settings.minCashReservePct,
       dailyLossBreakerPct: settings.dailyLossBreakerPct,
       unfilledOrderCancelMinutes: figures.unfilledOrderCancelMinutes,
       premiumYieldSessionsPerYear: tradingSessionsPerYear,

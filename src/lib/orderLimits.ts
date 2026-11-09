@@ -309,10 +309,11 @@ export async function evaluateOrderLimits(input: OrderLimitsInput): Promise<Orde
     cashLockedInCsps: bookFigures.heldAgainstPuts,
     existingTickerExposure,
     inFlight: { totalNotional: bookFigures.ordersWorking, tickerNotional: inFlight.tickerNotional },
-    settings,
     strategyPotFraction: input.strategy?.potFraction,
     strategyBook,
     valueLabel: `the ${bookLabels[book]} book's value`,
+    // Each book keeps its own reserve: Pluto's setting, Risk & Limits' for Manual (Marcelo 2026-11-09).
+    settings: { ...settings, minCashReservePct: books.minCashReservePctByBook[book] },
   });
   if (result.details) result.details.book = { book, bookValue: bookFigures.bookValue, availableCash: bookFigures.availableCash };
   return result;

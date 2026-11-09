@@ -1,6 +1,7 @@
 import type { Knex } from "knex";
 import type { VolFarmerV3AlwaysHoldTheStock } from "../backtest/backtestTypes.js";
 import { db } from "../db/connection.js";
+import { loadBooksLiveState } from "../books/bookFigures.js";
 import { loadPlutoSettings } from "./settingsStore.js";
 import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, tickerPotFraction } from "./tickerSettingsStore.js";
 
@@ -16,11 +17,11 @@ export interface PlutoTickerAllocation {
   allocationPct: number | null;
   /**
    * The ticker's pot in dollars, while it is enabled in Pluto: allocation (effective) × (1 + the excess allowance) ×
-   * Pluto's book value at last night's snapshot (tickerPotFraction). Null when the ticker is not enabled or no book value
-   * is recorded (before the books are started).
+   * Pluto's book value now (tickerPotFraction), the value its rounds and the order route size the pots on (2026-11-09;
+   * was last night's snapshot, $0 on the day Pluto was funded). Null when the ticker is not enabled or the books are not started.
    */
   potDollars: number | null;
-  /** Pluto's book value at last night's snapshot; null when none is recorded. */
+  /** Pluto's book value now; null before the books are started. */
   plutoBookValueDollars: number | null;
   /** The ticker's own Always hold the stock (Marcelo 2026-11-03); null = Pluto's setting, alwaysHoldTheStockEffective. */
   alwaysHoldTheStock: VolFarmerV3AlwaysHoldTheStock | null;
@@ -28,14 +29,15 @@ export interface PlutoTickerAllocation {
   alwaysHoldTheStockEffective: VolFarmerV3AlwaysHoldTheStock;
 }
 
+/** Pluto's book value now, as its rounds read it (src/books/bookFigures.ts); null before the books are started. */
+export async function loadPlutoBookValueNow(): Promise<number | null> {
+  const books = await loadBooksLiveState({ withoutAccountSummary: true });
+  return books.ready ? books.books.pluto.bookValue : null;
+}
+
 /** The allocation and pot of each of `symbols` (upper case); the shared reads are made once. */
 export async function loadPlutoTickerAllocations(symbols: readonly string[], connection: Knex = db): Promise<PlutoTickerAllocation[]> {
-  const [settings, enabledTickers, lastSnapshot] = await Promise.all([
-    loadPlutoSettings(connection),
-    loadEnabledPlutoTickerSettings(connection),
-    connection("book_value_snapshots").where({ book_key: "pluto" }).orderBy("snapshot_date", "desc").first("book_value"),
-  ]);
-  const plutoBookValueDollars = lastSnapshot ? Number(lastSnapshot.book_value) : null;
+  const [settings, enabledTickers, plutoBookValueDollars] = await Promise.all([loadPlutoSettings(connection), loadEnabledPlutoTickerSettings(connection), loadPlutoBookValueNow()]);
   const effectiveBySymbol = effectiveAllocationPctBySymbol(enabledTickers);
   return Promise.all(
     symbols.map(async (symbol) => {
