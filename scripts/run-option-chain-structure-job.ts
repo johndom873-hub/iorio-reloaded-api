@@ -49,6 +49,20 @@ async function main(): Promise<void> {
     { triggeredBy: "scheduler" },
   ).catch((error: unknown) => console.error(`session_close_read failed: ${error instanceof Error ? error.message : error}`));
 
+  // Pluto's tickers checked for a split before the open (src/pluto/plutoSplitCheck.ts). Its own job run: a failure alerts
+  // on its own. Before the structure refresh: a strike lookup that times out there stays queued in the Gateway, and every
+  // request sent after it, these daily bars too, waits behind it.
+  await runJob(
+    plutoSplitCheckJobName,
+    async () => {
+      const result = await runPlutoSplitCheck();
+      const pending = result.pendingSplits.map((split) => `${split.symbol} ${split.ratio} from ${split.effectiveDateIso}`);
+      console.log(`Pluto split check: ${result.checkedSymbols.length} checked, ${result.failed.length} failed${pending.length > 0 ? `; pending splits (Pluto stops on these): ${pending.join(", ")}` : ""}.`);
+      return { details: { ...result }, ...describePlutoSplitCheckOutcome(result) };
+    },
+    { triggeredBy: "scheduler" },
+  ).catch((error: unknown) => console.error(`${plutoSplitCheckJobName} failed: ${error instanceof Error ? error.message : error}`));
+
   await runJob(
     "option_chain_structure_refresh",
     async () => {
@@ -72,19 +86,6 @@ async function main(): Promise<void> {
     },
     { triggeredBy: "scheduler" },
   );
-
-  // Pluto's tickers checked for a split before the open (src/pluto/plutoSplitCheck.ts). Its own job run: a failure alerts
-  // on its own.
-  await runJob(
-    plutoSplitCheckJobName,
-    async () => {
-      const result = await runPlutoSplitCheck();
-      const pending = result.pendingSplits.map((split) => `${split.symbol} ${split.ratio} from ${split.effectiveDateIso}`);
-      console.log(`Pluto split check: ${result.checkedSymbols.length} checked, ${result.failed.length} failed${pending.length > 0 ? `; pending splits (Pluto stops on these): ${pending.join(", ")}` : ""}.`);
-      return { details: { ...result }, ...describePlutoSplitCheckOutcome(result) };
-    },
-    { triggeredBy: "scheduler" },
-  ).catch((error: unknown) => console.error(`${plutoSplitCheckJobName} failed: ${error instanceof Error ? error.message : error}`));
 }
 
 runScript("run-option-chain-structure-job", main, () => db.destroy());

@@ -24,11 +24,12 @@ export interface ExpectedJob {
 }
 
 export const expectedScheduledJobs: ExpectedJob[] = [
-  { jobName: "option_chain_structure_refresh", zone: "utc", hour: 9, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 30, marketDaysOnly: true },
+  // Runs after Pluto's split check in the same script (up to its 15 minutes), so it may start that much later.
+  { jobName: "option_chain_structure_refresh", zone: "utc", hour: 9, minute: 0, startByGraceMinutes: 25, maxRunMinutes: 30, marketDaysOnly: true },
   // Runs first inside the same Scheduler entry (run-option-chain-structure-job), so it shares its start time.
   { jobName: "session_close_read", zone: "utc", hour: 9, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 5, marketDaysOnly: true },
-  // Runs after the structure refresh in the same script (up to its 30 minutes), so it may start that much later.
-  { jobName: "pluto_split_check", zone: "utc", hour: 9, minute: 0, startByGraceMinutes: 40, maxRunMinutes: 15, marketDaysOnly: true },
+  // Runs right after the session-close read, before the structure refresh, in the same script.
+  { jobName: "pluto_split_check", zone: "utc", hour: 9, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 15, marketDaysOnly: true },
   { jobName: "market_calendar_sync", zone: "utc", hour: 19, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 15, marketDaysOnly: false },
   { jobName: "daily_screener_scan", zone: "utc", hour: 23, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 15, marketDaysOnly: true },
   { jobName: "daily_calendar_capture", zone: "utc", hour: 20, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 15, marketDaysOnly: false },
