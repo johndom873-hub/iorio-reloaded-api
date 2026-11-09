@@ -15,7 +15,7 @@ const recordedDatabaseCalls: RecordedDatabaseCall[] = [];
 const storedTradingViewTickerByTickerId = new Map<string, string | null>();
 
 vi.mock("../db/connection.js", () => ({
-  db: (table: string) => {
+  db: Object.assign((table: string) => {
     let whereClause: unknown;
     const conditions: unknown[] = [];
     const builder = {
@@ -28,13 +28,17 @@ vi.mock("../db/connection.js", () => ({
         conditions.push(["not in", column, values]);
         return builder;
       },
+      orderBy() {
+        return builder;
+      },
       async delete() {
         recordedDatabaseCalls.push({ table, operation: "delete", where: whereClause, conditions });
         return 0;
       },
       async first(...columns: unknown[]) {
         recordedDatabaseCalls.push({ table, operation: "first", where: whereClause, columns });
-        const tickerId = (whereClause as { id: string }).id;
+        const tickerId = (whereClause as { id?: string }).id;
+        if (tickerId === undefined) return undefined;
         return storedTradingViewTickerByTickerId.has(tickerId) ? { tradingview_ticker: storedTradingViewTickerByTickerId.get(tickerId) } : undefined;
       },
       async update(values: unknown) {
@@ -57,7 +61,7 @@ vi.mock("../db/connection.js", () => ({
       },
     };
     return builder;
-  },
+  }, { raw: (sql: string) => sql }),
 }));
 
 const {

@@ -152,6 +152,40 @@ describe("upsertEarningsEvents with TradingView's stand-in next date (real DB)",
   });
 });
 
+describe("upsertEarningsEvents keeps a report TradingView has not recorded yet (Marcelo 2026-11-09, real DB)", () => {
+  // IONQ on 8 Nov 2026: it reported on 5 Nov, but TradingView still gave its last report as 5 Aug and its next as 3 Mar 2027.
+  const ionqRow = (tvTicker: string) => ({ tvTicker, earnings_release_date: seconds("2026-08-05T20:05:00Z"), earnings_release_time: 1, earnings_release_next_date: seconds("2027-03-03T12:00:00Z"), earnings_release_next_time: 0 });
+
+  it("keeps the passed date a quarter after the last report and a quarter before the next (IONQ 5 Nov)", async () => {
+    const ticker = await createTicker();
+    await insertEvent(ticker.id, "earnings", "2026-11-05", "1");
+    await upsertEarningsEvents([ionqRow(ticker.tvTicker)], new Map([[ticker.tvTicker, ticker.id]]), "2026-11-09");
+    expect(await storedDates(ticker.id, "earnings")).toEqual(["2026-08-05", "2026-11-05", "2027-03-03"]);
+    // The calendar check now reads 5 Nov as the last report: 118 days to 3 Mar is a usual gap.
+    expect((await fetchCalendarConflictContext(ticker.id, new Date("2026-11-09T14:00:00Z"))).resolved).toBe(true);
+  });
+
+  it("keeps only the latest of several passed dates, and still removes an API Ninjas duplicate of the last report", async () => {
+    const ticker = await createTicker();
+    await insertEvent(ticker.id, "earnings", "2026-08-06"); // API Ninjas, a day after TradingView's report
+    await insertEvent(ticker.id, "earnings", "2026-10-29", "0");
+    await insertEvent(ticker.id, "earnings", "2026-11-05", "1");
+    await upsertEarningsEvents([ionqRow(ticker.tvTicker)], new Map([[ticker.tvTicker, ticker.id]]), "2026-11-09");
+    expect(await storedDates(ticker.id, "earnings")).toEqual(["2026-08-05", "2026-11-05", "2027-03-03"]);
+  });
+
+  it("removes a postponed estimate: the next date is within 45 days of it", async () => {
+    const ticker = await createTicker();
+    await insertEvent(ticker.id, "earnings", "2026-11-05", "0");
+    await upsertEarningsEvents(
+      [{ ...ionqRow(ticker.tvTicker), earnings_release_next_date: seconds("2026-11-19T12:00:00Z") }],
+      new Map([[ticker.tvTicker, ticker.id]]),
+      "2026-11-09",
+    );
+    expect(await storedDates(ticker.id, "earnings")).toEqual(["2026-08-05", "2026-11-19"]);
+  });
+});
+
 describe("upsertDividendEvents replaces a moved ex-date (real DB)", () => {
   it("deletes the old upcoming ex-date, keeps the past one and both reported dates", async () => {
     const ticker = await createTicker();

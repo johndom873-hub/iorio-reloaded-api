@@ -1,5 +1,5 @@
 import { db } from "../db/connection.js";
-import { easternIsoDate } from "./easternIsoDate.js";
+import { calendarDaysBetween, easternIsoDate } from "./easternIsoDate.js";
 
 // Earnings/dividend data sourced from TradingView's
 // public, unauthenticated endpoints -- same pattern already proven in
@@ -175,8 +175,38 @@ function eventDateIso(epochSeconds: unknown): string | null {
 }
 
 /**
+ * A report is about a quarter after the last and before the next, a postponed estimate days or weeks before the new date,
+ * and an API Ninjas duplicate a day or two after TradingView's report (Marcelo 2026-11-09).
+ */
+export const earningsPostponementMaxDays = 45;
+
+/**
+ * Whether a passed earnings date is a report TradingView has not recorded yet: TradingView moves its next date at once but
+ * its last report only days later. IONQ, IREN and AAOI reported on 5 Nov 2026; on 8 Nov TradingView still gave each a last
+ * report in August and a next date in February or March, and that report was being deleted as an estimate that passed
+ * unreported. So the latest passed date stays when it is more than 45 days after the last report and more than 45 days
+ * before the next date: 5 Nov is 92 days after 5 Aug and 118 days before 3 Mar.
+ */
+export function isEarningsReportTradingViewHasNotRecorded(passedDateIso: string, lastReportIso: string, nextDateIso: string | null): boolean {
+  if (nextDateIso === null) return false;
+  return calendarDaysBetween(lastReportIso, passedDateIso) > earningsPostponementMaxDays && calendarDaysBetween(passedDateIso, nextDateIso) > earningsPostponementMaxDays;
+}
+
+/** The latest stored earnings date after TradingView's last report and before today, or null. */
+async function loadLatestPassedEarningsDate(tickerId: string, lastReportIso: string, todayIso: string): Promise<string | null> {
+  const row: { eventDate?: string } | undefined = await db("ticker_calendar_events")
+    .where({ ticker_id: tickerId, event_type: "earnings" })
+    .where("event_date", ">", lastReportIso)
+    .where("event_date", "<", todayIso)
+    .orderBy("event_date", "desc")
+    .first(db.raw(`event_date::text as "eventDate"`));
+  return row?.eventDate ?? null;
+}
+
+/**
  * Removes a ticker's earnings dates between TradingView's last report and today: estimates that passed without a report.
- * Can include an API Ninjas row a day after TradingView's report date, a duplicate of that report.
+ * Can include an API Ninjas row a day after TradingView's report date, a duplicate of that report. A report TradingView has
+ * not recorded yet is among `keptDatesIso` (isEarningsReportTradingViewHasNotRecorded).
  */
 async function deletePassedUnreportedEarningsDates(tickerId: string, lastReportIso: string, keptDatesIso: string[], todayIso: string): Promise<void> {
   await db("ticker_calendar_events").where({ ticker_id: tickerId, event_type: "earnings" }).where("event_date", ">", lastReportIso).where("event_date", "<", todayIso).whereNotIn("event_date", keptDatesIso).delete();
@@ -217,7 +247,11 @@ export async function upsertEarningsEvents(rows: Record<string, unknown>[], tick
     // After the upserts, so the ticker is never without its next date in between.
     const keptDatesIso = [nextDateIso, lastReportIso].filter((date): date is string => date !== null);
     if (nextDateIso) await deleteRevisedFutureDates(tickerId, "earnings", keptDatesIso, todayIso);
-    if (lastReportIso && lastReportIso < todayIso) await deletePassedUnreportedEarningsDates(tickerId, lastReportIso, keptDatesIso, todayIso);
+    if (lastReportIso && lastReportIso < todayIso) {
+      const latestPassedDateIso = await loadLatestPassedEarningsDate(tickerId, lastReportIso, todayIso);
+      const reportNotRecordedYet = latestPassedDateIso !== null && isEarningsReportTradingViewHasNotRecorded(latestPassedDateIso, lastReportIso, nextDateIso) ? [latestPassedDateIso] : [];
+      await deletePassedUnreportedEarningsDates(tickerId, lastReportIso, [...keptDatesIso, ...reportNotRecordedYet], todayIso);
+    }
   }
   return written;
 }

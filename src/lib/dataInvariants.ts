@@ -95,7 +95,7 @@ export function evaluateDataInvariants(input: DataInvariantInputs): InvariantRes
       "Next earnings date",
       doubtfulNextDates,
       `every ticker's next earnings date is within ${earningsNextDateMaxGapDays} days of its last report`,
-      `doubtful (more than ${earningsNextDateMaxGapDays} days after the last report, or none ${earningsNextDateMissingAfterDays} days after it), so left unresolved and Pluto won't open`,
+      `doubtful (more than ${earningsNextDateMaxGapDays} days after the last report, or none ${earningsNextDateMissingAfterDays} days after it), so the Recovery Path scan treats these tickers' earnings as unknown (Vol Farmer v4 does not use earnings dates)`,
     ),
   );
   return results;

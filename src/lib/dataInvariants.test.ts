@@ -61,7 +61,7 @@ describe("evaluateDataInvariants", () => {
       {
         name: "Next earnings date",
         ok: false,
-        detail: "doubtful (more than 150 days after the last report, or none 60 days after it), so left unresolved and Pluto won't open: NBIS (last 2026-08-12, next 2027-02-16), MU (last 2026-07-01, next none)",
+        detail: "doubtful (more than 150 days after the last report, or none 60 days after it), so the Recovery Path scan treats these tickers' earnings as unknown (Vol Farmer v4 does not use earnings dates): NBIS (last 2026-08-12, next 2027-02-16), MU (last 2026-07-01, next none)",
       },
     ]);
   });
