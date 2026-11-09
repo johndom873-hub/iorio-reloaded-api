@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
+import { calendarDaysBetween } from "../../lib/easternIsoDate.js";
 import type { BacktestDetectedSplit } from "../backtestTypes.js";
 import { requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { BacktestBarHistory, loadBacktestBarHistory } from "./backtestBarHistory.js";
@@ -34,6 +35,11 @@ import { loadTreasuryBillRates, type TreasuryBillRates } from "./treasuryBillRat
 // $10–30 ETF's (Facebook's traded as FB until 2022-06-09), and their ratio to IBKR's Meta closes drifts, reading as
 // 9-for-10, 14-for-15, 20-for-21 and so on. The schedule then starts at the first day after the last such change: a
 // session over the days before it fails, and a download that finds one fails, naming the date to download from.
+//
+// So does a change of scale whose last old-scale day and first new-scale day are more than 14 calendar days apart, whatever
+// its ratio (Marcelo 2026-11-09): a real split spans a weekend or a holiday (the widest of 33 found: 4 days), while a symbol
+// handed to another company leaves weeks with no usable options between the two (COHR: Coherent's options to 2022-07-05,
+// II-VI's as COHR from 2022-09-08, their prices 5× apart in June 2022, read as a 5-for-1 split).
 
 export const standardSplitRatios: readonly number[] = [2, 3, 4, 5, 6, 7, 8, 10, 15, 20, 25, 30, 40, 50, 1.5, 1.25];
 export const splitSnapTolerance = 0.03;
@@ -41,8 +47,10 @@ export const splitPersistenceDays = 5;
 export const maximumSplitsPerFactor = 3;
 /** The longest gap (file days) between two runs of the same factor that takes that factor when its median is nearest it. */
 export const maximumSameFactorGapDays = 30;
+/** The most calendar days from a split's last old-scale day to its first new-scale day; a wider change is no split. */
+export const maximumSplitSpanCalendarDays = 14;
 /** Raise when the rule or the cache format changes, so cached schedules are rebuilt. */
-const splitScheduleVersion = 3;
+const splitScheduleVersion = 4;
 
 export interface NiceSplitFactor {
   factor: number;
@@ -244,9 +252,14 @@ export function isStandardSplitRatio(ratio: number): boolean {
   return ratio > 0 && standardSplitRatios.some((standard) => Math.abs(ratio / standard - 1) <= splitSnapTolerance || Math.abs(ratio * standard - 1) <= splitSnapTolerance);
 }
 
+/** Whether a change of scale spans more calendar days than a split does (COHR 2022-06-29 → 2022-09-09: 72). */
+export function spansTooLongForASplit(change: Pick<BacktestDetectedSplit, "lastDayBefore" | "firstDayAfter">): boolean {
+  return calendarDaysBetween(change.lastDayBefore, change.firstDayAfter) > maximumSplitSpanCalendarDays;
+}
+
 /** The schedule from the first day after its last change of scale that is no standard split; as it was when every change is one. */
 export function startAfterNonStandardChanges(schedule: Pick<SplitSchedule, "segments" | "splits" | "unresolved">): SplitSchedule {
-  const changes = schedule.splits.filter((split) => !isStandardSplitRatio(split.ratio));
+  const changes = schedule.splits.filter((split) => !isStandardSplitRatio(split.ratio) || spansTooLongForASplit(split));
   const lastChange = changes.at(-1);
   if (!lastChange) return { segments: schedule.segments, splits: schedule.splits, unresolved: schedule.unresolved, unmatchedOptionsBefore: null };
   const firstDayIso = lastChange.firstDayAfter;
@@ -276,7 +289,9 @@ export function describeSplitRatio(ratio: number): string {
 
 /** Why a file's options before a date can't be used: "The META options before 2022-06-09 match IBKR's META prices by no standard split (…)". */
 export function describeUnmatchedOptions(symbol: string, unmatched: UnmatchedOptions): string {
-  const changes = unmatched.changes.map((change) => `${describeSplitRatio(change.ratio)} on ${change.firstDayAfter}`);
+  const changes = unmatched.changes.map((change) =>
+    spansTooLongForASplit(change) ? `${describeSplitRatio(change.ratio)} between ${change.lastDayBefore} and ${change.firstDayAfter}` : `${describeSplitRatio(change.ratio)} on ${change.firstDayAfter}`,
+  );
   const listed = changes.length > 4 ? [...changes.slice(0, 3), `${changes.length - 3} more`] : changes;
   return `The ${symbol} options before ${unmatched.firstDayIso} match IBKR's ${symbol} prices by no standard split (their scale changes by ${listed.join(", ")}): the symbol belonged to another security then, or the data is wrong.`;
 }

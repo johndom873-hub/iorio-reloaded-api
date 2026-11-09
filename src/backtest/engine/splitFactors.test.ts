@@ -150,6 +150,23 @@ describe("changes of scale that are no standard split", () => {
     );
   });
 
+  it("include a standard ratio spanning more than 14 calendar days: the symbol passed to another company (COHR 2022)", () => {
+    // Ten days at 5×, no file days for two months, then ten at 1×: a "5-for-1" across 2026-01-16 → 2026-03-16.
+    const before = weekdaysBetween("2026-01-05", "2026-01-16").map((dateIso) => ({ dateIso, ratio: 5 }));
+    const after = weekdaysBetween("2026-03-16", "2026-03-27").map((dateIso) => ({ dateIso, ratio: 1 }));
+    const schedule = inferSplitSchedule([...before, ...after]);
+    expect(schedule.unmatchedOptionsBefore).toEqual({ firstDayIso: "2026-03-16", changes: [{ lastDayBefore: "2026-01-16", firstDayAfter: "2026-03-16", ratio: 5 }] });
+    expect(schedule.segments).toEqual([{ fromDateIso: "2026-03-16", toDateIso: "2026-03-27", factor: 1 }]);
+    expect(schedule.splits).toEqual([]);
+    expect(() => requireSplitFactors("COHR", schedule, ["2026-01-12"])).toThrow(
+      "The COHR options before 2026-03-16 match IBKR's COHR prices by no standard split (their scale changes by 5-for-1 between 2026-01-16 and 2026-03-16): the symbol belonged to another security then, or the data is wrong. Start the session on or after 2026-03-16, or delete the COHR file and download it again from 2026-03-16.",
+    );
+    // A real split over a weekend (Fri → Mon, 3 days) stays one.
+    const weekendSplit = inferSplitSchedule([...before, ...weekdaysBetween("2026-01-19", "2026-01-30").map((dateIso) => ({ dateIso, ratio: 1 }))]);
+    expect(weekendSplit.unmatchedOptionsBefore).toBeNull();
+    expect(weekendSplit.splits).toEqual([{ lastDayBefore: "2026-01-16", firstDayAfter: "2026-01-19", ratio: 5 }]);
+  });
+
   it("leave a schedule of standard splits as it is (4-for-1 then 10-for-1, and a 1-for-15 reverse split)", () => {
     const twoSplits = inferSplitSchedule(ratioDays([...repeat(40, 8), ...repeat(10, 7), ...repeat(1, 9)]));
     expect(twoSplits.unmatchedOptionsBefore).toBeNull();
