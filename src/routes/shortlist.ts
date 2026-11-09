@@ -19,6 +19,7 @@ import { refreshStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { invalidatePricePerformanceSnapshot } from "../lib/pricePerformanceSnapshot.js";
 import { countOpenPositionsForTicker, describeOpenPositionsBlockingRemoval } from "../lib/positionQueries.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { loadTickerDataRetryRows, recordTickerDataSuccess, tickerDataRetryMaxAttemptsPerDay } from "../ibkr/tickerDataRetries.js";
 import { applyTickerSwitch, planTickerSwitch } from "../books/tickerSwitch.js";
 import { loadBooksLiveState } from "../books/bookFigures.js";
 
@@ -62,7 +63,8 @@ shortlistRouter.get("/", async (_request, response) => {
       -- A 'running' run past the stale window is dead too (getLatestBackfillRun reports it as partial).
       CASE WHEN b.status = 'partial' OR (b.status = 'running' AND b.started_at <= now() - make_interval(mins => ${staleBackfillRunMinutes})) THEN true ELSE false END AS "backfillNeedsRetry",
       -- Remove is disabled in the Actions menu while this is above zero (DELETE below enforces the same).
-      op.open_position_count::int AS "openPositionCount"
+      op.open_position_count::int AS "openPositionCount",
+      (SELECT fetched_at FROM option_chain_params p WHERE p.ticker_id = t.id) AS "optionChainFetchedAt"
     FROM shortlist_entries se
     JOIN tickers t ON t.id = se.ticker_id
     LEFT JOIN users bu ON bu.id = se.bot_enabled_changed_by_user_id
@@ -83,11 +85,21 @@ shortlistRouter.get("/", async (_request, response) => {
     `,
   );
 
+  const todayIso = easternIsoDate(new Date());
+  const retryRows = await loadTickerDataRetryRows(
+    todayIso,
+    result.rows.map((row: { tickerId: string }) => row.tickerId),
+  );
   const rows = await Promise.all(
-    result.rows.map(async (row: { tickerId: string; sector: string | null; [key: string]: unknown }) => ({
-      ...row,
-      ...(await loadShortlistDataReadiness(row.tickerId, row.sector)),
-    })),
+    result.rows.map(async ({ optionChainFetchedAt, ...row }: { tickerId: string; sector: string | null; optionChainFetchedAt: Date | null; [key: string]: unknown }) => {
+      const readiness = await loadShortlistDataReadiness(row.tickerId, row.sector);
+      const optionChainFromToday = optionChainFetchedAt !== null && easternIsoDate(new Date(optionChainFetchedAt)) === todayIso;
+      // The automatic retries still open today (tickerDataRetries.ts): a kind fixed since, by a retry or by hand, drops out.
+      const dataRetries = retryRows
+        .filter((retry) => retry.tickerId === row.tickerId && retry.succeededAt === null && (retry.kind === "option_chain" ? !optionChainFromToday : readiness.dailyBarsPlan === "full"))
+        .map((retry) => ({ kind: retry.kind, attempts: retry.attempts, maxAttempts: tickerDataRetryMaxAttemptsPerDay, gaveUp: retry.gaveUpAt !== null, lastError: retry.lastError, lastAttemptAt: retry.lastAttemptAt }));
+      return { ...row, ...readiness, dataRetries };
+    }),
   );
   response.json(rows);
 });
@@ -129,6 +141,9 @@ shortlistRouter.post("/:tickerId/populate-daily-bars", async (request, response)
         dailyBarsPlan === "full"
           ? await fetchAndStoreFiveYearHistory(connection, ticker.id, ticker.symbol, { reqId })
           : await topUpDailyBars(connection, ticker.id, ticker.symbol, reqId);
+      // The full 5 years fetched by hand completes the history as a setup's history step does, so the retry pass
+      // (tickerDataRetries.ts) stops on it, even for a ticker listed less than 5 years.
+      if (dailyBarsPlan === "full") await recordTickerDataSuccess(ticker.id, "daily_bars_history", easternIsoDate(new Date()), false);
       invalidatePricePerformanceSnapshot();
       return { status: 200, body: { plan: dailyBarsPlan, ...result } };
     } finally {
@@ -206,6 +221,8 @@ shortlistRouter.post("/", async (request, response) => {
       sector,
       openPositionCount: await countOpenPositionsForTicker(ticker.id),
       ...(await loadShortlistDataReadiness(ticker.id, sector)),
+      // A ticker just added is being set up; retries start only if its setup leaves something missing.
+      dataRetries: [],
     });
   } catch (error) {
     // Partial unique index on (ticker_id) WHERE removed_at IS NULL.

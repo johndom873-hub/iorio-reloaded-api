@@ -45,16 +45,44 @@ export interface OptionChainStructureResult {
 
 /**
  * How a structure run is recorded: a failure when no ticker got its structure (none to refresh, or every one failed or was
- * skipped), completed with errors when some tickers have none today, neither when every ticker has. Each failed or skipped
- * ticker is one error.
+ * skipped, which points at the Gateway), a success otherwise. Tickers left without today's structure are listed in the
+ * details but raise no alert (Marcelo 2026-11-09): the retry pass (tickerDataRetries.ts) tries them again every 10 minutes
+ * and alerts on a ticker still missing it after its last try.
  */
 export function buildStructureJobOutcome(result: OptionChainStructureResult): Pick<JobResult, "failureMessage" | "completedWithErrors"> {
   if (result.tickersAttempted === 0) return { failureMessage: "no tickers to refresh (shortlist and open positions are both empty)" };
   const incomplete = [...result.failedSymbols, ...result.skippedSymbols];
-  if (incomplete.length === 0) return {};
-  const message = `${incomplete.length} of ${result.tickersAttempted} tickers have no structure today, so nothing quotes their options from it: ${incomplete.join(", ")}`;
-  if (incomplete.length >= result.tickersAttempted) return { failureMessage: message };
-  return { completedWithErrors: { errorCount: incomplete.length, message } };
+  if (incomplete.length >= result.tickersAttempted) return { failureMessage: `none of the ${result.tickersAttempted} tickers got today's structure: ${incomplete.join(", ")}` };
+  return {};
+}
+
+/** Pluto's tickers first, each group in its own order: a timeout ends a run, and must never skip a ticker Pluto trades. */
+export function orderPlutoTickersFirst<Ticker extends { tickerId: string }>(tickers: readonly Ticker[], plutoTickerIds: ReadonlySet<string>): Ticker[] {
+  return [...tickers.filter((ticker) => plutoTickerIds.has(ticker.tickerId)), ...tickers.filter((ticker) => !plutoTickerIds.has(ticker.tickerId))];
+}
+
+/**
+ * One ticker's structure, refreshed the way the morning job does it (a fresh grid reused, the nearest expiries always
+ * looked up). An empty answer is a failure: the fetch stores it as valid (IBKR error 200 becomes zero strikes), so a ticker
+ * with no contracts would otherwise count as done and only show up later as an empty chain.
+ */
+export async function refreshTickerStructure(
+  refresh: typeof refreshStoredOptionChain,
+  ib: IbkrApi,
+  ticker: Pick<OptionDataTicker, "tickerId" | "symbol" | "contractId">,
+  todayIso: string,
+  spotPrice: number | null,
+): Promise<{ chain: Awaited<ReturnType<typeof refreshStoredOptionChain>>; strikeCount: number; reusedGrids: number }> {
+  if (ticker.contractId === null) throw new Error("no ibkr_contract_id stored for this ticker");
+  const chain = await refresh(ib, { tickerId: ticker.tickerId, symbol: ticker.symbol, contractId: ticker.contractId }, todayIso, {
+    maxAgeDays: structureGridMaxAgeDays,
+    spotPrice,
+    alwaysLookUpWithinDays: structureGridAlwaysLookUpWithinDays,
+  });
+  const strikeCount = [...chain.strikesByExpiry.values()].reduce((sum, strikes) => sum + strikes.length, 0);
+  if (chain.expirations.length === 0) throw new Error("IBKR returned no option expirations");
+  if (strikeCount === 0) throw new Error("IBKR returned no strikes for any expiry");
+  return { chain, strikeCount, reusedGrids: chain.timings.expiries.filter((expiry) => expiry.reused).length };
 }
 
 /** Everything runOptionChainStructureRefresh touches outside itself; injectable so the run logic is testable offline. */
@@ -83,7 +111,7 @@ export async function runOptionChainStructureRefresh(
 ): Promise<OptionChainStructureResult> {
   const todayIso = easternIsoDate(dependencies.now());
   const [loadedUniverse, plutoTickerIds] = await Promise.all([dependencies.loadUniverse(), dependencies.loadPlutoTickerIds()]);
-  const universe = [...loadedUniverse.filter((ticker) => plutoTickerIds.has(ticker.tickerId)), ...loadedUniverse.filter((ticker) => !plutoTickerIds.has(ticker.tickerId))];
+  const universe = orderPlutoTickersFirst(loadedUniverse, plutoTickerIds);
   const result: OptionChainStructureResult = { tickersAttempted: universe.length, tickersComplete: 0, tickersFailed: 0, failedSymbols: [], skippedSymbols: [], gridLookups: 0, gridsReused: 0 };
   const spotBySymbol = await dependencies.loadSpotPrices(universe.map((ticker) => ticker.symbol));
 
@@ -91,20 +119,9 @@ export async function runOptionChainStructureRefresh(
   try {
     for (const [index, ticker] of universe.entries()) {
       try {
-        if (ticker.contractId === null) throw new Error("no ibkr_contract_id stored for this ticker");
-        const chain = await dependencies.refreshStoredOptionChain(ib, { tickerId: ticker.tickerId, symbol: ticker.symbol, contractId: ticker.contractId }, todayIso, {
-          maxAgeDays: structureGridMaxAgeDays,
-          spotPrice: spotBySymbol.get(ticker.symbol) ?? null,
-          alwaysLookUpWithinDays: structureGridAlwaysLookUpWithinDays,
-        });
-        const strikeCount = [...chain.strikesByExpiry.values()].reduce((sum, strikes) => sum + strikes.length, 0);
-        // An empty structure is stored as valid by the fetch (IBKR error 200 becomes zero strikes), so a
-        // ticker with no contracts would count as complete here and only show up later as an empty chain.
-        if (chain.expirations.length === 0) throw new Error("IBKR returned no option expirations");
-        if (strikeCount === 0) throw new Error("IBKR returned no strikes for any expiry");
-        const reused = chain.timings.expiries.filter((expiry) => expiry.reused).length;
-        result.gridsReused += reused;
-        result.gridLookups += chain.timings.expiries.length - reused;
+        const { chain, strikeCount, reusedGrids } = await refreshTickerStructure(dependencies.refreshStoredOptionChain, ib, ticker, todayIso, spotBySymbol.get(ticker.symbol) ?? null);
+        result.gridsReused += reusedGrids;
+        result.gridLookups += chain.timings.expiries.length - reusedGrids;
         onEvent({ type: "tickerDone", symbol: ticker.symbol, expiryCount: chain.strikesByExpiry.size, strikeCount, timings: chain.timings });
         result.tickersComplete++;
       } catch (error) {

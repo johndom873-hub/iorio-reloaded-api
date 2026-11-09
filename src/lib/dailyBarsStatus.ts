@@ -35,6 +35,10 @@ export async function loadDailyBarsStatus(tickerId: string, now: Date = new Date
             THEN NOT EXISTS (
               SELECT 1 FROM ticker_backfill_runs r
               WHERE r.ticker_id = :tickerId AND r.steps @> '[{"key":"history","status":"done"}]'::jsonb
+            ) AND NOT EXISTS (
+              -- The 5-year fetch done later, by the retry pass or Populate Daily Bars (tickerDataRetries.ts).
+              SELECT 1 FROM ticker_data_retries d
+              WHERE d.ticker_id = :tickerId AND d.data_kind = 'daily_bars_history' AND d.succeeded_at IS NOT NULL
             )
           ELSE false
         END AS "historyIncomplete"

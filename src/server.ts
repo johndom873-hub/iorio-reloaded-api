@@ -16,6 +16,7 @@ import { announceWebDynoStart } from "./lib/webDynoStartNotice.js";
 import { readAppEnvironment } from "./lib/appEnvironment.js";
 import { validatePasskeyConfiguration } from "./config/passkeyLoginMode.js";
 import { resumeInterruptedBackfillRuns } from "./ibkr/tickerBackfillPipeline.js";
+import { startTickerDataRetries } from "./ibkr/tickerDataRetries.js";
 import { marketDataPoolSnapshot } from "./ibkr/marketDataPool.js";
 import { startProcessMemoryMonitor } from "./lib/processMemoryMonitor.js";
 import { readBacktestDataDirectory } from "./backtest/backtestDataDirectory.js";
@@ -34,6 +35,13 @@ const port = Number(requireEnvironmentVariable("PORT"));
 const marketQuoteLoopFlag = requireEnvironmentVariable("MARKET_QUOTE_LOOP_ENABLED");
 if (marketQuoteLoopFlag !== "true" && marketQuoteLoopFlag !== "false") {
   throw new Error(`MARKET_QUOTE_LOOP_ENABLED must be "true" or "false", got: ${marketQuoteLoopFlag}`);
+}
+
+// Explicit on/off like the loop above: the retries of missing option chains and 5-year histories (tickerDataRetries.ts)
+// send IBKR lookups every 10 minutes, and local dev shares staging's IBKR login.
+const tickerDataRetriesFlag = requireEnvironmentVariable("TICKER_DATA_RETRIES_ENABLED");
+if (tickerDataRetriesFlag !== "true" && tickerDataRetriesFlag !== "false") {
+  throw new Error(`TICKER_DATA_RETRIES_ENABLED must be "true" or "false", got: ${tickerDataRetriesFlag}`);
 }
 
 // Validated at boot so a deploy without it fails here, not silently at the
@@ -80,6 +88,8 @@ app.listen(port, () => {
   startGenosuke();
   startOpsMonitor();
   startOrderTelegramNotices();
+  if (tickerDataRetriesFlag === "true") startTickerDataRetries();
+  else console.log("Ticker data retries disabled (TICKER_DATA_RETRIES_ENABLED=false).");
   startProcessMemoryMonitor({ processName: "web", label: "The API web dyno", counts: () => ({ poolContracts: marketDataPoolSnapshot().contractCount, liveListeners: sharedLiveConnection.listenerCount(), readListeners: sharedReadConnection.listenerCount() }) });
   // Pluto's band first: it is quoted first in every cycle.
   if (marketQuoteLoopFlag === "true") startMarketQuoteLoop([createOptionQuoteBandConsumer(), createAssignmentRiskConsumer(), createVolatilityConsumer()]);

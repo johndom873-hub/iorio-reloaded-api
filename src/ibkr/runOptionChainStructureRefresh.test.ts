@@ -177,15 +177,13 @@ describe("buildStructureJobOutcome", () => {
     expect(buildStructureJobOutcome(cleanResult)).toEqual({});
   });
 
-  it("completes with errors when some tickers failed or were skipped, one error each", () => {
-    expect(buildStructureJobOutcome({ ...cleanResult, tickersComplete: 2, tickersFailed: 1, failedSymbols: ["AAA"], skippedSymbols: ["BBB"] })).toEqual({
-      completedWithErrors: { errorCount: 2, message: "2 of 4 tickers have no structure today, so nothing quotes their options from it: AAA, BBB" },
-    });
+  it("raises nothing when only some tickers failed or were skipped: the retry pass tries them again", () => {
+    expect(buildStructureJobOutcome({ ...cleanResult, tickersComplete: 2, tickersFailed: 1, failedSymbols: ["AAA"], skippedSymbols: ["BBB"] })).toEqual({});
   });
 
   it("fails when no ticker got its structure, or there was none to refresh", () => {
     expect(buildStructureJobOutcome({ ...cleanResult, tickersComplete: 0, tickersFailed: 1, failedSymbols: ["AAA"], skippedSymbols: ["BBB", "CCC", "DDD"] })).toEqual({
-      failureMessage: "4 of 4 tickers have no structure today, so nothing quotes their options from it: AAA, BBB, CCC, DDD",
+      failureMessage: "none of the 4 tickers got today's structure: AAA, BBB, CCC, DDD",
     });
     expect(buildStructureJobOutcome({ ...cleanResult, tickersAttempted: 0, tickersComplete: 0 })).toEqual({ failureMessage: "no tickers to refresh (shortlist and open positions are both empty)" });
   });

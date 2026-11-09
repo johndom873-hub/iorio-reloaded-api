@@ -214,6 +214,12 @@ export async function startTickerBackfill(tickerId: string, symbol: string, depe
   return run;
 }
 
+/** Other IBKR setup work (the ticker data retry pass, tickerDataRetries.ts) waits its turn in the same queue as the setups. */
+export function enqueueTickerIbkrWork(task: () => Promise<void>): Promise<void> {
+  pipelineQueue = pipelineQueue.then(task).catch((error) => console.error("queued ticker IBKR work crashed", error));
+  return pipelineQueue;
+}
+
 function enqueueBackfillRun(run: TickerBackfillRun, symbol: string, dependencies: TickerBackfillDependencies): void {
   pipelineQueue = pipelineQueue.then(() => executeBackfillRun(run.id, run.tickerId, symbol, dependencies)).catch((error) => console.error(`ticker backfill for ${symbol} crashed`, error));
 }
