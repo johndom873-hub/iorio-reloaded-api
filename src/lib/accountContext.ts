@@ -30,9 +30,10 @@ export interface SettledCashForTrading {
 }
 
 /**
- * IBKR reports SettledCash only for a cash account. The paper account is a margin account, so it reports none, and its
- * total cash stands in (its settled cash equals its total cash there). On the live account, a cash account, none
- * reported stays unknown. Example: paper, no SettledCash, total cash $445,878 → settled cash $445,878.
+ * The paper account is a margin account and reports no settled cash, so its total cash stands in (its settled cash
+ * equals its total cash there). The live cash account's summary sends no SettledCash tag either; fetchAccountSummary
+ * fills it from IBKR's SettledCashByDate (2026-11-09), and one still missing stays unknown. Example: paper, no
+ * SettledCash, total cash $445,878 → settled cash $445,878.
  */
 export function settledCashForTrading(account: Pick<AccountSummary, "settledCash" | "totalCashValue">, tradingMode: "paper" | "live"): SettledCashForTrading {
   if (account.settledCash !== null) return { settledCash: account.settledCash, totalCashStandsIn: false };

@@ -24,6 +24,7 @@
     "test:coverage": "vitest run --coverage",
     "manage-user": "tsx scripts/manage-user.ts",
     "books:cutover": "tsx scripts/books-cutover.ts",
+    "books:record-deposit": "tsx scripts/books-record-deposit.ts",
     "split:rewrite": "tsx scripts/stock-split.ts rewrite",
     "split:undo": "tsx scripts/stock-split.ts undo",
     "ticker:unfreeze": "tsx scripts/stock-split.ts unfreeze",

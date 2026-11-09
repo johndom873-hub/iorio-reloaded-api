@@ -142,16 +142,20 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
     record("account_data", false, `account summary failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  // Pluto's own day (Marcelo 2026-11-05): its book value now against last night's, less the cash moved into it since
-  // (deposit splits, moves between books), so a manual loss never trips Pluto's breaker. Example: $600,000 last night,
-  // $585,000 now with $10,000 moved in today → (575,000 − 600,000) / 600,000 = −4.17%.
+  // Pluto's own day (Marcelo 2026-11-05; base with the cash moved in, 2026-11-09): its book value now less the cash
+  // moved into it since last night (deposit splits, moves between books), against last night's value plus that cash,
+  // so a manual loss never trips Pluto's breaker and a book funded today is measured on its funding. Examples: $600,000
+  // last night, $585,000 now with $10,000 moved in → (575,000 − 600,000) / 610,000 = −4.10%; $0 last night, $800,000
+  // moved in, $796,000 now → −4,000 / 800,000 = −0.50%.
   try {
     const books = await loadBooksLiveState({ fetchSummary: () => fetchPlutoAccountSummary(), now });
     if (!books.ready) record("daily_loss", false, "the Pluto and Manual books have not been started yet");
     else {
       const previous = await db("book_value_snapshots").where({ book_key: "pluto" }).where("snapshot_date", "<", todayEasternIso).orderBy("snapshot_date", "desc").first("book_value", "captured_at", db.raw(`snapshot_date::text as snapshot_date_iso`));
       const movedIn = previous ? await db("book_cash_entries").where({ book_key: "pluto" }).whereIn("kind", ["deposit_split", "book_move"]).where("effective_at", ">", previous.captured_at).sum({ total: "amount" }).first() : null;
-      const lossPct = dailyLossPercent(books.books.pluto.bookValue - Number(movedIn?.total ?? 0), previous ? Number(previous.book_value) : null);
+      const movedInDollars = Number(movedIn?.total ?? 0);
+      // dailyLossPercent(now, base) = (now − base) / base, with base = last night's value + the cash moved in since.
+      const lossPct = dailyLossPercent(books.books.pluto.bookValue, previous ? Number(previous.book_value) + movedInDollars : null);
       if (lossPct === null) record("daily_loss", false, "cannot compute today's move: no previous snapshot of Pluto's book");
       else record("daily_loss", lossPct > -settings.dailyLossBreakerPct, `${lossPct >= 0 ? "+" : ""}${lossPct.toFixed(2)}% of Pluto's book vs ${previous?.snapshot_date_iso} close (breaker at -${settings.dailyLossBreakerPct}%)`);
     }

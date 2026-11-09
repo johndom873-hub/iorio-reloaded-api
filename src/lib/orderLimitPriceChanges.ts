@@ -3,6 +3,14 @@
 // the request on the order's payload, the worker changes the order at IBKR (the same IBKR order, so it is not a new order
 // under any cap), and the order's payload keeps every change.
 
+/**
+ * Whether Pluto follows the mid in this environment (Marcelo 2026-11-09): off on production until it has run against
+ * IBKR on staging's paper account and the review's findings are fixed; a working order keeps the price it was sent at.
+ */
+export function followTheMidIsOn(environment: "development" | "staging" | "production"): boolean {
+  return environment !== "production";
+}
+
 /** How often Pluto re-reads the live quote of a working order it follows. */
 export const followTheMidCheckIntervalSeconds = 30;
 

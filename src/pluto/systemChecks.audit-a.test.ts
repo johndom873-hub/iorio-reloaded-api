@@ -80,12 +80,23 @@ describe("runPlutoSystemChecks (audit A)", () => {
     expect(JSON.stringify(harness.firstArgs[0])).toContain("snapshot_date::text as snapshot_date_iso");
   });
 
-  it("leaves cash moved into Pluto today out of its day: $1,020,000 now with $30,000 moved in is −1.00%, and trips at −3%", async () => {
+  it("leaves cash moved into Pluto today out of its day and adds it to the base: $1,020,000 now with $30,000 moved in is −0.97%, and trips at −3%", async () => {
     harness.plutoBookValue = 1_020_000;
     harness.movedIntoPluto = 30_000;
-    expect((await runPlutoSystemChecks(settings, at)).checks.daily_loss).toEqual({ ok: true, detail: "-1.00% of Pluto's book vs 2026-10-06 close (breaker at -3%)" });
-    harness.plutoBookValue = 1_000_000;
+    // (1,020,000 − 1,030,000) / 1,030,000
+    expect((await runPlutoSystemChecks(settings, at)).checks.daily_loss).toEqual({ ok: true, detail: "-0.97% of Pluto's book vs 2026-10-06 close (breaker at -3%)" });
+    // (999,000 − 1,030,000) / 1,030,000 = −3.01%
+    harness.plutoBookValue = 999_000;
     expect((await runPlutoSystemChecks(settings, at)).checks.daily_loss!.ok).toBe(false);
+  });
+
+  it("a book funded today from $0 is measured on its funding (Marcelo 2026-11-09): $796,000 now with $800,000 moved in is −0.50%", async () => {
+    harness.previousSnapshot = { book_value: "0", captured_at: new Date("2026-10-06T22:30:00Z"), snapshot_date_iso: "2026-10-06" };
+    harness.plutoBookValue = 796_000;
+    harness.movedIntoPluto = 800_000;
+    expect((await runPlutoSystemChecks(settings, at)).checks.daily_loss).toEqual({ ok: true, detail: "-0.50% of Pluto's book vs 2026-10-06 close (breaker at -3%)" });
+    harness.movedIntoPluto = 0;
+    expect((await runPlutoSystemChecks(settings, at)).checks.daily_loss!.detail).toBe("cannot compute today's move: no previous snapshot of Pluto's book");
   });
 
   it("a failed summary fails account_data with no cash in the context; a failed read of Pluto's book fails daily_loss (fail closed)", async () => {

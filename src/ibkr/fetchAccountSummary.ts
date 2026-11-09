@@ -1,5 +1,7 @@
 import { EventName, type IBApi } from "@stoqey/ib";
+import { environment } from "../config/env.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { fetchSettledCashForTodaysTrades } from "./fetchSettledCashByDate.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
 import { dedupeInFlight } from "../lib/dedupeInFlight.js";
 
@@ -13,7 +15,8 @@ export interface AccountSummary {
   // existing caller (dashboard.ts, riskLimits.ts) is unaffected.
   excessLiquidity: number | null;
   // The cash account's settled cash (Marcelo 2026-10-31): IBKR refuses a purchase the settled cash does not pay for, so
-  // Vol Farmer v4 sizes its purchases on it too.
+  // Vol Farmer v4 sizes its purchases on it too. The live account's summary sends no SettledCash, so there it is the
+  // cash settled on the day today's trades settle, from IBKR's SettledCashByDate (fetchSettledCashByDate.ts, 2026-11-09).
   settledCash: number | null;
 }
 
@@ -137,7 +140,7 @@ async function fetchAccountSummaryUncached(): Promise<AccountSummary> {
     const { ib, release } = borrowed;
     const reqId = sharedReadConnection.allocateReqId();
     try {
-      return await requestAccountSummary(ib, reqId);
+      return await withLiveSettledCash(ib, await requestAccountSummary(ib, reqId));
     } finally {
       ib.cancelAccountSummary(reqId);
       release();
@@ -148,9 +151,23 @@ async function fetchAccountSummaryUncached(): Promise<AccountSummary> {
   const { ib } = connection;
   const reqId = 9001;
   try {
-    return await requestAccountSummary(ib, reqId);
+    return await withLiveSettledCash(ib, await requestAccountSummary(ib, reqId));
   } finally {
     ib.cancelAccountSummary(reqId);
     connection.disconnect();
+  }
+}
+
+/**
+ * On the live account, a summary without SettledCash takes it from IBKR's SettledCashByDate (the day today's trades
+ * settle). A failure to read it leaves it unknown (null: Pluto then buys nothing) rather than failing the summary.
+ */
+async function withLiveSettledCash(ib: IBApi, summary: AccountSummary): Promise<AccountSummary> {
+  if (summary.settledCash !== null || environment.ibkrTradingMode !== "live") return summary;
+  try {
+    return { ...summary, settledCash: await fetchSettledCashForTodaysTrades(ib) };
+  } catch (error) {
+    console.log(`fetchAccountSummary: IBKR's settled cash by date could not be read (${error instanceof Error ? error.message : error}); settled cash stays unknown.`);
+    return summary;
   }
 }

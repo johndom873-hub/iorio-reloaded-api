@@ -3,6 +3,7 @@ import { db } from "../db/connection.js";
 import { easternInstant, easternIsoDate } from "../lib/easternIsoDate.js";
 import type { BookKey } from "./bookKeys.js";
 import { loadBooksCutover } from "./bookLedger.js";
+import { loadUnmatchedRecordedDeposits, settleStatementTransferAgainstRecordedDeposits, staleRecordedDepositProblems, whereNotUnmatchedRecordedDeposit } from "./recordedDeposits.js";
 import { attributeStatement, statementBaseCurrencyProblem, statementCutOffAt, type StatementAttributionContext, type StatementEntryDraft } from "./statementAttribution.js";
 import { bookOfTickerAt, loadTickerBookPeriods } from "./tickerBookPeriods.js";
 
@@ -13,6 +14,7 @@ import { bookOfTickerAt, loadTickerBookPeriods } from "./tickerBookPeriods.js";
 // it. Posting part of one would move the cut-off past fills it does not hold.
 //
 // A row already posted adds nothing (book_cash_entries' source_row_key); one whose amount changed since is reported.
+// A transfer matching a deposit recorded before the statement takes that entry's place (recordedDeposits.ts).
 // A row already in the cut-over's opening cash is skipped; a row first seen later, even one dated before the cut-over,
 // is new cash and is posted at the cut-over.
 //
@@ -131,6 +133,16 @@ export async function importStatementIntoBooks(statement: Record<string, unknown
         if (Math.abs(existingTotal - total) > 1e-6) problems.push(`statement row ${sourceRowKey} now reads ${total.toFixed(2)}, posted as ${existingTotal.toFixed(2)}`);
         continue;
       }
+      // A deposit recorded before the statement (recordedDeposits.ts): the row takes the recorded entry's place.
+      const onlyDraft = rowDrafts.length === 1 ? rowDrafts[0] : undefined;
+      if (onlyDraft) {
+        const outcome = await settleStatementTransferAgainstRecordedDeposits(trx, onlyDraft, new Date(Math.max(onlyDraft.effectiveAt.getTime(), cutover.cutOverAt.getTime())));
+        if (outcome.kind === "matched") continue;
+        if (outcome.kind === "held_back") {
+          problems.push(outcome.problem);
+          continue;
+        }
+      }
       const groupId = randomUUID();
       await trx("book_cash_entries").insert(
         rowDrafts.map((draft) => ({
@@ -149,11 +161,13 @@ export async function importStatementIntoBooks(statement: Record<string, unknown
       newEntryCount += rowDrafts.length;
       if (rowDrafts.some((draft) => draft.needsReview)) needsReviewCount++;
     }
-    const ledger = await trx("book_cash_entries").where("effective_at", "<", cutOffAt).sum({ total: "amount" }).first();
+    // A recorded deposit no statement row has matched yet is not in this statement's ending cash either.
+    const ledger = await whereNotUnmatchedRecordedDeposit(trx("book_cash_entries").where("effective_at", "<", cutOffAt)).sum({ total: "amount" }).first();
     ledgerCash = Number(ledger?.total ?? 0);
     gap = parsed.endingCash === null ? null : parsed.endingCash - ledgerCash;
     if (gap === null) problems.push("IBKR's statement has no ending cash: the books could not be checked against it");
     else if (Math.abs(gap) >= statementGapToleranceDollars) problems.push(`the books' cash differs from IBKR's ending cash of ${toDate} by ${gap.toFixed(2)}`);
+    problems.push(...staleRecordedDepositProblems(await loadUnmatchedRecordedDeposits(trx), `${toDate.slice(0, 4)}-${toDate.slice(4, 6)}-${toDate.slice(6, 8)}`));
     await trx("book_statement_imports").insert({
       from_date: `${parsed.fromDate.slice(0, 4)}-${parsed.fromDate.slice(4, 6)}-${parsed.fromDate.slice(6, 8)}`,
       to_date: `${toDate.slice(0, 4)}-${toDate.slice(4, 6)}-${toDate.slice(6, 8)}`,

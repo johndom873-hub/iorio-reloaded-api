@@ -1,4 +1,6 @@
 import { db } from "../db/connection.js";
+import { readAppEnvironment } from "../lib/appEnvironment.js";
+import { followTheMidIsOn } from "../lib/orderLimitPriceChanges.js";
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
 import { sharesPerContract } from "../backtest/engine/backtestBook.js";
 import { baselineMinimumBid, baselineQuoteRejection } from "../backtest/engine/baselineSaleSteps.js";
@@ -699,7 +701,9 @@ async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; t
  * or null to leave the order where it is (no two-sided quote; a sale whose quote fails v4's bid minimum or spread limit,
  * when `maxSpreadPctOfMid` is given; Pluto off or paused).
  */
-function followTheMidOf(input: VolFarmerV4RoundInput, symbol: string, contract: { expiry: string; strike: number; right: "C" | "P" }, side: "sell" | "buy", maxSpreadPctOfMid: number | null): PlutoFollowTheMid {
+/** How a working order follows the mid; undefined where following is off (production, orderLimitPriceChanges.ts). */
+function followTheMidOf(input: VolFarmerV4RoundInput, symbol: string, contract: { expiry: string; strike: number; right: "C" | "P" }, side: "sell" | "buy", maxSpreadPctOfMid: number | null): PlutoFollowTheMid | undefined {
+  if (!followTheMidIsOn(readAppEnvironment())) return undefined;
   return {
     priceNow: async () => {
       const state = await loadPlutoState();

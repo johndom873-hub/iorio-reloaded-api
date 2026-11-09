@@ -4,7 +4,8 @@ import { flatCommissionEstimator, flatStockCommissionEstimator } from "../lib/co
 import { regularCloseEt } from "../lib/marketSessionStatus.js";
 import { roundToCents } from "../lib/positionOrderRules.js";
 import { optionLimitCentsGivenUp, optionLimitPriceGivingUpOneCent } from "../lib/optionLimitPrice.js";
-import { followTheMidCheckIntervalSeconds, maxLimitPriceChangesPerOrder } from "../lib/orderLimitPriceChanges.js";
+import { followTheMidCheckIntervalSeconds, followTheMidIsOn, maxLimitPriceChangesPerOrder } from "../lib/orderLimitPriceChanges.js";
+import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { tradingSessionsPerYear } from "../lib/tradingSessionsHeld.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
 import { openingLookFallbackEtMinutes } from "./openingLook.js";
@@ -73,6 +74,8 @@ export interface PlutoHowItWorks {
     callMaxCommissionPctOfPremium: number;
     /** A Call, Put or buyback goes this many cents past the mid, never past the bid or ask; a LEAPS at the mid (optionLimitPrice.ts). */
     optionCentsGivenUp: number;
+    /** Whether working orders follow the mid here (off on production for now, orderLimitPriceChanges.ts). */
+    followsTheMid: boolean;
     /** Follow the mid: a working Call on shares held, Put or buyback is checked every this many seconds and its limit moved, at most maxLimitChangesPerOrder times. */
     followTheMidCheckSeconds: number;
     maxLimitChangesPerOrder: number;
@@ -155,7 +158,7 @@ export interface PlutoHowItWorks {
 const percent = (fraction: number) => Math.round(fraction * 1_000_000) / 10_000;
 
 /** Pure: the tab's numbers from Pluto's settings, the platform's unfilled-order sweep and the code's constants. */
-export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfilledOrderCancelMinutes: number; tickers: readonly Pick<PlutoTickerSettings, "symbol" | "alwaysHoldTheStock">[] }): PlutoHowItWorks {
+export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfilledOrderCancelMinutes: number; followsTheMid: boolean; tickers: readonly Pick<PlutoTickerSettings, "symbol" | "alwaysHoldTheStock">[] }): PlutoHowItWorks {
   const pot = volFarmerV4ExamplePlutoBookValue * tickerPotFraction(volFarmerV4ExampleAllocationPct, settings);
   const volFarmerV4Step = settings.volFarmerV4StepRule === "implied_move_at_put_sale" ? volFarmerV4ImpliedMoveStep(volFarmerV4ExampleImpliedVolatility).stepPct : settings.volFarmerV4StepBelowFirstBreakEvenPct;
   // A lot's cost at a price, as the steps count it (the shares and their commission).
@@ -203,6 +206,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       minimumBid: baselineMinimumBid,
       callMaxCommissionPctOfPremium: percent(volFarmerV4CallMaxCommissionShareOfPremium),
       optionCentsGivenUp: optionLimitCentsGivenUp,
+      followsTheMid: figures.followsTheMid,
       followTheMidCheckSeconds: followTheMidCheckIntervalSeconds,
       maxLimitChangesPerOrder: maxLimitPriceChangesPerOrder,
       firstPositionPct: settings.volFarmerV4FirstPositionPct,
@@ -271,5 +275,5 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
 
 export async function loadPlutoHowItWorks(): Promise<PlutoHowItWorks> {
   const [settings, unfilledOrderCancelMinutes, tickers] = await Promise.all([loadPlutoSettings(), loadOrderUnfilledCancelMinutes(), loadEnabledPlutoTickerSettings()]);
-  return buildPlutoHowItWorks(settings, { unfilledOrderCancelMinutes, tickers });
+  return buildPlutoHowItWorks(settings, { unfilledOrderCancelMinutes, followsTheMid: followTheMidIsOn(readAppEnvironment()), tickers });
 }
