@@ -5,6 +5,7 @@ import { startProcessMemoryMonitor } from "../lib/processMemoryMonitor.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { InternalApiClient } from "../lib/internalApiClient.js";
 import { startNotificationBroadcaster, subscribeToNotifications } from "../lib/notificationBroadcaster.js";
+import type { AppNotification } from "../lib/notificationChannel.js";
 import { computeMarketSessionStatus, resolveIsOpenDay } from "../lib/marketSessionStatus.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { readGitSha } from "../lib/readGitSha.js";
@@ -137,18 +138,8 @@ export class PlutoAgent {
       label: "Pluto's agent",
       counts: () => ({ poolContracts: marketDataPoolSnapshot().contractCount, orderWatches: this.watches.size, liveListeners: sharedLiveConnection.listenerCount(), readListeners: sharedReadConnection.listenerCount() }),
     });
-    // A saved settings change, or a position closing (budget and capacity free up), is felt at the next round.
     startNotificationBroadcaster();
-    this.unsubscribeNotifications = subscribeToNotifications((notification) => {
-      if (notification.type === "position_closed") {
-        this.queueForcedRound("position_closed", { symbol: notification.symbol, positionId: notification.positionId }, null);
-        return;
-      }
-      if (notification.type !== "pluto_event" || notification.eventType !== "settings_changed") return;
-      const fields = ((notification.payload.fields as { field: string }[] | undefined) ?? []).map((change) => change.field);
-      if (fields.length > 0 && fields.every((field) => settingsFieldsThatNeverChangeADecision.has(field))) return;
-      this.queueForcedRound("settings_changed", { fields, by: notification.payload.by ?? null }, null);
-    });
+    this.unsubscribeNotifications = subscribeToNotifications((notification) => this.onNotification(notification));
     await this.housekeeping();
     void this.runReadinessIfDue();
     this.loopDone = this.runLoop();
@@ -454,6 +445,29 @@ export class PlutoAgent {
     if (symbols === null && this.forcedRounds.some((round) => round.symbols === null)) return;
     this.forcedRounds.push({ trigger, detail, symbols, retried });
     this.wakeLoop?.();
+  }
+
+  /**
+   * A saved settings change, a position closing (budget and capacity free up) or a ticker switched on is felt at the next
+   * round. A ticker switched on gets a round of its own: without one, a ticker with no option expiring today is never
+   * quoted by the band, so no round would look at it until the next opening look.
+   */
+  private onNotification(notification: AppNotification): void {
+    if (notification.type === "position_closed") {
+      this.queueForcedRound("position_closed", { symbol: notification.symbol, positionId: notification.positionId }, null);
+      return;
+    }
+    if (notification.type !== "pluto_event") return;
+    if (notification.eventType === "ticker_enabled") {
+      const symbol = notification.payload.symbol;
+      if (typeof symbol !== "string" || symbol === "") return;
+      this.queueForcedRound("settings_changed", { fields: ["enabled"], symbol, by: notification.payload.by ?? null }, [symbol]);
+      return;
+    }
+    if (notification.eventType !== "settings_changed") return;
+    const fields = ((notification.payload.fields as { field: string }[] | undefined) ?? []).map((change) => change.field);
+    if (fields.length > 0 && fields.every((field) => settingsFieldsThatNeverChangeADecision.has(field))) return;
+    this.queueForcedRound("settings_changed", { fields, by: notification.payload.by ?? null }, null);
   }
 
   /** An order Pluto placed has ended: its budget and the ticker are free again, and a fill starts the ticker's cooldown. */

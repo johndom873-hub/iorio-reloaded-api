@@ -102,6 +102,7 @@ vi.mock("./bandQuoteWatermark.js", async () => {
 vi.mock("./systemChecks.js", () => ({ isInsideTradingWindow: () => harness.insideWindow }));
 
 const { PlutoAgent } = await import("./agent.js");
+const { easternIsoDate } = await import("../lib/easternIsoDate.js");
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AgentInternals = any;
@@ -254,6 +255,30 @@ describe("PlutoAgent opening look (audit A)", () => {
       await agent.loopIteration();
     }
     expect(harness.passRequests.filter((request) => request.trigger === "opening_analysis")).toHaveLength(5);
+  });
+});
+
+describe("PlutoAgent rounds queued by notifications", () => {
+  const plutoEvent = (eventType: string, payload: Record<string, unknown>) => ({ type: "pluto_event", eventId: 1, eventType, occurredAt: "2026-11-10T15:58:42Z", payload });
+
+  it("a ticker switched on gets a round of its own, run with every other enabled ticker's decisions untouched", async () => {
+    const agent = makeAgent();
+    agent.watching = true;
+    agent.openingLook.doneFor = easternIsoDate(new Date());
+    agent.onNotification(plutoEvent("ticker_enabled", { symbol: "NVDA", by: "Marcelo" }));
+    expect(agent.forcedRounds).toEqual([{ trigger: "settings_changed", detail: { fields: ["enabled"], symbol: "NVDA", by: "Marcelo" }, symbols: ["NVDA"], retried: false }]);
+    await agent.loopIteration();
+    expect(harness.passRequests[0]).toMatchObject({ trigger: "settings_changed", symbols: ["NVDA"], force: true, heldPositionsOnly: false });
+  });
+
+  it("a ticker switched off, or an event with no symbol, queues nothing; a decision setting still queues an every-ticker round", () => {
+    const agent = makeAgent();
+    agent.onNotification(plutoEvent("ticker_disabled", { symbol: "NVDA", by: "Marcelo" }));
+    agent.onNotification(plutoEvent("ticker_enabled", { by: "Marcelo" }));
+    agent.onNotification(plutoEvent("settings_changed", { by: "Marcelo", fields: [{ field: "telegramVerbosity" }] }));
+    expect(agent.forcedRounds).toEqual([]);
+    agent.onNotification(plutoEvent("settings_changed", { by: "Marcelo", symbol: "AMD", fields: [{ field: "allocationPct" }] }));
+    expect(agent.forcedRounds).toEqual([{ trigger: "settings_changed", detail: { fields: ["allocationPct"], by: "Marcelo" }, symbols: null, retried: false }]);
   });
 });
 
