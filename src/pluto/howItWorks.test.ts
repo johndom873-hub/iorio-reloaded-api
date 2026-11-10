@@ -33,7 +33,7 @@ describe("buildPlutoHowItWorks", () => {
     const { example, ...values } = buildPlutoHowItWorks(settings, figures).volFarmerV4;
     expect(values).toEqual({
       callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, minimumBid: 0.05, callMaxCommissionPctOfPremium: 20, firstPositionPct: 80,
-      optionCentsGivenUp: 1, followsTheMid: true, followTheMidCheckSeconds: 30, maxLimitChangesPerOrder: 10,
+      optionCentsGivenUp: 1, followsTheMid: true, followTheMidCheckSeconds: 30, maxLimitChangesPerOrder: 20,
       putsStartCallYieldPct: 5, putMaxAbsDelta: 0.3, stepRule: "implied_move_at_put_sale", stepBelowFirstBreakEvenPct: 15,
       leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAllocationPct: 10,
       rebalanceBandPct: 20, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45,

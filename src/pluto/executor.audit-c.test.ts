@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // Audit C (2026-10-07): the pessimistic fill figure is gone; the fill-slippage breaker must behave exactly as before.
 // watchPlutoOrder runs against a fake order API and a fake trades read; ledger, breaker and Telegram are mocked.
 
-const fillRows: { side: string; quantity: number; price: string; multiplier: number }[] = [];
+const fillRows: { side: string; quantity: number; price: string; multiplier: number; executed_at?: Date }[] = [];
 vi.mock("../db/connection.js", () => {
   const chain = {
     join: () => chain,
@@ -143,8 +143,9 @@ describe("follow the mid (Marcelo 2026-11-07)", () => {
     expect(api.post).not.toHaveBeenCalled();
   });
 
-  it("stops following after the order's 10th change, or when the route refuses (409)", async () => {
-    const changes = Array.from({ length: 10 }, () => ({ at: "x", from: 1.5, to: 1.49 }));
+  it("stops following after the order's 20th change, or when the route refuses (409)", async () => {
+    expect(await followTheMidOnce(apiPosting() as never, followed(1.4), working(1.5, { limitPriceChanges: Array.from({ length: 19 }, () => ({ at: "x", from: 1.5, to: 1.49 })) }) as never)).toBe(true);
+    const changes = Array.from({ length: 20 }, () => ({ at: "x", from: 1.5, to: 1.49 }));
     expect(await followTheMidOnce(apiPosting() as never, followed(1.4), working(1.5, { limitPriceChanges: changes }) as never)).toBe(false);
     const refusing = apiPosting(async () => {
       throw new InternalApiError(409, "Trading is halted.");
@@ -165,5 +166,44 @@ describe("follow the mid (Marcelo 2026-11-07)", () => {
     const update = vi.mocked(updatePlutoAction).mock.calls.at(-1)![1] as { outcome: string; fillPrice: number };
     expect(update.outcome).toBe("filled");
     expect(update.fillPrice).toBeCloseTo(1.4, 9);
+  });
+});
+
+describe("a followed order's fills, each against the limit IBKR held when it executed (Marcelo 2026-11-09)", () => {
+  const changedAt = Date.parse("2026-11-09T15:03:00.000Z");
+  // Sent at 1.05, changed to 1.29 at 15:03:00.
+  const changes = [{ at: "2026-11-09T15:03:00.000Z", from: 1.05, to: 1.29 }];
+  const filled = (extra: Record<string, unknown> = {}) => ({ id: "o1", status: "filled", errorMessage: null, updatedAt: new Date().toISOString(), payload: { legs: [{ role: "option", action: "SELL", unitPrice: 1.29, quantity: 4 }], limitPriceChanges: changes, ...extra } });
+  const watch = (followTheMid: { priceNow: () => Promise<number | null> } | undefined) =>
+    watchPlutoOrder({ get: vi.fn(async () => filled()), post: vi.fn(async () => ({})) } as never, settings, { actionId: "a1", orderId: "o1", symbol: "NVDA", reference: { price: 1.04, side: "sell", multiplier: 100 }, description: "Sell 4× NVDA $180 Call", ...(followTheMid ? { followTheMid } : {}) }, { pollIntervalMs: 0 });
+
+  it("2 filled at 1.05 before the change and 2 at 1.29 after it: no slippage, no breaker (against the last limit alone it is 9.3%)", async () => {
+    fillRows.push({ side: "SELL", quantity: 2, price: "1.05", multiplier: 100, executed_at: new Date(changedAt - 60_000) });
+    fillRows.push({ side: "SELL", quantity: 2, price: "1.29", multiplier: 100, executed_at: new Date(changedAt + 60_000) });
+    await watch({ priceNow: async () => null });
+    expect(vi.mocked(tripPlutoBreaker)).not.toHaveBeenCalled();
+  });
+
+  it("all 4 filled at 1.20 a minute after the change to 1.29: 7.0% under its limit trips the 5% breaker", async () => {
+    fillRows.push({ side: "SELL", quantity: 4, price: "1.20", multiplier: 100, executed_at: new Date(changedAt + 60_000) });
+    await watch({ priceNow: async () => null });
+    expect(vi.mocked(tripPlutoBreaker)).toHaveBeenCalledWith("fill_slippage", expect.stringContaining("vs its limits (average) 1.29 (7.0% past it"));
+  });
+
+  it("a fill seconds after the change may have met the limit before it: the kinder limit counts", async () => {
+    fillRows.push({ side: "SELL", quantity: 4, price: "1.05", multiplier: 100, executed_at: new Date(changedAt + 5_000) });
+    await watch({ priceNow: async () => null });
+    expect(vi.mocked(tripPlutoBreaker)).not.toHaveBeenCalled();
+  });
+
+  it("an order adopted after a restart is judged against its own limits, not its action's reference", async () => {
+    // Sent at 1.29 (the action's reference), moved down to 1.05 with the market and filled there: 18.6% under the
+    // reference would trip the breaker, 0% under its own limit does not.
+    const movedDown = { ...filled(), payload: { legs: [{ role: "option", action: "SELL", unitPrice: 1.05, quantity: 4 }], limitPriceChanges: [{ at: "2026-11-09T15:03:00.000Z", from: 1.29, to: 1.05 }] } };
+    fillRows.push({ side: "SELL", quantity: 4, price: "1.05", multiplier: 100, executed_at: new Date(changedAt + 60_000) });
+    await watchPlutoOrder({ get: vi.fn(async () => movedDown), post: vi.fn(async () => ({})) } as never, settings, { actionId: "a1", orderId: "o1", symbol: "NVDA", reference: { price: 1.29, side: "sell", multiplier: 100 }, description: "Sell 4× NVDA $180 Call" }, { pollIntervalMs: 0 });
+    expect(vi.mocked(tripPlutoBreaker)).not.toHaveBeenCalled();
+    const update = vi.mocked(updatePlutoAction).mock.calls.at(-1)![1] as { outcome: string; fillPrice: number };
+    expect(update).toMatchObject({ outcome: "filled", fillPrice: 1.05 });
   });
 });

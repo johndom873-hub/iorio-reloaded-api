@@ -107,7 +107,8 @@ describe("findDeadlineProblems", () => {
     await insertRun("ibkr_health_check", "2031-03-03T09:06:00Z", "success");
     const { runs, problems } = await findDeadlineProblems(utc("2031-03-03T09:11:00Z"));
     expect(runs.map((run) => run.jobName)).toEqual(["ibkr_health_check"]);
-    expect(problems.map((problem) => problem.alertKey)).toEqual(["deadline:option_chain_structure_refresh:2031-03-03", "deadline:session_close_read:2031-03-03"]);
+    // The structure refresh runs after Pluto's split check in the 09:00 job, so its deadline is later (09:25 UTC).
+    expect(problems.map((problem) => problem.alertKey)).toEqual(["deadline:session_close_read:2031-03-03", "deadline:pluto_split_check:2031-03-03"]);
   });
 
   it("does not expect market-day jobs on a weekend", async () => {
@@ -124,12 +125,12 @@ describe("reportJobDeadlines", () => {
     await reportJobDeadlines(utc("2031-03-03T09:11:00Z"));
     expect(recorded.throttledAlerts).toEqual([
       {
-        alertKey: "deadline:option_chain_structure_refresh:2031-03-03",
-        message: "⏰ option_chain_structure_refresh has not started for 2031-03-03 (was due 04:00 ET, deadline passed at 04:10 ET). Check the Heroku Scheduler entry and the job's clock guard.",
-      },
-      {
         alertKey: "deadline:session_close_read:2031-03-03",
         message: "⏰ session_close_read has not started for 2031-03-03 (was due 04:00 ET, deadline passed at 04:10 ET). Check the Heroku Scheduler entry and the job's clock guard.",
+      },
+      {
+        alertKey: "deadline:pluto_split_check:2031-03-03",
+        message: "⏰ pluto_split_check has not started for 2031-03-03 (was due 04:00 ET, deadline passed at 04:10 ET). Check the Heroku Scheduler entry and the job's clock guard.",
       },
     ]);
   });

@@ -689,7 +689,7 @@ async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; t
     round.committedThisRound += costDollars;
     memory.pending.push(pendingVolFarmerV4CallBuyBack(actionId, call));
     input.trackWatch(
-      watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: "buy", multiplier: 100 }, description: result.detail, cancelByMs: input.cancelByMs, followTheMid: followTheMidOf(input, ticker.symbol, contract, "buy", null) }),
+      watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: "buy", multiplier: 100 }, description: result.detail, cancelByMs: input.cancelByMs, followTheMid: followTheMidOf(input.marketWatch, ticker.symbol, contract, "buy", null) }),
       result.orderId,
       ticker.symbol,
     );
@@ -702,19 +702,39 @@ async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; t
  * when `maxSpreadPctOfMid` is given; Pluto off or paused).
  */
 /** How a working order follows the mid; undefined where following is off (production, orderLimitPriceChanges.ts). */
-function followTheMidOf(input: VolFarmerV4RoundInput, symbol: string, contract: { expiry: string; strike: number; right: "C" | "P" }, side: "sell" | "buy", maxSpreadPctOfMid: number | null): PlutoFollowTheMid | undefined {
+function followTheMidOf(marketWatch: Pick<PlutoMarketWatch, "burst">, symbol: string, contract: { expiry: string; strike: number; right: "C" | "P" }, side: "sell" | "buy", maxSpreadPctOfMid: number | null): PlutoFollowTheMid | undefined {
   if (!followTheMidIsOn(readAppEnvironment())) return undefined;
   return {
     priceNow: async () => {
       const state = await loadPlutoState();
       if (state.mode !== "on" || state.paused) return null;
-      const [live] = await input.marketWatch.burst(symbol, [contract]);
+      const [live] = await marketWatch.burst(symbol, [contract]);
       const twoSided = live && live.bid !== null && live.ask !== null && live.bid > 0 && live.ask > live.bid ? { bid: live.bid, ask: live.ask } : null;
       if (twoSided === null) return null;
       if (maxSpreadPctOfMid !== null && baselineQuoteRejection(twoSided, maxSpreadPctOfMid) !== null) return null;
       return optionLimitPriceGivingUpOneCent(twoSided.bid, twoSided.ask, side);
     },
   };
+}
+
+/**
+ * Follow the mid for a v4 order a new process adopted (the agent restarted while it worked): the same rules it was sent
+ * with, rebuilt from its action. A sale of a Call on shares held or a Put follows within v4's spread limit; a buyback
+ * follows at any spread; anything else (two legs, LEAPS, shares) does not.
+ */
+export function followTheMidOfAdoptedOrder(
+  marketWatch: Pick<PlutoMarketWatch, "burst">,
+  settings: PlutoSettings,
+  order: { executionStrategy: string | null; kind: string; symbol: string; contract: unknown; legs: readonly { role: "stock" | "option" }[] },
+): PlutoFollowTheMid | undefined {
+  if (order.executionStrategy !== "vol_farmer_v4" || order.legs.length !== 1 || order.legs[0]!.role !== "option") return undefined;
+  const contract = (order.contract ?? {}) as { expiry?: string; strike?: number; right?: "C" | "P"; strategyKey?: string };
+  if (!contract.expiry || contract.strike === undefined) return undefined;
+  const right = contract.right ?? (contract.strategyKey === "cash_secured_put" ? "P" : "C");
+  const followed = { expiry: contract.expiry, strike: Number(contract.strike), right };
+  if (order.kind === "open_covered_call" || order.kind === "open_cash_secured_put") return followTheMidOf(marketWatch, order.symbol, followed, "sell", volFarmerV4RulesOf(settings).farmer.maxSpreadPctOfMid);
+  if (order.kind === "close_leg") return followTheMidOf(marketWatch, order.symbol, followed, "buy", null);
+  return undefined;
 }
 
 /** Every leg reference the state holds. */
@@ -856,7 +876,7 @@ async function sendOrder(context: {
       description: result.detail,
       cancelByMs: input.cancelByMs,
       // A Call on shares held or a Put follows the mid; a Call that buys its shares with it (two legs) and a LEAPS do not.
-      ...(!isLeaps && !buysShares ? { followTheMid: followTheMidOf(input, ticker.symbol, contract, item.side, farmer.maxSpreadPctOfMid) } : {}),
+      ...(!isLeaps && !buysShares ? { followTheMid: followTheMidOf(input.marketWatch, ticker.symbol, contract, item.side, farmer.maxSpreadPctOfMid) } : {}),
     }),
     result.orderId,
     ticker.symbol,

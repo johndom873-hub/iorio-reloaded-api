@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { XMLParser } from "fast-xml-parser";
-import { assignFlowsToSnapshots, cashFlowFromTransferRow, extractExternalCashFlows, parseFlexDateTime, type FlexCashFlow, type SnapshotCaptureTime } from "./flexCashFlowAssignment.js";
+import { assignFlowsToSnapshots, cashFlowFromTransferRow, extractExternalCashFlows, nextSnapshotCashFlow, parseFlexDateTime, type FlexCashFlow, type SnapshotCaptureTime } from "./flexCashFlowAssignment.js";
 
 // The live account's real transfer row (Flex "Transfers" section, 2026-10-02 probe).
 const liveTransferRow = {
@@ -142,5 +142,24 @@ describe("extractExternalCashFlows", () => {
   it("does not hand a securities transfer to the performance maths", () => {
     const stock = parse(`<FlexQueryResponse><FlexStatements><FlexStatement><Transfers><Transfer assetCategory="STK" direction="IN" positionAmount="5000" cashTransfer="0" dateTime="20260925;101500" /></Transfers></FlexStatement></FlexStatements></FlexQueryResponse>`);
     expect(extractExternalCashFlows(stock)).toEqual([]);
+  });
+});
+
+describe("nextSnapshotCashFlow (statement part + recorded deposits part, Marcelo 2026-11-09)", () => {
+  it("the night a deposit is recorded: it counts, and nothing changes while the statement does not hold it", () => {
+    expect(nextSnapshotCashFlow({ netCashFlow: 0, recordedCashFlow: 0 }, { statementCashFlow: undefined, recordedCashFlow: 1_050_000 })).toEqual({ netCashFlow: 1_050_000, recordedCashFlow: 1_050_000 });
+    expect(nextSnapshotCashFlow({ netCashFlow: 1_050_000, recordedCashFlow: 1_050_000 }, { statementCashFlow: undefined, recordedCashFlow: 1_050_000 })).toBeNull();
+  });
+  it("the statement files it under the same night: the statement's figure replaces the recorded one, counted once", () => {
+    expect(nextSnapshotCashFlow({ netCashFlow: 1_050_000, recordedCashFlow: 1_050_000 }, { statementCashFlow: 1_050_000, recordedCashFlow: 0 })).toEqual({ netCashFlow: 1_050_000, recordedCashFlow: 0 });
+  });
+  it("the statement files it under another night: the recorded night drops to 0, the statement's night counts it", () => {
+    expect(nextSnapshotCashFlow({ netCashFlow: 1_050_000, recordedCashFlow: 1_050_000 }, { statementCashFlow: undefined, recordedCashFlow: 0 })).toEqual({ netCashFlow: 0, recordedCashFlow: 0 });
+    expect(nextSnapshotCashFlow({ netCashFlow: 0, recordedCashFlow: 0 }, { statementCashFlow: 1_050_000, recordedCashFlow: 0 })).toEqual({ netCashFlow: 1_050_000, recordedCashFlow: 0 });
+  });
+  it("as before: a statement flow already stored stays when tonight's report has no entry for that night", () => {
+    expect(nextSnapshotCashFlow({ netCashFlow: 500, recordedCashFlow: 0 }, { statementCashFlow: undefined, recordedCashFlow: 0 })).toBeNull();
+    expect(nextSnapshotCashFlow({ netCashFlow: 0, recordedCashFlow: 0 }, { statementCashFlow: undefined, recordedCashFlow: 0 })).toBeNull();
+    expect(nextSnapshotCashFlow({ netCashFlow: null, recordedCashFlow: 0 }, { statementCashFlow: undefined, recordedCashFlow: 0 })).toEqual({ netCashFlow: 0, recordedCashFlow: 0 });
   });
 });

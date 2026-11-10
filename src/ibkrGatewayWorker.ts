@@ -14,7 +14,7 @@ import { cancelSubmittedOrder, changeSubmittedOrderLimit, placeConfirmedOrder, t
 import { limitChangeableOrderStatuses } from "./lib/orderRequestStatuses.js";
 import { RecentLimitPriceChanges } from "./ibkr/ibkrGatewayRecentLimitPriceChanges.js";
 import { fetchTradingHalt } from "./lib/platformControls.js";
-import { createExecutionRecorder, handleOrderErrorEvent, handleOrderStatusEvent, reconcileStaleOrderRequests as reconcileStaleOrders } from "./ibkr/ibkrGatewayOrderTracking.js";
+import { createExecutionRecorder, handleOrderErrorEvent, handleOrderStatusEvent, reconcileStaleOrderRequests as reconcileStaleOrders, syncFollowedOrderLimitsWithIbkr } from "./ibkr/ibkrGatewayOrderTracking.js";
 import { resolveContractId } from "./ibkr/ibkrGatewayResolveContractId.js";
 import { allocateContractResolutionRequestId } from "./ibkr/contractResolutionRequestIds.js";
 import { fetchIbkrHeldPositions } from "./ibkr/ibkrGatewayFetchHeldPositions.js";
@@ -114,6 +114,18 @@ function notifyTelegramDeliveredWithinTimeout(message: string): Promise<boolean>
 // The limit changes this process just sent (follow the mid): read by the error listener to tell a refused change from a failed order.
 const recentLimitPriceChanges = new RecentLimitPriceChanges();
 
+// No limit change goes out on a new connection until the stale-order reconciliation has read IBKR's open orders: an order
+// that filled while the worker was away must not be changed first. A change waiting meanwhile is sent by the 30s poll.
+let limitChangesAllowed = false;
+let connectionCount = 0;
+
+/** Reads every followed order's limit back from IBKR's open orders (after a change IBKR refused late). */
+async function syncFollowedOrderLimits(): Promise<void> {
+  const ib = persistentIbkrConnection.getIb();
+  if (!ib) return;
+  await syncFollowedOrderLimitsWithIbkr(await fetchIbkrOpenOrders(ib), { db, publishNotification, recentLimitPriceChanges });
+}
+
 // Order placement lives in ibkr/ibkrGatewayOrderPlacement.ts (testable without this process); this wires in the real collaborators.
 const orderPlacementDependencies: OrderPlacementDependencies = {
   db,
@@ -141,6 +153,10 @@ function processOrderRequest(orderRequestId: string): Promise<void> {
 }
 
 function processLimitChange(orderRequestId: string): Promise<void> {
+  if (!limitChangesAllowed) {
+    console.log(`processLimitChange(${orderRequestId}): waiting for the stale-order reconciliation of this connection.`);
+    return Promise.resolve();
+  }
   return changeSubmittedOrderLimit(orderRequestId, orderPlacementDependencies);
 }
 
@@ -297,7 +313,7 @@ function setupOrderTrackingListeners(): void {
 
   // A rejected/errored order surfaces only as an error event keyed by the order id (see handleOrderErrorEvent).
   ib.on(EventName.error, (error, code, reqId) => {
-    void handleOrderErrorEvent(error, code, reqId, { ...orderTrackingDependencies, recentLimitPriceChanges });
+    void handleOrderErrorEvent(error, code, reqId, { ...orderTrackingDependencies, recentLimitPriceChanges, syncFollowedOrderLimits });
   });
 }
 
@@ -399,7 +415,7 @@ async function reconcilePositionsFromIbkr(): Promise<void> {
  * right after a fresh session starts.
  */
 function reconcileStaleOrderRequests(): Promise<void> {
-  return reconcileStaleOrders({ db, publishNotification, getIb: () => persistentIbkrConnection.getIb(), fetchIbkrOpenOrders, fetchIbkrCompletedOrders });
+  return reconcileStaleOrders({ db, publishNotification, getIb: () => persistentIbkrConnection.getIb(), fetchIbkrOpenOrders, fetchIbkrCompletedOrders, recentLimitPriceChanges });
 }
 
 // A failed connect no longer crashes the worker (see start()'s comment), so a
@@ -447,13 +463,20 @@ async function main(): Promise<void> {
   // and only then the stale-order reconciliation, which reads those trades
   // to tell a fill-while-down from a genuinely orphaned order.
   persistentIbkrConnection.onConnect((ib) => {
+    const connection = (connectionCount += 1);
+    limitChangesAllowed = false;
+    recentLimitPriceChanges.clear();
     setupOrderTrackingListeners();
     replayRecentIbkrExecutions(ib)
       .catch((error) => console.error(`Execution replay failed: ${error}`))
       .then(() => reconcilePositionsFromIbkr())
       .catch((error) => console.error(`Initial reconciliation failed: ${error}`))
       .then(() => reconcileStaleOrderRequests())
-      .catch((error) => console.error(`Stale-order reconciliation failed: ${error}`));
+      .catch((error) => console.error(`Stale-order reconciliation failed: ${error}`))
+      // Even after a failed reconciliation: a change IBKR then refuses is recorded as refused, never as the order failing.
+      .finally(() => {
+        if (connection === connectionCount) limitChangesAllowed = true;
+      });
   });
 
   await listenForOrderRequests();

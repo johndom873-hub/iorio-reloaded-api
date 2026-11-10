@@ -149,7 +149,7 @@ vi.mock("./volFarmerV4LookLoader.js", () => ({
   loadVolFarmerV4LeftoverStockLeg: async () => harness.leftoverStockLeg,
 }));
 
-const { isVolFarmerV4BuyBackRound, runVolFarmerV4Round, volFarmerV4CallsToBuyBack, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
+const { followTheMidOfAdoptedOrder, isVolFarmerV4BuyBackRound, runVolFarmerV4Round, volFarmerV4CallsToBuyBack, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
 
 /** v4 at its defaults: Calls expiring at today's close, 80% of the pot in shares, rebalanced. */
 const v4Settings = { ...plutoSafetyLimitsSettingsFixture, ...plutoVolFarmerV4SettingsFixture, excessAllowancePct: 0, maxQuoteAgeMinutes: 10, burstLines: 10, telegramVerbosity: "actions" };
@@ -815,5 +815,26 @@ describe("volFarmerV4NoCallQuotedReason", () => {
   it("selling today's expiry: words it, or that none ends today", () => {
     expect(volFarmerV4NoCallQuotedReason({ ...base, optionsExpiry: "today", bandCycleFinished: false })).toBe("no 28 Oct (0DTE) option is quoted yet today");
     expect(volFarmerV4NoCallQuotedReason({ ...base, optionsExpiry: "today", todayIso: "2026-10-29", bandCycleFinished: false })).toBe("no Call expiry ends today");
+  });
+});
+
+describe("followTheMidOfAdoptedOrder: an order adopted after a restart keeps following as it was sent", () => {
+  const marketWatch = { burst: vi.fn(async () => []) };
+  const settings = { ...plutoVolFarmerV4SettingsFixture } as never;
+  const order = (kind: string, extra: Record<string, unknown> = {}) => ({ executionStrategy: "vol_farmer_v4", kind, symbol: "NVDA", contract: { strategyKey: "covered_call", expiry: "2026-11-09", strike: 180, right: "C" }, legs: [{ role: "option" as const }], ...extra });
+
+  it("a Call on shares held, a Put and a buyback follow", () => {
+    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("open_covered_call"))).toBeDefined();
+    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("open_cash_secured_put", { contract: { strategyKey: "cash_secured_put", expiry: "2026-11-09", strike: 170, right: "P" } }))).toBeDefined();
+    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("close_leg"))).toBeDefined();
+  });
+
+  it("a Call sent with its shares (two legs), a LEAPS, shares, another strategy's order or one without its contract do not", () => {
+    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("open_covered_call", { legs: [{ role: "stock" }, { role: "option" }] }))).toBeUndefined();
+    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("buy_leaps"))).toBeUndefined();
+    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("sell_leaps"))).toBeUndefined();
+    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("buy_shares", { legs: [{ role: "stock" }] }))).toBeUndefined();
+    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("open_covered_call", { executionStrategy: "edge_margin" }))).toBeUndefined();
+    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("open_covered_call", { contract: null }))).toBeUndefined();
   });
 });

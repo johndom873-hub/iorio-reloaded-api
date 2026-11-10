@@ -3,6 +3,7 @@ import type { Knex } from "knex";
 import { easternIsoDate, weekdaysAfterUntil } from "../lib/easternIsoDate.js";
 import { formatWholeDollars } from "../lib/formatWholeDollars.js";
 import type { StatementEntryDraft } from "./statementAttribution.js";
+import type { FlexCashFlow } from "../lib/flexCashFlowAssignment.js";
 
 // A deposit recorded before IBKR's statement holds it (Marcelo 2026-11-09). Cash sent into the account shows in IBKR's
 // live cash at once, but the books only learn of it from the nightly statement, a day or two later; until then it can
@@ -107,4 +108,22 @@ export function staleRecordedDepositProblems(deposits: UnmatchedRecordedDeposit[
   return deposits
     .filter((deposit) => weekdaysAfterUntil(easternIsoDate(deposit.effectiveAt), statementToDateIso) >= recordedDepositReportAfterWeekdays)
     .map((deposit) => `the deposit of ${deposit.amount.toFixed(2)} recorded on ${easternIsoDate(deposit.effectiveAt)} is still not in IBKR's statement (through ${statementToDateIso})`);
+}
+
+/** How far apart a recorded deposit and the statement's transfer of the same amount may be and still be the same money. */
+export const recordedDepositStatementMatchDays = 10;
+
+/**
+ * The recorded deposits the account's daily P&L must still net out itself (account_pnl_snapshots.recorded_cash_flow):
+ * those no statement row has matched, less any whose transfer IBKR's cash flows already hold (same cents, within
+ * recordedDepositStatementMatchDays), which then count from the statement instead. The nightly cash-flow check runs before
+ * the import matches them, so without this the night the statement arrives would count the deposit twice.
+ * Example: $1,050,000.00 recorded on 9 Nov counts on 9 Nov's snapshot until the statement brings IBKR's 1,050,000.00.
+ */
+export function recordedDepositsAsCashFlows(deposits: readonly UnmatchedRecordedDeposit[], statementCashFlows: readonly FlexCashFlow[]): FlexCashFlow[] {
+  const flowTimeMs = (flow: FlexCashFlow) => flow.occurredAt?.getTime() ?? Date.parse(`${flow.isoDate}T12:00:00Z`);
+  const windowMs = recordedDepositStatementMatchDays * 24 * 60 * 60 * 1000;
+  return deposits
+    .filter((deposit) => !statementCashFlows.some((flow) => cents(flow.amount) === cents(deposit.amount) && Math.abs(flowTimeMs(flow) - deposit.effectiveAt.getTime()) <= windowMs))
+    .map((deposit) => ({ isoDate: easternIsoDate(deposit.effectiveAt), occurredAt: deposit.effectiveAt, amount: deposit.amount }));
 }

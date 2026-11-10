@@ -166,3 +166,19 @@ export function extractExternalCashFlows(statements: FlexStatementCashSections[]
   }
   return cashFlows;
 }
+
+/**
+ * One snapshot's cash flow after tonight's check (reconcileCashFlows, run-daily-pnl-snapshot-job.ts): net_cash_flow is the
+ * statement's part plus the recorded deposits' part (recorded_cash_flow, books/recordedDeposits.ts). The statement's part
+ * becomes the Flex report's figure for that snapshot, but a date the report has no entry for keeps a non-zero part already
+ * stored (the report's window may be shorter than the check's). The recorded part is always recomputed, so a deposit the
+ * statement now holds stops counting there, under whichever night IBKR files it. Null when nothing changes.
+ * Example: 9 Nov stored 1,050,000 (all recorded); the statement files the transfer under 10 Nov → 9 Nov becomes 0, 10 Nov 1,050,000.
+ */
+export function nextSnapshotCashFlow(stored: { netCashFlow: number | null; recordedCashFlow: number }, tonight: { statementCashFlow: number | undefined; recordedCashFlow: number }): { netCashFlow: number; recordedCashFlow: number } | null {
+  const storedStatement = stored.netCashFlow === null ? null : stored.netCashFlow - stored.recordedCashFlow;
+  const statement = tonight.statementCashFlow === undefined && storedStatement !== null && storedStatement !== 0 ? storedStatement : (tonight.statementCashFlow ?? 0);
+  const netCashFlow = statement + tonight.recordedCashFlow;
+  if (stored.netCashFlow !== null && stored.netCashFlow === netCashFlow && stored.recordedCashFlow === tonight.recordedCashFlow) return null;
+  return { netCashFlow, recordedCashFlow: tonight.recordedCashFlow };
+}

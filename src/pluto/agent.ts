@@ -11,6 +11,7 @@ import { readGitSha } from "../lib/readGitSha.js";
 import { plutoAgentHolderHeader, type PlutoAgentLease } from "./agentLease.js";
 import type { PlutoConfig } from "./config.js";
 import { loadWorkingPlutoOrders, watchPlutoOrder } from "./executor.js";
+import { followTheMidOfAdoptedOrder } from "./volFarmerV4Round.js";
 import { closeAbandonedPlutoPasses, recordPlutoEvent, type PlutoTrigger } from "./ledger.js";
 import { PlutoMarketWatch } from "./marketWatch.js";
 import { runPlutoPass, type PassRequest, type PassRunnerContext } from "./passRunner.js";
@@ -368,7 +369,17 @@ export class PlutoAgent {
       for (const order of orphans) {
         await recordPlutoEvent("order_adopted", { actionId: order.actionId, orderId: order.orderId, symbol: order.symbol, description: order.description, ageMinutes: Math.round((Date.now() - order.createdAtMs) / 60_000) });
         this.context.trackWatch(
-          watchPlutoOrder(this.api, this.settings, { actionId: order.actionId, orderId: order.orderId, symbol: order.symbol, reference: order.reference, description: order.description, cancelByMs: session.cancelByMs, startedAtMs: order.createdAtMs }),
+          watchPlutoOrder(this.api, this.settings, {
+            actionId: order.actionId,
+            orderId: order.orderId,
+            symbol: order.symbol,
+            reference: order.reference,
+            description: order.description,
+            cancelByMs: session.cancelByMs,
+            startedAtMs: order.createdAtMs,
+            // It keeps following the mid as it did before the restart.
+            followTheMid: followTheMidOfAdoptedOrder(this.marketWatch, this.settings, order),
+          }),
           order.orderId,
           order.symbol,
         );

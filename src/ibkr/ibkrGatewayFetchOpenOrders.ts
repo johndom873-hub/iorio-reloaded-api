@@ -4,6 +4,8 @@ import type { IBApi, Order } from "@stoqey/ib";
 export interface IbkrOpenOrder {
   orderId: number;
   permId: number | undefined;
+  /** The limit IBKR holds for the order (after any change it accepted); undefined when IBKR sent none. */
+  limitPrice: number | undefined;
 }
 
 const openOrdersTimeoutMs = 15_000;
@@ -16,6 +18,8 @@ const openOrdersTimeoutMs = 15_000;
  * later collide with a genuinely different order once a new session's order
  * id counter wraps back around to the same number (see
  * reconcileStaleOrderRequests in ibkrGatewayWorker.ts).
+ *
+ * Also read back the limit of each order Pluto follows (syncFollowedOrderLimitsWithIbkr).
  *
  * Same reject-on-timeout shape as fetchIbkrHeldPositions — an empty/partial
  * result from a stalled openOrderEnd would otherwise read as "IBKR has no
@@ -33,7 +37,7 @@ export function fetchIbkrOpenOrders(ib: IBApi): Promise<IbkrOpenOrder[]> {
     }
 
     const onOpenOrder = (orderId: number, _contract: unknown, order: Order) => {
-      rows.push({ orderId, permId: order.permId });
+      rows.push({ orderId, permId: order.permId, limitPrice: typeof order.lmtPrice === "number" && Number.isFinite(order.lmtPrice) ? order.lmtPrice : undefined });
     };
     const onEnd = () => {
       if (settled) return;

@@ -58,6 +58,8 @@ const completeBootEnvironment: Record<string, string> = {
   PASSKEY_LOGIN: "off",
   PASSKEY_RP_ID: "localhost",
   APP_ENVIRONMENT: "development",
+  DATABASE_SSL: "false",
+  TICKER_DATA_RETRIES_ENABLED: "false",
 };
 
 function stubBootEnvironment(overrides: Record<string, string | undefined> = {}): void {

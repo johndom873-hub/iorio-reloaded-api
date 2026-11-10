@@ -66,7 +66,8 @@ import { previousOpenSessionDate, lastCompletedSessionDate } from "../src/lib/ma
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 import { buildPnlSnapshotJobOutcome, type PnlSnapshotProblem } from "../src/lib/pnlSnapshotJobOutcome.js";
-import { assignFlowsToSnapshots, extractExternalCashFlows, type FlexCashFlow } from "../src/lib/flexCashFlowAssignment.js";
+import { assignFlowsToSnapshots, extractExternalCashFlows, nextSnapshotCashFlow, type FlexCashFlow } from "../src/lib/flexCashFlowAssignment.js";
+import { loadUnmatchedRecordedDeposits, recordedDepositsAsCashFlows } from "../src/books/recordedDeposits.js";
 import { importStatementIntoBooks } from "../src/books/statementImport.js";
 import { booksStartFromStatement } from "../src/books/cutover.js";
 import { writeBookValueSnapshots } from "../src/books/bookSnapshots.js";
@@ -79,6 +80,7 @@ interface RecentAccountSnapshotRow {
   capturedAt: Date;
   netLiquidationValue: string | null;
   netCashFlow: string | null;
+  recordedCashFlow: string;
 }
 
 /**
@@ -96,7 +98,8 @@ async function reconcileCashFlows(snapshotDate: string, flexCashFlows: FlexCashF
       to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate",
       captured_at AS "capturedAt",
       net_liquidation_value AS "netLiquidationValue",
-      net_cash_flow AS "netCashFlow"
+      net_cash_flow AS "netCashFlow",
+      recorded_cash_flow AS "recordedCashFlow"
     FROM account_pnl_snapshots
     WHERE snapshot_date >= (?::date - interval '10 days')
     ORDER BY snapshot_date ASC
@@ -105,29 +108,27 @@ async function reconcileCashFlows(snapshotDate: string, flexCashFlows: FlexCashF
   ).then((result) => result.rows);
 
   // A flow belongs to the first snapshot captured after it happened, not to its calendar date (flexCashFlowAssignment.ts).
-  const cashFlowByDate = assignFlowsToSnapshots(
-    flexCashFlows,
-    recentRows.map((row) => ({ snapshotDate: row.snapshotDate, capturedAt: new Date(row.capturedAt) })),
-  );
+  const snapshotCaptureTimes = recentRows.map((row) => ({ snapshotDate: row.snapshotDate, capturedAt: new Date(row.capturedAt) }));
+  const cashFlowByDate = assignFlowsToSnapshots(flexCashFlows, snapshotCaptureTimes);
+  // Deposits recorded before the statement holds them, filed the same way (books/recordedDeposits.ts).
+  const recordedCashFlowByDate = assignFlowsToSnapshots(recordedDepositsAsCashFlows(await loadUnmatchedRecordedDeposits(db), flexCashFlows), snapshotCaptureTimes);
 
   for (let i = 1; i < recentRows.length; i++) {
     const row = recentRows[i];
     const previousRow = recentRows[i - 1];
     if (!row || !previousRow) continue;
-    const storedCashFlow = row.netCashFlow === null ? null : Number(row.netCashFlow);
-    const flexCashFlow = cashFlowByDate.get(row.snapshotDate);
-    // A date the Flex report has no entry for is not evidence that the flow was zero (the report's
-    // window may be shorter than these 10 days): never zero a deposit or withdrawal already stored.
-    if (flexCashFlow === undefined && storedCashFlow !== null && storedCashFlow !== 0) continue;
-    const newCashFlow = flexCashFlow ?? 0;
-    if (storedCashFlow === newCashFlow) continue;
+    const next = nextSnapshotCashFlow(
+      { netCashFlow: row.netCashFlow === null ? null : Number(row.netCashFlow), recordedCashFlow: Number(row.recordedCashFlow) },
+      { statementCashFlow: cashFlowByDate.get(row.snapshotDate), recordedCashFlow: recordedCashFlowByDate.get(row.snapshotDate) ?? 0 },
+    );
+    if (next === null) continue;
     if (row.netLiquidationValue === null || previousRow.netLiquidationValue === null) continue;
 
-    const dailyPnl = Number(row.netLiquidationValue) - Number(previousRow.netLiquidationValue) - newCashFlow;
+    const dailyPnl = Number(row.netLiquidationValue) - Number(previousRow.netLiquidationValue) - next.netCashFlow;
     await db("account_pnl_snapshots")
       .where({ snapshot_date: row.snapshotDate })
-      .update({ net_cash_flow: newCashFlow, daily_pnl: dailyPnl });
-    console.log(`Reconciled cash flow for ${row.snapshotDate}: net_cash_flow=${newCashFlow} daily_pnl=${dailyPnl}`);
+      .update({ net_cash_flow: next.netCashFlow, recorded_cash_flow: next.recordedCashFlow, daily_pnl: dailyPnl });
+    console.log(`Reconciled cash flow for ${row.snapshotDate}: net_cash_flow=${next.netCashFlow} (recorded deposits ${next.recordedCashFlow}) daily_pnl=${dailyPnl}`);
   }
 }
 
@@ -226,14 +227,21 @@ async function main(): Promise<void> {
       const accountSummary = accountSummaryResult.value;
       const ledgerPnl = ledgerPnlResult.value;
       try {
-        // Best-effort daily_pnl assuming zero cash flow today — right most
-        // nights, since deposits/withdrawals are rare. reconcileCashFlows
-        // below corrects this (and past days) once real Flex data confirms
-        // otherwise; see this file's header comment.
-        const previousRow: { netLiquidationValue: string | null; snapshotDate: string } | undefined = await db.raw(
-          `SELECT net_liquidation_value AS "netLiquidationValue", to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate" FROM account_pnl_snapshots WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1`,
+        // Best-effort daily_pnl with only the deposits recorded since the
+        // last snapshot as today's cash flow (books/recordedDeposits.ts) —
+        // Flex rarely holds today's yet. reconcileCashFlows below corrects
+        // this (and past days) once real Flex data confirms otherwise; see
+        // this file's header comment.
+        const previousRow: { netLiquidationValue: string | null; snapshotDate: string; capturedAt: Date } | undefined = await db.raw(
+          `SELECT net_liquidation_value AS "netLiquidationValue", to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate", captured_at AS "capturedAt" FROM account_pnl_snapshots WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1`,
           [snapshotDate],
         ).then((result) => result.rows[0]);
+        const capturedAt = new Date();
+        const recordedCashFlow = previousRow
+          ? (await loadUnmatchedRecordedDeposits(db))
+              .filter((deposit) => deposit.effectiveAt > new Date(previousRow.capturedAt) && deposit.effectiveAt <= capturedAt)
+              .reduce((sum, deposit) => sum + deposit.amount, 0)
+          : 0;
         // Deliberately still a delta against the previous ROW when a night was
         // missed: the window sums on the Dashboard stay right that way (the
         // missed sessions' move is not lost). The Dashboard's Day card hides
@@ -243,18 +251,19 @@ async function main(): Promise<void> {
         }
         const dailyPnl =
           previousRow?.netLiquidationValue != null && accountSummary.netLiquidationValue != null
-            ? accountSummary.netLiquidationValue - Number(previousRow.netLiquidationValue)
+            ? accountSummary.netLiquidationValue - Number(previousRow.netLiquidationValue) - recordedCashFlow
             : null;
 
         await db("account_pnl_snapshots")
           .insert({
             snapshot_date: snapshotDate,
             daily_pnl: dailyPnl,
-            net_cash_flow: 0,
+            net_cash_flow: recordedCashFlow,
+            recorded_cash_flow: recordedCashFlow,
             realized_pnl: ledgerPnl.realizedPnl,
             unrealized_pnl: ledgerPnl.unrealizedPnl,
             net_liquidation_value: accountSummary.netLiquidationValue,
-            captured_at: db.fn.now(),
+            captured_at: capturedAt,
           })
           .onConflict(["snapshot_date"])
           .merge();

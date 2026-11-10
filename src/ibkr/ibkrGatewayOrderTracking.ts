@@ -1,7 +1,8 @@
 import type { CommissionReport, Contract, Execution, IBApi } from "@stoqey/ib";
 import type { Knex } from "knex";
 import type { AppNotification } from "../lib/notificationChannel.js";
-import { finalOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
+import { finalOrderRequestStatuses, limitChangeableOrderStatuses } from "../lib/orderRequestStatuses.js";
+import { isLimitChangeRefusalError } from "../lib/orderLimitPriceChanges.js";
 import { ibkrInactiveOrderMessage, ibkrOrderCanceledErrorCode, ibkrOrderRejectionErrorCodes, requestStatusForIbkrRejection, requestStatusForOrderStatusEvent } from "./ibkrGatewayOrderStatus.js";
 import { recordIbkrCancellationReason, recordIbkrOrderCanceled, workingOrderRequestStatuses, type ExecutedOutcome } from "./ibkrGatewayCancellationRecording.js";
 import type { OrderRequestPayload } from "./ibkrGatewayOrderPayload.js";
@@ -25,7 +26,7 @@ interface FillLegRow {
 type FillDestination = ({ kind: "open"; leg: FillLegRow } | { kind: "closed"; leg: FillLegRow } | { kind: "wait" }) & { assignedOptionLegIds?: string[] };
 import { parseIbkrExecutionTime } from "./ibkrGatewayParseExecutionTime.js";
 import type { fetchIbkrCompletedOrders } from "./ibkrGatewayFetchCompletedOrders.js";
-import type { fetchIbkrOpenOrders } from "./ibkrGatewayFetchOpenOrders.js";
+import type { fetchIbkrOpenOrders, IbkrOpenOrder } from "./ibkrGatewayFetchOpenOrders.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { exitFromClosingFills } from "../lib/partialCloseSlice.js";
 import { closingTradeOtherThanSettlementSql } from "../lib/settlementExecution.js";
@@ -42,7 +43,9 @@ export interface OrderTrackingDependencies {
 
 export interface OrderErrorDependencies extends OrderTrackingDependencies {
   /** The limit changes the worker just sent: an error on one of those orders is the change refused (follow the mid). */
-  recentLimitPriceChanges: Pick<RecentLimitPriceChanges, "take">;
+  recentLimitPriceChanges: Pick<RecentLimitPriceChanges, "withinRefusalWindow" | "changedOrderRequestId">;
+  /** Reads every followed order's limit back from IBKR's open orders (syncFollowedOrderLimitsWithIbkr). */
+  syncFollowedOrderLimits(): Promise<void>;
 }
 
 export interface OrderStatusEvent {
@@ -112,7 +115,11 @@ export function handleOrderStatusEvent(event: OrderStatusEvent, dependencies: Or
 export function handleOrderErrorEvent(error: Error, code: number, reqId: number, dependencies: OrderErrorDependencies): Promise<void> {
   const { db } = dependencies;
   if (reqId === -1) return Promise.resolve();
-  if (code === 399 || (code >= 2100 && code <= 2169)) {
+  const changeInWindow = dependencies.recentLimitPriceChanges.withinRefusalWindow(reqId);
+  const changedOrderRequestId = dependencies.recentLimitPriceChanges.changedOrderRequestId(reqId);
+  const refusesAChange = isLimitChangeRefusalError(code, error.message) && (changeInWindow !== null || changedOrderRequestId !== null);
+  // 2102 sits in IBKR's informational range but, on an order just changed, is the change refused.
+  if ((code === 399 || (code >= 2100 && code <= 2169)) && !refusesAChange) {
     console.log(`Order ${reqId} informational message: ${code} ${error.message}`);
     return Promise.resolve();
   }
@@ -123,11 +130,16 @@ export function handleOrderErrorEvent(error: Error, code: number, reqId: number,
       notify: (orderRequestId) => dependencies.publishNotification({ type: "order_status", orderId: orderRequestId }),
     }).catch((dbError) => console.error(`Failed to record IBKR cancel for ${reqId}: ${dbError}`));
   }
-  // Any other error inside the refusal window of a limit change is IBKR refusing that change (an order that has just
+  // Every error inside the refusal window of a limit change is IBKR refusing that change (an order that has just
   // filled cannot be changed); the order keeps working at its previous limit and its own statuses still arrive.
-  const change = dependencies.recentLimitPriceChanges.take(reqId);
-  if (change) {
-    return recordLimitPriceChangeRefused(change, `IBKR error ${code}: ${error.message}`, dependencies).catch((dbError) => console.error(`Failed to record the refused limit change of ${reqId}: ${dbError}`));
+  if (changeInWindow) {
+    return recordLimitPriceChangeRefused(changeInWindow, `IBKR error ${code}: ${error.message}`, dependencies).catch((dbError) => console.error(`Failed to record the refused limit change of ${reqId}: ${dbError}`));
+  }
+  // Later, an error only a change can cause leaves the order working: IBKR's own statuses end it if it has ended, and
+  // the limit IBKR kept is read back from its open orders.
+  if (refusesAChange) {
+    console.warn(`Order ${reqId} (order request ${changedOrderRequestId}): IBKR refused a limit change after the refusal window (${code} ${error.message}); reading its limit back from IBKR.`);
+    return dependencies.syncFollowedOrderLimits().catch((syncError) => console.error(`Failed to read back the limit of ${reqId}: ${syncError}`));
   }
   if (ibkrOrderRejectionErrorCodes.has(code)) {
     return recordIbkrOrderRejection(reqId, `IBKR error ${code}: ${error.message}`, dependencies).catch((dbError) => console.error(`Failed to record IBKR refusal for ${reqId}: ${dbError}`));
@@ -160,6 +172,46 @@ async function recordLimitPriceChangeRefused(change: RecentLimitPriceChange, rea
   if (!updated) return;
   console.warn(`Order request ${change.orderRequestId}: IBKR refused the limit change ${change.from} → ${change.to} (${reason}); it keeps working at ${change.from}.`);
   await dependencies.publishNotification({ type: "order_status", orderId: change.orderRequestId });
+}
+
+/**
+ * A followed order's limit as IBKR holds it (its open orders) replaces the one on the payload when they differ: a change
+ * written but never sent (the worker stopped in between), or refused without an error the worker could tie to it. The
+ * last change, if it is the one IBKR does not hold, is marked refused. An order with a change still inside its refusal
+ * window is left alone (IBKR may not have applied it yet), as is one whose permId is not IBKR's.
+ */
+export async function syncFollowedOrderLimitsWithIbkr(
+  openOrders: IbkrOpenOrder[],
+  dependencies: OrderTrackingDependencies & { recentLimitPriceChanges: Pick<RecentLimitPriceChanges, "withinRefusalWindow"> },
+): Promise<void> {
+  const { db } = dependencies;
+  const openByOrderId = new Map(openOrders.map((order) => [order.orderId, order]));
+  const rows: { id: string; ibkr_order_id: number; ibkr_perm_id: number | null }[] = await db("order_requests")
+    .whereIn("status", limitChangeableOrderStatuses)
+    .whereNotNull("ibkr_order_id")
+    .whereRaw("jsonb_array_length(coalesce(payload->'limitPriceChanges', '[]'::jsonb)) > 0")
+    .select("id", "ibkr_order_id", "ibkr_perm_id");
+  const cents = (price: number) => Math.round(price * 100);
+  for (const row of rows) {
+    const open = openByOrderId.get(row.ibkr_order_id);
+    if (!open || open.limitPrice === undefined) continue;
+    if (row.ibkr_perm_id && open.permId && row.ibkr_perm_id !== open.permId) continue;
+    if (dependencies.recentLimitPriceChanges.withinRefusalWindow(row.ibkr_order_id)) continue;
+    const ibkrLimit = cents(open.limitPrice) / 100;
+    const corrected = await db.transaction(async (transaction) => {
+      const current: { payload: OrderRequestPayload; status: string } | undefined = await transaction("order_requests").where({ id: row.id }).forUpdate().first("payload", "status");
+      const leg = current && current.payload.legs.length === 1 ? current.payload.legs[0] : undefined;
+      if (!current || !leg || !(limitChangeableOrderStatuses as readonly string[]).includes(current.status) || cents(leg.unitPrice) === cents(ibkrLimit)) return null;
+      const changes = [...(current.payload.limitPriceChanges ?? [])];
+      const last = changes.at(-1);
+      if (last && last.refused === undefined && cents(last.to) === cents(leg.unitPrice)) changes[changes.length - 1] = { ...last, refused: `IBKR holds the order at ${ibkrLimit.toFixed(2)}` };
+      await transaction("order_requests").where({ id: row.id }).update({ payload: { ...current.payload, legs: [{ ...leg, unitPrice: ibkrLimit }], limitPriceChanges: changes }, updated_at: db.fn.now() });
+      return leg.unitPrice;
+    });
+    if (corrected === null) continue;
+    console.warn(`Order request ${row.id}: IBKR holds its limit at ${ibkrLimit}, not ${corrected}; the order now shows IBKR's limit.`);
+    await dependencies.publishNotification({ type: "order_status", orderId: row.id });
+  }
 }
 
 /**
@@ -215,6 +267,7 @@ export interface StaleOrderReconciliationDependencies extends OrderTrackingDepen
   getIb(): IBApi | null;
   fetchIbkrOpenOrders: typeof fetchIbkrOpenOrders;
   fetchIbkrCompletedOrders: typeof fetchIbkrCompletedOrders;
+  recentLimitPriceChanges: Pick<RecentLimitPriceChanges, "withinRefusalWindow">;
   now?: () => Date;
 }
 
@@ -242,6 +295,8 @@ export async function reconcileStaleOrderRequests(dependencies: StaleOrderReconc
   if (staleCandidates.length === 0) return;
 
   const [openOrders, completedOrders] = await Promise.all([dependencies.fetchIbkrOpenOrders(ib), dependencies.fetchIbkrCompletedOrders(ib)]);
+  // A followed order still working shows the limit IBKR holds (a change written before the worker stopped may never have gone out).
+  await syncFollowedOrderLimitsWithIbkr(openOrders, dependencies);
   const liveOrderIds = new Set(openOrders.map((order) => order.orderId));
   const completedStatusByPermId = new Map(completedOrders.filter((order) => order.permId).map((order) => [order.permId!, order.status]));
 

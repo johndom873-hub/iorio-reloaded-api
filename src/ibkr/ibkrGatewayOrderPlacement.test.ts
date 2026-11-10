@@ -509,7 +509,7 @@ describe("order placement against order_requests", () => {
       expect(row.payload.limitPriceChangeRequest).toBeUndefined();
       expect(row.payload.limitPriceChanges).toEqual([{ at: expect.any(String), from: 1.3, to: 1.29 }]);
       expect(dependencies.recentLimitPriceChanges).toBeInstanceOf(RecentLimitPriceChanges);
-      expect((dependencies.recentLimitPriceChanges as RecentLimitPriceChanges).take(7790)).toEqual({ orderRequestId: orderId, from: 1.3, to: 1.29, sentAtMs: expect.any(Number) });
+      expect((dependencies.recentLimitPriceChanges as RecentLimitPriceChanges).withinRefusalWindow(7790)).toEqual({ orderRequestId: orderId, from: 1.3, to: 1.29, sentAtMs: expect.any(Number) });
     });
 
     it("drops a change the live check refuses: nothing sent, the order keeps its limit, the change says why", async () => {

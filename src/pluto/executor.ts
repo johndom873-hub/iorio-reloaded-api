@@ -10,7 +10,7 @@ import type { PlutoOrderPlan } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { classifyRoutineOrderProblem, routineOrderProblemLabels } from "./routineOrderProblems.js";
 import { tripPlutoBreaker } from "./stateStore.js";
-import { followTheMidCheckIntervalSeconds, maxLimitPriceChangesPerOrder, type LimitPriceChange, type LimitPriceChangeRequest } from "../lib/orderLimitPriceChanges.js";
+import { followTheMidCheckIntervalSeconds, limitPriceChangeRefusalWindowSeconds, maxLimitPriceChangesPerOrder, type LimitPriceChange, type LimitPriceChangeRequest } from "../lib/orderLimitPriceChanges.js";
 import { limitChangeableOrderStatuses } from "../lib/orderRequestStatuses.js";
 
 /**
@@ -142,6 +142,8 @@ export interface PlutoFill {
   quantity: number;
   price: number;
   multiplier: number;
+  /** When IBKR executed it (trades.executed_at): a followed order's fill is judged against the limit IBKR held then. */
+  executedAtMs?: number;
 }
 
 function isoToIbkrExpiry(expiryIso: string): string {
@@ -272,6 +274,54 @@ export function compareFillsWithReference(reference: PlutoFillReference, fills: 
   };
 }
 
+/**
+ * The limits IBKR may have held at a moment: the order's first limit, then each change IBKR accepted from its time on. A
+ * moment inside the refusal window of a change may still have met the limit before it, so both are given.
+ */
+export function limitsInForceAt(firstLimit: number, changes: readonly LimitPriceChange[], atMs: number): number[] {
+  let limit = firstLimit;
+  let previous: number | null = null;
+  let changedAtMs = Number.NEGATIVE_INFINITY;
+  for (const change of [...changes].filter((entry) => entry.refused === undefined).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
+    const changeAtMs = Date.parse(change.at);
+    if (changeAtMs > atMs) break;
+    previous = limit;
+    limit = change.to;
+    changedAtMs = changeAtMs;
+  }
+  return previous !== null && atMs - changedAtMs <= limitPriceChangeRefusalWindowSeconds * 1000 ? [previous, limit] : [limit];
+}
+
+/**
+ * Pure: a followed single-leg order's fills, each against the limit IBKR held when it executed (Marcelo 2026-11-09), so
+ * part filled at $1.05 and the rest at $1.29 after the limit moved is no slippage. Of two possible limits (a fill just
+ * after a change) the one kinder to the fill counts. A fill with no execution time is judged against the last limit.
+ * slippage % = Σ shortfall × quantity × multiplier / Σ limit × quantity × multiplier × 100, shortfall = limit − fill for a
+ * sale and fill − limit for a purchase; positive = worse. Null until something filled.
+ */
+export function compareFillsWithOwnLimits(chosen: { side: "sell" | "buy"; multiplier: number }, fills: PlutoFill[], firstLimit: number, changes: readonly LimitPriceChange[]): (FillComparison & { averageLimitPrice: number }) | null {
+  const matched = fills.filter((fill) => fill.side === chosen.side && fill.multiplier === chosen.multiplier);
+  const quantity = matched.reduce((sum, fill) => sum + fill.quantity, 0);
+  if (quantity === 0) return null;
+  const signed = (dollars: number) => (chosen.side === "sell" ? dollars : -dollars);
+  const lastLimit = limitsInForceAt(firstLimit, changes, Number.POSITIVE_INFINITY).at(-1)!;
+  let limitDollars = 0;
+  let fillDollars = 0;
+  for (const fill of matched) {
+    const candidates = fill.executedAtMs === undefined ? [lastLimit] : limitsInForceAt(firstLimit, changes, fill.executedAtMs);
+    const limit = chosen.side === "sell" ? Math.min(...candidates) : Math.max(...candidates);
+    limitDollars += limit * fill.quantity * chosen.multiplier;
+    fillDollars += fill.price * fill.quantity * chosen.multiplier;
+  }
+  return {
+    chosenLegFillPrice: fillDollars / (quantity * chosen.multiplier),
+    averageLimitPrice: limitDollars / (quantity * chosen.multiplier),
+    referenceNetDollars: signed(limitDollars),
+    fillNetDollars: signed(fillDollars),
+    slippagePct: limitDollars > 0 ? ((signed(limitDollars) - signed(fillDollars)) / limitDollars) * 100 : 0,
+  };
+}
+
 export interface AdoptableOrder {
   orderId: string;
   actionId: string;
@@ -280,6 +330,10 @@ export interface AdoptableOrder {
   createdAtMs: number;
   reference: PlutoFillReference;
   description: string;
+  /** What follow the mid needs to rebuild the order's rules (followTheMidOfAdoptedOrder). */
+  executionStrategy: string | null;
+  contract: unknown;
+  legs: { role: "stock" | "option" }[];
 }
 
 /** The order an action row describes, in the platform's order wording; DTE counted from `todayIso`. */
@@ -313,13 +367,13 @@ export function referenceForAdoptedOrder(action: { kind: string; symbol: string;
 
 /** Pluto orders IBKR may still be working: everything with a pluto_action_id that is not final. */
 export async function loadWorkingPlutoOrders(): Promise<AdoptableOrder[]> {
-  const rows: { id: string; status: string; created_at: Date; action_id: string; kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown; reference_other_legs: unknown }[] = await db("order_requests as o")
+  const rows: { id: string; status: string; created_at: Date; payload: { legs?: { role: "stock" | "option" }[] } | null; action_id: string; kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown; reference_other_legs: unknown; execution_strategy: string | null }[] = await db("order_requests as o")
     .join("pluto_actions as a", "a.id", "o.pluto_action_id")
     .whereNotIn("o.status", finalOrderRequestStatuses)
-    .select("o.id", "o.status", "o.created_at", "a.id as action_id", "a.kind", "a.symbol", "a.reference_bid", "a.reference_mid", "a.limit_price", "a.quantity", "a.contract", "a.reference_other_legs");
+    .select("o.id", "o.status", "o.created_at", "o.payload", "a.id as action_id", "a.kind", "a.symbol", "a.reference_bid", "a.reference_mid", "a.limit_price", "a.quantity", "a.contract", "a.reference_other_legs", "a.execution_strategy");
   return rows.map((row) => {
       const { description, ...reference } = referenceForAdoptedOrder(row);
-      return { orderId: row.id, actionId: row.action_id, symbol: row.symbol, kind: row.kind, createdAtMs: new Date(row.created_at).getTime(), reference, description };
+      return { orderId: row.id, actionId: row.action_id, symbol: row.symbol, kind: row.kind, createdAtMs: new Date(row.created_at).getTime(), reference, description, executionStrategy: row.execution_strategy, contract: row.contract, legs: row.payload?.legs ?? [] };
     });
 }
 
@@ -358,11 +412,11 @@ export function otherLegOrderPrices(chosen: { side: "sell" | "buy"; multiplier: 
 
 /** Every execution recorded against the order, with its leg's multiplier (1 for shares, 100 for options). */
 export async function loadOrderFills(orderId: string): Promise<PlutoFill[]> {
-  const rows: { side: string; quantity: number; price: string; multiplier: number | string }[] = await db("trades as t")
+  const rows: { side: string; quantity: number; price: string; multiplier: number | string; executed_at: Date }[] = await db("trades as t")
     .join("position_legs as pl", "pl.id", "t.position_leg_id")
     .where("t.source_order_request_id", orderId)
-    .select("t.side", "t.quantity", "t.price", "pl.multiplier");
-  return rows.map((row) => ({ side: row.side.toLowerCase() === "buy" ? "buy" : "sell", quantity: Number(row.quantity), price: Number(row.price), multiplier: Number(row.multiplier) }));
+    .select("t.side", "t.quantity", "t.price", "pl.multiplier", "t.executed_at");
+  return rows.map((row) => ({ side: row.side.toLowerCase() === "buy" ? "buy" : "sell", quantity: Number(row.quantity), price: Number(row.price), multiplier: Number(row.multiplier), ...(Number.isFinite(new Date(row.executed_at).getTime()) ? { executedAtMs: new Date(row.executed_at).getTime() } : {}) }));
 }
 
 /**
@@ -403,10 +457,14 @@ export async function watchPlutoOrder(
       // A new contract's fills are written only once the reconciliation creates its position: wait for all of them.
       if (filledStatus && shouldWaitForFills(order.status, orderLegs, fills, order.updatedAt ? new Date(order.updatedAt) : new Date(startedAt), now())) continue;
       // Judged only on complete fills: a roll recorded half-way would read as a huge slippage on one leg.
-      // A followed order is judged against the limit it filled at, not the one it was sent with.
-      const finalLimit = input.followTheMid && orderLegs.length === 1 ? Number(orderLegs[0]!.unitPrice) : null;
-      const reference = finalLimit !== null && Number.isFinite(finalLimit) ? { ...input.reference, price: finalLimit } : input.reference;
-      const comparison = fills.length > 0 && fillsAreComplete(order.status, orderLegs, fills) ? compareFillsWithReference(reference, fills) : null;
+      // A followed order (or one adopted after its limit moved) is judged fill by fill against the limit IBKR held then.
+      const limitChanges = order.payload?.limitPriceChanges ?? [];
+      const followed = orderLegs.length === 1 && Number.isFinite(Number(orderLegs[0]!.unitPrice)) && (input.followTheMid !== undefined || limitChanges.length > 0);
+      const firstLimit = followed ? (limitChanges[0]?.from ?? Number(orderLegs[0]!.unitPrice)) : null;
+      const reference = followed ? { ...input.reference, price: Number(orderLegs[0]!.unitPrice) } : input.reference;
+      const complete = fills.length > 0 && fillsAreComplete(order.status, orderLegs, fills);
+      const ownLimitsComparison = complete && firstLimit !== null ? compareFillsWithOwnLimits(input.reference, fills, firstLimit, limitChanges) : null;
+      const comparison = !complete ? null : firstLimit !== null ? ownLimitsComparison : compareFillsWithReference(reference, fills);
       if (filledStatus && comparison === null) await recordPlutoEvent("warning", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, message: "the order's fills were not all recorded in time, so its fill price and slippage are not checked" });
       const fillPrice = comparison?.chosenLegFillPrice ?? null;
       const impliedFillPrice = comparison ? impliedChosenLegPrice(reference, otherLegOrderPrices(reference, order.payload?.legs ?? []), fills) : null;
@@ -429,7 +487,9 @@ export async function watchPlutoOrder(
         // was wrong. Either way a human looks before the next order.
         const where = input.reference.otherLegs?.length
           ? `net ${comparison.fillNetDollars.toFixed(2)} vs reference net ${comparison.referenceNetDollars.toFixed(2)}`
-          : `filled at ${comparison.chosenLegFillPrice.toFixed(2)} vs reference ${reference.price.toFixed(2)}`;
+          : ownLimitsComparison !== null
+            ? `filled at ${comparison.chosenLegFillPrice.toFixed(2)} vs its limit${limitChanges.length > 0 ? "s (average)" : ""} ${ownLimitsComparison.averageLimitPrice.toFixed(2)}`
+            : `filled at ${comparison.chosenLegFillPrice.toFixed(2)} vs reference ${reference.price.toFixed(2)}`;
         const detail = `${input.description}: ${where} (${comparison.slippagePct.toFixed(1)}%${input.reference.otherLegs?.length ? " of the option's reference value" : ""} past it, limit ${settings.maxFillSlippagePct}%)`;
         await tripPlutoBreaker("fill_slippage", detail);
         await recordPlutoEvent("breaker_tripped", { name: "fill_slippage", detail });

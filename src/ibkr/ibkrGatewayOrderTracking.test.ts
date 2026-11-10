@@ -23,6 +23,7 @@ const {
   maxPendingCommissions,
   openingFillReconciliationDelayMs,
   reconcileStaleOrderRequests,
+  syncFollowedOrderLimitsWithIbkr,
 } = await import("./ibkrGatewayOrderTracking.js");
 const { ibkrInactiveOrderMessage } = await import("./ibkrGatewayOrderStatus.js");
 const { RecentLimitPriceChanges } = await import("./ibkrGatewayRecentLimitPriceChanges.js");
@@ -44,8 +45,9 @@ const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000);
 
 const notifications: AppNotification[] = [];
 const publishNotification = async (notification: AppNotification) => void notifications.push(notification);
-const noRecentLimitPriceChanges = { take: () => null };
-const dependencies = { db: testDb, publishNotification, recentLimitPriceChanges: noRecentLimitPriceChanges };
+const noRecentLimitPriceChanges = { withinRefusalWindow: () => null, changedOrderRequestId: () => null };
+const noLimitSync = async () => {};
+const dependencies = { db: testDb, publishNotification, recentLimitPriceChanges: noRecentLimitPriceChanges, syncFollowedOrderLimits: noLimitSync };
 
 const coveredCallPayload: OrderRequestPayload = {
   symbol: "TRK",
@@ -302,6 +304,103 @@ describe("handleOrderErrorEvent", () => {
       expect((await rowOf(id)).payload.legs[0].unitPrice).toBe(1.49);
       expect((await rowOf(id)).payload.limitPriceChanges[0].refused).toBeUndefined();
     });
+
+    it("a second error inside the window is the same refusal: the order keeps working, never rejected", async () => {
+      const { id, ibkrOrderId } = await insertOrder({ payload: changedPayload });
+      const recentLimitPriceChanges = new RecentLimitPriceChanges();
+      recentLimitPriceChanges.remember(ibkrOrderId, { orderRequestId: id, from: 1.5, to: 1.49 });
+      await handleOrderErrorEvent(new Error("Order rejected - reason:Order has been cancelled already, too late to replace"), 201, ibkrOrderId, { ...dependencies, recentLimitPriceChanges });
+      await handleOrderErrorEvent(new Error("Order rejected - reason:price outside limits"), 201, ibkrOrderId, { ...dependencies, recentLimitPriceChanges });
+      const row = await rowOf(id);
+      expect(row.status).toBe("submitted");
+      expect(row.error_message).toBeNull();
+      expect(row.payload.legs[0].unitPrice).toBe(1.5);
+      expect(row.payload.limitPriceChanges).toEqual([{ at: "2026-11-09T15:01:30.000Z", from: 1.5, to: 1.49, refused: "IBKR error 201: Order rejected - reason:Order has been cancelled already, too late to replace" }]);
+    });
+
+    it("2102 (still being processed) inside the window is the change refused, not an informational message", async () => {
+      const { id, ibkrOrderId } = await insertOrder({ payload: changedPayload });
+      const recentLimitPriceChanges = new RecentLimitPriceChanges();
+      recentLimitPriceChanges.remember(ibkrOrderId, { orderRequestId: id, from: 1.5, to: 1.49 });
+      await handleOrderErrorEvent(new Error("Unable to modify this order as it is still being processed."), 2102, ibkrOrderId, { ...dependencies, recentLimitPriceChanges });
+      const row = await rowOf(id);
+      expect(row.status).toBe("submitted");
+      expect(row.payload.legs[0].unitPrice).toBe(1.5);
+      expect(row.payload.limitPriceChanges[0].refused).toBe("IBKR error 2102: Unable to modify this order as it is still being processed.");
+    });
+
+    it("2102 on an order never changed stays informational", async () => {
+      const { id, ibkrOrderId } = await insertOrder();
+      await handleOrderErrorEvent(new Error("Unable to modify this order as it is still being processed."), 2102, ibkrOrderId, dependencies);
+      expect((await rowOf(id)).status).toBe("submitted");
+      expect(notifications).toEqual([]);
+    });
+
+    it("after the window, an error only a change can cause leaves the order working and reads its limit back from IBKR", async () => {
+      for (const [code, message] of [
+        [201, "Order rejected - reason:Order has been cancelled already, too late to replace"],
+        [104, "Can't modify a filled order."],
+        [2102, "Unable to modify this order as it is still being processed."],
+      ] as const) {
+        const { id, ibkrOrderId } = await insertOrder({ payload: changedPayload });
+        let nowMs = Date.parse("2026-11-09T15:01:30.000Z");
+        const recentLimitPriceChanges = new RecentLimitPriceChanges(() => nowMs);
+        recentLimitPriceChanges.remember(ibkrOrderId, { orderRequestId: id, from: 1.5, to: 1.49 });
+        nowMs += 60_000;
+        const syncFollowedOrderLimits = vi.fn(async () => {});
+        await handleOrderErrorEvent(new Error(message), code, ibkrOrderId, { ...dependencies, recentLimitPriceChanges, syncFollowedOrderLimits });
+        const row = await rowOf(id);
+        expect(row.status).toBe("submitted");
+        expect(row.error_message).toBeNull();
+        expect(syncFollowedOrderLimits).toHaveBeenCalledTimes(1);
+      }
+    });
+  });
+
+  describe("syncFollowedOrderLimitsWithIbkr", () => {
+    const followedPayload: OrderRequestPayload = {
+      symbol: "TRK",
+      strategyKey: "covered_call",
+      legs: [{ role: "option", action: "SELL" as never, symbol: "TRK", quantity: 3, unitPrice: 1.45 }],
+      limitPriceChanges: [
+        { at: "2026-11-09T15:01:30.000Z", from: 1.5, to: 1.49 },
+        { at: "2026-11-09T15:02:00.000Z", from: 1.49, to: 1.45 },
+      ],
+    };
+    const sync = (openOrders: { orderId: number; permId?: number; limitPrice?: number }[], recentLimitPriceChanges = new RecentLimitPriceChanges()) =>
+      syncFollowedOrderLimitsWithIbkr(openOrders as never, { db: testDb, publishNotification, recentLimitPriceChanges });
+
+    it("takes the limit IBKR holds and marks the last change, the one IBKR does not hold, refused", async () => {
+      const { id, ibkrOrderId } = await insertOrder({ payload: followedPayload, ibkr_perm_id: nextPermId() });
+      await sync([{ orderId: ibkrOrderId, limitPrice: 1.4900000000000002 }]);
+      const row = await rowOf(id);
+      expect(row.payload.legs[0].unitPrice).toBe(1.49);
+      expect(row.payload.limitPriceChanges[0].refused).toBeUndefined();
+      expect(row.payload.limitPriceChanges[1]).toEqual({ at: "2026-11-09T15:02:00.000Z", from: 1.49, to: 1.45, refused: "IBKR holds the order at 1.49" });
+      expect(notifications).toEqual([{ type: "order_status", orderId: id }]);
+    });
+
+    it("leaves alone an order whose limit matches, one with a change inside its refusal window, another order behind a reused id, and an unchanged order", async () => {
+      const matching = await insertOrder({ payload: followedPayload });
+      const inWindow = await insertOrder({ payload: followedPayload });
+      const permId = nextPermId();
+      const reused = await insertOrder({ payload: followedPayload, ibkr_perm_id: permId });
+      const unchanged = await insertOrder();
+      const recentLimitPriceChanges = new RecentLimitPriceChanges();
+      recentLimitPriceChanges.remember(inWindow.ibkrOrderId, { orderRequestId: inWindow.id, from: 1.49, to: 1.45 });
+      await sync(
+        [
+          { orderId: matching.ibkrOrderId, limitPrice: 1.45 },
+          { orderId: inWindow.ibkrOrderId, limitPrice: 1.49 },
+          { orderId: reused.ibkrOrderId, permId: permId + 1, limitPrice: 1.49 },
+          { orderId: unchanged.ibkrOrderId, limitPrice: 2.0 },
+        ],
+        recentLimitPriceChanges,
+      );
+      for (const order of [matching, inWindow, reused]) expect((await rowOf(order.id)).payload.legs[0].unitPrice).toBe(1.45);
+      expect((await rowOf(unchanged.id)).payload).toEqual(coveredCallPayload);
+      expect(notifications).toEqual([]);
+    });
   });
 
   it("an IBKR refusal (201) ends a submitted order as rejected with IBKR's code and text, and publishes it", async () => {
@@ -433,8 +532,8 @@ describe("reconcileStaleOrderRequests", () => {
     await testDb("order_requests").where({ requested_by_user_id: userId }).whereIn("status", ["submitted", "partially_filled", "cancel_requested"]).update({ status: "filled" });
   });
 
-  const run = async (overrides: { openOrderIds?: number[]; completed?: { permId?: number; status: string }[]; ib?: IBApi | null } = {}) => {
-    const fetchIbkrOpenOrders = vi.fn(async () => (overrides.openOrderIds ?? []).map((orderId) => ({ orderId })));
+  const run = async (overrides: { openOrderIds?: number[]; openOrders?: { orderId: number; permId?: number; limitPrice?: number }[]; completed?: { permId?: number; status: string }[]; ib?: IBApi | null } = {}) => {
+    const fetchIbkrOpenOrders = vi.fn(async () => overrides.openOrders ?? (overrides.openOrderIds ?? []).map((orderId) => ({ orderId })));
     const fetchIbkrCompletedOrders = vi.fn(async () => overrides.completed ?? []);
     await reconcileStaleOrderRequests({
       db: scopedDb,
@@ -442,6 +541,7 @@ describe("reconcileStaleOrderRequests", () => {
       getIb: () => (overrides.ib === undefined ? ({} as IBApi) : overrides.ib),
       fetchIbkrOpenOrders: fetchIbkrOpenOrders as never,
       fetchIbkrCompletedOrders: fetchIbkrCompletedOrders as never,
+      recentLimitPriceChanges: new RecentLimitPriceChanges(),
       now,
     });
     return { fetchIbkrOpenOrders, fetchIbkrCompletedOrders };
@@ -452,6 +552,21 @@ describe("reconcileStaleOrderRequests", () => {
     const { fetchIbkrOpenOrders } = await run({ ib: null });
     expect(fetchIbkrOpenOrders).not.toHaveBeenCalled();
     expect((await rowOf(id)).status).toBe("submitted");
+  });
+
+  it("a followed order still open takes the limit IBKR holds (a change written but never sent before a restart)", async () => {
+    const payload: OrderRequestPayload = {
+      symbol: "TRK",
+      strategyKey: "covered_call",
+      legs: [{ role: "option", action: "SELL" as never, symbol: "TRK", quantity: 3, unitPrice: 1.45 }],
+      limitPriceChanges: [{ at: "2026-11-09T15:02:00.000Z", from: 1.49, to: 1.45 }],
+    };
+    const { id, ibkrOrderId } = await insertOrder({ payload });
+    await run({ openOrders: [{ orderId: ibkrOrderId, limitPrice: 1.49 }] });
+    const row = await rowOf(id);
+    expect(row.status).toBe("submitted");
+    expect(row.payload.legs[0].unitPrice).toBe(1.49);
+    expect(row.payload.limitPriceChanges[0].refused).toBe("IBKR holds the order at 1.49");
   });
 
   it("leaves an order that IBKR still lists as open", async () => {

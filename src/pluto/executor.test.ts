@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareFillsWithReference, describeActionOrder, impliedChosenLegPrice, otherLegOrderPrices, referenceForAdoptedOrder } from "./executor.js";
+import { compareFillsWithOwnLimits, compareFillsWithReference, describeActionOrder, impliedChosenLegPrice, limitsInForceAt, otherLegOrderPrices, referenceForAdoptedOrder } from "./executor.js";
 
 describe("compareFillsWithReference", () => {
   const option = (side: "sell" | "buy", quantity: number, price: number) => ({ side, quantity, price, multiplier: 100 });
@@ -74,5 +74,35 @@ describe("impliedChosenLegPrice", () => {
     expect(otherLegOrderPrices(call, [{ role: "option", action: "SELL", unitPrice: 2 }])).toEqual([]);
     expect(impliedChosenLegPrice(call, [], [option("sell", 1, 2)])).toBeNull();
     expect(impliedChosenLegPrice(call, [{ side: "buy", price: 1, multiplier: 100 }], [option("buy", 1, 1)])).toBeNull();
+  });
+});
+
+describe("limitsInForceAt / compareFillsWithOwnLimits (Marcelo 2026-11-09)", () => {
+  const changes = [
+    { at: "2026-11-09T15:02:00.000Z", from: 1.05, to: 1.12 },
+    { at: "2026-11-09T15:02:30.000Z", from: 1.12, to: 1.23, refused: "IBKR error 2102: still being processed" },
+    { at: "2026-11-09T15:03:00.000Z", from: 1.12, to: 1.29 },
+  ];
+  const at = (iso: string) => Date.parse(iso);
+
+  it("the first limit before any change, each accepted change from its time, both limits inside a change's 15 s, a refused change never", () => {
+    expect(limitsInForceAt(1.05, changes, at("2026-11-09T15:01:00.000Z"))).toEqual([1.05]);
+    expect(limitsInForceAt(1.05, changes, at("2026-11-09T15:02:10.000Z"))).toEqual([1.05, 1.12]);
+    expect(limitsInForceAt(1.05, changes, at("2026-11-09T15:02:40.000Z"))).toEqual([1.12]);
+    expect(limitsInForceAt(1.05, changes, at("2026-11-09T15:04:00.000Z"))).toEqual([1.29]);
+  });
+
+  it("a sale: Σ (limit − fill) / Σ limit, each fill on its own limit; a buyback the mirror", () => {
+    const sale = compareFillsWithOwnLimits({ side: "sell", multiplier: 100 }, [
+      { side: "sell", quantity: 2, price: 1.05, multiplier: 100, executedAtMs: at("2026-11-09T15:01:00.000Z") },
+      { side: "sell", quantity: 2, price: 1.2, multiplier: 100, executedAtMs: at("2026-11-09T15:04:00.000Z") },
+    ], 1.05, changes)!;
+    // (0 × 2 + 0.09 × 2) / (1.05 × 2 + 1.29 × 2) = 0.18 / 4.68
+    expect(sale.slippagePct).toBeCloseTo((0.18 / 4.68) * 100, 9);
+    expect(sale.averageLimitPrice).toBeCloseTo(1.17, 9);
+    expect(sale.chosenLegFillPrice).toBeCloseTo(1.125, 9);
+    const buyback = compareFillsWithOwnLimits({ side: "buy", multiplier: 100 }, [{ side: "buy", quantity: 1, price: 0.6, multiplier: 100, executedAtMs: at("2026-11-09T15:01:00.000Z") }], 0.5, [])!;
+    expect(buyback.slippagePct).toBeCloseTo(20, 9);
+    expect(compareFillsWithOwnLimits({ side: "buy", multiplier: 100 }, [], 0.5, [])).toBeNull();
   });
 });
