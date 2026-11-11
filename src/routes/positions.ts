@@ -1,4 +1,6 @@
-import { loadPositionBookFigures } from "../books/bookDashboard.js";
+import { loadPositionBookFigures, requestedBook } from "../books/bookDashboard.js";
+import { loadTickerBookPeriods } from "../books/tickerBookPeriods.js";
+import { buildCycleScoreboard } from "../lib/cycleScoreboard.js";
 import { Router, type Request, type Response } from "express";
 import { OptionType, OrderAction } from "@stoqey/ib";
 import { db } from "../db/connection.js";
@@ -243,36 +245,10 @@ positionsRouter.get("/cycles", async (request, response) => {
 // Stored-mark cycle figures per open ticker for the Positions table's Cycle P&L column (see positionCycleMarks.ts).
 positionsRouter.get("/cycles/marks", getCycleMarksHandler);
 
-// Fair strategy scoreboard (approved 2026-09-19): every cycle of every symbol attributed to the CSP / Unstructured /
-// CC / Hedge / LEAPS buckets. Cycles whose ledger can't be trusted (dataFlags) are left out of the totals and counted instead.
-positionsRouter.get("/cycles/scoreboard", async (_request, response) => {
-  const all = await fetchCyclesForTickers("all");
-  const zero = () => ({ premium: 0, stock: 0, total: 0, capital: 0 });
-  const buckets = { csp: zero(), unstructured: zero(), cc: zero(), hedge: zero(), leaps: zero() };
-  let cyclesIncluded = 0;
-  const excluded: { symbol: string; reason: string }[] = [];
-  for (const { symbol, cycles } of all) {
-    for (const cycle of cycles) {
-      if (cycle.dataFlags.length > 0) {
-        excluded.push({ symbol, reason: cycle.dataFlags[0]! });
-        continue;
-      }
-      cyclesIncluded += 1;
-      for (const key of ["csp", "unstructured", "cc", "hedge", "leaps"] as const) {
-        buckets[key].premium += cycle.buckets[key].premium;
-        buckets[key].stock += cycle.buckets[key].stock;
-        buckets[key].total += cycle.buckets[key].total;
-        buckets[key].capital += cycle.buckets[key].capital;
-      }
-    }
-  }
-  const withReturn = (bucket: ReturnType<typeof zero>) => ({ ...bucket, returnOnCapital: bucket.capital > 0 ? bucket.total / bucket.capital : null });
-  response.json({
-    buckets: { csp: withReturn(buckets.csp), unstructured: withReturn(buckets.unstructured), cc: withReturn(buckets.cc), hedge: withReturn(buckets.hedge), leaps: withReturn(buckets.leaps) },
-    total: buckets.csp.total + buckets.unstructured.total + buckets.cc.total + buckets.hedge.total + buckets.leaps.total,
-    cyclesIncluded,
-    cyclesExcluded: excluded,
-  });
+// Fair strategy scoreboard (approved 2026-09-19), over every cycle or one book's (?book=pluto|manual): lib/cycleScoreboard.ts.
+positionsRouter.get("/cycles/scoreboard", async (request, response) => {
+  const [symbolCycles, bookPeriods] = await Promise.all([fetchCyclesForTickers("all"), loadTickerBookPeriods()]);
+  response.json(buildCycleScoreboard(symbolCycles, requestedBook(request.query), bookPeriods, new Date()));
 });
 
 // Set only when the greeks came from position_leg_greeks_snapshots instead

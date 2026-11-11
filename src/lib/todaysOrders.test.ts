@@ -25,7 +25,7 @@ const rollPayload: OrderRequestPayload = {
   ],
 };
 
-function orderRow(id: string, payload: OrderRequestPayload, status = "filled") {
+function orderRow(id: string, payload: OrderRequestPayload, status = "filled", tickerId: string | null = "ticker-roll") {
   return {
     id,
     request_type: "roll_leg",
@@ -40,6 +40,7 @@ function orderRow(id: string, payload: OrderRequestPayload, status = "filled") {
     error_message: null,
     ibkr_order_id: 7,
     ibkr_perm_id: 99,
+    ticker_id: tickerId,
   };
 }
 
@@ -51,6 +52,7 @@ describe("buildTodaysOrders", () => {
         { orderRequestId: "a", legType: "option", side: "buy", strike: "50.0000", expiry: "20261016", quantity: "2", notional: "3.04", commission: "1.3" },
         { orderRequestId: "a", legType: "option", side: "sell", strike: "50.0000", expiry: "20261023", quantity: "2", notional: "4.5", commission: "1.3" },
       ],
+      [],
     );
     expect(order!.legs[0]).toMatchObject({ action: "BUY", filledQuantity: 2, averageFillPrice: 1.52 });
     expect(order!.legs[1]).toMatchObject({ action: "SELL", filledQuantity: 2, averageFillPrice: 2.25 });
@@ -68,6 +70,7 @@ describe("buildTodaysOrders", () => {
     const [order] = buildTodaysOrders(
       [orderRow("d", payload)],
       [{ orderRequestId: "d", legType: "option", side: "buy", strike: "103.0000", expiry: "20261002", quantity: 3, notional: 3.6, commission: 1 }],
+      [],
     );
     expect(order!.legs[0]).toMatchObject({ expiry: "20261002", filledQuantity: 3, averageFillPrice: 1.2 });
   });
@@ -76,15 +79,28 @@ describe("buildTodaysOrders", () => {
     const [order] = buildTodaysOrders(
       [orderRow("b", { symbol: "BW", strategyKey: "covered_call", legs: [{ role: "stock", action: "BUY" as never, symbol: "BW", quantity: 100, unitPrice: 10 }] })],
       [{ orderRequestId: "b", legType: "stock", side: "buy", strike: null, expiry: null, quantity: 100, notional: 100 * 10 - 10, commission: null }],
+      [],
     );
     expect(order!.legs[0]).toMatchObject({ filledQuantity: 100, averageFillPrice: 9.9 });
     expect(order!.commission).toBeNull();
   });
 
   it("leaves a leg with no fills at zero filled with no average price", () => {
-    const [order] = buildTodaysOrders([orderRow("c", rollPayload, "submitted")], []);
+    const [order] = buildTodaysOrders([orderRow("c", rollPayload, "submitted")], [], []);
     expect(order!.legs.every((leg) => leg.filledQuantity === 0 && leg.averageFillPrice === null)).toBe(true);
     expect(order!.commission).toBeNull();
+  });
+
+  it("puts each order in its ticker's book when it was created, a hedge and an unknown symbol in Manual's", () => {
+    // Pluto's period on the ticker: 1 Oct 13:00 to 15:00 UTC; the orders are created at 14:00 unless moved.
+    const periods = [{ tickerId: "ticker-roll", startedAt: new Date("2026-10-01T13:00:00Z"), endedAt: new Date("2026-10-01T15:00:00Z") }];
+    const afterThePeriod = { ...orderRow("late", rollPayload), created_at: new Date("2026-10-01T15:30:00Z") };
+    const orders = buildTodaysOrders(
+      [orderRow("inside", rollPayload), afterThePeriod, orderRow("hedge", { ...rollPayload, strategyKey: "hedge" }), orderRow("unknown", rollPayload, "filled", null)],
+      [],
+      periods,
+    );
+    expect(Object.fromEntries(orders.map((order) => [order.id, order.bookKey]))).toEqual({ inside: "pluto", late: "manual", hedge: "manual", unknown: "manual" });
   });
 });
 
@@ -133,5 +149,25 @@ describe("fetchTodaysOrders", () => {
   it("accepts the new cancelled_partially_filled status", async () => {
     const id = await insertOrder("cancelled_partially_filled", new Date());
     expect((await fetchTodaysOrders()).find((order) => order.id === id)?.status).toBe("cancelled_partially_filled");
+  });
+
+  it("reads each order's book from its ticker's Pluto periods: Pluto's on a ticker Pluto is on for, Manual's with no ticker row", async () => {
+    userId ??= (await testDb("users").first("id")).id;
+    const [ticker] = await testDb("tickers").insert({ symbol: "TODAYBOOK" }).returning(["id"]);
+    try {
+      await testDb("ticker_book_periods").insert({ ticker_id: ticker.id, book_key: "pluto", started_at: new Date(Date.now() - 3_600_000), created_by_user_id: userId });
+      const [row] = await testDb("order_requests")
+        .insert({ requested_by_user_id: userId, request_type: "open_covered_call", payload: JSON.stringify({ symbol: "TODAYBOOK", strategyKey: "covered_call", legs: [] }), status: "submitted" })
+        .returning(["id"]);
+      createdOrderIds.push(row.id);
+      const noTickerRow = await insertOrder("submitted", new Date());
+      const orders = await fetchTodaysOrders();
+      expect(orders.find((order) => order.id === row.id)?.bookKey).toBe("pluto");
+      expect(orders.find((order) => order.id === noTickerRow)?.bookKey).toBe("manual");
+    } finally {
+      await testDb("order_requests").whereIn("id", createdOrderIds).delete();
+      await testDb("ticker_book_periods").where({ ticker_id: ticker.id }).delete();
+      await testDb("tickers").where({ id: ticker.id }).delete();
+    }
   });
 });

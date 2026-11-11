@@ -3,6 +3,8 @@ import { easternIsoDate } from "./easternIsoDate.js";
 import { activeOrderRequestStatuses } from "./orderRequestStatuses.js";
 import { computeNetLimitPrice, type OrderLegPayload, type OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchOrderLegFillRows, matchOrderLegFills, normalizeOrderLegExpiryToYyyymmdd, type OrderLegFillRow } from "./orderFills.js";
+import type { BookKey } from "../books/bookKeys.js";
+import { bookOfLegAt, loadTickerBookPeriods, type TickerBookPeriod } from "../books/tickerBookPeriods.js";
 
 export interface TodaysOrderLeg {
   role: "stock" | "option";
@@ -40,6 +42,8 @@ export interface TodaysOrder {
   /** Total commission over this order's fills; null when no fill has a commission yet. */
   commission: number | null;
   legs: TodaysOrderLeg[];
+  /** The book of its ticker when the order was created (hedges always Manual's), the positions' rule (Marcelo 2026-11-11). */
+  bookKey: BookKey;
 }
 
 export interface TodaysOrderRow {
@@ -56,10 +60,12 @@ export interface TodaysOrderRow {
   error_message: string | null;
   ibkr_order_id: number | null;
   ibkr_perm_id: number | null;
+  /** Null when no ticker has the order's symbol: the order then counts as Manual's. */
+  ticker_id: string | null;
 }
 
 /** Pairs each order with its legs' fills (matched on leg type, side, strike and expiry, so a roll's close and open legs stay apart). */
-export function buildTodaysOrders(orderRows: TodaysOrderRow[], fillRows: OrderLegFillRow[]): TodaysOrder[] {
+export function buildTodaysOrders(orderRows: TodaysOrderRow[], fillRows: OrderLegFillRow[], bookPeriods: readonly TickerBookPeriod[]): TodaysOrder[] {
   const fillsByOrderId = new Map<string, OrderLegFillRow[]>();
   for (const fill of fillRows) {
     const fills = fillsByOrderId.get(fill.orderRequestId) ?? [];
@@ -101,6 +107,7 @@ export function buildTodaysOrders(orderRows: TodaysOrderRow[], fillRows: OrderLe
       netLimitPrice: computeNetLimitPrice(row.payload.legs),
       commission: commissions.length > 0 ? commissions.reduce((sum, commission) => sum + commission, 0) : null,
       legs,
+      bookKey: row.ticker_id === null ? "manual" : bookOfLegAt(bookPeriods, row.ticker_id, row.payload.strategyKey, row.created_at),
     };
   });
 }
@@ -115,6 +122,7 @@ export async function fetchTodaysOrders(now: Date = new Date()): Promise<TodaysO
     .leftJoin("users as ru", "ru.id", "orq.requested_by_user_id")
     .leftJoin("users as cu", "cu.id", "orq.cancelled_by_user_id")
     .leftJoin("users as fu", "fu.id", "orq.confirmed_by_user_id")
+    .leftJoin("tickers as t", "t.symbol", db.raw("orq.payload->>'symbol'"))
     .where((builder) =>
       builder.whereRaw("(orq.updated_at AT TIME ZONE 'America/New_York')::date = ?::date", [easternIsoDate(now)]).orWhereIn("orq.status", [...activeOrderRequestStatuses]),
     )
@@ -133,9 +141,10 @@ export async function fetchTodaysOrders(now: Date = new Date()): Promise<TodaysO
       "ru.display_name as requested_by_display_name",
       "cu.display_name as cancelled_by_display_name",
       "fu.display_name as confirmed_by_display_name",
+      "t.id as ticker_id",
     );
   if (orderRows.length === 0) return [];
 
-  const fillRows = await fetchOrderLegFillRows(orderRows.map((row) => row.id));
-  return buildTodaysOrders(orderRows, fillRows);
+  const [fillRows, bookPeriods] = await Promise.all([fetchOrderLegFillRows(orderRows.map((row) => row.id)), loadTickerBookPeriods()]);
+  return buildTodaysOrders(orderRows, fillRows, bookPeriods);
 }

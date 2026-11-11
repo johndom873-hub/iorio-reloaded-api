@@ -171,6 +171,20 @@ export function isVolFarmerV4BuyBackRound(input: { callsInTheMoneyAtLastLook: Vo
   return input.callsInTheMoneyAtLastLook === "bought_back" || isLastSessionBeforeWeekend(input.todayIso, input.nextSessionIso);
 }
 
+/**
+ * Pure: in v4's buyback minutes on a day its setting does not buy back, why each of its Calls expiring today in the money
+ * is left to be assigned; null outside those minutes or with none. Example (bought back before weekends only, a Monday,
+ * the window ending 15:30 ET, at 15:29): "the window's last 2 minutes: $41.5 Call · 9 Nov (0DTE) · 11× in the money at
+ * 41.78, not bought back (only on the last session before a weekend), left to be assigned".
+ */
+export function volFarmerV4CallsLeftToBeAssignedNote(input: { callsInTheMoneyAtLastLook: VolFarmerV3CallsInTheMoneyAtLastLook; nowMs: number; windowEndAtMs: number | null; buyBackRound: boolean; calls: readonly VolFarmerV4CallToBuyBack[]; stockPrice: number }): string | null {
+  if (input.buyBackRound || input.windowEndAtMs === null || input.calls.length === 0) return null;
+  if (input.nowMs < input.windowEndAtMs - volFarmerV4BuyBackMinutesBeforeWindowEnd * 60_000) return null;
+  const why = input.callsInTheMoneyAtLastLook === "assigned" ? "the setting leaves Calls in the money to be assigned" : "only on the last session before a weekend";
+  const calls = input.calls.map((call) => `${describeOptionContract({ strike: call.strike, right: "C", expiry: call.expiry, dte: 0 })} · ${call.contracts}×`).join(", ");
+  return `the window's last ${volFarmerV4BuyBackMinutesBeforeWindowEnd} minutes: ${calls} in the money at ${input.stockPrice.toFixed(2)}, not bought back (${why}), left to be assigned`;
+}
+
 /** A Call v4 buys back: its leg, the contracts the leg holds and each position's of them. */
 export interface VolFarmerV4CallToBuyBack {
   legId: string;
@@ -434,10 +448,22 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
   // v4's buyback minutes (Marcelo 2026-11-02): only the Calls in the money are bought back, and nothing else is sent.
   const liveSessions = await loadLiveTradingSessions(now);
   const nextSessionIso = liveSessions.openDays.find((dateIso) => dateIso > clock.todayIso);
-  if (isVolFarmerV4BuyBackRound({ callsInTheMoneyAtLastLook: settings.volFarmerV4CallsInTheMoneyAtLastLook, nowMs: now.getTime(), windowEndAtMs: input.windowEndAtMs, todayIso: clock.todayIso, nextSessionIso })) {
+  const buyBackRound = isVolFarmerV4BuyBackRound({ callsInTheMoneyAtLastLook: settings.volFarmerV4CallsInTheMoneyAtLastLook, nowMs: now.getTime(), windowEndAtMs: input.windowEndAtMs, todayIso: clock.todayIso, nextSessionIso });
+  if (buyBackRound) {
     if (pass === "cycles_calls_puts") await buyBackCallsInTheMoney({ input, ticker, memory, openLegs, stockPrice, clock, round, summary, note });
     await saveVolFarmerV4Memory(tickerId, memory, adopted);
     return nothingDue;
+  }
+  if (pass === "cycles_calls_puts") {
+    const leftToBeAssigned = volFarmerV4CallsLeftToBeAssignedNote({
+      callsInTheMoneyAtLastLook: settings.volFarmerV4CallsInTheMoneyAtLastLook,
+      nowMs: now.getTime(),
+      windowEndAtMs: input.windowEndAtMs,
+      buyBackRound,
+      calls: volFarmerV4CallsToBuyBack({ state: memory.state, openLegs, pending: memory.pending, stockPrice, todayIso: clock.todayIso }),
+      stockPrice,
+    });
+    if (leftToBeAssigned !== null) note(leftToBeAssigned);
   }
   const { quotes, stale } = latestCycleQuotes(bandQuotes, bandCycle, now, settings.maxQuoteAgeMinutes);
   if (stale) {

@@ -149,7 +149,7 @@ vi.mock("./volFarmerV4LookLoader.js", () => ({
   loadVolFarmerV4LeftoverStockLeg: async () => harness.leftoverStockLeg,
 }));
 
-const { followTheMidOfAdoptedOrder, isVolFarmerV4BuyBackRound, runVolFarmerV4Round, volFarmerV4CallsToBuyBack, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
+const { followTheMidOfAdoptedOrder, isVolFarmerV4BuyBackRound, runVolFarmerV4Round, volFarmerV4CallsLeftToBeAssignedNote, volFarmerV4CallsToBuyBack, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
 
 /** v4 at its defaults: Calls expiring at today's close, 80% of the pot in shares, rebalanced. */
 const v4Settings = { ...plutoSafetyLimitsSettingsFixture, ...plutoVolFarmerV4SettingsFixture, excessAllowancePct: 0, maxQuoteAgeMinutes: 10, burstLines: 10, telegramVerbosity: "actions" };
@@ -767,6 +767,26 @@ describe("isVolFarmerV4BuyBackRound", () => {
     // The Thursday before Good Friday 2026.
     expect(check("bought_back_before_weekends", "2026-10-30T19:29:00Z", "2026-04-02", "2026-04-06")).toBe(true);
     expect(isVolFarmerV4BuyBackRound({ callsInTheMoneyAtLastLook: "bought_back", nowMs: windowEndAtMs, windowEndAtMs: null, todayIso: "2026-10-30", nextSessionIso: "2026-11-02" })).toBe(false);
+  });
+});
+
+describe("volFarmerV4CallsLeftToBeAssignedNote", () => {
+  // Mon 9 Nov 2026, the window ending 15:30 ET (20:30 UTC); staging's DRAM case.
+  const windowEndAtMs = Date.parse("2026-11-09T20:30:00Z");
+  const dram = { legId: "c1", expiry: "2026-11-09", strike: 41.5, contracts: 11, contractsByPosition: { first: 11, second: 0 } };
+  const note = (overrides: Partial<Parameters<typeof volFarmerV4CallsLeftToBeAssignedNote>[0]> = {}) =>
+    volFarmerV4CallsLeftToBeAssignedNote({ callsInTheMoneyAtLastLook: "bought_back_before_weekends", nowMs: Date.parse("2026-11-09T20:29:00Z"), windowEndAtMs, buyBackRound: false, calls: [dram], stockPrice: 41.78, ...overrides });
+
+  it("names each Call in the money left to be assigned, and why, in the buyback minutes of a day that buys none back", () => {
+    expect(note()).toBe("the window's last 2 minutes: $41.5 Call · 9 Nov (0DTE) · 11× in the money at 41.78, not bought back (only on the last session before a weekend), left to be assigned");
+    expect(note({ callsInTheMoneyAtLastLook: "assigned" })).toContain("(the setting leaves Calls in the money to be assigned)");
+  });
+
+  it("says nothing before the minutes, on a buyback round, with no Call in the money or no window", () => {
+    expect(note({ nowMs: Date.parse("2026-11-09T20:27:59Z") })).toBeNull();
+    expect(note({ buyBackRound: true })).toBeNull();
+    expect(note({ calls: [] })).toBeNull();
+    expect(note({ windowEndAtMs: null })).toBeNull();
   });
 });
 

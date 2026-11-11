@@ -555,6 +555,28 @@ describe("GET /positions/cycles, /cycles/marks, /cycles/scoreboard and route dis
     expect(response.json.total).toBe(100);
   });
 
+  it("?book= counts each cycle in its ticker's book (an open one, the book now), the hedge bucket always Manual's", async () => {
+    const plutoTicker = await createTicker();
+    const userId = (await testDb("users").first("id")).id;
+    await testDb("ticker_book_periods").insert({ ticker_id: plutoTicker.id, book_key: "pluto", started_at: new Date(Date.now() - 3_600_000), created_by_user_id: userId });
+    try {
+      fetchCyclesForTickersMock.mockResolvedValue([
+        { symbol: plutoTicker.symbol, tickerId: plutoTicker.id, cycles: [cycleOf({ cc: bucketOf(100, 0, 100, 5000), hedge: bucketOf(-20, 0, -20, 300) })] },
+        { symbol: "MAN", tickerId: "not-a-pluto-ticker", cycles: [cycleOf({ csp: bucketOf(40, 0, 40, 1000) })] },
+      ]);
+      const pluto = (await call("GET", "/positions/cycles/scoreboard?book=pluto")).json;
+      expect(pluto).toMatchObject({ total: 100, cyclesIncluded: 1 });
+      expect(pluto.buckets.hedge.total).toBe(0);
+      const manual = (await call("GET", "/positions/cycles/scoreboard?book=manual")).json;
+      expect(manual).toMatchObject({ total: 20, cyclesIncluded: 1 });
+      expect(manual.buckets).toMatchObject({ csp: { total: 40 }, hedge: { total: -20 }, cc: { total: 0 } });
+      // Anything else is All books.
+      expect((await call("GET", "/positions/cycles/scoreboard?book=nonsense")).json).toMatchObject({ total: 120, cyclesIncluded: 2 });
+    } finally {
+      await testDb("ticker_book_periods").where({ ticker_id: plutoTicker.id }).delete();
+    }
+  });
+
   it("answers an empty scoreboard when there are no cycles", async () => {
     fetchCyclesForTickersMock.mockResolvedValue([]);
     const response = await call("GET", "/positions/cycles/scoreboard");
