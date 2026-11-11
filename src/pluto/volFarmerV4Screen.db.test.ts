@@ -97,6 +97,33 @@ describe("the Vol Farmer v2 card", () => {
     expect(await loadVolFarmerV4LeapsLook(waitingId)).toBeNull();
   });
 
+  it("shows the positions as the next round finds them: a Call settled since the last round is gone, an assigned one's shares too", async () => {
+    // IBIT on 11 Nov before the window: 1,400 shares, the $42 Call · 10 Nov expired worthless (closed at $0, the stock closed
+    // at 41.62); the memory, last saved before the expiry, still lists it.
+    const [position] = await testDb("positions").insert({ ticker_id: adoptedId, strategy_key: "covered_call", status: "open" }).returning("id");
+    const expiredAt = new Date("2026-11-10T21:00:00Z");
+    const callOf = async (strike: number, quantity: number) => {
+      const [row] = await testDb("position_legs").insert({ position_id: position.id, leg_type: "option", side: "short", quantity, option_type: "call", strike_price: strike, expiry_date: "2026-11-10", multiplier: 100, entry_price: 0.3, entry_at: new Date("2026-11-10T14:30:00Z"), exit_at: expiredAt, exit_price: 0 }).returning("id");
+      return row.id as string;
+    };
+    await testDb("daily_price_bars").insert({ ticker_id: adoptedId, trading_date: "2026-11-10", close_price: 41.62 });
+    const expiredLeg = await callOf(42, 14);
+    const state = newVolFarmerV4SymbolState();
+    state.first = { shares: 1_400, costPerShare: 42, premiums: [{ legId: expiredLeg, dollars: 420, shares: 1_400 }], calls: [{ legId: expiredLeg, shares: 1_400 }], puts: [] };
+    await saveVolFarmerV4Memory(adoptedId, { state, pending: [] }, false);
+    const [expired] = await loadVolFarmerV4Screen();
+    expect(expired!.first).toMatchObject({ shares: 1_400, calls: [] });
+
+    // The same morning had 4 of the lots' Call been a $41 one: in the money at the 41.62 close, assigned, 400 shares called away.
+    const assignedLeg = await callOf(41, 4);
+    state.first = { shares: 1_400, costPerShare: 42, premiums: [{ legId: expiredLeg, dollars: 420, shares: 1_400 }], calls: [{ legId: expiredLeg, shares: 1_000 }, { legId: assignedLeg, shares: 400 }], puts: [] };
+    await saveVolFarmerV4Memory(adoptedId, { state, pending: [] }, false);
+    const [assigned] = await loadVolFarmerV4Screen();
+    expect(assigned!.first).toMatchObject({ shares: 1_000, calls: [] });
+    // The stored memory is left as the round saved it: only the round takes the settlement in.
+    expect((await testDb("pluto_vol_farmer_v4_cycles").where({ ticker_id: adoptedId }).first("memory")).memory.state.first.calls).toHaveLength(2);
+  });
+
   it("takes the pot-based figures at the ticker's pot now: raising its allocation clears a warning raised at the old pot", async () => {
     const figures = { potDollars: 56_957, committedDollars: 53_754, freeCashDollars: 5_000, leapsCapDollars: 5_696, putsDollars: 11_391 };
     await saveVolFarmerV4LastRound(adoptedId, { at: new Date("2026-10-28T14:30:00Z"), notes: [], figures });

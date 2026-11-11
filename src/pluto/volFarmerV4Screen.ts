@@ -1,7 +1,7 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { sharesPerContract } from "../backtest/engine/backtestBook.js";
-import { volFarmerV4BreakEven, type VolFarmerV4Position } from "../backtest/engine/volFarmerV4Steps.js";
+import { settleVolFarmerV4SinceLastLook, volFarmerV4BreakEven, type VolFarmerV4Position } from "../backtest/engine/volFarmerV4Steps.js";
 import { volFarmerV4MemoryFromStored, type VolFarmerV4Memory, type VolFarmerV4OrderKind } from "./volFarmerV4LiveBook.js";
 import type { VolFarmerV4RoundFigures } from "./volFarmerV4LookLoader.js";
 import { loadEnabledPlutoTickerSettings, type PlutoTickerSettings } from "./tickerSettingsStore.js";
@@ -17,11 +17,13 @@ import { loadPlutoTickerAllocations } from "./tickerAllocations.js";
 import { plutoOrdersSentToday, loadPlutoOrdersSentToday } from "./safetyLimits.js";
 import { describePlutoBlock, loadPlutoState } from "./stateStore.js";
 import { describeVolFarmerV4NextActions, type VolFarmerV4ActionLine, type VolFarmerV4NextAction } from "./volFarmerV4NextActions.js";
-import { loadVolFarmerV4StepImpliedVolatility } from "./volFarmerV4LookLoader.js";
+import { loadVolFarmerV4LegStatuses, loadVolFarmerV4StepImpliedVolatility } from "./volFarmerV4LookLoader.js";
 import { volFarmerV4RulesOf } from "./volFarmerV4LiveBook.js";
 
 // The Pluto screen's Vol Farmer v4 card: each enabled ticker running v4, its two positions and LEAPS as v4's memory
-// counts them (pluto_vol_farmer_v4_cycles), the orders still working and what its last round said.
+// counts them (pluto_vol_farmer_v4_cycles), the orders still working and what its last round said. The memory is shown
+// as the next round will find it: what settled since the last round (a Call or Put expired or assigned) is taken in first,
+// by the steps' own rule, so a Call that expired overnight is not shown open before the day's first round.
 
 /** An option a position holds: a leg of the book, or an order still working (its leg not known yet). */
 export interface VolFarmerV4ScreenOption {
@@ -86,16 +88,27 @@ export async function loadVolFarmerV4Screen(connection: Knex = db): Promise<VolF
   if (tickers.length === 0) return [];
   const rows: CycleRow[] = await connection("pluto_vol_farmer_v4_cycles").whereIn("ticker_id", tickers.map((ticker) => ticker.tickerId)).select("ticker_id", "memory", "adopted_at", "last_round_at", "last_round_notes", "last_round_figures");
   const rowByTickerId = new Map(rows.map((row) => [row.ticker_id, row]));
-  const legIds = rows.flatMap((row) => (row.memory === null ? [] : memoryLegIds(row.memory))).filter((legId) => !legId.startsWith("action:") && !legId.startsWith("planned:"));
-  const legs: { id: string; strike_price: string | null; expiry_date: string | null; quantity: number; exit_at: Date | null }[] =
-    legIds.length === 0 ? [] : await connection("position_legs").whereIn("id", [...new Set(legIds)]).select("id", "strike_price", connection.raw("expiry_date::text as expiry_date"), "quantity", "exit_at");
+  const legIds = [...new Set(rows.flatMap((row) => (row.memory === null ? [] : memoryLegIds(row.memory))).filter((legId) => !legId.startsWith("action:") && !legId.startsWith("planned:")))];
+  const [legs, legStatusById]: [{ id: string; strike_price: string | null; expiry_date: string | null; quantity: number; exit_at: Date | null }[], Awaited<ReturnType<typeof loadVolFarmerV4LegStatuses>>] = await Promise.all([
+    legIds.length === 0 ? [] : connection("position_legs").whereIn("id", legIds).select("id", "strike_price", connection.raw("expiry_date::text as expiry_date"), "quantity", "exit_at"),
+    loadVolFarmerV4LegStatuses(legIds, connection),
+  ]);
   const legById = new Map(legs.map((leg) => [leg.id, leg]));
+  // A working order's ref is no leg of the book: undefined to the settling, so it stays open, as at the round.
+  const memoryByTickerId = new Map(
+    rows.map((row) => {
+      if (row.memory === null) return [row.ticker_id, null] as const;
+      const memory = volFarmerV4MemoryFromStored(row.memory);
+      settleVolFarmerV4SinceLastLook({ leg: (legId) => legStatusById.get(legId) }, memory.state, [], 1);
+      return [row.ticker_id, memory] as const;
+    }),
+  );
   // The pot-based figures follow the ticker's pot as set now, not the one its last round read: a changed allocation shows at once.
   const [currentSettings, allocations] = await Promise.all([loadPlutoSettings(connection), loadPlutoTickerAllocations(tickers.map((ticker) => ticker.symbol), connection)]);
   const potBySymbol = new Map(allocations.map((allocation) => [allocation.symbol, allocation.potDollars]));
   const base: VolFarmerV4ScreenTickerBase[] = tickers.map((ticker) => {
     const row = rowByTickerId.get(ticker.tickerId);
-    const memory = row?.memory ? volFarmerV4MemoryFromStored(row.memory) : null;
+    const memory = memoryByTickerId.get(ticker.tickerId) ?? null;
     const optionOf = (legId: string, shares: number): VolFarmerV4ScreenOption | null => {
       const contracts = Math.round(shares / sharesPerContract);
       const pending = memory?.pending.find((order) => order.ref === legId);
@@ -139,7 +152,7 @@ export async function loadVolFarmerV4Screen(connection: Knex = db): Promise<VolF
       lastRoundFigures: figuresAtCurrentPot(row?.last_round_figures ?? null, potBySymbol.get(ticker.symbol) ?? null, currentSettings),
     };
   });
-  return withNextActions(base, tickers, rowByTickerId, connection);
+  return withNextActions(base, tickers, memoryByTickerId, connection);
 }
 
 /**
@@ -155,7 +168,7 @@ export function figuresAtCurrentPot(figures: VolFarmerV4RoundFigures | null, pot
 const unavailableNextAction: VolFarmerV4NextAction = { state: "not_due", text: "Next action unavailable", sub: null, alert: null };
 
 /** Each ticker's Next action, its six actions and its last order. A failure to read an input leaves the card as it was, without them. */
-async function withNextActions(base: VolFarmerV4ScreenTickerBase[], tickers: PlutoTickerSettings[], rowByTickerId: Map<string, CycleRow>, connection: Knex): Promise<VolFarmerV4ScreenTicker[]> {
+async function withNextActions(base: VolFarmerV4ScreenTickerBase[], tickers: PlutoTickerSettings[], memoryByTickerId: ReadonlyMap<string, VolFarmerV4Memory | null>, connection: Knex): Promise<VolFarmerV4ScreenTicker[]> {
   const withoutActions = (): VolFarmerV4ScreenTicker[] => base.map((ticker) => ({ ...ticker, nextAction: unavailableNextAction, actions: [], lastOrder: null, cancelledToday: 0 }));
   try {
     const now = new Date();
@@ -194,8 +207,7 @@ async function withNextActions(base: VolFarmerV4ScreenTickerBase[], tickers: Plu
     return await Promise.all(
       base.map(async (ticker, index): Promise<VolFarmerV4ScreenTicker> => {
         const settingsOfTicker = tickers[index]!;
-        const row = rowByTickerId.get(settingsOfTicker.tickerId);
-        const memory = row?.memory ? volFarmerV4MemoryFromStored(row.memory) : null;
+        const memory = memoryByTickerId.get(settingsOfTicker.tickerId) ?? null;
         const [ordersTodayTicker, previousClose, stepImpliedVolatility] = await Promise.all([
           plutoOrdersSentToday(now, ticker.symbol, connection).then((result) => Number((result as { count?: string | number } | undefined)?.count ?? 0)),
           bandPriceByTickerId.has(settingsOfTicker.tickerId) ? Promise.resolve(null) : loadPreviousClose(settingsOfTicker.tickerId, todayIso),

@@ -431,9 +431,10 @@ const contractKeyOf = (contract: { expiry: string; strike: number }) => `${contr
 /**
  * Updates the positions from what settled since the last look: Calls assigned or expired, Puts assigned or expired, the
  * LEAPS settled. A position whose last shares were called away ends; the second's Puts' premiums then start afresh and
- * its LEAPS is sold at this look. Its notes give shares and strikes as traded today.
+ * its LEAPS is sold at this look. Its notes give shares and strikes as traded today. Pluto's screen runs it too, on a copy
+ * of the memory, to show the positions as the next round will find them (volFarmerV4Screen.ts).
  */
-function reconcile(book: VolFarmerV4Book, state: VolFarmerV4SymbolState, notes: string[], priceToCycleScale: number): void {
+export function settleVolFarmerV4SinceLastLook(book: Pick<VolFarmerV4Book, "leg" | "notePositionPnl">, state: VolFarmerV4SymbolState, notes: string[], priceToCycleScale: number): void {
   const sharesAsTraded = (cycleShares: number, leg: VolFarmerV4LegStatus) => Math.round(cycleShares * (leg.priceToCycleScale ?? priceToCycleScale));
   const calledAway = new Set<"first" | "second">();
   for (const [name, position] of [["first", state.first], ["second", state.second]] as const) {
@@ -476,7 +477,7 @@ function reconcile(book: VolFarmerV4Book, state: VolFarmerV4SymbolState, notes: 
 }
 
 /** The LEAPS' legs still held, with their contracts. */
-function openLeapsLegs(book: VolFarmerV4Book, leaps: NonNullable<VolFarmerV4SymbolState["leaps"]>): { legId: string; contracts: number }[] {
+function openLeapsLegs(book: Pick<VolFarmerV4Book, "leg">, leaps: NonNullable<VolFarmerV4SymbolState["leaps"]>): { legId: string; contracts: number }[] {
   return leaps.legIds.flatMap((legId) => {
     const leg = book.leg(legId);
     return leg !== undefined && !leg.closed ? [{ legId, contracts: leg.contracts }] : [];
@@ -519,7 +520,7 @@ export function runVolFarmerV4Turn(input: VolFarmerV4LookInput): VolFarmerV4Turn
   const { state, market, farmer, v2, v3, book } = input;
   const { symbol, todayIso, stockPrice, riskFreeRate, quotes, priceToCycleScale } = market;
   const parts: string[] = [];
-  reconcile(book, state, parts, priceToCycleScale);
+  settleVolFarmerV4SinceLastLook(book, state, parts, priceToCycleScale);
   const sharesPerContractOnCycleScale = Math.round(sharesPerContract / priceToCycleScale);
   const asTraded = (cyclePrice: number) => cyclePrice / priceToCycleScale;
   const breakEvenAsTraded = (position: VolFarmerV4Position | null) => {
