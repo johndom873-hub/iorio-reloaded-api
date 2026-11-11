@@ -171,6 +171,11 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
  * Every event of the given positions, including the leftover-stock opens/closes the feed hides as consequences of another
  * event (the trading-events Telegram catch-all, approved 2026-10-07, reports those too).
  */
+/** A leftover-stock position's reason when its shares are what another position's event left behind: a CSP assigned, a covered call's Call expired or bought back. */
+export function isLeftoverStockOfAnotherPositionsEvent(unstructuredReason: string | null): boolean {
+  return unstructuredReason === "csp_assigned_stock" || unstructuredReason === "cc_expired_leftover_stock" || unstructuredReason === "cc_call_bought_back_stock";
+}
+
 export async function fetchPositionEventsForPositions(positionIds: string[]): Promise<PositionEvent[]> {
   if (positionIds.length === 0) return [];
   const positions: PositionRow[] = await db("positions as p")
@@ -356,10 +361,7 @@ async function buildPositionEvents(positions: PositionRow[], options: { includeC
     // duplicate ("No strategy" next to "Assigned" for one real-world event).
     // A leftover position closed because its shares were actually sold is a
     // real transaction and still shows.
-    const openIsConsequenceOfAnotherEvent =
-      !options.includeConsequenceEvents &&
-      isUnstructured &&
-      (position.unstructuredReason === "csp_assigned_stock" || position.unstructuredReason === "cc_expired_leftover_stock" || position.unstructuredReason === "cc_call_bought_back_stock");
+    const openIsConsequenceOfAnotherEvent = !options.includeConsequenceEvents && isUnstructured && isLeftoverStockOfAnotherPositionsEvent(position.unstructuredReason);
     const closeIsConsequenceOfAnotherEvent = !options.includeConsequenceEvents && isUnstructured && position.closeReason === "stock_rolled_into_covered_call";
     if (!openIsConsequenceOfAnotherEvent) {
       events.push({

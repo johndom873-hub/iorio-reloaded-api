@@ -1,5 +1,5 @@
 import { db } from "../db/connection.js";
-import { fetchPositionEventsForPositions, type PositionEvent, type PositionEventLeg, type ShareHandOverPosition } from "./positionEvents.js";
+import { fetchPositionEventsForPositions, isLeftoverStockOfAnotherPositionsEvent, type PositionEvent, type PositionEventLeg, type ShareHandOverPosition } from "./positionEvents.js";
 import { fetchPositionById } from "./positionQueries.js";
 import { formatSignedDollars } from "./formatSignedDollars.js";
 import { formatSignedPercent } from "./formatSignedPercent.js";
@@ -9,6 +9,26 @@ import { describeTradeContract, describeTradeLine, formatTradePrice, labelStrate
 // alerts chat, including the leftover-stock positions the dashboard feed hides. A close the expiry message already told
 // (notifyPositionExpired marks telegram_closed_notified_at) is not repeated. Runs in the worker right after each
 // reconciliation pass, so it reads positions only once the pass has finished changing them.
+// A ticker's shares moving between strategies is not told (Marcelo 2026-11-11): selling Calls on No Strategy shares, a
+// covered call's Call ending with its shares kept, a Put's assigned shares landing in No Strategy. What ended or traded is
+// told elsewhere: the expiry message (notifyPositionExpired), and each order's own "Filled" notice.
+
+/** An opening that only received shares from another position (No Strategy into a covered call, leftovers into No Strategy). */
+export function isStrategyTransitionOpening(event: PositionEvent): boolean {
+  if ((event.sharesCarriedFromPositions ?? []).length > 0) return true;
+  return event.strategyKey === "unstructured" && isLeftoverStockOfAnotherPositionsEvent(event.unstructuredReason);
+}
+
+/**
+ * A close that only handed its shares on: No Strategy shares rolled into a covered call, or a covered call whose Call an app
+ * order bought back (its "Filled" notice tells it) with the shares kept. An expiry or assignment stays told (this close
+ * message is the expiry message's fallback when that one was not delivered), and so does an outside trade, which no
+ * order notice tells.
+ */
+export function isStrategyTransitionClose(event: PositionEvent): boolean {
+  if (event.closeReason === "stock_rolled_into_covered_call") return true;
+  return event.closeReason === "closed_via_app" && (event.sharesMovedToPositions ?? []).length > 0;
+}
 
 const unstructuredReasonLabels: Record<string, string> = {
   csp_assigned_stock: "left over from a put assignment",
@@ -141,17 +161,22 @@ export async function sendDuePositionTelegramNotices(send: (message: string) => 
 
         // Told once its opening order has finished, so an order filled lot by lot is told at its full size.
         if (position.openedNeedsNotice && position.openingOrderWorking) continue;
+        // A strategy transition is marked told without a message.
         if (position.openedNeedsNotice && openedEvent) {
-          if (!(await send(describePositionOpenedNotice(openedEvent)))) return sent;
+          if (!isStrategyTransitionOpening(openedEvent)) {
+            if (!(await send(describePositionOpenedNotice(openedEvent)))) return sent;
+            sent += 1;
+          }
           await db("positions").where({ id: position.id }).update({ telegram_opened_notified_at: db.fn.now() });
-          sent += 1;
         }
         if (position.closedNeedsNotice && closedEvent) {
-          const details = await fetchPositionById(position.id);
-          const capitalDeployed = details?.capitalDeployed == null ? null : Number(details.capitalDeployed);
-          if (!(await send(describePositionClosedNotice(closedEvent, capitalDeployed)))) return sent;
+          if (!isStrategyTransitionClose(closedEvent)) {
+            const details = await fetchPositionById(position.id);
+            const capitalDeployed = details?.capitalDeployed == null ? null : Number(details.capitalDeployed);
+            if (!(await send(describePositionClosedNotice(closedEvent, capitalDeployed)))) return sent;
+            sent += 1;
+          }
           await db("positions").where({ id: position.id }).update({ telegram_closed_notified_at: db.fn.now() });
-          sent += 1;
         }
       } catch (error) {
         console.error(`Position Telegram notice failed for position ${position.id}: ${error instanceof Error ? error.message : error}`);

@@ -192,7 +192,7 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     expect(pass.sent[0]).toContain(`• Buy $55 Call · ${jan17()} · 1× @ 0.40`);
   });
 
-  it("a covered call opened on shares handed over says they were carried at their cost, its call at the real fill with the commission apart; the source names it", async () => {
+  it("a covered call rolled in the app into one that carries its shares is a strategy transition: neither is told, both are marked", async () => {
     const source = await createPosition({ strategyKey: "covered_call", openedAt: new Date(Date.now() - 60_000), closedAt: new Date(), closeReason: "closed_via_app" });
     await trx("positions").where({ id: source.positionId }).update({ telegram_opened_notified_at: new Date() });
     await insertLeg(source.positionId, { leg_type: "stock", side: "long", quantity: 100, multiplier: 1, option_type: null, strike_price: null, expiry_date: null, entry_price: 100, exit_price: 100, exit_at: new Date() });
@@ -204,20 +204,19 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
 
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
-    expect(pass.sent).toHaveLength(2);
-    expect(pass.sent[0]).toContain("• 100 shares moved to a covered call");
-    expect(pass.sent[1]).toBe(`📥 New position: ${receiver.symbol} covered call\n• 100 shares carried from a covered call at $100.00 cost\n• Sell $105 Call · ${jan17()} · 1× @ 1.15 (commission $0.65)`);
+    expect(pass.sent).toEqual([]);
+    expect((await state(source.positionId)).closed).not.toBeNull();
+    expect((await state(receiver.positionId)).opened).not.toBeNull();
   });
 
-  it("leftover shares absorbed into a covered call are told as such (reason label)", async () => {
+  it("leftover shares absorbed into a covered call are a strategy transition: not told, marked", async () => {
     const { positionId, symbol } = await createPosition({ strategyKey: "unstructured", unstructuredReason: "csp_assigned_stock", closedAt: new Date(), closeReason: "stock_rolled_into_covered_call" });
     await trx("positions").where({ id: positionId }).update({ telegram_opened_notified_at: new Date() });
     await insertLeg(positionId, { leg_type: "stock", side: "long", quantity: 100, multiplier: 1, option_type: null, strike_price: null, expiry_date: null, entry_price: 50, exit_price: 50, exit_at: new Date() });
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
-    expect(pass.sent[0]!.split("\n")[0]).toBe(`📤 Position closed: ${symbol} stock, No Strategy — shares moved into a covered call`);
-    // The base is what the shares cost (100 × 50), even once they have moved on.
-    expect(pass.sent[0]!.split("\n").at(-1)).toBe("P&L: $0.00 (0.00%)");
+    expect(pass.sent.filter((message) => message.includes(symbol))).toEqual([]);
+    expect((await state(positionId)).closed).not.toBeNull();
   });
 
   it("a position with no legs at all (an orphan the self-heal closes) still produces readable messages", async () => {

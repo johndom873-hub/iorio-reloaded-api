@@ -77,6 +77,7 @@ afterAll(async () => {
   const positionIds = testDb("positions").whereIn("ticker_id", createdTickerIds).select("id");
   await testDb("trades").whereIn("position_leg_id", testDb("position_legs").whereIn("position_id", positionIds).select("id")).del();
   await testDb("order_requests").whereIn("id", createdOrderIds).del();
+  await testDb("position_share_sources").whereIn("position_id", positionIds).orWhereIn("source_position_id", positionIds).del();
   if (orderUserId) await testDb("users").where({ id: orderUserId }).del();
   await testDb("position_legs").whereIn("position_id", positionIds).del();
   await testDb("positions").whereIn("ticker_id", createdTickerIds).del();
@@ -140,7 +141,7 @@ describe("sendDuePositionTelegramNotices", () => {
     expect(state.closed).not.toBeNull();
   });
 
-  it("does not repeat a close the expiry message already told, and names a leftover-stock position", async () => {
+  it("does not repeat a close the expiry message already told, nor tell the shares the assignment left in No Strategy", async () => {
     const expired = await createPosition({ strategyKey: "cash_secured_put", closedAt: new Date(), closeReason: "expired_worthless" });
     await insertShortPut(expired.positionId, 0);
     await testDb("positions").where({ id: expired.positionId }).update({ telegram_opened_notified_at: new Date(), telegram_closed_notified_at: new Date() });
@@ -150,9 +151,62 @@ describe("sendDuePositionTelegramNotices", () => {
     const sender = recordingSender();
     await sendDuePositionTelegramNotices(sender.send);
     expect(sender.sent.filter((message) => message.includes(expired.symbol))).toEqual([]);
-    expect(sender.sent.filter((message) => message.includes(leftover.symbol))).toEqual([
-      `📥 New position: ${leftover.symbol} stock, No Strategy (left over from a put assignment)\n• Buy 100 shares @ 180.00`,
-    ]);
+    expect(sender.sent.filter((message) => message.includes(leftover.symbol))).toEqual([]);
+    expect((await noticeState(leftover.positionId)).opened).not.toBeNull();
+  });
+
+  it("tells no strategy transition: Calls sold on No Strategy shares, a Call bought back in the app with its shares kept", async () => {
+    const stockLeg = (positionId: string, exitPrice: number | null) =>
+      testDb("position_legs").insert({ position_id: positionId, leg_type: "stock", side: "long", quantity: 1_400, multiplier: 1, entry_price: 41.73, entry_at: new Date(), exit_price: exitPrice, exit_at: exitPrice === null ? null : new Date() });
+    const shortCall = (positionId: string, exitPrice: number | null) =>
+      testDb("position_legs").insert({ position_id: positionId, leg_type: "option", side: "short", quantity: 14, multiplier: 100, option_type: "call", strike_price: 42, expiry_date: "2031-01-17", entry_price: 0.3, entry_at: new Date(), exit_price: exitPrice, exit_at: exitPrice === null ? null : new Date() });
+    const link = (positionId: string, sourcePositionId: string) => testDb("position_share_sources").insert({ position_id: positionId, source_position_id: sourcePositionId, shares_received: 1_400 });
+
+    // No Strategy → covered call: the shares move (closed at their entry price), the new position sells the Calls.
+    const noStrategy = await createPosition({ strategyKey: "unstructured", unstructuredReason: "manual_stock_buy", closedAt: new Date(), closeReason: "stock_rolled_into_covered_call" });
+    await stockLeg(noStrategy.positionId, 41.73);
+    await testDb("positions").where({ id: noStrategy.positionId }).update({ telegram_opened_notified_at: new Date() });
+    const coveredCall = await createPosition({ strategyKey: "covered_call" });
+    await stockLeg(coveredCall.positionId, null);
+    await shortCall(coveredCall.positionId, null);
+    await link(coveredCall.positionId, noStrategy.positionId);
+
+    // A covered call whose Call an app order bought back, its shares moved to No Strategy.
+    const boughtBack = await createPosition({ strategyKey: "covered_call", closedAt: new Date(), closeReason: "closed_via_app" });
+    await stockLeg(boughtBack.positionId, 41.73);
+    await shortCall(boughtBack.positionId, 0.5);
+    await testDb("positions").where({ id: boughtBack.positionId }).update({ telegram_opened_notified_at: new Date() });
+    const kept = await createPosition({ strategyKey: "unstructured", unstructuredReason: "cc_call_bought_back_stock" });
+    await stockLeg(kept.positionId, null);
+    await link(kept.positionId, boughtBack.positionId);
+
+    // Still told: a covered call's Call that expired whose expiry message was not delivered, and a Call bought back
+    // outside the app (no order notice tells it), each with its shares kept.
+    const expired = await createPosition({ strategyKey: "covered_call", closedAt: new Date(), closeReason: "expired_worthless" });
+    await stockLeg(expired.positionId, 41.73);
+    await shortCall(expired.positionId, 0);
+    const outside = await createPosition({ strategyKey: "covered_call", closedAt: new Date(), closeReason: "closed_via_external_trade" });
+    await stockLeg(outside.positionId, 41.73);
+    await shortCall(outside.positionId, 0.5);
+    for (const { positionId } of [expired, outside]) await testDb("positions").where({ id: positionId }).update({ telegram_opened_notified_at: new Date() });
+    const expiredLeftover = await createPosition({ strategyKey: "unstructured", unstructuredReason: "cc_expired_leftover_stock" });
+    await stockLeg(expiredLeftover.positionId, null);
+    await link(expiredLeftover.positionId, expired.positionId);
+    const outsideLeftover = await createPosition({ strategyKey: "unstructured", unstructuredReason: "cc_call_bought_back_stock" });
+    await stockLeg(outsideLeftover.positionId, null);
+    await link(outsideLeftover.positionId, outside.positionId);
+
+    const sender = recordingSender();
+    await sendDuePositionTelegramNotices(sender.send);
+    const about = (symbol: string) => sender.sent.filter((message) => message.includes(symbol));
+    for (const transition of [noStrategy, coveredCall, boughtBack, kept, expiredLeftover, outsideLeftover]) {
+      expect(about(transition.symbol)).toEqual([]);
+      const state = await noticeState(transition.positionId);
+      expect(state.opened).not.toBeNull();
+    }
+    for (const closed of [noStrategy, boughtBack]) expect((await noticeState(closed.positionId)).closed).not.toBeNull();
+    expect(about(expired.symbol)).toEqual([expect.stringMatching(/^📤 Position closed: \S+ covered call — expired worthless\n/)]);
+    expect(about(outside.symbol)).toEqual([expect.stringMatching(/^📤 Position closed: \S+ covered call — closed outside the app\n/)]);
   });
 
   it("leaves everything untold when Telegram does not deliver, and stops the pass at the first failure", async () => {
