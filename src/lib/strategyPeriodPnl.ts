@@ -2,6 +2,7 @@ import type { BookKey } from "../books/bookKeys.js";
 import { bookOfPositionAtNightSql } from "../books/bookDashboard.js";
 import { db } from "../db/connection.js";
 import { legRealizedPnlSql } from "./legRealizedPnlSql.js";
+import { easternTodaySql } from "./easternTodaySql.js";
 
 // The Dashboard's per-strategy Day/WTD/MTD/YTD table and YTD card moved to the fair cycle attribution
 // (cyclePeriodPnl.ts, 2026-09-21). What remains here is the daily series behind the P&L Over Time chart, still on
@@ -48,7 +49,7 @@ export async function computeStrategyDailyPnlSeries(days: number, book: { book: 
   const result = await db.raw(
     `
     WITH days AS (
-      SELECT generate_series((CURRENT_DATE - (? - 1)::int), CURRENT_DATE, interval '1 day')::date AS d
+      SELECT generate_series((${easternTodaySql} - (? - 1)::int), ${easternTodaySql}, interval '1 day')::date AS d
     ),
     strategies AS (
       SELECT DISTINCT strategy_key FROM positions

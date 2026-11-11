@@ -10,6 +10,7 @@ import { computeStrategyDailyPnlSeries } from "../lib/strategyPeriodPnl.js";
 import { computeCyclePeriodPnl } from "../lib/cyclePeriodPnl.js";
 import { fetchPositionEvents } from "../lib/positionEvents.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { easternTodaySql } from "../lib/easternTodaySql.js";
 import { bookOfPositionAtNightSql, bookOfPositionNowSql, bookPerformanceRows, loadBookDailySeries, loadBookSummary, loadBooksFirstDate, loadOpenPositionBooksNow, loadPositionBooksNow, requestedBook, type BookDailyRow } from "../books/bookDashboard.js";
 import { loadBooksLiveState } from "../books/bookFigures.js";
 import type { BookKey } from "../books/bookKeys.js";
@@ -42,9 +43,9 @@ async function loadPeriodPnl() {
   const [sums, latestTwo] = await Promise.all([
     db.raw(`
       SELECT
-        (SELECT SUM(daily_pnl) FROM account_pnl_snapshots WHERE snapshot_date >= date_trunc('week', CURRENT_DATE)) AS week,
-        (SELECT SUM(daily_pnl) FROM account_pnl_snapshots WHERE snapshot_date >= date_trunc('month', CURRENT_DATE)) AS month,
-        (SELECT SUM(daily_pnl) FROM account_pnl_snapshots WHERE snapshot_date >= date_trunc('year', CURRENT_DATE)) AS year
+        (SELECT SUM(daily_pnl) FROM account_pnl_snapshots WHERE snapshot_date >= date_trunc('week', ${easternTodaySql})) AS week,
+        (SELECT SUM(daily_pnl) FROM account_pnl_snapshots WHERE snapshot_date >= date_trunc('month', ${easternTodaySql})) AS month,
+        (SELECT SUM(daily_pnl) FROM account_pnl_snapshots WHERE snapshot_date >= date_trunc('year', ${easternTodaySql})) AS year
     `),
     db.raw(`SELECT to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate", daily_pnl AS "dailyPnl" FROM account_pnl_snapshots ORDER BY snapshot_date DESC LIMIT 2`),
   ]);
@@ -181,7 +182,7 @@ dashboardRouter.get("/summary", async (request, response) => {
   // total "P&L by Period" uses) instead avoids that gap entirely and
   // guarantees this card's Total ties out to Period's YTD Total exactly.
   const snapshotBeforeYearStart = await db("account_pnl_snapshots")
-    .where("snapshot_date", "<", db.raw("date_trunc('year', CURRENT_DATE)"))
+    .where("snapshot_date", "<", db.raw(`date_trunc('year', ${easternTodaySql})`))
     .orderBy("snapshot_date", "desc")
     .first();
   const accountTotalYtd = Number(periods.year ?? 0);

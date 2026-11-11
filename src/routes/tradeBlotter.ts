@@ -18,6 +18,17 @@ const validStrategyKeys = ["covered_call", "cash_secured_put", "hedge", "leaps",
 // sign-flipped for short legs since a short profits when price falls.
 // Value (approved 2026-10-02): price * quantity * multiplier, unsigned, per fill. For an option that is the
 // premium transacted in dollars; for stock, the dollar value of the shares. Not the option's notional (strike * 100).
+// A plain date from the page's date inputs (YYYY-MM-DD) is a US/Eastern trading day (Marcelo 2026-11-11): From starts at
+// its 00:00 ET, To ends at the next day's 00:00 ET. A full timestamp is used as given. Example: To 2026-11-10 keeps a fill
+// at 15:59 ET on 10 Nov (20:59 UTC), which a bare "<= 2026-11-10" (UTC midnight, 19:00 ET on 9 Nov) left out.
+const plainIsoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+function fromCondition(column: string, from: string): string {
+  return plainIsoDatePattern.test(from) ? `${column} >= (?::date)::timestamp AT TIME ZONE 'America/New_York'` : `${column} >= ?`;
+}
+function toCondition(column: string, to: string): string {
+  return plainIsoDatePattern.test(to) ? `${column} < ((?::date) + 1)::timestamp AT TIME ZONE 'America/New_York'` : `${column} <= ?`;
+}
+
 tradeBlotterRouter.get("/", async (request, response) => {
   const strategyKey = request.query.strategy as string | undefined;
   const symbol = (request.query.symbol as string | undefined)?.trim().toUpperCase();
@@ -45,11 +56,11 @@ tradeBlotterRouter.get("/", async (request, response) => {
     params.push(symbol);
   }
   if (from) {
-    conditions.push("tr.executed_at >= ?");
+    conditions.push(fromCondition("tr.executed_at", from));
     params.push(from);
   }
   if (to) {
-    conditions.push("tr.executed_at <= ?");
+    conditions.push(toCondition("tr.executed_at", to));
     params.push(to);
   }
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -114,11 +125,11 @@ tradeBlotterRouter.get("/", async (request, response) => {
     orderParams.push(symbol);
   }
   if (from) {
-    orderConditions.push("orq.created_at >= ?");
+    orderConditions.push(fromCondition("orq.created_at", from));
     orderParams.push(from);
   }
   if (to) {
-    orderConditions.push("orq.created_at <= ?");
+    orderConditions.push(toCondition("orq.created_at", to));
     orderParams.push(to);
   }
 

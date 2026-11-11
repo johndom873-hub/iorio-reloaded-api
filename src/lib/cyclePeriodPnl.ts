@@ -2,6 +2,7 @@ import { db } from "../db/connection.js";
 import { deriveCycles, type Cycle, type CycleBucket, type CycleInput } from "./cycles.js";
 import { loadCycleInputsForTickers } from "./cycleQueries.js";
 import { easternInstant, previousOpenSessionDate } from "./marketSessionStatus.js";
+import { easternTodaySql } from "./easternTodaySql.js";
 
 // Dashboard "P&L by Period" / "P&L by Strategy (YTD)" on the fair cycle attribution (approved 2026-09-21; the same
 // CSP / N/S / CC buckets as the Positions scoreboard, see cycles.ts).
@@ -17,7 +18,7 @@ import { easternInstant, previousOpenSessionDate } from "./marketSessionStatus.j
 //
 // Baselines follow the account-level card they must reconcile with (loadPeriodPnl in routes/dashboard.ts):
 //   Day   = the last trading day before the latest account snapshot (the account's Day is that snapshot's daily P&L)
-//   Week/Month/Year = the last trading day before this Monday / the 1st / Jan 1 (by CURRENT_DATE, as the account card does)
+//   Week/Month/Year = the last trading day before this Monday / the 1st / Jan 1 (by today's ET date, as the account card does)
 
 export type CyclePeriod = "day" | "week" | "month" | "year";
 const cyclePeriods: CyclePeriod[] = ["day", "week", "month", "year"];
@@ -42,15 +43,15 @@ interface SnapshotMarks {
   unrealizedPnl: number;
 }
 
-// The boundaries are read in SQL (CURRENT_DATE, as the account card does); the previous trading day before each is resolved
+// The boundaries are read in SQL (today's ET date, as the account card does); the previous trading day before each is resolved
 // by the same walk the Dashboard's Day card uses, so a gap in market_calendar can never put the two on different days.
 export async function loadBaselineDates(): Promise<Record<CyclePeriod, string> | null> {
   const result = await db.raw(`
     SELECT
       latest.d::text AS "latestSnapshotDate",
-      date_trunc('week', CURRENT_DATE)::date::text AS "weekStart",
-      date_trunc('month', CURRENT_DATE)::date::text AS "monthStart",
-      date_trunc('year', CURRENT_DATE)::date::text AS "yearStart"
+      date_trunc('week', ${easternTodaySql})::date::text AS "weekStart",
+      date_trunc('month', ${easternTodaySql})::date::text AS "monthStart",
+      date_trunc('year', ${easternTodaySql})::date::text AS "yearStart"
     FROM (SELECT MAX(snapshot_date) AS d FROM account_pnl_snapshots) latest
   `);
   const row = result.rows[0];

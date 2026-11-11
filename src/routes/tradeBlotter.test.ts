@@ -298,6 +298,14 @@ describe("trade filters", () => {
     expect(await symbolsFor("?from=2026-03-10T12:00:01Z&to=2026-03-20T11:59:59Z")).toEqual([]);
   });
 
+  it("reads a plain From/To date as a whole US/Eastern trading day", async () => {
+    // AAA filled 10 Mar 12:00 UTC (08:00 ET), BBB 20 Mar 12:00 UTC: To 2026-03-10 used to end at UTC midnight and miss AAA.
+    expect(await symbolsFor("?to=2026-03-10")).toEqual(["AAA"]);
+    expect(await symbolsFor("?from=2026-03-20")).toEqual(["BBB"]);
+    expect(await symbolsFor("?from=2026-03-10&to=2026-03-20")).toEqual(["BBB", "AAA"]);
+    expect(await symbolsFor("?from=2026-03-11&to=2026-03-19")).toEqual([]);
+  });
+
   it("combines every filter with AND", async () => {
     expect(await symbolsFor("?strategy=covered_call&symbol=aaa")).toEqual([]);
     expect(await symbolsFor("?strategy=covered_call&symbol=bbb&from=2026-03-01T00:00:00Z")).toEqual(["BBB"]);
@@ -395,5 +403,13 @@ describe("pending (unfilled) orders", () => {
     expect(await symbolsFor("?from=2026-03-05T00:00:00Z")).toEqual(["BBB"]);
     expect(await symbolsFor("?to=2026-03-05T00:00:00Z")).toEqual(["AAA"]);
     expect(await symbolsFor("?strategy=covered_call&symbol=AAA")).toEqual([]);
+  });
+
+  it("files a pending order under the ET day it was created on, also after 19:00 ET when UTC is already the next day", async () => {
+    // 5 Mar 2026 22:30 EST = 6 Mar 03:30 UTC.
+    await insertOrderRequest({ payload: { symbol: "LATE", strategyKey: "covered_call", legs: [optionLeg] }, created_at: "2026-03-06T03:30:00Z" });
+    const symbolsFor = async (query: string) => (await get(`/trade-blotter${query}`)).json.pendingOrders.map((row: { symbol: string }) => row.symbol);
+    expect(await symbolsFor("?from=2026-03-05&to=2026-03-05")).toEqual(["LATE"]);
+    expect(await symbolsFor("?from=2026-03-06&to=2026-03-06")).toEqual([]);
   });
 });
