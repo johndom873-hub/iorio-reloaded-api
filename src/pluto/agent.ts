@@ -147,24 +147,12 @@ export class PlutoAgent {
   }
 
   /**
-   * Deploy and crash-loop detection, before anything else happens (design item 6, refined round 2). Outside production a new
-   * release keeps Pluto's previous state, running or paused (Marcelo, 2026-10-09); production still pauses on one.
+   * Crash-loop detection, before anything else happens (design item 6, refined round 2). A new release keeps Pluto's
+   * previous state, running or paused, in every environment (Marcelo: staging 2026-10-09, production 2026-11-11).
    */
   private async guardBoot(): Promise<void> {
     const settings = this.settings!;
-    const state = await loadPlutoState();
     const release = currentRelease();
-    if (readAppEnvironment() === "production" && state.lastSeenRelease !== null && release !== null && state.lastSeenRelease !== release) {
-      // A person's pause (and its reason) outranks the deploy pause: never let "resume once you're happy with the release"
-      // replace "paused by Juan" (Marcelo, 2026-10-06).
-      if (state.paused) {
-        await recordPlutoEvent("warning", { message: `new release ${release.slice(0, 7)} started while already paused (${state.pauseReason ?? "unknown reason"}); the existing pause is kept` });
-      } else {
-        await pausePluto("deploy");
-        await recordPlutoEvent("paused", { by: "agent", reason: "deploy", from: state.lastSeenRelease, to: release });
-        await notifyPlutoTelegram(`⏸️ Pluto paused after a deploy (${state.lastSeenRelease.slice(0, 7)} → ${release.slice(0, 7)}). Press Resume on the Pluto screen once you are happy with the release.`);
-      }
-    }
     if (release !== null) await recordPlutoRelease(release);
     // Only starts on this release count: a burst of deploys is not a crash loop, a release that keeps restarting is.
     const recentStartsQuery = db("pluto_events").where({ type: "agent_started" }).where("occurred_at", ">", new Date(Date.now() - 60 * 60_000));

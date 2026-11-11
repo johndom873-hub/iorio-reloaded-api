@@ -5,9 +5,10 @@ import type { PlutoReadinessRecord } from "./readiness.js";
 
 // Pluto's runtime state: one row (pluto_state). Mode is off/on (Marcelo, 2026-09-28: no
 // other modes). Pause is a separate flag that overrides everything: manual (either user),
-// after a deploy or a crash loop (the agent itself on boot), or a tripped breaker. A
-// breaker trip always needs a human reset; a manual/deploy/crash-loop pause is lifted by
-// Resume. The order gate is: mode on AND not paused AND no breaker tripped.
+// after a crash loop (the agent itself on boot), or a tripped breaker. "deploy" is kept for
+// pauses from before 2026-11-11, when production paused on every release. A breaker trip
+// always needs a human reset; any other pause is lifted by Resume. The order gate is: mode
+// on AND not paused AND no breaker tripped.
 
 export type PlutoMode = "off" | "on";
 export type PlutoPauseKind = "manual" | "deploy" | "crash_loop" | "readiness" | "breaker";

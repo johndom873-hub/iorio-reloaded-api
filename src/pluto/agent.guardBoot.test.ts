@@ -101,31 +101,26 @@ afterEach(() => {
 });
 
 describe("guardBoot on a new release", () => {
-  it("keeps a running Pluto running outside production, and records the release", async () => {
-    harness.recentStartReleases = ["v186"];
-    await bootOnRelease("v186", "staging", state());
-    expect(harness.pauses).toEqual([]);
-    expect(harness.telegrams).toEqual([]);
-    expect(harness.events).toEqual([]);
-    expect(harness.state.paused).toBe(false);
-    expect(harness.recordedReleases).toEqual(["v186"]);
-  });
+  // Marcelo 2026-11-11: no environment pauses on a release (staging since 2026-10-09).
+  for (const environment of ["staging", "production"] as const) {
+    it(`keeps a running Pluto running in ${environment}, and records the release`, async () => {
+      harness.recentStartReleases = ["v186"];
+      await bootOnRelease("v186", environment, state());
+      expect(harness.pauses).toEqual([]);
+      expect(harness.telegrams).toEqual([]);
+      expect(harness.events).toEqual([]);
+      expect(harness.state.paused).toBe(false);
+      expect(harness.recordedReleases).toEqual(["v186"]);
+    });
 
-  it("keeps a person's pause and its reason outside production, without a warning", async () => {
-    harness.recentStartReleases = ["v186"];
-    await bootOnRelease("v186", "staging", state({ paused: true, pauseReason: "manual" }));
-    expect(harness.pauses).toEqual([]);
-    expect(harness.events).toEqual([]);
-    expect(harness.state).toMatchObject({ paused: true, pauseReason: "manual" });
-  });
-
-  it("still pauses a running Pluto in production and says so", async () => {
-    harness.recentStartReleases = ["v186"];
-    await bootOnRelease("v186", "production", state());
-    expect(harness.pauses).toEqual(["deploy"]);
-    expect(harness.events).toEqual([{ type: "paused", payload: { by: "agent", reason: "deploy", from: "v185", to: "v186" } }]);
-    expect(harness.telegrams[0]).toContain("Pluto paused after a deploy");
-  });
+    it(`keeps a person's pause and its reason in ${environment}, without a warning`, async () => {
+      harness.recentStartReleases = ["v186"];
+      await bootOnRelease("v186", environment, state({ paused: true, pauseReason: "manual" }));
+      expect(harness.pauses).toEqual([]);
+      expect(harness.events).toEqual([]);
+      expect(harness.state).toMatchObject({ paused: true, pauseReason: "manual" });
+    });
+  }
 });
 
 describe("guardBoot crash-loop count", () => {
