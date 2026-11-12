@@ -36,6 +36,9 @@ export interface CycleOptionLegRow {
   openingFillCount?: number;
   openingCommission?: number | null;
   closingFillPrice?: number | null;
+  /** The stock's price at the leg's opening and closing fills (cycleQueries.ts optionFillStockPriceSql). */
+  openingStockPrice?: number | null;
+  closingStockPrice?: number | null;
   /** The timeline's label for the leg's opening or closing row in place of the fill's: a simulated book's bookkeeping moves name themselves. Never selected. */
   openingRowLabel?: string;
   closingRowLabel?: string;
@@ -96,8 +99,6 @@ export interface CycleInputRows {
   openPositionPremiumPnl: Map<string, number>;
   /** The snapshot date of each openPositionPremiumPnl mark, by position id. */
   openPositionMarkDate?: Map<string, string>;
-  /** What the shares behind each Covered Call position were bought at (stockLegAcquisitionFills.ts). */
-  stockCostPriceByPositionId?: Map<string, number>;
 }
 
 function optionLegsOfTicker<Row extends CycleOptionLegRow>(rows: readonly Row[], tickerId: string) {
@@ -132,7 +133,6 @@ export function buildCycleInputFromRows(tickerId: string, rows: CycleInputRows):
     lastPrice,
     openPositionPremiumPnl: rows.openPositionPremiumPnl,
     openPositionMarkDate: rows.openPositionMarkDate,
-    ...(rows.stockCostPriceByPositionId === undefined ? {} : { stockCostPriceByPositionId: rows.stockCostPriceByPositionId }),
   };
 }
 

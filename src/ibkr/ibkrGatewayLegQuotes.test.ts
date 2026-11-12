@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { EventName, MarketDataType, type IBApi } from "@stoqey/ib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrderLegPayload } from "./ibkrGatewayOrderPayload.js";
-import { fetchLegQuoteSnapshots, legQuoteSnapshotTimeoutMs } from "./ibkrGatewayLegQuotes.js";
+import { fetchContractQuoteSnapshots, fetchLegQuoteSnapshots, legQuoteSnapshotTimeoutMs } from "./ibkrGatewayLegQuotes.js";
 
 class FakeIbApi extends EventEmitter {
   reqMarketDataType = vi.fn();
@@ -122,6 +122,35 @@ describe("fetchLegQuoteSnapshots", () => {
     tick(100, bid, 1);
     tick(100, ask, 1.1);
     expect((await result).notes).toEqual([]);
+  });
+
+  it("keeps an option's stock price from its real-time option computation tick, waiting for it only when asked", async () => {
+    const ib = new FakeIbApi();
+    const result = fetchContractQuoteSnapshots(ib as unknown as IBApi, [{ conId: 1, exchange: "SMART" }], { allocateRequestId: () => 100, waitForUnderlyingPrice: true });
+    const optionComputation = (field: number, underlyingPrice: number) => ib.emit(EventName.tickOptionComputation, 100, field, 0, 0.5, 0.3, 0.06, 0, 0.1, 0.01, -0.02, underlyingPrice);
+    ib.emit(EventName.tickPrice, 100, bid, 0.05);
+    ib.emit(EventName.tickPrice, 100, ask, 0.07);
+    let settled = false;
+    void result.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(settled).toBe(false);
+    // A delayed tick (83) and IBKR's "unknown" sentinel are not a price.
+    optionComputation(83, 41.5);
+    optionComputation(13, -1);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(settled).toBe(false);
+    optionComputation(13, 41.62);
+    expect(await result).toEqual({ quotes: [{ bid: 0.05, ask: 0.07, underlyingPrice: 41.62 }], notes: [] });
+    expect(ib.listenerCount(EventName.tickOptionComputation)).toBe(0);
+  });
+
+  it("ends without the stock price when IBKR ends the snapshot first", async () => {
+    const ib = new FakeIbApi();
+    const result = fetchContractQuoteSnapshots(ib as unknown as IBApi, [{ conId: 1, exchange: "SMART" }], { allocateRequestId: () => 100, waitForUnderlyingPrice: true });
+    ib.emit(EventName.tickPrice, 100, bid, 0.05);
+    ib.emit(EventName.tickPrice, 100, ask, 0.07);
+    ib.emit(EventName.tickSnapshotEnd, 100);
+    expect(await result).toEqual({ quotes: [{ bid: 0.05, ask: 0.07 }], notes: [] });
   });
 
   it("has nothing to wait for with no legs", async () => {

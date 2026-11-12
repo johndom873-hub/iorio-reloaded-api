@@ -117,7 +117,7 @@ describe("the cycle loaders and the exported row mapping", () => {
     for (const { tickerId, input } of loaded) {
       const built = buildCycleInputFromRows(tickerId, handWrittenRows);
       // The loader also reads each leg's fills for the timeline; the hand-written rows have none, so those figures are compared apart.
-      const withoutFillFigures = (legs: typeof input.optionLegs) => legs.map(({ openingFillPrice: _price, openingFillCount: _count, openingCommission: _commission, closingFillPrice: _closing, ...leg }) => leg);
+      const withoutFillFigures = (legs: typeof input.optionLegs) => legs.map(({ openingFillPrice: _price, openingFillCount: _count, openingCommission: _commission, closingFillPrice: _closing, openingStockPrice: _openingStock, closingStockPrice: _closingStock, ...leg }) => leg);
       expect(sortById(withoutFillFigures(input.optionLegs))).toEqual(sortById(built.optionLegs));
       expect(input.optionLegs.every((leg) => typeof leg.openingFillCount === "number")).toBe(true);
       expect(sortByEntry(input.stockLegs)).toEqual(sortByEntry(built.stockLegs));
@@ -214,5 +214,58 @@ describe("an option assigned before its expiry date", () => {
     } finally {
       await testDb("positions").where({ id: putPositionId }).update({ close_reason: "assigned" });
     }
+  });
+});
+
+// The Wheel cycle's Stock price on option rows (Marcelo 2026-11-11): the stock's price at each fill, from the snapshot the
+// worker takes right after it, else the price Pluto decided the order on; averaged over the fills' contracts. A $42 Call
+// sold in two fills, 10 contracts with a snapshot at 41.62 and 4 through a Pluto order decided at 41.55; bought back in one
+// fill with neither; a $40 Put with a snapshot at 41.80.
+describe("the stock price on option rows", () => {
+  const tickerId: string = randomUUID();
+  const callPositionId: string = randomUUID();
+  const putPositionId: string = randomUUID();
+  const callLegId: string = randomUUID();
+  const putLegId: string = randomUUID();
+  const soldAt = at("2026-11-11T15:01:00Z");
+  const boughtBackAt = at("2026-11-11T19:00:00Z");
+
+  beforeAll(async () => {
+    await testDb("tickers").insert({ id: tickerId, symbol: "STP", company_name: "Stock Price Co", sector: "Technology" });
+    await testDb("positions").insert([
+      { id: callPositionId, strategy_key: "covered_call", ticker_id: tickerId, status: "closed", opened_at: soldAt, closed_at: boughtBackAt, close_reason: "closed_via_app" },
+      { id: putPositionId, strategy_key: "cash_secured_put", ticker_id: tickerId, status: "open", opened_at: soldAt },
+    ]);
+    await testDb("position_legs").insert([
+      { id: callLegId, position_id: callPositionId, leg_type: "option", side: "short", quantity: 14, option_type: "call", strike_price: 42, expiry_date: "2026-11-11", multiplier: 100, entry_price: 0.06, entry_at: soldAt, exit_price: 0.02, exit_at: boughtBackAt },
+      { id: putLegId, position_id: putPositionId, leg_type: "option", side: "short", quantity: 2, option_type: "put", strike_price: 40, expiry_date: "2026-11-13", multiplier: 100, entry_price: 0.3, entry_at: soldAt, exit_price: null, exit_at: null },
+    ]);
+    const [user] = await testDb("users").insert({ username: `stp-${tickerId}`, display_name: "Stock Price", password_hash: "x" }).returning("id");
+    const [pass] = await testDb("pluto_passes").insert({ trigger: "test" }).returning("id");
+    const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_covered_call", symbol: "STP", outcome: "filled", candidate_scores: JSON.stringify({ stockPrice: 41.55, delta: 0.3 }) }).returning("id");
+    const [order] = await testDb("order_requests").insert({ requested_by_user_id: user.id, request_type: "open_covered_call", payload: JSON.stringify({ symbol: "STP", legs: [] }), status: "filled", pluto_action_id: action.id }).returning("id");
+    const trade = (legId: string, execId: string, side: string, quantity: number, price: number, executedAt: Date, isClosingTrade: boolean, sourceOrderRequestId: string | null) => ({ position_leg_id: legId, ibkr_exec_id: execId, side, quantity, price, commission: 0.65, executed_at: executedAt, is_closing_trade: isClosingTrade, source_order_request_id: sourceOrderRequestId });
+    await testDb("trades").insert([
+      trade(callLegId, `stp-1-${tickerId}`, "sell", 10, 0.06, soldAt, false, null),
+      trade(callLegId, `stp-2-${tickerId}`, "sell", 4, 0.06, soldAt, false, order.id),
+      trade(callLegId, `stp-3-${tickerId}`, "buy", 14, 0.02, boughtBackAt, true, null),
+      trade(putLegId, `stp-4-${tickerId}`, "sell", 2, 0.3, soldAt, false, null),
+    ]);
+    const quote = (execId: string, underlyingPrice: number) => ({ ibkr_exec_id: execId, ibkr_contract_id: "1", sec_type: "OPT", executed_at: soldAt, execution_price: 0.06, bid: 0.05, ask: 0.07, quoted_at: soldAt, underlying_price: underlyingPrice });
+    await testDb("execution_quotes").insert([quote(`stp-1-${tickerId}`, 41.62), quote(`stp-4-${tickerId}`, 41.8)]);
+    await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: "2026-11-10", close_price: 41.68 });
+  });
+
+  it("is the stock's price at the fills, else Pluto's, averaged over the contracts; none where neither is known", async () => {
+    const [loaded] = await loadCycleInputsForTickers([tickerId]);
+    const callLeg = loaded!.input.optionLegs.find((leg) => leg.id === callLegId)!;
+    // (10 × 41.62 + 4 × 41.55) ÷ 14 = 41.6000.
+    expect(callLeg).toMatchObject({ openingStockPrice: 41.6, closingStockPrice: null });
+
+    const [cycles] = (await fetchCyclesForTickers([tickerId])).map((entry) => entry.cycles);
+    const timeline = cycles![0]!.timeline;
+    expect(timeline.find((row) => row.label.startsWith("Sold call"))).toMatchObject({ stockPrice: 41.6, stockPriceSource: "execution" });
+    expect(timeline.find((row) => row.label.startsWith("Bought back call"))).toMatchObject({ stockPrice: null, stockPriceSource: null });
+    expect(timeline.find((row) => row.label.startsWith("Sold put"))).toMatchObject({ stockPrice: 41.8, stockPriceSource: "execution" });
   });
 });

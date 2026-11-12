@@ -12,12 +12,16 @@ const bidTick = 1;
 const askTick = 2;
 const delayedBidTick = 66;
 const delayedAskTick = 67;
+/** IBKR's real-time option computation ticks (bid, ask, last, model): each carries the stock's price (undPrice). */
+const realTimeOptionComputationTicks = [10, 11, 12, 13];
 
 export const legQuoteSnapshotTimeoutMs = 6_000;
 
 export interface LegQuoteSnapshot {
   bid: number | null;
   ask: number | null;
+  /** An option's stock price as IBKR's option computation tick gave it; absent for a stock, or when none arrived. */
+  underlyingPrice?: number | null;
 }
 
 export interface LegQuoteSnapshotResult {
@@ -32,6 +36,8 @@ type SnapshotApi = Pick<IBApi, "on" | "removeListener" | "reqMarketDataType" | "
 export interface QuoteSnapshotOptions {
   timeoutMs?: number;
   allocateRequestId?: () => number;
+  /** The contracts are options whose snapshot waits for the stock price too (until IBKR ends it or the timeout), not only bid and ask. */
+  waitForUnderlyingPrice?: boolean;
 }
 
 export function fetchLegQuoteSnapshots(ib: SnapshotApi, legs: OrderLegPayload[], options: QuoteSnapshotOptions = {}): Promise<LegQuoteSnapshotResult> {
@@ -49,7 +55,7 @@ export function fetchContractQuoteSnapshots(ib: SnapshotApi, contracts: Contract
   const sawDelayedOnly = new Set<number>();
   let finish: () => void = () => {};
 
-  const isComplete = (index: number) => quotes[index]!.bid !== null && quotes[index]!.ask !== null;
+  const isComplete = (index: number) => quotes[index]!.bid !== null && quotes[index]!.ask !== null && (options.waitForUnderlyingPrice !== true || quotes[index]!.underlyingPrice != null);
   const settle = (requestId: number) => {
     if (pending.delete(requestId) && pending.size === 0) finish();
   };
@@ -68,6 +74,14 @@ export function fetchContractQuoteSnapshots(ib: SnapshotApi, contracts: Contract
     else quotes[index]!.ask = price;
     if (isComplete(index)) settle(requestId);
   };
+  const onTickOptionComputation = (requestId: number, field: number, _tickAttrib: number | undefined, _impliedVol?: number, _delta?: number, _optPrice?: number, _pvDividend?: number, _gamma?: number, _vega?: number, _theta?: number, underlyingPrice?: number) => {
+    const index = legIndexByRequestId.get(requestId);
+    if (index === undefined || !realTimeOptionComputationTicks.includes(field)) return;
+    // IBKR fills an unknown price with a sentinel (-1, or Double.MAX_VALUE): only a plausible positive price is kept.
+    if (underlyingPrice === undefined || !Number.isFinite(underlyingPrice) || underlyingPrice <= 0 || underlyingPrice > 1e7) return;
+    quotes[index]!.underlyingPrice = underlyingPrice;
+    if (isComplete(index)) settle(requestId);
+  };
   const onSnapshotEnd = (requestId: number) => {
     if (legIndexByRequestId.has(requestId)) settle(requestId);
   };
@@ -81,6 +95,7 @@ export function fetchContractQuoteSnapshots(ib: SnapshotApi, contracts: Contract
   };
 
   ib.on(EventName.tickPrice, onTickPrice);
+  ib.on(EventName.tickOptionComputation, onTickOptionComputation);
   ib.on(EventName.tickSnapshotEnd, onSnapshotEnd);
   ib.on(EventName.error, onError);
 
@@ -110,6 +125,7 @@ export function fetchContractQuoteSnapshots(ib: SnapshotApi, contracts: Contract
     } finally {
       for (const requestId of legIndexByRequestId.keys()) ib.cancelMktData(requestId);
       ib.removeListener(EventName.tickPrice, onTickPrice);
+      ib.removeListener(EventName.tickOptionComputation, onTickOptionComputation);
       ib.removeListener(EventName.tickSnapshotEnd, onSnapshotEnd);
       ib.removeListener(EventName.error, onError);
     }

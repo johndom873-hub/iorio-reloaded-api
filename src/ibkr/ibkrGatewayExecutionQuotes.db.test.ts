@@ -29,13 +29,14 @@ afterAll(async () => {
 });
 
 describe("captureExecutionQuote", () => {
-  it("stores the bid and ask of the executed contract, once per execution", async () => {
+  it("stores the bid and ask of the executed contract and an option's stock price, once per execution", async () => {
     let requests = 0;
     const dependencies = {
-      fetchQuotes: async (contracts: Contract[]) => {
+      fetchQuotes: async (contracts: Contract[], options: { waitForUnderlyingPrice: boolean }) => {
         requests += 1;
         expect(contracts).toEqual([{ conId: 123456, exchange: "SMART" }]);
-        return { quotes: [{ bid: 1.29, ask: 1.32 }], notes: [] };
+        expect(options).toEqual({ waitForUnderlyingPrice: true });
+        return { quotes: [{ bid: 1.29, ask: 1.32, underlyingPrice: 41.6234 }], notes: [] };
       },
       now: () => now,
     };
@@ -48,11 +49,26 @@ describe("captureExecutionQuote", () => {
     expect(Number(rows[0].ask)).toBe(1.32);
     expect(Number(rows[0].execution_price)).toBe(1.31);
     expect(rows[0].sec_type).toBe("OPT");
+    expect(Number(rows[0].underlying_price)).toBe(41.6234);
     expect(rows[0].note).toBeNull();
   });
 
+  it("stores no stock price for a stock fill, and does not wait for one", async () => {
+    const dependencies = {
+      fetchQuotes: async (_contracts: Contract[], options: { waitForUnderlyingPrice: boolean }) => {
+        expect(options).toEqual({ waitForUnderlyingPrice: false });
+        return { quotes: [{ bid: 41.6, ask: 41.62, underlyingPrice: null }], notes: [] };
+      },
+      now: () => now,
+    };
+    await captureExecutionQuote({} as never, { conId: 654321, secType: "STK" } as Contract, execution("20261005 11:00:05 US/Eastern"), dependencies);
+    const row = await db("execution_quotes").where({ ibkr_exec_id: execId }).first();
+    expect(row.sec_type).toBe("STK");
+    expect(row.underlying_price).toBeNull();
+  });
+
   it("keeps IBKR's explanation when a side is missing", async () => {
-    const dependencies = { fetchQuotes: async () => ({ quotes: [{ bid: null, ask: null }], notes: ["IBKR sent only delayed quotes for leg 1"] }), now: () => now };
+    const dependencies = { fetchQuotes: async () => ({ quotes: [{ bid: null, ask: null, underlyingPrice: null }], notes: ["IBKR sent only delayed quotes for leg 1"] }), now: () => now };
     await captureExecutionQuote({} as never, contract, execution("20261005 11:00:05 US/Eastern"), dependencies);
     const row = await db("execution_quotes").where({ ibkr_exec_id: execId }).first();
     expect(row.bid).toBeNull();

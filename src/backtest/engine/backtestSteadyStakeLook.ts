@@ -133,13 +133,13 @@ export async function runSteadyStakeLook(context: BacktestLookContext): Promise<
       let positionIds: string[];
       let optionLegId: string;
       if (strategyKey === "covered_call") {
-        const opened = openCoveredCall(ledger, { symbol, expiryDate: candidate.expiry, strike: toCyclePrice(candidate.strike), contracts, callFillPrice: toCyclePrice(candidate.fillPrice), stockFillPrice: null, at, actionId, splitFactorToday: lookSymbol.splitFactorToday, sharesPerContract: sharesPerContractOnCycleScale, tradedSharesPerLedgerShare: priceToCycleScale });
+        const opened = openCoveredCall(ledger, { symbol, expiryDate: candidate.expiry, strike: toCyclePrice(candidate.strike), contracts, callFillPrice: toCyclePrice(candidate.fillPrice), stockFillPrice: null, at, actionId, splitFactorToday: lookSymbol.splitFactorToday, sharesPerContract: sharesPerContractOnCycleScale, tradedSharesPerLedgerShare: priceToCycleScale, stockPrice: toCyclePrice(stockPrice) });
         const leftoverLegIds = opened.leftoverPositionId === null ? [] : legsOfPosition(ledger, opened.leftoverPositionId).filter((leg) => leg.exitAt === null).map((leg) => leg.id);
         legIds = [opened.callLegId, opened.stockLegId, ...leftoverLegIds];
         positionIds = [opened.positionId, ...(opened.leftoverPositionId === null ? [] : [opened.leftoverPositionId])];
         optionLegId = opened.callLegId;
       } else {
-        const opened = openCashSecuredPut(ledger, { symbol, expiryDate: candidate.expiry, strike: toCyclePrice(candidate.strike), contracts, fillPrice: toCyclePrice(candidate.fillPrice), at, actionId, splitFactorToday: lookSymbol.splitFactorToday, sharesPerContract: sharesPerContractOnCycleScale });
+        const opened = openCashSecuredPut(ledger, { symbol, expiryDate: candidate.expiry, strike: toCyclePrice(candidate.strike), contracts, fillPrice: toCyclePrice(candidate.fillPrice), at, actionId, splitFactorToday: lookSymbol.splitFactorToday, sharesPerContract: sharesPerContractOnCycleScale, stockPrice: toCyclePrice(stockPrice) });
         legIds = [opened.legId];
         positionIds = [opened.positionId];
         optionLegId = opened.legId;

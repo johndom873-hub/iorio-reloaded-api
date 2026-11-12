@@ -191,7 +191,7 @@ export function buyBackVolFarmerV4CallsInTheMoney(input: {
       const contracts = leg.quantity;
       const cost = fillPrice * sharesPerContract * contracts + optionCommissionDollars(contracts);
       const actionId = input.nextActionId();
-      buyBackCoveredCallKeepingShares(ledger, { positionId: leg.positionId, callFillPrice: fillPrice * priceToCycleScale, at, actionId });
+      buyBackCoveredCallKeepingShares(ledger, { positionId: leg.positionId, callFillPrice: fillPrice * priceToCycleScale, at, actionId, stockPrice: stockPrice * priceToCycleScale });
       input.priceByLegId.delete(leg.id);
       // Against the Call's premium, for the break-even and the run's P&L by position.
       position.premiums.push({ legId: leg.id, dollars: -cost, shares: call.shares });
@@ -359,6 +359,7 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
         splitFactorToday: lookSymbol.splitFactorToday,
         sharesPerContract: sharesPerContractOnCycleScale,
         tradedSharesPerLedgerShare: priceToCycleScale,
+        stockPrice: stockPrice * priceToCycleScale,
       });
       context.priceByLegId.set(opened.callLegId, ((call.bid + call.ask) / 2) * priceToCycleScale);
       context.priceByLegId.set(opened.stockLegId, stockPrice * priceToCycleScale);
@@ -392,7 +393,7 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
     sellCashSecuredPut(sale) {
       const put = sale.candidate;
       const actionId = context.nextActionId();
-      const opened = openCashSecuredPut(ledger, { symbol, expiryDate: put.expiry, strike: put.strike * priceToCycleScale, contracts: sale.contracts, fillPrice: put.fillPrice * priceToCycleScale, at, actionId, splitFactorToday: lookSymbol.splitFactorToday, sharesPerContract: sharesPerContractOnCycleScale });
+      const opened = openCashSecuredPut(ledger, { symbol, expiryDate: put.expiry, strike: put.strike * priceToCycleScale, contracts: sale.contracts, fillPrice: put.fillPrice * priceToCycleScale, at, actionId, splitFactorToday: lookSymbol.splitFactorToday, sharesPerContract: sharesPerContractOnCycleScale, stockPrice: stockPrice * priceToCycleScale });
       context.priceByLegId.set(opened.legId, ((put.bid + put.ask) / 2) * priceToCycleScale);
       actions.push({
         actionId,
@@ -422,7 +423,7 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
 
     buyLeaps(purchase) {
       const actionId = context.nextActionId();
-      const opened = buyLeapsCall(ledger, { symbol, expiryDate: purchase.expiry, strike: purchase.strike * priceToCycleScale, contracts: purchase.contracts, fillPrice: purchase.fillPrice * priceToCycleScale, at, actionId, sharesPerContract: sharesPerContractOnCycleScale });
+      const opened = buyLeapsCall(ledger, { symbol, expiryDate: purchase.expiry, strike: purchase.strike * priceToCycleScale, contracts: purchase.contracts, fillPrice: purchase.fillPrice * priceToCycleScale, at, actionId, sharesPerContract: sharesPerContractOnCycleScale, stockPrice: stockPrice * priceToCycleScale });
       context.priceByLegId.set(opened.legId, markOfTwoSidedQuote(purchase, volFarmerStepSettingsOf(context.settings).v2.leapsSpreadCostChargedPct / 100) * priceToCycleScale);
       actions.push({
         actionId,
@@ -469,7 +470,7 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
       // One order for every leg of the LEAPS (its purchase and top-ups), each closed whole at the order's fill.
       const legs = sale.legIds.map((legId) => legById(legId)!);
       const actionId = context.nextActionId();
-      for (const leg of legs) sellLeapsCall(ledger, { legId: leg.id, contracts: leg.quantity, fillPrice: sale.fillPrice * priceToCycleScale, at, actionId });
+      for (const leg of legs) sellLeapsCall(ledger, { legId: leg.id, contracts: leg.quantity, fillPrice: sale.fillPrice * priceToCycleScale, at, actionId, stockPrice: stockPrice * priceToCycleScale });
       actions.push({
         actionId,
         tradingDate: todayIso,

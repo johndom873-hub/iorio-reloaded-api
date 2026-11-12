@@ -1,6 +1,5 @@
 import { breakEvenForPosition, type OpenCycleSummary } from "../../../lib/cycleBreakEven.js";
 import { buildCycleInputFromRows, summarizeOpenCycleFromRows, type CycleInputRows, type CycleOptionLegRow, type CycleStockTradeRow } from "../../../lib/cycleInputRows.js";
-import { stockAcquisitionByPositionIdFromRecords } from "../../../lib/stockAcquisitionTracing.js";
 import { deriveCycles, type Cycle, type CycleInput } from "../../../lib/cycles.js";
 import { computeUnrealizedPnlByPosition, type UnrealizedPnlByPosition } from "../../../lib/positionOrderRules.js";
 import { availableUncoveredShares, cashLockedInCashSecuredPuts, positionCapitalAtRisk, positionCapitalDeployed, positionRealizedPnl, type PositionFigures, type PositionRealizedPnl } from "../../../lib/positionSelectors.js";
@@ -109,7 +108,11 @@ function optionLegRows(ledger: SimulatedLedger, symbol: string, expiryCloseByDat
   const fillFiguresOf = (legId: string, closing: boolean) => {
     const fills = (tradesByLegId.get(legId) ?? []).filter((trade) => trade.isClosingTrade === closing);
     const quantity = fills.reduce((sum, trade) => sum + trade.quantity, 0);
-    return { count: fills.length, quantity, price: quantity > 0 ? fills.reduce((sum, trade) => sum + trade.price * trade.quantity, 0) / quantity : null, commission: fills.reduce((sum, trade) => sum + trade.commission, 0) };
+    // The stock's price at the fills, over the contracts of the fills that know it (cycleQueries.ts optionFillStockPriceSql).
+    const withStockPrice = fills.filter((trade) => trade.stockPrice !== undefined);
+    const stockPriceQuantity = withStockPrice.reduce((sum, trade) => sum + trade.quantity, 0);
+    const stockPrice = stockPriceQuantity > 0 ? withStockPrice.reduce((sum, trade) => sum + trade.stockPrice! * trade.quantity, 0) / stockPriceQuantity : null;
+    return { count: fills.length, quantity, price: quantity > 0 ? fills.reduce((sum, trade) => sum + trade.price * trade.quantity, 0) / quantity : null, commission: fills.reduce((sum, trade) => sum + trade.commission, 0), stockPrice };
   };
   // A fill price on its cycle's scale, as traded on the day it filled (× F(day) ÷ the cycle's factor): the timeline's labels.
   const asTradedOn = (leg: LedgerLeg, price: number | null, at: Date | null): number | null => {
@@ -142,11 +145,15 @@ function optionLegRows(ledger: SimulatedLedger, symbol: string, expiryCloseByDat
         settledAs: leg.settledAs ?? undefined,
         ...(() => {
           const opening = fillFiguresOf(leg.parentLegId ?? leg.id, false);
+          const closing = fillFiguresOf(leg.id, true);
           return {
             openingFillPrice: asTradedOn(leg, opening.price, leg.entryAt),
             openingFillCount: opening.count,
             openingCommission: opening.quantity > 0 ? (opening.commission / opening.quantity) * leg.quantity : null,
-            closingFillPrice: asTradedOn(leg, fillFiguresOf(leg.id, true).price, leg.exitAt),
+            closingFillPrice: asTradedOn(leg, closing.price, leg.exitAt),
+            // On the cycle's scale, like the strike: the session's records turn both into prices as traded (timelineAsTraded).
+            openingStockPrice: opening.stockPrice,
+            closingStockPrice: closing.stockPrice,
           };
         })(),
         ...(position.strategyKey === "leaps" ? { leaps: true } : {}),
@@ -195,29 +202,7 @@ export function ledgerCycleInputRows(ledger: SimulatedLedger, symbol: string, ma
     stockTradeRows: stockTradeRows(ledger, symbol),
     barRows: market.dailyCloses.map((bar) => ({ tickerId: symbol, date: bar.date, close: bar.close })),
     openPositionPremiumPnl,
-    // The same book gives the same costs whatever closes the cycles are read with (the session's records derive each
-    // symbol's cycles on several price scales): traced once per symbol and ledger revision.
-    stockCostPriceByPositionId: rememberedForRevision(ledger, `stockCostPriceByPositionId|${symbol}`, () => ledgerStockCostPriceByPositionId(ledger, symbolPositions)),
   };
-}
-
-/** What the shares behind each Covered Call were bought at, traced the way the live loader does (stockAcquisitionTracing.ts). */
-function ledgerStockCostPriceByPositionId(ledger: SimulatedLedger, symbolPositions: readonly LedgerPosition[]): Map<string, number> {
-  const positionIds = new Set(symbolPositions.map((position) => position.id));
-  const symbolLegs = symbolPositions.flatMap((position) => legsOfPosition(ledger, position.id));
-  const stockLegPositionByLegId = new Map(symbolLegs.filter((leg) => leg.legType === "stock").map((leg) => [leg.id, leg.positionId]));
-  const coveredCallPositionIds = [...new Set(symbolLegs.filter((leg) => leg.legType === "option" && leg.optionType === "call" && leg.side === "short").map((leg) => leg.positionId))];
-  const acquisitions = stockAcquisitionByPositionIdFromRecords(coveredCallPositionIds, {
-    buyFills: ledger.trades
-      .filter((trade) => !trade.isClosingTrade && trade.side === "buy" && stockLegPositionByLegId.has(trade.legId))
-      .map((trade) => ({ positionId: stockLegPositionByLegId.get(trade.legId)!, quantity: trade.quantity, price: trade.price, commission: trade.commission })),
-    shareSources: ledger.shareSources.filter((link) => positionIds.has(link.positionId)).map((link) => ({ positionId: link.positionId, sourcePositionId: link.sourcePositionId, sharesReceived: null })),
-    assignedPuts: symbolPositions
-      .filter((position) => position.strategyKey === "cash_secured_put" && position.closeReason === "assigned")
-      .flatMap((position) => legsOfPosition(ledger, position.id).filter((leg) => leg.legType === "option" && leg.optionType === "put" && leg.side === "short" && leg.strikePrice !== null))
-      .map((leg) => ({ positionId: leg.positionId, strike: leg.strikePrice!, quantity: leg.quantity, multiplier: leg.multiplier })),
-  });
-  return new Map([...acquisitions].map(([positionId, acquisition]) => [positionId, acquisition.fillPrice]));
 }
 
 /**

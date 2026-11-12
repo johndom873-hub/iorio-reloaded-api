@@ -83,8 +83,8 @@ function recordLegCash(ledger: SimulatedLedger, position: LedgerPosition, leg: L
   recordCash(ledger, { at, kind, amount, symbol: position.symbol, positionId: position.id, legId: leg.id });
 }
 
-function recordTrade(ledger: SimulatedLedger, leg: LedgerLeg, trade: { side: "buy" | "sell"; quantity: number; price: number; commission: number; at: Date; isClosingTrade: boolean; actionId: string | null }): void {
-  ledger.trades.push({ id: nextLedgerId(ledger, "trade"), legId: leg.id, side: trade.side, quantity: trade.quantity, price: trade.price, commission: trade.commission, executedAt: trade.at, isClosingTrade: trade.isClosingTrade, actionId: trade.actionId });
+function recordTrade(ledger: SimulatedLedger, leg: LedgerLeg, trade: { side: "buy" | "sell"; quantity: number; price: number; commission: number; at: Date; isClosingTrade: boolean; actionId: string | null; stockPrice?: number }): void {
+  ledger.trades.push({ id: nextLedgerId(ledger, "trade"), legId: leg.id, side: trade.side, quantity: trade.quantity, price: trade.price, commission: trade.commission, executedAt: trade.at, isClosingTrade: trade.isClosingTrade, actionId: trade.actionId, ...(trade.stockPrice === undefined ? {} : { stockPrice: trade.stockPrice }) });
 }
 
 /** A position opened on a flat symbol starts a cycle on the scale a new cycle takes today, or continues the one that closed within the grouping window. */
@@ -120,7 +120,7 @@ function requireContractNotHeld(ledger: SimulatedLedger, symbol: string, expiryD
 function sellOptionToOpen(
   ledger: SimulatedLedger,
   position: LedgerPosition,
-  option: { optionType: "call" | "put"; strike: number; expiryDate: string; contracts: number; sharesPerContract: number; fillPrice: number; at: Date; actionId: string | null },
+  option: { optionType: "call" | "put"; strike: number; expiryDate: string; contracts: number; sharesPerContract: number; fillPrice: number; at: Date; actionId: string | null; stockPrice?: number },
 ): LedgerLeg {
   const commission = optionCommissionDollars(option.contracts);
   const leg: LedgerLeg = {
@@ -142,18 +142,18 @@ function sellOptionToOpen(
     expiryClose: null,
   };
   ledger.legs.push(leg);
-  recordTrade(ledger, leg, { side: "sell", quantity: option.contracts, price: option.fillPrice, commission, at: option.at, isClosingTrade: false, actionId: option.actionId });
+  recordTrade(ledger, leg, { side: "sell", quantity: option.contracts, price: option.fillPrice, commission, at: option.at, isClosingTrade: false, actionId: option.actionId, stockPrice: option.stockPrice });
   recordLegCash(ledger, position, leg, option.at, "premium", option.fillPrice * option.sharesPerContract * option.contracts);
   recordLegCash(ledger, position, leg, option.at, "commission", -commission);
   return leg;
 }
 
 /** A short option bought back: the leg exits at the fill, the commission sits on the closing trade. */
-function buyOptionToClose(ledger: SimulatedLedger, position: LedgerPosition, leg: LedgerLeg, fillPrice: number, at: Date, actionId: string | null): void {
+function buyOptionToClose(ledger: SimulatedLedger, position: LedgerPosition, leg: LedgerLeg, fillPrice: number, at: Date, actionId: string | null, stockPrice?: number): void {
   const commission = optionCommissionDollars(leg.quantity);
   leg.exitPrice = fillPrice;
   leg.exitAt = at;
-  recordTrade(ledger, leg, { side: "buy", quantity: leg.quantity, price: fillPrice, commission, at, isClosingTrade: true, actionId });
+  recordTrade(ledger, leg, { side: "buy", quantity: leg.quantity, price: fillPrice, commission, at, isClosingTrade: true, actionId, stockPrice });
   recordLegCash(ledger, position, leg, at, "buyback", -fillPrice * leg.multiplier * leg.quantity);
   recordLegCash(ledger, position, leg, at, "commission", -commission);
 }
@@ -232,6 +232,8 @@ export interface OpenCashSecuredPutEvent {
   fillPrice: number;
   at: Date;
   actionId: string | null;
+  /** The stock's price at the look, on the cycle's scale: the option trade's Stock price in the Wheel cycle. */
+  stockPrice?: number;
   /** Today's cumulative split factor: the cycle's, when this sale opens one. */
   splitFactorToday: number;
   /** Shares one contract covers on the cycle's scale: 100 unless a split since the cycle began changed it. */
@@ -244,7 +246,7 @@ function applyOpenCashSecuredPut(ledger: SimulatedLedger, event: OpenCashSecured
   requireContractNotHeld(ledger, event.symbol, event.expiryDate, event.strike);
   startCycleIfFlat(ledger, event.symbol, event.splitFactorToday, event.at);
   const position = createPosition(ledger, event.symbol, "cash_secured_put", event.at);
-  const leg = sellOptionToOpen(ledger, position, { optionType: "put", strike: event.strike, expiryDate: event.expiryDate, contracts: event.contracts, sharesPerContract: event.sharesPerContract ?? standardSharesPerContract, fillPrice: event.fillPrice, at: event.at, actionId: event.actionId });
+  const leg = sellOptionToOpen(ledger, position, { optionType: "put", strike: event.strike, expiryDate: event.expiryDate, contracts: event.contracts, sharesPerContract: event.sharesPerContract ?? standardSharesPerContract, fillPrice: event.fillPrice, at: event.at, actionId: event.actionId, stockPrice: event.stockPrice });
   return { positionId: position.id, legId: leg.id };
 }
 
@@ -260,6 +262,8 @@ export interface OpenCoveredCallEvent {
   stockFillPrice: number | null;
   at: Date;
   actionId: string | null;
+  /** The stock's price at the look, on the cycle's scale: the option trade's Stock price in the Wheel cycle. */
+  stockPrice?: number;
   /** Today's cumulative split factor: the cycle's, when this order opens one. */
   splitFactorToday: number;
   /** Shares one contract covers on the cycle's scale: 100 unless a split since the cycle began changed it. */
@@ -314,7 +318,7 @@ function applyOpenCoveredCall(ledger: SimulatedLedger, event: OpenCoveredCallEve
     recordLegCash(ledger, position, stockLeg, event.at, "share_purchase", -sharesBought * event.stockFillPrice!);
     recordLegCash(ledger, position, stockLeg, event.at, "commission", -stockCommission);
   }
-  const callLeg = sellOptionToOpen(ledger, position, { optionType: "call", strike: event.strike, expiryDate: event.expiryDate, contracts: event.contracts, sharesPerContract, fillPrice: event.callFillPrice, at: event.at, actionId: event.actionId });
+  const callLeg = sellOptionToOpen(ledger, position, { optionType: "call", strike: event.strike, expiryDate: event.expiryDate, contracts: event.contracts, sharesPerContract, fillPrice: event.callFillPrice, at: event.at, actionId: event.actionId, stockPrice: event.stockPrice });
 
   const leftoverShares = uncoveredShares - sharesFromHeld;
   const leftover = leftoverShares > 0 ? receiveUncoveredShares(ledger, event.symbol, leftoverShares, handedOverEntryPrice, event.at, "unknown", uncovered.map((held) => held.position.id)) : null;
@@ -333,6 +337,8 @@ export interface RollLegEvent {
   newFillPrice: number;
   at: Date;
   actionId: string | null;
+  /** The stock's price at the look, on the cycle's scale: the option trade's Stock price in the Wheel cycle. */
+  stockPrice?: number;
 }
 
 /**
@@ -347,7 +353,7 @@ function applyRollLeg(ledger: SimulatedLedger, event: RollLegEvent): { closedPos
   if (oldPosition.strategyKey === "covered_call" && oldStockLeg === null) throw new Error(`Covered call ${oldPosition.id} holds no shares to carry into the roll.`);
   requireContractNotHeld(ledger, oldPosition.symbol, event.newExpiryDate, event.newStrike);
 
-  buyOptionToClose(ledger, oldPosition, oldLeg, event.buybackFillPrice, event.at, event.actionId);
+  buyOptionToClose(ledger, oldPosition, oldLeg, event.buybackFillPrice, event.at, event.actionId, event.stockPrice);
   const newPosition = createPosition(ledger, oldPosition.symbol, oldPosition.strategyKey, event.at);
   let newStockLeg: LedgerLeg | null = null;
   if (oldStockLeg !== null) {
@@ -356,7 +362,7 @@ function applyRollLeg(ledger: SimulatedLedger, event: RollLegEvent): { closedPos
     recordShareSource(ledger, newPosition.id, oldPosition.id);
   }
   closePosition(oldPosition, event.at, "closed_via_app");
-  const newLeg = sellOptionToOpen(ledger, newPosition, { optionType: oldLeg.optionType, strike: event.newStrike, expiryDate: event.newExpiryDate, contracts: oldLeg.quantity, sharesPerContract: oldLeg.multiplier, fillPrice: event.newFillPrice, at: event.at, actionId: event.actionId });
+  const newLeg = sellOptionToOpen(ledger, newPosition, { optionType: oldLeg.optionType, strike: event.newStrike, expiryDate: event.newExpiryDate, contracts: oldLeg.quantity, sharesPerContract: oldLeg.multiplier, fillPrice: event.newFillPrice, at: event.at, actionId: event.actionId, stockPrice: event.stockPrice });
   return { closedPositionId: oldPosition.id, positionId: newPosition.id, legId: newLeg.id, stockLegId: newStockLeg?.id ?? null };
 }
 
@@ -367,6 +373,8 @@ export interface BuyBackPutEvent {
   fillPrice: number;
   at: Date;
   actionId: string | null;
+  /** The stock's price at the look, on the cycle's scale: the option trade's Stock price in the Wheel cycle. */
+  stockPrice?: number;
 }
 
 /** A cash-secured put bought back: the leg exits at the fill and its position closes (closed via app). */
@@ -374,7 +382,7 @@ function applyBuyBackPut(ledger: SimulatedLedger, event: BuyBackPutEvent): void 
   const leg = requireLeg(ledger, event.legId);
   const position = requirePosition(ledger, leg.positionId);
   if (leg.legType !== "option" || leg.side !== "short" || leg.optionType !== "put" || leg.exitAt !== null) throw new Error(`Leg ${leg.id} is not an open short put: only a put is bought back on its own.`);
-  buyOptionToClose(ledger, position, leg, event.fillPrice, event.at, event.actionId);
+  buyOptionToClose(ledger, position, leg, event.fillPrice, event.at, event.actionId, event.stockPrice);
   closePosition(position, event.at, "closed_via_app");
   endCycleIfFlat(ledger, position.symbol, event.at);
 }
@@ -387,6 +395,8 @@ export interface CloseCoveredCallEvent {
   stockFillPrice: number;
   at: Date;
   actionId: string | null;
+  /** The stock's price at the look, on the cycle's scale: the option trade's Stock price in the Wheel cycle. */
+  stockPrice?: number;
   /** Shares as traded today per share on the cycle's scale (the stock commission is charged on shares as traded); 1 when omitted. */
   tradedSharesPerLedgerShare?: number;
 }
@@ -396,7 +406,7 @@ function applyCloseCoveredCall(ledger: SimulatedLedger, event: CloseCoveredCallE
   const position = requirePosition(ledger, event.positionId);
   const { optionLeg, stockLeg } = openLegsOfPosition(ledger, position);
   if (position.status !== "open" || position.strategyKey !== "covered_call" || optionLeg === null || stockLeg === null) throw new Error(`Position ${position.id} is not an open covered call with its call and its shares.`);
-  buyOptionToClose(ledger, position, optionLeg, event.callFillPrice, event.at, event.actionId);
+  buyOptionToClose(ledger, position, optionLeg, event.callFillPrice, event.at, event.actionId, event.stockPrice);
   sellStockLegShares(ledger, position, stockLeg, stockLeg.quantity, event.stockFillPrice, event.at, event.actionId, event.tradedSharesPerLedgerShare ?? 1);
   closePosition(position, event.at, "closed_via_app");
   endCycleIfFlat(ledger, position.symbol, event.at);
@@ -408,6 +418,8 @@ export interface BuyBackCoveredCallKeepingSharesEvent {
   callFillPrice: number;
   at: Date;
   actionId: string | null;
+  /** The stock's price at the look, on the cycle's scale: the option trade's Stock price in the Wheel cycle. */
+  stockPrice?: number;
 }
 
 /**
@@ -419,7 +431,7 @@ function applyBuyBackCoveredCallKeepingShares(ledger: SimulatedLedger, event: Bu
   const position = requirePosition(ledger, event.positionId);
   const { optionLeg, stockLeg } = openLegsOfPosition(ledger, position);
   if (position.status !== "open" || position.strategyKey !== "covered_call" || optionLeg === null || stockLeg === null) throw new Error(`Position ${position.id} is not an open covered call with its call and its shares.`);
-  buyOptionToClose(ledger, position, optionLeg, event.callFillPrice, event.at, event.actionId);
+  buyOptionToClose(ledger, position, optionLeg, event.callFillPrice, event.at, event.actionId, event.stockPrice);
   handOffStockLeg(stockLeg, event.at);
   closePosition(position, event.at, "closed_via_app");
   receiveUncoveredShares(ledger, position.symbol, stockLeg.quantity, stockLeg.entryPrice, event.at, "cc_call_bought_back_stock", [position.id]);
@@ -575,6 +587,8 @@ export interface BuyLeapsCallEvent {
   fillPrice: number;
   at: Date;
   actionId: string | null;
+  /** The stock's price at the look, on the cycle's scale: the option trade's Stock price in the Wheel cycle. */
+  stockPrice?: number;
   /** Shares one contract covers on the cycle's scale: 100 unless a split since the cycle began changed it. */
   sharesPerContract?: number;
 }
@@ -613,7 +627,7 @@ function applyBuyLeapsCall(ledger: SimulatedLedger, event: BuyLeapsCallEvent): {
     expiryClose: null,
   };
   ledger.legs.push(leg);
-  recordTrade(ledger, leg, { side: "buy", quantity: event.contracts, price: event.fillPrice, commission, at: event.at, isClosingTrade: false, actionId: event.actionId });
+  recordTrade(ledger, leg, { side: "buy", quantity: event.contracts, price: event.fillPrice, commission, at: event.at, isClosingTrade: false, actionId: event.actionId, stockPrice: event.stockPrice });
   recordLegCash(ledger, position, leg, event.at, "leaps_purchase", -event.fillPrice * sharesPerContract * event.contracts);
   recordLegCash(ledger, position, leg, event.at, "commission", -commission);
   return { positionId: position.id, legId: leg.id };
@@ -627,6 +641,8 @@ export interface SellLeapsCallEvent {
   fillPrice: number;
   at: Date;
   actionId: string | null;
+  /** The stock's price at the look, on the cycle's scale: the option trade's Stock price in the Wheel cycle. */
+  stockPrice?: number;
 }
 
 /**
@@ -648,7 +664,7 @@ function sellLeapsCallContracts(ledger: SimulatedLedger, event: SellLeapsCallEve
   }
   soldLeg.exitPrice = event.fillPrice;
   soldLeg.exitAt = event.at;
-  recordTrade(ledger, soldLeg, { side: "sell", quantity: event.contracts, price: event.fillPrice, commission, at: event.at, isClosingTrade: true, actionId: event.actionId });
+  recordTrade(ledger, soldLeg, { side: "sell", quantity: event.contracts, price: event.fillPrice, commission, at: event.at, isClosingTrade: true, actionId: event.actionId, stockPrice: event.stockPrice });
   recordLegCash(ledger, position, soldLeg, event.at, "leaps_sale", event.fillPrice * soldLeg.multiplier * event.contracts);
   recordLegCash(ledger, position, soldLeg, event.at, "commission", -commission);
   const positionClosed = legsOfPosition(ledger, position.id).every((positionLeg) => positionLeg.exitAt !== null);

@@ -82,11 +82,13 @@ export function buildFinishedLedgerFixture(): FinishedLedgerFixture {
   const ledger = createSimulatedLedger(fixtureStartingCash, easternInstant("2026-03-02", 9, 30));
   let actionNumber = 0;
   const nextActionId = () => `action-${(actionNumber += 1)}`;
-  const openPut = (symbol: string, dateIso: string, expiryDate: string, strike: number, contracts: number, fillPrice: number) => openCashSecuredPut(ledger, { symbol, expiryDate, strike, contracts, fillPrice, at: decisionAt(dateIso), actionId: nextActionId(), splitFactorToday: 1 });
-  const openCall = (symbol: string, dateIso: string, expiryDate: string, strike: number, contracts: number, callFillPrice: number, stockPrice: number | null) =>
-    openCoveredCall(ledger, { symbol, expiryDate, strike, contracts, callFillPrice, stockFillPrice: stockPrice === null ? null : stockPrice + 0.01, at: decisionAt(dateIso), actionId: nextActionId(), splitFactorToday: 1 });
+  // `lookStockPrice`: the stock's price at the look, for the Wheel cycle's Stock price on the option's row (WHL's and BWR's buyback have one).
+  const openPut = (symbol: string, dateIso: string, expiryDate: string, strike: number, contracts: number, fillPrice: number, lookStockPrice?: number) =>
+    openCashSecuredPut(ledger, { symbol, expiryDate, strike, contracts, fillPrice, at: decisionAt(dateIso), actionId: nextActionId(), splitFactorToday: 1, ...(lookStockPrice === undefined ? {} : { stockPrice: lookStockPrice }) });
+  const openCall = (symbol: string, dateIso: string, expiryDate: string, strike: number, contracts: number, callFillPrice: number, stockPrice: number | null, lookStockPrice?: number) =>
+    openCoveredCall(ledger, { symbol, expiryDate, strike, contracts, callFillPrice, stockFillPrice: stockPrice === null ? null : stockPrice + 0.01, at: decisionAt(dateIso), actionId: nextActionId(), splitFactorToday: 1, ...(lookStockPrice === undefined ? {} : { stockPrice: lookStockPrice }) });
 
-  const whlPut = openPut("WHL", "2026-03-02", "2026-03-06", 50, 1, 1.2);
+  const whlPut = openPut("WHL", "2026-03-02", "2026-03-06", 50, 1, 1.2, 50.85);
   const mixPut = openPut("MIX", "2026-03-02", "2026-03-06", 30, 2, 0.5);
   const rolPut = openPut("ROL", "2026-03-02", "2026-03-06", 40, 2, 0.6);
   const bwrFirstCall = openCall("BWR", "2026-03-02", "2026-03-06", 31, 2, 0.5, 30);
@@ -101,7 +103,7 @@ export function buildFinishedLedgerFixture(): FinishedLedgerFixture {
   settleExpiry(ledger, { legId: bwrFirstCall.callLegId, expiryClose: 31.5 });
   settleExpiry(ledger, { legId: sldPut.legId, expiryClose: 19.5 });
 
-  const whlFirstCall = openCall("WHL", "2026-03-09", "2026-03-13", 51, 1, 0.8, null);
+  const whlFirstCall = openCall("WHL", "2026-03-09", "2026-03-13", 51, 1, 0.8, null, 49.1);
   const mixFirstCall = openCall("MIX", "2026-03-09", "2026-03-13", 31, 1, 0.45, null);
   const bwrPut = openPut("BWR", "2026-03-09", "2026-03-13", 30, 1, 0.35);
 
@@ -109,13 +111,13 @@ export function buildFinishedLedgerFixture(): FinishedLedgerFixture {
   const sldSharesPositionId = ledger.positions.find((position) => position.symbol === "SLD" && position.status === "open")!.id;
   sellShares(ledger, { positionId: sldSharesPositionId, shares: 100, fillPrice: 20.99, at: decisionAt("2026-03-10"), actionId: nextActionId() });
 
-  buyBackPut(ledger, { legId: bwrPut.legId, fillPrice: 0.1, at: decisionAt("2026-03-11"), actionId: nextActionId() });
+  buyBackPut(ledger, { legId: bwrPut.legId, fillPrice: 0.1, at: decisionAt("2026-03-11"), actionId: nextActionId(), stockPrice: 31.2 });
 
   settleExpiry(ledger, { legId: whlFirstCall.callLegId, expiryClose: 50.5 });
   settleExpiry(ledger, { legId: mixFirstCall.callLegId, expiryClose: 30.2 });
   settleExpiry(ledger, { legId: frePut.legId, expiryClose: 9.5 });
 
-  const whlSecondCall = openCall("WHL", "2026-03-16", "2026-03-20", 50, 1, 0.9, null);
+  const whlSecondCall = openCall("WHL", "2026-03-16", "2026-03-20", 50, 1, 0.9, null, 50.75);
   const mixSecondCall = openCall("MIX", "2026-03-16", "2026-03-27", 31, 2, 0.4, 30.3);
   const bwrSecondCall = openCall("BWR", "2026-03-16", "2026-03-27", 32, 1, 0.55, 31);
 

@@ -1,7 +1,21 @@
 import { db } from "../db/connection.js";
 import { assignmentDayCloseJoinSql, buildCycleInputFromRows, settlementCloseSelectSql, type CycleInputRows } from "./cycleInputRows.js";
 import { deriveCycles, type Cycle, type CycleInput } from "./cycles.js";
-import { fetchStockAcquisitionByPositionId } from "./stockLegAcquisitionFills.js";
+
+/**
+ * The stock's price at an option leg's opening or closing fills, averaged over their contracts (Marcelo 2026-11-11): each
+ * fill's own, from the snapshot taken right after it (execution_quotes.underlying_price), else the price Pluto decided the
+ * order on (its action's scores); null when no fill has either. `pl` is the leg, `legIdSql` the leg its fills are on.
+ */
+function optionFillStockPriceSql(legIdSql: string, closing: boolean): string {
+  return `(SELECT ROUND((SUM(fill_stock.price * tr.quantity) / NULLIF(SUM(tr.quantity) FILTER (WHERE fill_stock.price IS NOT NULL), 0))::numeric, 4)::float
+           FROM trades tr
+           LEFT JOIN execution_quotes eq ON eq.ibkr_exec_id = tr.ibkr_exec_id
+           LEFT JOIN order_requests orq ON orq.id = tr.source_order_request_id
+           LEFT JOIN pluto_actions pa ON pa.id = orq.pluto_action_id
+           CROSS JOIN LATERAL (SELECT COALESCE(eq.underlying_price, (pa.candidate_scores->>'stockPrice')::numeric) AS price) fill_stock
+           WHERE tr.position_leg_id = ${legIdSql} AND ${closing ? "" : "NOT "}tr.is_closing_trade)`;
+}
 
 export interface SymbolCycles {
   symbol: string;
@@ -45,6 +59,8 @@ export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Pr
               (SELECT COUNT(*)::int FROM trades tr WHERE tr.position_leg_id = COALESCE(pl.parent_leg_id, pl.id) AND NOT tr.is_closing_trade) AS "openingFillCount",
               (SELECT (SUM(COALESCE(tr.commission, 0)) / NULLIF(SUM(tr.quantity), 0) * pl.quantity)::float FROM trades tr WHERE tr.position_leg_id = COALESCE(pl.parent_leg_id, pl.id) AND NOT tr.is_closing_trade) AS "openingCommission",
               (SELECT (SUM(tr.price * tr.quantity) / NULLIF(SUM(tr.quantity), 0))::float FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade) AS "closingFillPrice",
+              ${optionFillStockPriceSql("COALESCE(pl.parent_leg_id, pl.id)", false)} AS "openingStockPrice",
+              ${optionFillStockPriceSql("pl.id", true)} AS "closingStockPrice",
               ${settlementCloseSelectSql}
        FROM position_legs pl JOIN positions p ON p.id = pl.position_id
        LEFT JOIN daily_price_bars b ON b.ticker_id = p.ticker_id AND b.trading_date = pl.expiry_date
@@ -79,12 +95,7 @@ export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Pr
     db.raw(`SELECT DISTINCT p.ticker_id AS "tickerId", t.symbol FROM positions p JOIN tickers t ON t.id = p.ticker_id ${tickerIds === "all" ? "" : "WHERE p.ticker_id = ANY(?)"}`, tickerIds === "all" ? [] : [tickerIds]),
   ]);
 
-  // What the shares behind each Covered Call were bought at, for its timeline rows' stock price.
-  const coveredCallPositionIds: string[] = [...new Set<string>(optionRows.rows.filter((row: any) => row.side === "short" && row.optionType === "call").map((row: any) => row.positionId as string))];
-  const stockCostPriceByPositionId = new Map([...(await fetchStockAcquisitionByPositionId(coveredCallPositionIds))].map(([positionId, acquisition]) => [positionId, acquisition.fillPrice]));
-
   const rows: CycleInputRows = {
-    stockCostPriceByPositionId,
     optionRows: optionRows.rows,
     stockLegRows: stockLegRows.rows,
     stockTradeRows: stockTradeRows.rows,

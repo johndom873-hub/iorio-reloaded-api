@@ -55,8 +55,12 @@ export async function exportLedgerToDatabase(database: Knex, ledger: SimulatedLe
     );
   }
   if (ledger.trades.length > 0) {
+    // A trade that knows the stock's price at its look is exported as live records it: an execution id, and that id's
+    // quote snapshot carrying the price (execution_quotes.underlying_price).
+    const execIdOf = (trade: (typeof ledger.trades)[number]) => (trade.stockPrice === undefined ? null : `ledger-${randomUUID()}`);
+    const exported = ledger.trades.map((trade) => ({ trade, execId: execIdOf(trade) }));
     await database("trades").insert(
-      ledger.trades.map((trade) => ({
+      exported.map(({ trade, execId }) => ({
         position_leg_id: legIdByLedgerId.get(trade.legId)!,
         side: trade.side,
         quantity: trade.quantity,
@@ -64,8 +68,15 @@ export async function exportLedgerToDatabase(database: Knex, ledger: SimulatedLe
         commission: trade.commission,
         executed_at: trade.executedAt,
         is_closing_trade: trade.isClosingTrade,
+        ibkr_exec_id: execId,
       })),
     );
+    const quotes = exported.filter(({ execId }) => execId !== null);
+    if (quotes.length > 0) {
+      await database("execution_quotes").insert(
+        quotes.map(({ trade, execId }) => ({ ibkr_exec_id: execId, ibkr_contract_id: "ledger", sec_type: "OPT", executed_at: trade.executedAt, execution_price: trade.price, quoted_at: trade.executedAt, underlying_price: trade.stockPrice })),
+      );
+    }
   }
   if (ledger.shareSources.length > 0) {
     await database("position_share_sources").insert(ledger.shareSources.map((source) => ({ position_id: positionIdByLedgerId.get(source.positionId)!, source_position_id: positionIdByLedgerId.get(source.sourcePositionId)! })));

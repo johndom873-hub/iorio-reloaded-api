@@ -52,6 +52,8 @@ export interface LedgerTrade {
   isClosingTrade: boolean;
   /** The simulated Pluto action that caused it; null for a settlement. */
   actionId: string | null;
+  /** An option trade's stock price at the look that placed it, on the cycle's scale (the Wheel cycle's Stock price); absent when not known. */
+  stockPrice?: number;
 }
 
 /** position_share_sources: `positionId` received shares from `sourcePositionId`. */

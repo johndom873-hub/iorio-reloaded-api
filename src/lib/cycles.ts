@@ -64,6 +64,9 @@ export interface CycleOptionLeg {
   openingCommission?: number | null;
   /** Average price of the leg's closing fills. Absent: exitPrice. */
   closingFillPrice?: number | null;
+  /** The stock's price at the leg's opening and closing fills, for its rows' Stock price; absent or null shows none. */
+  openingStockPrice?: number | null;
+  closingStockPrice?: number | null;
   /** The opening or closing row's label in place of the fill's (a simulated book's bookkeeping moves); live leaves them unset. */
   openingRowLabel?: string;
   closingRowLabel?: string;
@@ -102,8 +105,6 @@ export interface CycleInput {
   openPositionMarkDate?: Map<string, string>;
   /** Open positions whose option mark could not be established (used by "as of" runs): the cycle is flagged instead of guessed at credit. */
   openPositionPremiumPnlUnavailable?: Set<string>;
-  /** What the shares behind each Covered Call position were bought at (stockLegAcquisitionFills.ts), for its rows' stock price. */
-  stockCostPriceByPositionId?: Map<string, number>;
 }
 
 export interface BucketResult {
@@ -472,9 +473,9 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       const bucket = optionLegBucket(leg);
       const sign = leg.side === "short" ? 1 : -1;
       const contractShares = leg.quantity * leg.multiplier;
-      // A Covered Call's rows show what the shares it covers were bought at; a put or a hedge has no shares behind it.
-      const coveredSharesPrice = leg.optionType === "call" && leg.side === "short" ? (input.stockCostPriceByPositionId?.get(leg.positionId) ?? null) : null;
-      const optionMeta: RowMeta = { instrument: "option", quantity: contractShares, strike: leg.strike, expiryDate: leg.expiryDate, stockPrice: coveredSharesPrice, stockPriceSource: coveredSharesPrice === null ? null : "execution", commission: null };
+      // Every option row shows the stock's price at its fills (Marcelo 2026-11-11), the lab's at the look that placed them.
+      const rowStockPrice = (event.kind === "optionOpen" ? leg.openingStockPrice : leg.closingStockPrice) ?? null;
+      const optionMeta: RowMeta = { instrument: "option", quantity: contractShares, strike: leg.strike, expiryDate: leg.expiryDate, stockPrice: rowStockPrice, stockPriceSource: rowStockPrice === null ? null : "execution", commission: null };
       if (event.kind === "optionOpen" && leg.side === "long" && leg.exitAt === null) optionMeta.unrealized = true;
       if (event.kind === "optionOpen") {
         const credit = sign * leg.entryPrice * contractShares;
