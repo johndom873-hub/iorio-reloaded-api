@@ -40,11 +40,11 @@ const mocks = vi.hoisted(() => {
 
   const rawMock = vi.fn((sql: string): unknown => ({ rows: state.rawRows, sql }));
   const db = Object.assign((table: string) => createBuilder(table), { raw: rawMock });
-  return { queries, state, db, rawMock, fetchPricesPoolFirst: vi.fn(), streamPooledPrices: vi.fn() };
+  return { queries, state, db, rawMock, fetchPricesPoolFirst: vi.fn(), fetchPooledPricesOnly: vi.fn(), streamPooledPrices: vi.fn() };
 });
 
 vi.mock("../db/connection.js", () => ({ db: mocks.db }));
-vi.mock("../ibkr/pricePool.js", () => ({ fetchPricesPoolFirst: mocks.fetchPricesPoolFirst, streamPooledPrices: mocks.streamPooledPrices }));
+vi.mock("../ibkr/pricePool.js", () => ({ fetchPricesPoolFirst: mocks.fetchPricesPoolFirst, fetchPooledPricesOnly: mocks.fetchPooledPricesOnly, streamPooledPrices: mocks.streamPooledPrices }));
 
 const { computeCashLockedInCsps, computeExposureRows, computePositionExposures, computeTickerExposure, legsToPriceContracts, streamPositionExposures } = await import("./positionExposure.js");
 
@@ -79,6 +79,8 @@ beforeEach(() => {
   mocks.rawMock.mockClear();
   mocks.fetchPricesPoolFirst.mockReset();
   mocks.fetchPricesPoolFirst.mockResolvedValue({});
+  mocks.fetchPooledPricesOnly.mockReset();
+  mocks.fetchPooledPricesOnly.mockReturnValue({});
   mocks.streamPooledPrices.mockReset();
 });
 
@@ -253,15 +255,26 @@ describe("computeTickerExposure", () => {
       optionLeg({ positionId: "p1" }),
       optionLeg({ positionId: "p2", strategyKey: "cash_secured_put", optionType: "put", strikePrice: "40" }),
     ];
-    mocks.fetchPricesPoolFirst.mockResolvedValue({ "0": 52, "1": 1.5, "2": 0.8 });
+    mocks.fetchPricesPoolFirst.mockResolvedValue({ "0": 52 });
+    mocks.fetchPooledPricesOnly.mockReturnValue({ "1": 1.5, "2": 0.8 });
     expect(await computeTickerExposure("AAA")).toBe(8970);
   });
 
-  it("asks the pool for every leg's contract with a 1.5 s snapshot timeout", async () => {
+  it("prices stock legs pool first with a 1.5 s snapshot timeout, and option legs from the pool only (no snapshot)", async () => {
     mocks.state.positions = [position()];
     mocks.state.legs = [stockLeg(), optionLeg()];
     await computeTickerExposure("AAA");
-    expect(mocks.fetchPricesPoolFirst).toHaveBeenCalledWith(legsToPriceContracts([stockLeg(), optionLeg()]), { snapshotTimeoutMs: 1_500 });
+    const [stockContract, optionContract] = legsToPriceContracts([stockLeg(), optionLeg()]);
+    expect(mocks.fetchPricesPoolFirst).toHaveBeenCalledWith([stockContract], { snapshotTimeoutMs: 1_500 });
+    expect(mocks.fetchPooledPricesOnly).toHaveBeenCalledWith([optionContract]);
+  });
+
+  it("values an option nobody streams at its last closing price, with no snapshot for it (short call closed at $1.20: 100 x $52 - 1 x 100 x $1.20 = $5,080)", async () => {
+    mocks.state.positions = [position()];
+    mocks.state.legs = [stockLeg(), optionLeg({ lastClosingPrice: "1.2" } as Partial<OpenLegRow>)];
+    mocks.fetchPricesPoolFirst.mockResolvedValue({ "0": 52 });
+    mocks.fetchPooledPricesOnly.mockReturnValue({ "1": null });
+    expect(await computeTickerExposure("AAA")).toBe(5080);
   });
 
   it("values unpriced legs at their entry price when the price fetch fails (100 x $50 - 1 x 100 x $2 = $4,800)", async () => {
@@ -274,7 +287,8 @@ describe("computeTickerExposure", () => {
   it("mixes live and entry prices when only some legs came back (stock live $52 = $5,200, short call at entry $2 = -$200)", async () => {
     mocks.state.positions = [position()];
     mocks.state.legs = [stockLeg(), optionLeg()];
-    mocks.fetchPricesPoolFirst.mockResolvedValue({ "0": 52, "1": null });
+    mocks.fetchPricesPoolFirst.mockResolvedValue({ "0": 52 });
+    mocks.fetchPooledPricesOnly.mockReturnValue({ "1": null });
     expect(await computeTickerExposure("AAA")).toBe(5000);
   });
 

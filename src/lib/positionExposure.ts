@@ -1,7 +1,7 @@
 import { OptionType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
-import { fetchPricesPoolFirst, streamPooledPrices } from "../ibkr/pricePool.js";
+import { fetchPooledPricesOnly, fetchPricesPoolFirst, streamPooledPrices } from "../ibkr/pricePool.js";
 import { dedupeInFlight } from "./dedupeInFlight.js";
 import { sleepUnlessAborted } from "./sleepUnlessAborted.js";
 
@@ -223,18 +223,22 @@ async function computePositionExposuresUncached(): Promise<PositionExposureRow[]
 const tickerExposurePriceTimeoutMs = 1_500;
 
 /**
- * One ticker's total exposure, for the Signals order-limits check: only that ticker's open legs are priced (pool
- * first, then a snapshot capped at tickerExposurePriceTimeoutMs), so another ticker's illiquid leg cannot stall it.
+ * One ticker's total exposure, for the Signals order-limits check and Pluto's rounds: only that ticker's open legs are
+ * priced, so another ticker's illiquid leg cannot stall it. Stock legs: pool first, then a snapshot capped at
+ * tickerExposurePriceTimeoutMs. Option legs (Marcelo 2026-11-11): the pool only, never a snapshot; one nobody streams is
+ * valued at its last closing price, else its entry price (computeExposureRows). A short option's value is small next to
+ * the shares it covers, and its snapshots went unanswered by the thousand (a same-day Call never ticks).
  */
 export async function computeTickerExposure(symbol: string): Promise<number> {
   const { positions, legs } = await resolveOpenPositionsAndLegs(symbol);
   if (positions.length === 0) return 0;
 
-  let pricesByKey: Record<string, number | null> = {};
+  const contracts = legsToPriceContracts(legs);
+  let pricesByKey: Record<string, number | null> = fetchPooledPricesOnly(contracts.filter((contract) => contract.legType === "option"));
   try {
-    pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs), { snapshotTimeoutMs: tickerExposurePriceTimeoutMs });
+    Object.assign(pricesByKey, await fetchPricesPoolFirst(contracts.filter((contract) => contract.legType !== "option"), { snapshotTimeoutMs: tickerExposurePriceTimeoutMs }));
   } catch {
-    // Leave pricesByKey empty — every leg falls back to its closing or entry price in computeExposureRows.
+    // The stock legs fall back to their closing or entry price in computeExposureRows.
   }
   return computeExposureRows(positions, legs, pricesByKey).reduce((sum, row) => sum + row.exposure, 0);
 }

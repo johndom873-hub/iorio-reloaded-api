@@ -26,6 +26,21 @@ export async function fetchPricesPoolFirst(contracts: PriceContract[], options: 
   return pricesByKey;
 }
 
+/**
+ * Prices only from what this process already streams: a contract nobody pooled has no entry, and no IBKR request is sent
+ * (Marcelo 2026-11-11). For valuing legs whose stored closing or entry price is an acceptable answer, so a round or an
+ * order check never waits on a snapshot IBKR answers late or never (a same-day Call: about 1,560 unanswered 1.5 s
+ * snapshots on prod, 11 Nov).
+ */
+export function fetchPooledPricesOnly(contracts: PriceContract[]): Record<string, number | null> {
+  const pricesByKey: Record<string, number | null> = {};
+  for (const contract of contracts) {
+    const pooledQuote = peekPooledQuote(contract);
+    pricesByKey[contract.key] = pooledQuote ? pooledMarkPrice(contract, pooledQuote) : null;
+  }
+  return pricesByKey;
+}
+
 // Thin price-shaped view over marketDataPool.ts (the one real pool — see its
 // header comment) — kept as its own file/signatures so every consumer
 // migrated before the 2026-09-24 pool merge (positions.ts, positionExposure.ts,
