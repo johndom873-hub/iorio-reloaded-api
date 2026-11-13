@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { CycleInput, CycleOptionLeg } from "./cycles.js";
-import { attributionMoveRowsForNight, nightCapturedAtOrAfter, nightLedgerCutoffMs, type BookMove } from "./pnlAttributionSnapshots.js";
+import { deriveCycles, type CycleInput, type CycleOptionLeg } from "./cycles.js";
+import { attributionMoveRowsForNight, nightCapturedAtOrAfter, nightLedgerCutoffMs, withNightlySnapshotPrices, type BookMove } from "./pnlAttributionSnapshots.js";
 
 // A ticker moved Manual → Pluto at 10:23 ET on 11 Nov (15:23 UTC). Every figure below is worked out by hand.
 const movedAt = new Date("2026-11-11T15:23:00Z");
@@ -83,5 +83,32 @@ describe("nightLedgerCutoffMs", () => {
     expect(new Date(nightLedgerCutoffMs("2026-11-09", new Date("2026-11-09T22:30:25Z"))).toISOString()).toBe("2026-11-09T22:30:25.000Z"); // 17:30 ET: DRAM's 21:46 ET call-away is the next night's
     expect(new Date(nightLedgerCutoffMs("2026-11-09", new Date("2026-11-10T06:00:00Z"))).toISOString()).toBe("2026-11-10T04:59:59.999Z"); // re-run the next morning
     expect(new Date(nightLedgerCutoffMs("2026-11-09", null)).toISOString()).toBe("2026-11-10T04:59:59.999Z");
+  });
+});
+
+describe("withNightlySnapshotPrices (the Ticker modal's Wheel cycle card)", () => {
+  it("marks the shares and the open Call at the night's snapshot prices, labelled as the snapshot", () => {
+    const cutoffMs = Date.parse("2026-11-11T22:30:00Z");
+    const snapshotPrices = { stockPriceByTickerId: { exact: new Map([["ticker", 47]]), implied: new Map() }, optionPriceByLegId: new Map([["call", 2]]) };
+    const marked = withNightlySnapshotPrices(input, input, "ticker", "2026-11-11", snapshotPrices, cutoffMs);
+    expect(marked.lastPrice).toEqual({ date: "2026-11-11", price: 47, source: "snapshot" });
+    // The Call sold at $1.00, at $2.00 that night: (1.00 − 2.00) × 100 = −$100.
+    expect(marked.openPositionPremiumPnl.get("cc")).toBeCloseTo(-100, 6);
+    expect(marked.openPositionMarkDate?.get("cc")).toBe("2026-11-11");
+    const markRows = deriveCycles(marked)[0]!.timeline.filter((row) => row.at === null);
+    // 200 shares: the 100 the Call covers (CC) and 100 Unstructured, each marked at $47.
+    expect(markRows.map((row) => [row.bucket, row.label, row.quantity, row.stockPrice, row.stockPriceSource, row.markDate])).toEqual([
+      ["cc", "Marked at the 2026-11-11 nightly snapshot", 100, 47, "snapshot", "2026-11-11"],
+      ["unstructured", "Marked at the 2026-11-11 nightly snapshot", 100, 47, "snapshot", "2026-11-11"],
+      ["cc", "Open call marked to market", 100, 47, "snapshot", "2026-11-11"],
+    ]);
+  });
+
+  it("keeps a mark it cannot replace: no implied stock price once the legs grew, no option price for a leg", () => {
+    const cutoffMs = Date.parse("2026-11-10T22:30:00Z");
+    const snapshotPrices = { stockPriceByTickerId: { exact: new Map(), implied: new Map([["ticker", 43]]) }, optionPriceByLegId: new Map() };
+    const marked = withNightlySnapshotPrices(input, input, "ticker", "2026-11-10", snapshotPrices, cutoffMs);
+    expect(marked.lastPrice).toBeNull();
+    expect(marked.openPositionPremiumPnl.has("cc")).toBe(false);
   });
 });

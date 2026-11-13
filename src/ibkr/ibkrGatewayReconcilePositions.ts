@@ -339,7 +339,8 @@ async function recordShareSource(positionId: string, sourcePositionId: string, s
  */
 interface ShareMovementLedger {
   releasedSharesBySourcePositionId: Map<string, number>;
-  stockQuantityChangeByPositionId: Map<string, { before: number; after: number }>;
+  /** legBefore: the open stock leg the position had when the pass first synced it (its id and cost then), null when none. */
+  stockQuantityChangeByPositionId: Map<string, { before: number; after: number; legBefore: { id: string; entryPrice: number } | null }>;
 }
 
 function emptyShareMovementLedger(): ShareMovementLedger {
@@ -352,9 +353,10 @@ function recordSharesReleased(sourcePositionId: string, shares: number): void {
   released.set(sourcePositionId, (released.get(sourcePositionId) ?? 0) + shares);
 }
 
-function recordStockQuantityChange(positionId: string, before: number, after: number): void {
+function recordStockQuantityChange(positionId: string, before: number, after: number, legBefore: { id: string; entryPrice: number } | null): void {
   const changes = shareMovementsOfSymbol.stockQuantityChangeByPositionId;
-  changes.set(positionId, { before: changes.get(positionId)?.before ?? before, after });
+  const earlier = changes.get(positionId);
+  changes.set(positionId, { before: earlier?.before ?? before, after, legBefore: earlier ? earlier.legBefore : legBefore });
 }
 
 /** Shares a covered call's own open_covered_call order(s) bought with its call: the first shares of its stock leg. */
@@ -372,26 +374,37 @@ async function sharesBoughtByOwnCoveredCallOrders(positionId: string): Promise<n
     .reduce((sum: number, leg: { quantity?: number }) => sum + Number(leg.quantity ?? 0), 0);
 }
 
+/** A position whose open stock leg grew this pass by shares moved in from other positions of the ticker. */
+interface SharesMovedIntoLeg {
+  legId: string;
+  legEntryPriceBefore: number;
+  sharesAfter: number;
+  sharesMovedIn: number;
+}
+
 /**
  * The share-source links of the symbol just synced. Each receiving position (covered calls first, then the leftover) is
  * credited with its stock leg's growth this pass, taken from the releasing positions in the order they released; a covered
- * call's shares its own order bought are never taken from anyone. What no position's growth claims is not linked.
+ * call's shares its own order bought are never taken from anyone. What no position's growth claims is not linked. Returns
+ * the receivers whose existing leg took the shares (startNewLegsForSharesMovedIn).
  */
-async function writeShareSourceLinksOfSymbol(symbol: string): Promise<void> {
+async function writeShareSourceLinksOfSymbol(symbol: string): Promise<SharesMovedIntoLeg[]> {
   const { releasedSharesBySourcePositionId, stockQuantityChangeByPositionId } = shareMovementsOfSymbol;
   shareMovementsOfSymbol = emptyShareMovementLedger();
-  if (releasedSharesBySourcePositionId.size === 0) return;
+  const movedIntoLegs: SharesMovedIntoLeg[] = [];
+  if (releasedSharesBySourcePositionId.size === 0) return movedIntoLegs;
   const growingPositionIds = [...stockQuantityChangeByPositionId].filter(([, change]) => change.after > change.before).map(([positionId]) => positionId);
-  if (growingPositionIds.length === 0) return;
+  if (growingPositionIds.length === 0) return movedIntoLegs;
   const strategyKeyByPositionId = new Map<string, string>(
     (await db("positions").whereIn("id", growingPositionIds).select("id", "strategy_key")).map((row: { id: string; strategy_key: string }) => [row.id, row.strategy_key]),
   );
   const receiversInOrder = [...growingPositionIds.filter((id) => strategyKeyByPositionId.get(id) === "covered_call"), ...growingPositionIds.filter((id) => strategyKeyByPositionId.get(id) !== "covered_call")];
   const unclaimedBySourcePositionId = new Map(releasedSharesBySourcePositionId);
   for (const receiverPositionId of receiversInOrder) {
-    const { before, after } = stockQuantityChangeByPositionId.get(receiverPositionId)!;
+    const { before, after, legBefore } = stockQuantityChangeByPositionId.get(receiverPositionId)!;
     const ownBoughtShares = strategyKeyByPositionId.get(receiverPositionId) === "covered_call" ? await sharesBoughtByOwnCoveredCallOrders(receiverPositionId) : 0;
     let sharesToClaim = Math.max(0, after - Math.max(before, ownBoughtShares));
+    const sharesClaimable = sharesToClaim;
     for (const [sourcePositionId, unclaimed] of unclaimedBySourcePositionId) {
       if (sharesToClaim <= 0) break;
       if (sourcePositionId === receiverPositionId || unclaimed <= 0) continue;
@@ -401,6 +414,43 @@ async function writeShareSourceLinksOfSymbol(symbol: string): Promise<void> {
       await recordShareSource(receiverPositionId, sourcePositionId, taken, "add");
       console.log(`Reconciliation #${currentPassId}: ${symbol} — position ${receiverPositionId} records ${taken} sh received from position ${sourcePositionId}.`);
     }
+    const sharesMovedIn = sharesClaimable - sharesToClaim;
+    if (legBefore !== null && before > 0 && sharesMovedIn > 0) movedIntoLegs.push({ legId: legBefore.id, legEntryPriceBefore: legBefore.entryPrice, sharesAfter: after, sharesMovedIn });
+  }
+  return movedIntoLegs;
+}
+
+/**
+ * Shares moved into a position's existing stock leg (a Covered Call's shares back to the leftover when its Call expired,
+ * Marcelo 2026-11-13) start a new leg from now, as a handoff re-creates one: raised in place, the old leg would date the
+ * moved shares from its own entry, and the ticker would hold them twice until they moved (INTC 19–24 Oct: 600 shares on
+ * record, 500 held). The old leg closes at its own cost before the pass (no P&L) with the shares it held plus any its own
+ * fills added (their fills date them); the new one takes the pass's settled cost, so it runs after the cost sync.
+ */
+async function startNewLegsForSharesMovedIn(symbol: string, movedIntoLegs: readonly SharesMovedIntoLeg[]): Promise<void> {
+  for (const moved of movedIntoLegs) {
+    const leg = await db("position_legs").where({ id: moved.legId, leg_type: "stock" }).whereNull("exit_at").first();
+    if (!leg || Number(leg.quantity) !== moved.sharesAfter || moved.sharesMovedIn >= moved.sharesAfter) continue;
+    const newLegId = await db.transaction(async (trx): Promise<string> => {
+      await trx("position_legs").where({ id: leg.id }).update({ quantity: moved.sharesAfter - moved.sharesMovedIn, entry_price: moved.legEntryPriceBefore, exit_price: moved.legEntryPriceBefore, exit_at: trx.fn.now() });
+      const [inserted] = await trx("position_legs")
+        .insert({
+          position_id: leg.position_id,
+          leg_type: "stock",
+          side: leg.side,
+          quantity: moved.sharesAfter,
+          multiplier: leg.multiplier,
+          ibkr_contract_id: leg.ibkr_contract_id,
+          entry_price: leg.entry_price,
+          entry_price_from_position_split: leg.entry_price_from_position_split,
+          entry_at: trx.fn.now(),
+        })
+        .returning(["id"]);
+      return inserted.id;
+    });
+    console.log(
+      `Reconciliation #${currentPassId}: ${symbol} — ${moved.sharesMovedIn} sh moved into stock leg ${leg.id} of position ${leg.position_id}: it closes with ${moved.sharesAfter - moved.sharesMovedIn} sh @ ${moved.legEntryPriceBefore}, new leg ${newLegId} holds ${moved.sharesAfter} sh @ ${leg.entry_price} from now.`,
+    );
   }
 }
 
@@ -883,8 +933,9 @@ async function syncHeldStructures(bySymbol: Map<string, IbkrHeldPosition[]>, hel
         }
       }
     }
-    await writeShareSourceLinksOfSymbol(symbol);
+    const movedIntoLegs = await writeShareSourceLinksOfSymbol(symbol);
     if (stockLeg) await syncStockEntriesPerPosition(symbol, stockLeg);
+    await startNewLegsForSharesMovedIn(symbol, movedIntoLegs);
   }
 }
 
@@ -1097,7 +1148,7 @@ async function upsertPositionLeg(
   const lookupQuery = db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at");
   if (scopeLookupToPosition) lookupQuery.where({ position_id: positionId });
   const existing = await lookupQuery.first();
-  if (stockTickerId !== undefined) recordStockQuantityChange(existing?.position_id ?? positionId, Number(existing?.quantity ?? 0), trueQuantity);
+  if (stockTickerId !== undefined) recordStockQuantityChange(existing?.position_id ?? positionId, Number(existing?.quantity ?? 0), trueQuantity, existing ? { id: existing.id, entryPrice: Number(existing.entry_price) } : null);
 
   if (existing) {
     // Sync to IBKR's current truth on every pass, not just at creation.

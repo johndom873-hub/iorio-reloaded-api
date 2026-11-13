@@ -109,8 +109,8 @@ export interface CycleInput {
   stockTrades: CycleStockTrade[];
   /** Daily closes by ISO date (YYYY-MM-DD) in America/New_York; used for handoff valuation. */
   dailyCloses: Map<string, number>;
-  /** Latest known price for marking shares still held, and the date it is from. */
-  lastPrice: { date: string; price: number } | null;
+  /** Latest known price for marking shares still held, the date it is from, and whether it is that day's close (the default) or the nightly snapshot's price (17:30 ET, after-hours included). */
+  lastPrice: { date: string; price: number; source?: "close" | "snapshot" } | null;
   /** Unrealized premium P&L of currently open option legs keyed by position id (from the latest snapshot); absent = at credit. */
   openPositionPremiumPnl: Map<string, number>;
   /** The date each openPositionPremiumPnl mark is from (its snapshot date), by position id; absent where not known. */
@@ -126,8 +126,8 @@ export interface BucketResult {
   capital: number;
 }
 
-/** Where a timeline row's stock price comes from: an IBKR execution (a fill, an assignment at the strike), or a market close. */
-export type CycleStockPriceSource = "execution" | "close";
+/** Where a timeline row's stock price comes from: an IBKR execution (a fill, an assignment at the strike), a market close, or the nightly snapshot (17:30 ET). */
+export type CycleStockPriceSource = "execution" | "close" | "snapshot";
 
 export interface CycleTimelineRow {
   at: Date | null; // null = mark row of what is still open (dated by markDate)
@@ -544,7 +544,8 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
     if (lastPrice === null) dataFlags.push("no price to mark the shares still held");
     else {
       for (const pool of ["cc", "unstructured"] as const) {
-        if (pools[pool].shares > 0) addRow(null, `Marked to the ${lastPrice.date} close`, pool === "cc" ? "cc" : "unstructured", 0, pools[pool].shares * (lastPrice.price - pools[pool].ref), { instrument: "stock", quantity: pools[pool].shares, strike: null, expiryDate: null, stockPrice: lastPrice.price, stockPriceSource: "close", commission: null, markDate: lastPrice.date });
+        const markSource = lastPrice.source ?? "close";
+        if (pools[pool].shares > 0) addRow(null, markSource === "snapshot" ? `Marked at the ${lastPrice.date} nightly snapshot` : `Marked to the ${lastPrice.date} close`, pool === "cc" ? "cc" : "unstructured", 0, pools[pool].shares * (lastPrice.price - pools[pool].ref), { instrument: "stock", quantity: pools[pool].shares, strike: null, expiryDate: null, stockPrice: lastPrice.price, stockPriceSource: markSource, commission: null, markDate: lastPrice.date });
       }
     }
   }
@@ -569,6 +570,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       openOptionPositions.push({ positionId, premiumPnl: snapshotPremiumPnl ?? credit, bucket, optionType: legs[0]!.optionType, quantity, strike, expiryDate });
       if (snapshotPremiumPnl === undefined) continue; // stays at credit
       const markDate = openPositionMarkDate?.get(positionId);
+      const markedAtSnapshotStockPrice = markDate !== undefined && lastPrice?.source === "snapshot" && lastPrice.date === markDate;
       const adjustment = snapshotPremiumPnl - credit;
       netPremium += adjustment;
       addRow(null, `Open ${legs[0]!.optionType} marked to market`, bucket, adjustment, 0, {
@@ -576,9 +578,10 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
         quantity,
         strike,
         expiryDate,
-        // The close of the snapshot's own day, so the price and the mark always describe the same day.
-        stockPrice: markDate === undefined ? lastPrice?.price ?? null : dailyCloses.get(markDate) ?? null,
-        stockPriceSource: "close",
+        // The stock price of the snapshot's own day (its nightly snapshot price when the shares are marked there, else its
+        // close), so the price and the mark always describe the same moment.
+        stockPrice: markDate === undefined ? lastPrice?.price ?? null : markedAtSnapshotStockPrice ? lastPrice!.price : dailyCloses.get(markDate) ?? null,
+        stockPriceSource: markedAtSnapshotStockPrice ? "snapshot" : "close",
         commission: null,
         ...(markDate === undefined ? {} : { markDate }),
       });

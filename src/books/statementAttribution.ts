@@ -120,6 +120,16 @@ function tradeTaxKey(dateText: string | undefined, side: string | undefined, qua
   return [String(dateText ?? "").slice(0, 8), String(side ?? "").toUpperCase(), Math.abs(Number(String(quantity ?? "").replace(/,/g, ""))), String(contract ?? "").trim().replace(/\s+/g, " ").toUpperCase()].join("|");
 }
 
+/** A row's IBKR transactionID, null when the Flex query leaves the field out: its row key would not be unique. */
+function transactionIdOf(row: StatementRow): string | null {
+  const transactionId = String(row.transactionID ?? "").trim();
+  return transactionId === "" ? null : transactionId;
+}
+
+function missingTransactionIdProblem(section: string, row: StatementRow): string {
+  return `${section} row of ${row.dateTime ?? row.date ?? "unknown date"} (${row.description ?? row.symbol ?? row.type ?? "no description"}): no transactionID, not posted; the Flex query must include TransactionID`;
+}
+
 function amountOf(text: string | undefined): number | null {
   if (text === undefined || text.trim() === "") return null;
   const amount = Number(text);
@@ -161,6 +171,10 @@ export function attributeStatement(statement: Record<string, unknown>, context: 
   const tradeTaxKeys = new Set<string>();
   for (const row of statementSectionRows(statement.Trades)) {
     if (row.levelOfDetail !== undefined && row.levelOfDetail !== "EXECUTION") continue;
+    if (transactionIdOf(row) === null) {
+      problems.push(missingTransactionIdProblem("Trades", row));
+      continue;
+    }
     const sourceRowKey = `trade:${row.transactionID}`;
     rowKeys.push(sourceRowKey);
     tradeTaxKeys.add(tradeTaxKey(row.tradeDate, row.buySell, row.quantity, row.symbol));
@@ -180,6 +194,10 @@ export function attributeStatement(statement: Record<string, unknown>, context: 
   const placementByCashTransactionId = new Map<string, { placement: Placement; at: Date }>();
   for (const row of statementSectionRows(statement.CashTransactions)) {
     if (row.levelOfDetail !== undefined && row.levelOfDetail !== "DETAIL") continue;
+    if (transactionIdOf(row) === null) {
+      problems.push(missingTransactionIdProblem("CashTransactions", row));
+      continue;
+    }
     const sourceRowKey = `cash:${row.transactionID}`;
     rowKeys.push(sourceRowKey);
     const amount = amountOf(row.amount);
@@ -220,6 +238,10 @@ export function attributeStatement(statement: Record<string, unknown>, context: 
   // in the trade's net cash. A trade's tax row carries no link to the trade, only its words and date: "SG Goods and
   // Services Tax (Sell 1 BMNR  261009P00024500)" on the fill's trade date.
   for (const row of statementSectionRows(statement.SalesTaxes)) {
+    if (transactionIdOf(row) === null) {
+      problems.push(missingTransactionIdProblem("SalesTaxes", row));
+      continue;
+    }
     const sourceRowKey = `tax:${row.transactionID}`;
     rowKeys.push(sourceRowKey);
     const taxed = placementByCashTransactionId.get(String(row.taxableTransactionID ?? ""));

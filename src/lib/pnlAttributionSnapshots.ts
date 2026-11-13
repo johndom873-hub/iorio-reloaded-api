@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import { bookOfTickerAt, loadTickerBookPeriods, type TickerBookPeriod } from "../books/tickerBookPeriods.js";
-import { loadCycleInputsForTickers, type SymbolCycleInput } from "./cycleQueries.js";
+import { loadCycleInputsForTickers, type SymbolCycleInput, type SymbolCycles } from "./cycleQueries.js";
 import { loadSnapshotMarksBetween, openingFillsAfter, truncateCycleInputAt, type SnapshotMarks } from "./cyclePeriodPnl.js";
 import { deriveCycles, type CycleBucket, type CycleInput } from "./cycles.js";
 import { easternInstant, easternIsoDate } from "./easternIsoDate.js";
@@ -168,19 +168,59 @@ export function cycleInputAsOfNight(input: CycleInput, tickerId: string, snapsho
   const truncated = truncateCycleInputAt(input, cutoffMs, snapshotDate, snapshotMarks);
   if (truncated.optionLegs.length === 0 && truncated.stockLegs.length === 0 && truncated.stockTrades.length === 0) return null;
   if (snapshotPrices === null) return truncated;
-  const legsGrewSince = input.stockLegs.some((leg) => leg.entryAt.getTime() <= cutoffMs && openingFillsAfter(leg, cutoffMs).length > 0);
+  return withNightlySnapshotPrices(truncated, input, tickerId, snapshotDate, snapshotPrices, cutoffMs);
+}
+
+/**
+ * Pure: `ledger` with one night's snapshot prices in place of the cycles' own marks (see NightlySnapshotPrices): the shares
+ * still held at the ticker's snapshot stock price (the implied one only while `fullInput`'s legs have not grown since
+ * `cutoffMs`), each open option position at its legs' snapshot prices when every one of them has one. Marks it cannot
+ * replace stay as they were.
+ */
+export function withNightlySnapshotPrices(ledger: CycleInput, fullInput: CycleInput, tickerId: string, snapshotDate: string, snapshotPrices: NightlySnapshotPrices, cutoffMs: number): CycleInput {
+  const legsGrewSince = fullInput.stockLegs.some((leg) => leg.entryAt.getTime() <= cutoffMs && openingFillsAfter(leg, cutoffMs).length > 0);
   const stockPrice = snapshotPrices.stockPriceByTickerId.exact.get(tickerId) ?? (legsGrewSince ? undefined : snapshotPrices.stockPriceByTickerId.implied.get(tickerId));
-  const openPositionPremiumPnl = new Map(truncated.openPositionPremiumPnl);
-  const openPositionPremiumPnlUnavailable = new Set(truncated.openPositionPremiumPnlUnavailable ?? []);
+  const openPositionPremiumPnl = new Map(ledger.openPositionPremiumPnl);
+  const openPositionMarkDate = new Map(ledger.openPositionMarkDate ?? []);
+  const openPositionPremiumPnlUnavailable = new Set(ledger.openPositionPremiumPnlUnavailable ?? []);
   const openLegsByPosition = new Map<string, CycleInput["optionLegs"]>();
-  for (const leg of truncated.optionLegs) if (leg.exitAt === null) openLegsByPosition.set(leg.positionId, [...(openLegsByPosition.get(leg.positionId) ?? []), leg]);
+  for (const leg of ledger.optionLegs) if (leg.exitAt === null) openLegsByPosition.set(leg.positionId, [...(openLegsByPosition.get(leg.positionId) ?? []), leg]);
   for (const [positionId, legs] of openLegsByPosition) {
     const prices = legs.map((leg) => snapshotPrices.optionPriceByLegId.get(leg.id));
     if (prices.some((price) => price === undefined)) continue;
     openPositionPremiumPnl.set(positionId, legs.reduce((sum, leg, index) => sum + (leg.side === "short" ? 1 : -1) * (leg.entryPrice - prices[index]!) * leg.quantity * leg.multiplier, 0));
+    openPositionMarkDate.set(positionId, snapshotDate);
     openPositionPremiumPnlUnavailable.delete(positionId);
   }
-  return { ...truncated, openPositionPremiumPnl, openPositionPremiumPnlUnavailable, ...(stockPrice === undefined ? {} : { lastPrice: { date: snapshotDate, price: stockPrice } }) };
+  return { ...ledger, openPositionPremiumPnl, openPositionMarkDate, openPositionPremiumPnlUnavailable, ...(stockPrice === undefined ? {} : { lastPrice: { date: snapshotDate, price: stockPrice, source: "snapshot" as const } }) };
+}
+
+/**
+ * The given tickers' ledgers as they stand now, open legs marked at the latest nightly snapshot's prices (Marcelo
+ * 2026-11-13): the Ticker modal's Wheel cycle card, so it agrees with the P&L Analyser. A ticker whose daily close is newer
+ * than that snapshot keeps the close.
+ */
+export async function loadCycleInputsAtLatestNightlySnapshot(tickerIds: string[]): Promise<SymbolCycleInput[]> {
+  const [symbolInputs, latestNight] = await Promise.all([
+    loadCycleInputsForTickers(tickerIds),
+    db("account_pnl_snapshots").orderBy("snapshot_date", "desc").first(db.raw("snapshot_date::text AS night"), "captured_at"),
+  ]);
+  if (!latestNight) return symbolInputs;
+  const night: string = latestNight.night;
+  const { snapshotPricesByNight } = await loadNightlyMarks([night], "nightlySnapshot");
+  const snapshotPrices = snapshotPricesByNight?.get(night);
+  if (snapshotPrices === undefined) return symbolInputs;
+  const cutoffMs = nightLedgerCutoffMs(night, latestNight.captured_at === null ? null : new Date(latestNight.captured_at));
+  return symbolInputs.map((symbolInput) =>
+    symbolInput.input.lastPrice !== null && symbolInput.input.lastPrice.date > night ? symbolInput : { ...symbolInput, input: withNightlySnapshotPrices(symbolInput.input, symbolInput.input, symbolInput.tickerId, night, snapshotPrices, cutoffMs) },
+  );
+}
+
+/** The given tickers' cycles (oldest first) at the latest nightly snapshot's prices (loadCycleInputsAtLatestNightlySnapshot). */
+export async function fetchCyclesAtLatestNightlySnapshot(tickerIds: string[]): Promise<SymbolCycles[]> {
+  return (await loadCycleInputsAtLatestNightlySnapshot(tickerIds))
+    .map(({ symbol, tickerId, input }) => ({ symbol, tickerId, cycles: deriveCycles(input) }))
+    .filter((symbolCycles) => symbolCycles.cycles.length > 0);
 }
 
 /**

@@ -54,6 +54,27 @@ describe("attributeStatement", () => {
     expect(amountsOf("cash:11")).toEqual([["pluto", 2250], ["manual", 750]]);
   });
 
+  it("reports rows without a transactionID instead of posting them under one shared key", () => {
+    const parsed = attributeStatement(
+      statementWith({
+        Trades: { Trade: { levelOfDetail: "EXECUTION", assetCategory: "STK", symbol: "AMD", underlyingSymbol: "", conid: "1", dateTime: "20261105;085900", tradeDate: "20261105", buySell: "BUY", quantity: "100", netCash: "-16241.00" } },
+        CashTransactions: {
+          CashTransaction: [
+            { levelOfDetail: "DETAIL", type: "Broker Interest Paid", amount: "-61.20", dateTime: "20260903", description: "USD DEBIT INT FOR AUG-2026", symbol: "" },
+            { levelOfDetail: "DETAIL", type: "Broker Interest Paid", amount: "-88.10", dateTime: "20261003", description: "USD DEBIT INT FOR SEP-2026", symbol: "" },
+            { transactionID: "13", levelOfDetail: "DETAIL", type: "Other Fees", amount: "-4.5", dateTime: "20261103;170205", description: "MARKET DATA FOR NOV 2026", symbol: "" },
+          ],
+        },
+        SalesTaxes: { SalesTax: { taxableTransactionID: "13", salesTax: "-0.405", date: "20261103", taxableDescription: "MARKET DATA" } },
+      }),
+      context,
+    );
+    expect([...new Set(parsed.entries.map((entry) => entry.sourceRowKey))]).toEqual(["cash:13"]);
+    expect(parsed.problems).toHaveLength(4);
+    expect(parsed.problems.every((problem) => problem.includes("no transactionID"))).toBe(true);
+    expect(parsed.problems[1]).toContain("USD DEBIT INT FOR AUG-2026");
+  });
+
   it("skips a trade's GST (already in its net cash) and flags a tax row it cannot place", () => {
     const parsed = attributeStatement(
       statementWith({

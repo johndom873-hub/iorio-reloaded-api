@@ -1584,7 +1584,8 @@ export interface BacktestCycleTimelineRow {
   expiryDate: string | null;
   /** The stock price behind the row: an execution (a fill, an assignment at the strike), or a market close. */
   stockPrice: number | null;
-  stockPriceSource: "execution" | "close" | null;
+  /** "snapshot" (the live book's nightly snapshot price) never occurs in a backtest; the type is the cycles' own. */
+  stockPriceSource: "execution" | "close" | "snapshot" | null;
   commissionDollars: number | null;
   premiumDollars: number;
   stockDollars: number;

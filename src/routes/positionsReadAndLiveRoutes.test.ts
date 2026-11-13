@@ -75,6 +75,11 @@ vi.mock("../lib/cycleQueries.js", async () => {
   const actual = await vi.importActual<typeof import("../lib/cycleQueries.js")>("../lib/cycleQueries.js");
   return { ...actual, fetchCyclesForTickers: (...args: unknown[]) => fetchCyclesForTickersMock(...args) };
 });
+const fetchCyclesAtLatestNightlySnapshotMock = vi.fn();
+vi.mock("../lib/pnlAttributionSnapshots.js", async () => {
+  const actual = await vi.importActual<typeof import("../lib/pnlAttributionSnapshots.js")>("../lib/pnlAttributionSnapshots.js");
+  return { ...actual, fetchCyclesAtLatestNightlySnapshot: (...args: unknown[]) => fetchCyclesAtLatestNightlySnapshotMock(...args) };
+});
 const fetchBreakEvenByPositionIdMock = vi.fn();
 vi.mock("../lib/cycleBreakEvenQueries.js", async () => {
   const actual = await vi.importActual<typeof import("../lib/cycleBreakEvenQueries.js")>("../lib/cycleBreakEvenQueries.js");
@@ -84,6 +89,7 @@ vi.mock("../lib/cycleBreakEvenQueries.js", async () => {
 const { db } = await import("../db/connection.js");
 const { positionsRouter } = await import("./positions.js");
 const actualCycleQueries = await vi.importActual<typeof import("../lib/cycleQueries.js")>("../lib/cycleQueries.js");
+const actualAttributionSnapshots = await vi.importActual<typeof import("../lib/pnlAttributionSnapshots.js")>("../lib/pnlAttributionSnapshots.js");
 const actualBreakEvenQueries = await vi.importActual<typeof import("../lib/cycleBreakEvenQueries.js")>("../lib/cycleBreakEvenQueries.js");
 
 const testDb: Knex = db;
@@ -154,6 +160,7 @@ beforeEach(() => {
   getRiskFreeRateMock.mockReset().mockResolvedValue(0.04);
   loadRecoveryTargetWindowMock.mockReset().mockResolvedValue({ deltaTargetMin: 0.2, deltaTargetMax: 0.3, dteTargetMin: 20, dteTargetMax: 45 });
   fetchCyclesForTickersMock.mockReset().mockImplementation(actualCycleQueries.fetchCyclesForTickers);
+  fetchCyclesAtLatestNightlySnapshotMock.mockReset().mockImplementation(actualAttributionSnapshots.fetchCyclesAtLatestNightlySnapshot);
   fetchBreakEvenByPositionIdMock.mockReset().mockImplementation(actualBreakEvenQueries.fetchBreakEvenByPositionId);
 });
 
@@ -466,16 +473,16 @@ describe("GET /positions/cycles, /cycles/marks, /cycles/scoreboard and route dis
     const response = await call("GET", "/positions/cycles?symbol=nosuchsymbolqq");
     expect(response.status).toBe(200);
     expect(response.json).toEqual({ symbol: "NOSUCHSYMBOLQQ", cycles: [] });
-    expect(fetchCyclesForTickersMock).not.toHaveBeenCalled();
+    expect(fetchCyclesAtLatestNightlySnapshotMock).not.toHaveBeenCalled();
   });
 
   it("lists a symbol's cycles newest first, upper-casing and trimming the symbol", async () => {
     const ticker = await createTicker();
-    fetchCyclesForTickersMock.mockResolvedValue([{ symbol: ticker.symbol, tickerId: ticker.id, cycles: [{ id: "oldest" }, { id: "middle" }, { id: "newest" }] }]);
+    fetchCyclesAtLatestNightlySnapshotMock.mockResolvedValue([{ symbol: ticker.symbol, tickerId: ticker.id, cycles: [{ id: "oldest" }, { id: "middle" }, { id: "newest" }] }]);
     const response = await call("GET", `/positions/cycles?symbol=${encodeURIComponent(` ${ticker.symbol.toLowerCase()} `)}`);
     expect(response.status).toBe(200);
     expect(response.json).toEqual({ symbol: ticker.symbol, cycles: [{ id: "newest" }, { id: "middle" }, { id: "oldest" }] });
-    expect(fetchCyclesForTickersMock).toHaveBeenCalledWith([ticker.id]);
+    expect(fetchCyclesAtLatestNightlySnapshotMock).toHaveBeenCalledWith([ticker.id]);
   });
 
   it("answers a known symbol that has no cycles with an empty list", async () => {

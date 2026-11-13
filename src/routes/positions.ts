@@ -13,6 +13,7 @@ import type { Greeks, GreeksContract } from "../ibkr/fetchLiveGreeks.js";
 import { fetchGreeksPoolFirst } from "../ibkr/greeksPool.js";
 import { streamPooledGreeks } from "../ibkr/greeksPool.js";
 import { fetchCyclesForTickers } from "../lib/cycleQueries.js";
+import { fetchCyclesAtLatestNightlySnapshot } from "../lib/pnlAttributionSnapshots.js";
 import { fetchBreakEvenByPositionId, type PositionBreakEven } from "../lib/cycleBreakEvenQueries.js";
 import { fetchStockAcquisitionByPositionId, type StockAcquisition } from "../lib/stockLegAcquisitionFills.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
@@ -226,7 +227,8 @@ positionsRouter.get("/", async (request, response) => {
 });
 
 // Wheel cycles (approved 2026-09-19, see cycles.ts): every cycle of one symbol, newest first — the Ticker Detail
-// "Cycle" card. Registered before GET /:id so the wildcard doesn't swallow "cycles".
+// "Cycle" card, its open legs at the latest nightly snapshot's prices like the P&L Analyser. Registered before GET /:id so
+// the wildcard doesn't swallow "cycles".
 positionsRouter.get("/cycles", async (request, response) => {
   const symbol = String(request.query.symbol ?? "").trim().toUpperCase();
   if (!symbol) {
@@ -238,7 +240,7 @@ positionsRouter.get("/cycles", async (request, response) => {
     response.json({ symbol, cycles: [] });
     return;
   }
-  const [symbolCycles] = await fetchCyclesForTickers([ticker.id]);
+  const [symbolCycles] = await fetchCyclesAtLatestNightlySnapshot([ticker.id]);
   response.json({ symbol, cycles: [...(symbolCycles?.cycles ?? [])].reverse() });
 });
 

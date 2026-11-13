@@ -290,7 +290,12 @@ describe("reconcileHeldPositions — every structure change is its own position"
     await runPass(holdings(2));
     expect(await positionsFor(ticker.id)).toHaveLength(2);
     expect((await openLegs(leftoverId)).map((leg) => Number(leg.quantity))).toEqual([100]);
-    expect(Number((await legsFor(coveredCallId)).find((leg) => leg.leg_type === "stock")!.quantity)).toBe(200);
+    // The leftover's 100 shares moved to the covered call from that pass: its 100-share leg closed, a 200-share leg opened.
+    const coveredCallStockLegs = (await legsFor(coveredCallId)).filter((leg) => leg.leg_type === "stock");
+    expect(coveredCallStockLegs.map((leg) => [Number(leg.quantity), leg.exit_at === null])).toEqual([
+      [100, false],
+      [200, true],
+    ]);
 
     await runPass(holdings(3));
     const finalPositions = await positionsFor(ticker.id);
@@ -1152,9 +1157,60 @@ describe("reconcileHeldPositions — fixes from the 2026-10-16 P&L review", () =
 
     await runPass([heldStock(ticker.symbol, stockConId, 200, 45.005)]);
 
-    const leftoverLeg = await testDb("position_legs").where({ id: leftoverLegId }).first();
-    expect([leftoverLeg.exit_at, leftoverLeg.quantity, Number(leftoverLeg.entry_price)]).toEqual([null, 200, 45.005]);
+    // The leftover's own 100 shares close at their own cost; a new leg holds all 200 at the blend from the takeover on, so
+    // the Covered Call's 100 shares are not dated from the leftover's entry (Marcelo 2026-11-13).
+    const leftoverLegs = await testDb("position_legs").where({ position_id: leftoverId, leg_type: "stock" }).orderBy("entry_at");
+    expect(leftoverLegs.map((leg) => [leg.id === leftoverLegId, leg.quantity, Number(leg.entry_price), leg.exit_price === null ? null : Number(leg.exit_price), leg.exit_at === null, leg.entry_price_from_position_split])).toEqual([
+      [true, 100, 50, 50, false, true],
+      [false, 200, 45.005, null, true, true],
+    ]);
+    expect(leftoverLegs[1].entry_at.getTime()).toBe(leftoverLegs[0].exit_at.getTime());
     expect((await testDb("position_share_sources").where({ position_id: leftoverId, source_position_id: coveredCallId }).first()).shares_received).toBe(100);
+
+    // The next pass, IBKR unchanged: nothing moves again.
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 45.005)]);
+    expect((await testDb("position_legs").where({ position_id: leftoverId, leg_type: "stock" })).map((leg) => [leg.quantity, leg.exit_at === null]).sort()).toEqual([
+      [100, false],
+      [200, true],
+    ]);
+  });
+
+  it("INTC: a Covered Call's 100 shares back to the 400-share leftover when its Call expires start a new 500-share leg, not a 500-share leg dated from the leftover's entry", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const leftoverId = await insertPosition(ticker.id, "unstructured", "cc_expired_leftover_stock");
+    const leftoverLegId = await insertStockLeg(leftoverId, stockConId, 400, 95.84);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    const coveredCallStockLegId = await insertStockLeg(coveredCallId, stockConId, 100, 95.84);
+    await insertShortOptionLeg(coveredCallId, callConId, "call", 110, isoDateDaysFromToday(-1), 0.5);
+    const leftoverEntryAt = (await testDb("position_legs").where({ id: leftoverLegId }).first()).entry_at;
+
+    await runPass([heldStock(ticker.symbol, stockConId, 500, 95.84)]);
+
+    const coveredCallStockLeg = await testDb("position_legs").where({ id: coveredCallStockLegId }).first();
+    const leftoverLegs = await testDb("position_legs").where({ position_id: leftoverId, leg_type: "stock" }).orderBy("entry_at");
+    expect(leftoverLegs.map((leg) => [leg.quantity, leg.exit_at === null, Number(leg.entry_price)])).toEqual([
+      [400, false, 95.84],
+      [500, true, 95.84],
+    ]);
+    expect(leftoverLegs[0].entry_at.getTime()).toBe(leftoverEntryAt.getTime());
+    // Held at every moment: 400 + 100 until the move, 500 after it.
+    expect(leftoverLegs[0].exit_at.getTime()).toBeGreaterThanOrEqual(coveredCallStockLeg.exit_at.getTime());
+    expect(leftoverLegs[1].entry_at.getTime()).toBe(leftoverLegs[0].exit_at.getTime());
+  });
+
+  it("shares a leg's own buy fill added grow it in place: the fill dates them (two 100-share orders for one contract)", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const positionId = await insertPosition(ticker.id, "unstructured", "pluto_share_buy");
+    const legId = await insertStockLeg(positionId, stockConId, 100, 50);
+    await testDb("trades").insert({ position_leg_id: legId, ibkr_exec_id: `reconcile-test-second-buy-${legId}`, side: "buy", quantity: 100, price: 52, commission: 1, executed_at: new Date(Date.now() - 60_000), is_closing_trade: false });
+
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 51.01)]);
+
+    const legs = await legsFor(positionId);
+    expect(legs.map((leg) => [leg.id === legId, leg.quantity, leg.exit_at === null])).toEqual([[true, 200, true]]);
   });
 
   it("one of two puts bought back: the closed contract costs what IBKR's remaining average leaves (oldest first), the remainder IBKR's average", async () => {
