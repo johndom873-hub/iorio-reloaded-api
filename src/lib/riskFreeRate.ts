@@ -135,3 +135,50 @@ export async function getRiskFreeRate(options: GetRiskFreeRateOptions = {}): Pro
 export function getRiskFreeRateForJob(): Promise<number | null> {
   return getRiskFreeRate({ waitForRefresh: true, attempts: jobFredAttempts });
 }
+
+// TB3MS's monthly history (Marcelo 2026-11-13), for the P&L Analyser's Sharpe, Sortino and Excess Calmar: each month's
+// returns are measured against the T-bill rate of that month, not today's. FRED dates each observation the 1st of its month
+// and publishes it early the next month, so a night uses the latest observation dated on or before it.
+const historyStartDate = "2026-01-01";
+
+/** Fetches TB3MS from historyStartDate and upserts every observation into risk_free_rate_history. Returns how many were stored. */
+export async function refreshRiskFreeRateHistory(): Promise<number> {
+  const apiKey = requireEnvironmentVariable("FRED_API_KEY");
+  const url = new URL("https://api.stlouisfed.org/fred/series/observations");
+  url.searchParams.set("series_id", fredSeriesId);
+  url.searchParams.set("observation_start", historyStartDate);
+  url.searchParams.set("api_key", apiKey);
+  url.searchParams.set("file_type", "json");
+  const body = await runWithRetries(
+    async () => {
+      const response = await fetch(url, { headers: fredRequestHeaders, signal: AbortSignal.timeout(fredRequestTimeoutMs) });
+      if (!response.ok) throw new Error(`FRED responded ${response.status}`);
+      return readFredJson<{ observations?: { date: string; value: string }[] }>(response);
+    },
+    jobFredAttempts,
+    fredRetryBackoffMs,
+  );
+  const rows = (body.observations ?? [])
+    .map((observation) => ({ series_id: fredSeriesId, observation_date: observation.date, rate_percent: parseFloat(observation.value) }))
+    .filter((row) => Number.isFinite(row.rate_percent));
+  if (rows.length === 0) throw new Error("FRED returned no TB3MS observations");
+  await db("risk_free_rate_history").insert(rows).onConflict(["series_id", "observation_date"]).merge(["rate_percent"]);
+  return rows.length;
+}
+
+/** The stored history as a lookup: the annual T-bill rate (percent) in force on a night, or null before the first observation. */
+export async function loadRiskFreeRateLookup(): Promise<(night: string) => number | null> {
+  const rows: { observation_date: string; rate_percent: string }[] = await db("risk_free_rate_history")
+    .where({ series_id: fredSeriesId })
+    .orderBy("observation_date")
+    .select(db.raw("observation_date::text AS observation_date"), "rate_percent");
+  const observations = rows.map((row) => ({ date: row.observation_date, ratePercent: Number(row.rate_percent) }));
+  return (night) => {
+    let found: number | null = null;
+    for (const observation of observations) {
+      if (observation.date > night) break;
+      found = observation.ratePercent;
+    }
+    return found;
+  };
+}

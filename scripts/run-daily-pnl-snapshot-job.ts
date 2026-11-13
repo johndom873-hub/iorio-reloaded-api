@@ -41,10 +41,11 @@
 // market (fixed 2026-09-11).
 //
 // Position prices come from fetchDailyClosingPrices.ts (stocks: today's
-// daily bar incl. after-hours = last; options: IBKR's portfolio mark), not
-// fetchLivePrices — both end on real IBKR completion signals, no arrival
-// waits, and the snapshot never stores the prior session's close as
-// today's price (approved 2026-09-18).
+// daily bar incl. after-hours = last; options: IBKR's portfolio mark, one
+// expiring that day its intrinsic value at that last), not fetchLivePrices
+// — both end on real IBKR completion signals, no arrival waits, and the
+// snapshot never stores the prior session's close as today's price
+// (approved 2026-09-18).
 //
 // Usage (dev):
 //   npm run job:daily-pnl-snapshot
@@ -75,6 +76,8 @@ import { fillWorthlessExpiredOptionPrices } from "../src/lib/expiredOptionWorthl
 import { fetchOpenLegsOfOpenPositions, type OpenPositionLegRow } from "../src/lib/openPositionLegsForPnlSnapshot.js";
 import { sendLeapsExpiryWarnings } from "../src/lib/leapsExpiryWarnings.js";
 import { checkFlexTokenExpiry } from "../src/lib/flexTokenExpiryNotice.js";
+import { writeAttributionSnapshots } from "../src/lib/pnlAttributionSnapshots.js";
+import { refreshRiskFreeRateHistory } from "../src/lib/riskFreeRate.js";
 
 interface RecentAccountSnapshotRow {
   snapshotDate: string;
@@ -176,6 +179,25 @@ async function runStatementSteps(snapshotDate: string, legRows: OpenPositionLegR
   } catch (error) {
     console.error(`Book value snapshot failed: ${describeError(error)}`);
     problems.push({ message: `Books: tonight's book values could not be saved - ${describeError(error)}`, errorCount: 1, nothingUsable: false });
+  }
+}
+
+// The P&L Analyser's nightly attribution (pnlAttributionSnapshots.ts) and the T-bill history its ratios use, after
+// tonight's snapshots and book values are written. Either failing leaves tonight's other figures in place.
+async function runPnlAnalysisSteps(problems: PnlSnapshotProblem[]): Promise<void> {
+  const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error)).split("\n")[0]!;
+  try {
+    const written = await writeAttributionSnapshots();
+    console.log(`P&L attribution: ${written.rowCount} row(s) over ${written.nights.length} night(s) (${written.nights[0] ?? "none"} to ${written.nights.at(-1) ?? "none"}).`);
+  } catch (error) {
+    console.error(`P&L attribution failed: ${describeError(error)}`);
+    problems.push({ message: `P&L Analyser: tonight's attribution could not be saved - ${describeError(error)}`, errorCount: 1, nothingUsable: false });
+  }
+  try {
+    console.log(`T-bill history: ${await refreshRiskFreeRateHistory()} monthly rate(s) stored.`);
+  } catch (error) {
+    console.error(`T-bill history refresh failed: ${describeError(error)}`);
+    problems.push({ message: `P&L Analyser: the T-bill history could not be refreshed - ${describeError(error)}`, errorCount: 1, nothingUsable: false });
   }
 }
 
@@ -291,6 +313,7 @@ async function main(): Promise<void> {
     if (legRows.length === 0) {
       console.log("No open positions — nothing to snapshot at the position level.");
       await runStatementSteps(snapshotDate, legRows, {}, problems);
+      await runPnlAnalysisSteps(problems);
       if (!accountSnapshotWritten) problems.push({ message: `account-level P&L failed for ${snapshotDate} - ${accountSnapshotError}`, errorCount: 1, nothingUsable: true });
       return {
         details: { accountSnapshot: accountSnapshotWritten, accountSnapshotError, openPositionCount: 0 },
@@ -392,6 +415,7 @@ async function main(): Promise<void> {
     // cash-flow data for recent days. Its own failure (Flex API down,
     // report still generating) must not fail the whole job either.
     await runStatementSteps(snapshotDate, legRows, pricesByLegIdResult.status === "fulfilled" ? pricesByLegIdResult.value : {}, problems);
+    await runPnlAnalysisSteps(problems);
 
     // Greeks, same nightly cadence as the P&L snapshot above — piggybacks on
     // this job rather than a second scheduled IBKR round-trip. Only option

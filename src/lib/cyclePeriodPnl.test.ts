@@ -63,3 +63,32 @@ describe("truncateCycleInputAsOf", () => {
     expect(now.buckets.csp.total - atBaseline.buckets.csp.total).toBeCloseTo(30);
   });
 });
+
+describe("truncateCycleInputAsOf: a leg that grew after the night", () => {
+  it("counts only the contracts it had by then, at IBKR's average cost less the later fills'", () => {
+    // INTC LEAPS on prod: 10 contracts at $5.3712 today, 1 from 4 Nov without a recorded fill, 2 bought on 5 Nov, 7 on 9 Nov at $5.53 ($3.78).
+    const leg = putLeg({
+      side: "long", optionType: "call", strike: 70, quantity: 10, entryPrice: 5.3712, entryAt: new Date("2026-11-04T15:36:00Z"), exitPrice: null, exitAt: null, hasClosingTrade: false, expiryDate: "2027-04-16", leaps: true,
+      openingFills: [
+        { at: new Date("2026-11-05T14:36:00Z"), quantity: 1, price: 4.86, commission: 0.92 },
+        { at: new Date("2026-11-05T16:01:00Z"), quantity: 1, price: 4.38, commission: 0.92 },
+        { at: new Date("2026-11-09T15:06:00Z"), quantity: 7, price: 5.53, commission: 3.78 },
+      ],
+    });
+    const marks = new Map([["pos-1", { premiumPnl: 0, unrealizedPnl: 0 }]]);
+    const asOfSixth = truncateCycleInputAsOf(inputWith([leg]), "2026-11-06", marks).optionLegs[0]!;
+    expect(asOfSixth.quantity).toBe(3);
+    expect(asOfSixth.entryPrice).toBeCloseTo((5.3712 * 1_000 - (5.53 * 700 + 3.78)) / 300, 10); // $4.988
+    expect(asOfSixth.openingFills).toHaveLength(2);
+    expect(truncateCycleInputAsOf(inputWith([leg]), "2026-11-04", marks).optionLegs[0]!.quantity).toBe(1);
+    expect(truncateCycleInputAsOf(inputWith([leg]), "2026-11-10", marks).optionLegs[0]).toBe(leg);
+  });
+
+  it("drops a leg that held nothing yet and shrinks a stock leg to its shares by then", () => {
+    const leg = putLeg({ exitPrice: null, exitAt: null, hasClosingTrade: false, openingFills: [{ at: new Date("2026-08-28T15:00:00Z"), quantity: 1, price: 2, commission: 1 }] });
+    const stockLeg = { positionId: "pos-2", quantity: 300, entryAt: new Date("2026-08-27T15:00:00Z"), exitAt: null, openingFills: [{ at: new Date("2026-08-27T15:00:00Z"), quantity: 100, price: 50, commission: 1 }, { at: new Date("2026-09-02T15:00:00Z"), quantity: 200, price: 51, commission: 1 }] };
+    const truncated = truncateCycleInputAsOf(inputWith([leg], { stockLegs: [stockLeg] }), "2026-08-27", new Map());
+    expect(truncated.optionLegs).toHaveLength(0);
+    expect(truncated.stockLegs[0]!.quantity).toBe(100);
+  });
+});

@@ -117,10 +117,10 @@ describe("the cycle loaders and the exported row mapping", () => {
     for (const { tickerId, input } of loaded) {
       const built = buildCycleInputFromRows(tickerId, handWrittenRows);
       // The loader also reads each leg's fills for the timeline; the hand-written rows have none, so those figures are compared apart.
-      const withoutFillFigures = (legs: typeof input.optionLegs) => legs.map(({ openingFillPrice: _price, openingFillCount: _count, openingCommission: _commission, closingFillPrice: _closing, openingStockPrice: _openingStock, closingStockPrice: _closingStock, ...leg }) => leg);
+      const withoutFillFigures = (legs: typeof input.optionLegs) => legs.map(({ openingFillPrice: _price, openingFillCount: _count, openingCommission: _commission, closingFillPrice: _closing, openingStockPrice: _openingStock, closingStockPrice: _closingStock, openingFills: _openingFills, ...leg }) => leg);
       expect(sortById(withoutFillFigures(input.optionLegs))).toEqual(sortById(built.optionLegs));
       expect(input.optionLegs.every((leg) => typeof leg.openingFillCount === "number")).toBe(true);
-      expect(sortByEntry(input.stockLegs)).toEqual(sortByEntry(built.stockLegs));
+      expect(sortByEntry(input.stockLegs.map(({ openingFills: _openingFills, ...leg }) => leg))).toEqual(sortByEntry(built.stockLegs));
       expect(input.stockTrades).toEqual(built.stockTrades);
       expect(input.dailyCloses).toEqual(built.dailyCloses);
       expect(input.lastPrice).toEqual(built.lastPrice);

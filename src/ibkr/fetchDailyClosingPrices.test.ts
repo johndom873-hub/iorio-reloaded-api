@@ -162,6 +162,22 @@ describe("fetchDailyClosingPrices option marks", () => {
     expect(ib.reqAccountUpdates).toHaveBeenCalledWith(true, "");
   });
 
+  it("prices an option expiring on the session's date at its intrinsic value at the underlying's price, not its mark", async () => {
+    // Underlying at $190 (after-hours included): a $185 Call is worth $5, a $200 Put $10, a $200 Call and a $185 Put $0,
+    // whatever IBKR's mark, and even when the account no longer holds the contract.
+    const expiring = (key: string, strike: number, right: "C" | "P") => option(key, { expiry: "20261006", strike, right: right as PriceContract["right"] });
+    const prices = await run([expiring("call-in", 185, "C"), expiring("put-in", 200, "P"), expiring("call-out", 200, "C"), expiring("put-out", 185, "P")], () => {
+      optionRow({ lastTradeDateOrContractMonth: "20261006", strike: 185, right: "C" as Contract["right"] }, -1, 5.4);
+      optionRow({ lastTradeDateOrContractMonth: "20261006", strike: 185, right: "P" as Contract["right"] }, -1, 0.35);
+    });
+    expect(prices).toEqual({ "call-in": 5, "put-in": 10, "call-out": 0, "put-out": 0 });
+  });
+
+  it("keeps the mark of an expiring option when the underlying has no price for the session", async () => {
+    const expiring = option("opt", { expiry: "20261006" });
+    expect(await run([expiring], () => optionRow({ lastTradeDateOrContractMonth: "20261006" }, -1, 1.25), null)).toEqual({ opt: 1.25 });
+  });
+
   it("uses the mark of a short (negative) position too", async () => {
     expect(await run([option("opt")], () => optionRow({}, -3, 2.5))).toEqual({ opt: 2.5 });
   });

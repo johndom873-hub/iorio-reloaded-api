@@ -1,5 +1,5 @@
 import { summarizeOpenCycle, type CycleOptionLeg as BreakEvenOptionLeg, type CycleStockTrade as BreakEvenStockTrade, type OpenCycleSummary, type OptionSettlementOutcome } from "./cycleBreakEven.js";
-import type { CycleInput, CycleOptionLeg, CycleStockLeg, CycleStockTrade } from "./cycles.js";
+import type { CycleInput, CycleLegOpeningFill, CycleOptionLeg, CycleStockLeg, CycleStockTrade } from "./cycles.js";
 
 // The rows the cycle loaders select (cycleQueries.ts, cycleBreakEvenQueries.ts) and their mapping into the inputs of
 // deriveCycles and summarizeOpenCycle. Pure, so anything that holds the same rows (the backtest's simulated ledger)
@@ -44,6 +44,21 @@ export interface CycleOptionLegRow {
   closingRowLabel?: string;
   /** The leg's position is a LEAPS (see CycleOptionLeg): selected by the cycle loader from its strategy; a simulated ledger states it. */
   leaps?: boolean;
+  /** The leg's own opening fills, as the cycle loader selects them (JSON, timestamps as text); absent elsewhere. */
+  openingFills?: OpeningFillRow[] | null;
+}
+
+/** An opening fill as the loader's JSON gives it. */
+export interface OpeningFillRow {
+  at: Date | string;
+  quantity: number;
+  price: number;
+  commission: number;
+}
+
+function openingFillsOf(rows: OpeningFillRow[] | null | undefined): { openingFills?: CycleLegOpeningFill[] } {
+  if (!rows || rows.length === 0) return {};
+  return { openingFills: rows.map((row) => ({ at: new Date(row.at), quantity: Number(row.quantity), price: Number(row.price), commission: Number(row.commission) })).sort((first, second) => first.at.getTime() - second.at.getTime()) };
 }
 
 // An early assignment settles the cycle on the assignment date (Marcelo 2026-10-15): a short leg that left before its
@@ -69,6 +84,7 @@ export interface CycleStockLegRow {
   quantity: number;
   entryAt: Date | string;
   exitAt: Date | string | null;
+  openingFills?: OpeningFillRow[] | null;
 }
 
 export interface CycleStockTradeRow {
@@ -104,7 +120,7 @@ export interface CycleInputRows {
 function optionLegsOfTicker<Row extends CycleOptionLegRow>(rows: readonly Row[], tickerId: string) {
   return rows
     .filter((row) => row.tickerId === tickerId)
-    .map(({ assignedBeforeExpiry, leaps, ...row }) => ({ ...row, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt), ...(assignedBeforeExpiry && row.settledAs === undefined ? { settledAs: "assigned" as const } : {}), ...(leaps ? { leaps: true } : {}) }));
+    .map(({ assignedBeforeExpiry, leaps, openingFills, ...row }) => ({ ...row, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt), ...(assignedBeforeExpiry && row.settledAs === undefined ? { settledAs: "assigned" as const } : {}), ...(leaps ? { leaps: true } : {}), ...openingFillsOf(openingFills) }));
 }
 
 function stockTradesOfTicker(rows: readonly CycleStockTradeRow[], tickerId: string): CycleStockTrade[] {
@@ -124,7 +140,7 @@ export function buildCycleInputFromRows(tickerId: string, rows: CycleInputRows):
   const optionLegs: CycleOptionLeg[] = optionLegsOfTicker(rows.optionRows, tickerId);
   const stockLegs: CycleStockLeg[] = rows.stockLegRows
     .filter((row) => row.tickerId === tickerId)
-    .map((row) => ({ positionId: row.positionId, quantity: row.quantity, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt) }));
+    .map((row) => ({ positionId: row.positionId, quantity: row.quantity, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt), ...openingFillsOf(row.openingFills) }));
   return {
     optionLegs,
     stockLegs,

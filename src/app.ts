@@ -18,6 +18,7 @@ import { positionsRouter } from "./routes/positions.js";
 import { pricePerformanceRouter } from "./routes/pricePerformance.js";
 import { riskLimitsRouter } from "./routes/riskLimits.js";
 import { plutoRouter } from "./routes/pluto.js";
+import { pnlAnalysisRouter } from "./routes/pnlAnalysis.js";
 import { screenerRouter } from "./routes/screener.js";
 import { shortlistRouter } from "./routes/shortlist.js";
 import { orderChecksRouter } from "./routes/orderChecks.js";
@@ -92,6 +93,7 @@ app.use("/system-health", systemHealthRouter);
 app.use("/calendar-events", calendarEventsRouter);
 app.use("/dashboard", dashboardRouter);
 app.use("/books", booksRouter);
+app.use("/pnl-analysis", pnlAnalysisRouter);
 // Model backtesting is local only (docs/backtesting/): mounted only when BACKTEST_DATA_DIR is set, and loaded lazily so
 // staging and prod never load it.
 if (readBacktestDataDirectory()) {

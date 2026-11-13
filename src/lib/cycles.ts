@@ -72,6 +72,16 @@ export interface CycleOptionLeg {
   closingRowLabel?: string;
   /** The leg's position is a LEAPS (strategy "leaps"): its rows go in the leaps bucket, not the hedge's. */
   leaps?: boolean;
+  /** The leg's own opening fills (its trades, not a parent's), oldest first: an "as of" run counts only those up to its day. */
+  openingFills?: CycleLegOpeningFill[];
+}
+
+export interface CycleLegOpeningFill {
+  at: Date;
+  quantity: number;
+  price: number;
+  /** A missing commission counts as 0 (IBKR charges a partial fill's commission on its first execution). */
+  commission: number;
 }
 
 export type OptionSettlementOutcome = "assigned" | "worthless";
@@ -81,6 +91,8 @@ export interface CycleStockLeg {
   quantity: number;
   entryAt: Date;
   exitAt: Date | null;
+  /** The leg's own opening fills, oldest first (see CycleOptionLeg.openingFills). */
+  openingFills?: CycleLegOpeningFill[];
 }
 
 export interface CycleStockTrade {
@@ -190,7 +202,7 @@ const groupingWindowMs = 120_000;
 // A leg's entry_at is when the worker's reconcile pass created it, which can be minutes after the real fill
 // (HOOD 2026-08-24: fills 21:44, legs 21:46), so stock fills are matched from a short lookback before the cycle start.
 const fillLookbackMs = 600_000;
-const marginalThreshold = 0.05;
+export const marginalThreshold = 0.05;
 
 function optionLegBucket(leg: Pick<CycleOptionLeg, "side" | "optionType" | "leaps">): CycleBucket {
   if (leg.side === "long") return leg.leaps ? "leaps" : "hedge";
@@ -212,12 +224,12 @@ interface RawEvent {
   expiryClose?: number | null;
 }
 
-function isSettledWithoutTrade(leg: CycleOptionLeg): boolean {
+export function isSettledWithoutTrade(leg: CycleOptionLeg): boolean {
   return leg.side === "short" && leg.exitAt !== null && !leg.hasClosingTrade && (leg.exitPrice === 0 || leg.exitPrice === null);
 }
 
 /** Whether a leg that settled without a trade was assigned: its explicit settlement when given, else in the money by the threshold at the expiry close. */
-function settledAssigned(leg: CycleOptionLeg): boolean {
+export function settledAssigned(leg: CycleOptionLeg): boolean {
   if (leg.expiryClose === null) return false;
   if (leg.settledAs !== undefined) return leg.settledAs === "assigned";
   return (leg.optionType === "call" ? leg.expiryClose - leg.strike : leg.strike - leg.expiryClose) >= marginalThreshold;
@@ -229,14 +241,14 @@ function settledAssigned(leg: CycleOptionLeg): boolean {
 // assignment (assignmentFillMatching.ts) is absorbed by it: the fill leaves the trades, and the assignment keeps its own
 // rows and bucket but takes the fill's price and commission. Matched over the whole input, not per cycle: a call-away's
 // sale can be executed after the cycle it closes has ended. Kept per trade list, as the windows are per leg list.
-interface AssignmentFills {
+export interface AssignmentFills {
   fillByLegId: Map<string, CycleStockTrade>;
   absorbedFills: Set<CycleStockTrade>;
 }
 
 const assignmentFillsByStockTrades = new WeakMap<readonly CycleStockTrade[], { optionLegs: readonly CycleOptionLeg[]; optionLegCount: number; stockTradeCount: number; fills: AssignmentFills }>();
 
-function assignmentFillsOf(input: CycleInput): AssignmentFills {
+export function assignmentFillsOf(input: CycleInput): AssignmentFills {
   const kept = assignmentFillsByStockTrades.get(input.stockTrades);
   if (kept && kept.optionLegs === input.optionLegs && kept.optionLegCount === input.optionLegs.length && kept.stockTradeCount === input.stockTrades.length) return kept.fills;
   const assignedLegs = input.optionLegs.filter((leg) => isSettledWithoutTrade(leg) && settledAssigned(leg));

@@ -63,7 +63,8 @@ export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Pr
               (SELECT (SUM(tr.price * tr.quantity) / NULLIF(SUM(tr.quantity), 0))::float FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade) AS "closingFillPrice",
               ${optionFillStockPriceSql("COALESCE(pl.parent_leg_id, pl.id)", false)} AS "openingStockPrice",
               ${optionFillStockPriceSql("pl.id", true)} AS "closingStockPrice",
-              ${settlementCloseSelectSql}
+              ${settlementCloseSelectSql},
+              (SELECT json_agg(json_build_object('at', tr.executed_at, 'quantity', tr.quantity, 'price', tr.price, 'commission', COALESCE(tr.commission, 0)) ORDER BY tr.executed_at) FROM trades tr WHERE tr.position_leg_id = pl.id AND NOT tr.is_closing_trade) AS "openingFills"
        FROM position_legs pl JOIN positions p ON p.id = pl.position_id
        LEFT JOIN daily_price_bars b ON b.ticker_id = p.ticker_id AND b.trading_date = pl.expiry_date
        ${assignmentDayCloseJoinSql}
@@ -71,7 +72,8 @@ export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Pr
       params,
     ),
     db.raw(
-      `SELECT p.ticker_id AS "tickerId", pl.position_id AS "positionId", pl.quantity, pl.entry_at AS "entryAt", pl.exit_at AS "exitAt"
+      `SELECT p.ticker_id AS "tickerId", pl.position_id AS "positionId", pl.quantity, pl.entry_at AS "entryAt", pl.exit_at AS "exitAt",
+              (SELECT json_agg(json_build_object('at', tr.executed_at, 'quantity', tr.quantity, 'price', tr.price, 'commission', COALESCE(tr.commission, 0)) ORDER BY tr.executed_at) FROM trades tr WHERE tr.position_leg_id = pl.id AND NOT tr.is_closing_trade) AS "openingFills"
        FROM position_legs pl JOIN positions p ON p.id = pl.position_id
        WHERE pl.leg_type = 'stock' AND pl.side = 'long' ${filter}`,
       params,

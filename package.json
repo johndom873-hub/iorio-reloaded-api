@@ -48,6 +48,8 @@
     "backtest:fetch-dividends": "tsx scripts/fetch-backtest-dividends.ts",
     "backtest:fetch-market-indices": "tsx scripts/fetch-backtest-market-indices.ts",
     "backfill:ticker-history": "tsx scripts/backfillTickerHistory.ts",
+    "backfill-pnl-attribution": "tsx scripts/backfill-pnl-attribution.ts",
+    "import-account-cash-items": "tsx scripts/import-account-cash-items.ts",
     "deploy:worker:staging": "bash scripts/deploy-worker-to-vps.sh staging",
     "worker:staging": "bash scripts/staging-worker-control.sh",
     "release-phase": "node dist/scripts/run-release-phase.js"

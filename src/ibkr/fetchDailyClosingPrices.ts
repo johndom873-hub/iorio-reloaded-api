@@ -25,6 +25,10 @@ const gatewaySilentTimeoutMs = 30_000;
  *   data for options at all (error 162), and the market-data snapshot has
  *   no completion signal for options. Approved 2026-09-18: options use the
  *   mark, stocks use last.
+ * - An option expiring on the session's date: its intrinsic value at the
+ *   underlying's price above, not the mark (Marcelo 2026-11-13). It can no
+ *   longer trade, so only its exercise is left, and the books price the
+ *   shares it delivers at that same price (intrinsicValueAtExpiry).
  *
  * A leg with no price gets null (the job then skips that position).
  */
@@ -42,6 +46,19 @@ export function priceFromPortfolioMark(marketPrice: number, right: string | unde
   const outOfTheMoney = optionRight === "C" ? strike > underlyingClose : optionRight === "P" ? strike < underlyingClose : false;
   return outOfTheMoney ? 0 : null;
 }
+/**
+ * Pure: an option's value once its last trading session has closed, what exercising it is worth at `underlyingPrice`
+ * (Marcelo 2026-11-13). A Call max(0, price − strike), a Put max(0, strike − price), per share.
+ * Example: DRAM $41.50 Call, stock $42.10 → $0.60 (11 short contracts: −$660, what the call-away gives up on shares worth
+ * $42.10 sold at $41.50); NBIS $210 Put, stock $223.54 → $0.
+ */
+export function intrinsicValueAtExpiry(right: string | undefined, strike: number, underlyingPrice: number): number | null {
+  const optionRight = right?.charAt(0).toUpperCase();
+  if (optionRight === "C") return Math.max(0, underlyingPrice - strike);
+  if (optionRight === "P") return Math.max(0, strike - underlyingPrice);
+  return null;
+}
+
 export async function fetchDailyClosingPrices(contracts: PriceContract[], sessionDateIso: string): Promise<Record<string, number | null>> {
   const priceByKey: Record<string, number | null> = Object.fromEntries(contracts.map((contract) => [contract.key, null]));
   if (contracts.length === 0) return priceByKey;
@@ -151,6 +168,11 @@ export async function fetchDailyClosingPrices(contracts: PriceContract[], sessio
     );
 
     for (const contract of optionContracts) {
+      const underlyingPrice = stockClosesBySymbol.get(contract.symbol) ?? null;
+      if (contract.expiry === expectedBarDate && contract.strike !== undefined && underlyingPrice !== null) {
+        priceByKey[contract.key] = intrinsicValueAtExpiry(contract.right, contract.strike, underlyingPrice);
+        continue;
+      }
       const held = portfolioMarks.find(
         (row) =>
           row.position !== 0 &&
@@ -160,7 +182,7 @@ export async function fetchDailyClosingPrices(contracts: PriceContract[], sessio
           row.contract.strike === contract.strike &&
           row.contract.right?.charAt(0).toUpperCase() === contract.right?.charAt(0).toUpperCase(),
       );
-      priceByKey[contract.key] = held ? priceFromPortfolioMark(held.marketPrice, contract.right, contract.strike, stockClosesBySymbol.get(contract.symbol) ?? null) : null;
+      priceByKey[contract.key] = held ? priceFromPortfolioMark(held.marketPrice, contract.right, contract.strike, underlyingPrice) : null;
     }
 
     return priceByKey;

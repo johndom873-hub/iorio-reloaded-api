@@ -64,8 +64,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function sendFlexRequest(token: string, queryId: string): Promise<string> {
-  const url = `${flexWebServiceBaseUrl}/SendRequest?t=${encodeURIComponent(token)}&q=${encodeURIComponent(queryId)}&v=3`;
+/** A statement period other than the query's own (fd/td, YYYYMMDD; accepted by IBKR, checked on the live account 2026-11-13). */
+export interface FlexStatementPeriod {
+  fromDate: string;
+  toDate: string;
+}
+
+async function sendFlexRequest(token: string, queryId: string, period: FlexStatementPeriod | null): Promise<string> {
+  const periodParameters = period === null ? "" : `&fd=${encodeURIComponent(period.fromDate)}&td=${encodeURIComponent(period.toDate)}`;
+  const url = `${flexWebServiceBaseUrl}/SendRequest?t=${encodeURIComponent(token)}&q=${encodeURIComponent(queryId)}&v=3${periodParameters}`;
   const response = await fetch(url);
   const body = xmlParser.parse(await response.text()) as SendRequestResponse;
   const status = body.FlexStatementResponse?.Status;
@@ -80,8 +87,8 @@ async function sendFlexRequest(token: string, queryId: string): Promise<string> 
   return referenceCode;
 }
 
-function sendFlexRequestRetryingRateLimit(token: string, queryId: string): Promise<string> {
-  return retryOnFlexRateLimit(() => sendFlexRequest(token, queryId), {
+function sendFlexRequestRetryingRateLimit(token: string, queryId: string, period: FlexStatementPeriod | null): Promise<string> {
+  return retryOnFlexRateLimit(() => sendFlexRequest(token, queryId, period), {
     onRetry: ({ attempt, maxAttempts, delayMs }) =>
       console.warn(`Flex SendRequest was rate limited (attempt ${attempt} of ${maxAttempts}); retrying in ${delayMs / 1000}s.`),
   });
@@ -148,13 +155,14 @@ export async function fetchFlexCashTransactions(): Promise<FlexCashFlow[]> {
 
 /**
  * The whole Flex report, every section the query holds (the books' import reads trades, cash transactions, sales taxes,
- * transfers and the cash report from it, src/books/statementImport.ts). Refused unless it is the worker's account.
+ * transfers and the cash report from it, src/books/statementImport.ts). Refused unless it is the worker's account. `period`
+ * asks for other dates than the query's own window (the P&L Analyser's import of the rows from before the books).
  */
-export async function fetchFlexStatements(): Promise<FlexStatementXml[]> {
+export async function fetchFlexStatements(period: FlexStatementPeriod | null = null): Promise<FlexStatementXml[]> {
   const token = requireEnvironmentVariable("IBKR_FLEX_TOKEN");
   const queryId = requireEnvironmentVariable("IBKR_FLEX_QUERY_ID");
 
-  const referenceCode = await sendFlexRequestRetryingRateLimit(token, queryId);
+  const referenceCode = await sendFlexRequestRetryingRateLimit(token, queryId, period);
   const statements = await pollFlexStatement(token, referenceCode);
   await assertStatementsAreForWorkerAccount(statements);
   return statements;
