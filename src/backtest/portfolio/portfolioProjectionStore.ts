@@ -5,7 +5,7 @@ import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
 import { requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { stockCommissionDollars } from "../engine/ledger/ledgerFills.js";
 import { loadTreasuryBillRates, type TreasuryBillRates } from "../engine/treasuryBillRates.js";
-import { tickerBusinessChangeOf, type TickerBusinessChange } from "../tickerBusinessChanges.js";
+import { tickerBusinessChangeOf, type TickerBusinessChange } from "../../lib/tickerBusinessChanges.js";
 import { loadBacktestLabSettings } from "../labSettingsStore.js";
 import { dayHistoryStartIso, drawDayPaths, leftoverDaysByTicker, marketDayHistoryOf, tradingDaysPerYear } from "./portfolioDayHistory.js";
 import { ivHalfLifeOf, ivNowAgainstNormalOf, loadTickerWithHistory, projectionTickerOf } from "./portfolioProjectionTickers.js";

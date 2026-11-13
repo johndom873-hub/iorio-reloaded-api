@@ -149,9 +149,11 @@ describe("getPricePerformanceSnapshot", () => {
   });
 
 
-  it("binds the completed-session date to the latest-bar lookup, then today's Eastern date (the live 1W/1M/3M/1Y anchor), and asks for the completed session twice (now, and now minus 150 minutes)", async () => {
+  it("binds each business change's history start and the 2006 floor, then the completed-session date to the latest-bar lookup, then today's Eastern date (the live 1W/1M/3M/1Y anchor), and asks for the completed session twice (now, and now minus 150 minutes)", async () => {
     await snapshotModule.getPricePerformanceSnapshot(now);
-    expect(mocks.state.rawCalls[0]!.bindings).toEqual(["2026-10-05", "2026-10-06"]);
+    const [historyStarts, ...rest] = mocks.state.rawCalls[0]!.bindings as [string, ...string[]];
+    expect(JSON.parse(historyStarts)).toMatchObject({ NBIS: "2024-10-21", SHAZ: "2026-02-18" });
+    expect(rest).toEqual(["2006-01-01", "2026-10-05", "2026-10-06"]);
     expect(mocks.state.completedSessionCalls.map((date) => date.toISOString())).toEqual(["2026-10-06T14:00:00.000Z", "2026-10-06T11:30:00.000Z"]);
   });
 

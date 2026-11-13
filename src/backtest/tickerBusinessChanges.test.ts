@@ -9,7 +9,7 @@ import { writeFileStockBars } from "./backtestFileStockBars.js";
 import { readBacktestDataFileContents, readBacktestDataFilePeriodContents } from "./dataFileSummary.js";
 import { BacktestSymbolFile } from "./engine/backtestSymbolFile.js";
 import { syntheticOptionQuotes, writeSyntheticSymbolFile, type SyntheticSymbolFileDay } from "./engine/testSupport/syntheticBacktestData.js";
-import { currentBusinessFromOf, possibleBusinessChangeNotice, rowsFrom, tickerBusinessChangeOf } from "./tickerBusinessChanges.js";
+import { currentBusinessFromOf, possibleBusinessChangeNotice, rowsFrom, tickerBusinessChangeOf } from "../lib/tickerBusinessChanges.js";
 
 describe("the list of business changes", () => {
   it("gives a listed ticker's first session of its current business, and none for the others", () => {

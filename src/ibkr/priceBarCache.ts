@@ -14,6 +14,7 @@ import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { recordStockSplit } from "../lib/stockSplits.js";
 import { cachedExtendedHoursChartBars, fetchExtendedHoursChartBars, isExtendedHoursChartRange } from "./extendedHoursChartBars.js";
 import { fullDailyHistoryDuration, fullDailyHistoryRequestTimeoutMs, fullDailyHistoryStartDate } from "./historicalDataDuration.js";
+import { historyStartDateOf } from "../lib/tickerBusinessChanges.js";
 import type { Knex } from "knex";
 
 // MA99 (technicalIndicators.ts) is the deeper of the two indicator
@@ -341,6 +342,13 @@ export function ivBarsToDateMap(ivBars: PriceBar[]): Map<string, number> {
   return new Map(ivBars.map((bar) => [new Date(bar.time * 1000).toISOString().slice(0, 10), bar.close]));
 }
 
+// The 1Y/5Y/All charts start at the ticker's history start at the earliest (tickerBusinessChanges.ts: its business change,
+// else 2006), so a chart never shows a peak Price Performance's Drawdown leaves out.
+function chartSince(symbol: string, rangeSince: Date | null): Date {
+  const historyStart = new Date(`${historyStartDateOf(symbol)}T00:00:00Z`);
+  return rangeSince === null || rangeSince < historyStart ? historyStart : rangeSince;
+}
+
 async function readDailyBars(tickerId: string, since: Date): Promise<PriceBar[]> {
   const rows = await db("daily_price_bars")
     .where({ ticker_id: tickerId })
@@ -422,10 +430,10 @@ function intradayCacheNeedsRefresh(latestCached: Date | null, symbol: string, ra
 // confirmed cache hit (needsLiveFetch === false) can read straight from the
 // DB without ever touching IBKR. Only valid to call once needsLiveFetch has
 // already confirmed the cache is warm and fresh for this tickerId/range.
-async function readCachedBarsOnly(tickerId: string, range: Exclude<ChartRange, "1D" | "5D">): Promise<PriceBar[]> {
-  if (range === "1Y") return readDailyBars(tickerId, subtractDuration(new Date(), "1 Y"));
-  if (range === "5Y") return readWeeklyResampledBars(tickerId, subtractDuration(new Date(), "5 Y"));
-  if (range === "All") return readWeeklyResampledBars(tickerId, null);
+async function readCachedBarsOnly(tickerId: string, symbol: string, range: Exclude<ChartRange, "1D" | "5D">): Promise<PriceBar[]> {
+  if (range === "1Y") return readDailyBars(tickerId, chartSince(symbol, subtractDuration(new Date(), "1 Y")));
+  if (range === "5Y") return readWeeklyResampledBars(tickerId, chartSince(symbol, subtractDuration(new Date(), "5 Y")));
+  if (range === "All") return readWeeklyResampledBars(tickerId, chartSince(symbol, null));
   const cfg = intradayConfig[range];
   return readIntradayBars(tickerId, cfg.barSize, subtractDuration(new Date(), cfg.fullDuration));
 }
@@ -484,9 +492,9 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
       markLiveFetched(symbol, range);
     }
 
-    if (range === "1Y") return readDailyBars(tickerId, subtractDuration(new Date(), "1 Y"));
-    if (range === "5Y") return readWeeklyResampledBars(tickerId, subtractDuration(new Date(), "5 Y"));
-    return readWeeklyResampledBars(tickerId, null);
+    if (range === "1Y") return readDailyBars(tickerId, chartSince(symbol, subtractDuration(new Date(), "1 Y")));
+    if (range === "5Y") return readWeeklyResampledBars(tickerId, chartSince(symbol, subtractDuration(new Date(), "5 Y")));
+    return readWeeklyResampledBars(tickerId, chartSince(symbol, null));
   }
 
   const cfg = intradayConfig[range];
@@ -523,7 +531,7 @@ export async function fetchCachedPriceBars(symbol: string, range: ChartRange): P
 
   const tickerId = await resolveTickerId(symbol);
   if (tickerId && !(await needsLiveFetch(tickerId, symbol, range))) {
-    return readCachedBarsOnly(tickerId, range);
+    return readCachedBarsOnly(tickerId, symbol, range);
   }
   return withChartReadConnection((connection, reqId) => getCachedChartBars(connection, symbol, range, reqId));
 }
@@ -617,7 +625,7 @@ export async function fetchCachedIvBars(symbol: string, range: IvChartRange): Pr
 
   if (!tickerId) return [];
 
-  const since = range === "All" ? null : subtractDuration(new Date(), range === "1Y" ? "1 Y" : "5 Y");
+  const since = chartSince(symbol, range === "All" ? null : subtractDuration(new Date(), range === "1Y" ? "1 Y" : "5 Y"));
   const rows: { trading_date: string | Date; implied_volatility: string }[] = await db("daily_price_bars")
     .where({ ticker_id: tickerId })
     .whereNotNull("implied_volatility")

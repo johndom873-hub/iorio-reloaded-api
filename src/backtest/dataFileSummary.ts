@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { openBacktestDataFileReadOnly } from "./backtestDataFile.js";
-import { currentBusinessFromOf } from "./tickerBusinessChanges.js";
+import { currentBusinessFromOf } from "../lib/tickerBusinessChanges.js";
 import { countFileDailyBars } from "./backtestFileStockBars.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "./backtestDataDirectory.js";
 import { calendarDaysBetween } from "../lib/easternIsoDate.js";

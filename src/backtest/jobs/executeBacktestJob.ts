@@ -10,7 +10,7 @@ import { backtestRepoRoot, requireBacktestDataDirectory } from "../backtestDataD
 import { openBacktestDataFileReadOnly, readFirstOptionDay } from "../backtestDataFile.js";
 import { readFileDividendsFetchedAt, refreshFileDividends } from "../backtestFileDividends.js";
 import { describeFileStockBarsRefresh, FileOptionsPredateStockError, FileStockBarsCancelledError, fileWithoutStockBarsReason, refreshFileStockBars } from "../refreshFileStockBars.js";
-import { possibleBusinessChangeNotice } from "../tickerBusinessChanges.js";
+import { possibleBusinessChangeNotice } from "../../lib/tickerBusinessChanges.js";
 import { BacktestCancelledError, runBacktestSession } from "../engine/runBacktestSession.js";
 import { describeUnmatchedOptions, refreshSplitScheduleForSymbol, type SplitSchedule } from "../engine/splitFactors.js";
 import { runAnalysisJob } from "../analysis/runAnalysisJob.js";

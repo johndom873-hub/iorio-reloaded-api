@@ -702,12 +702,12 @@ describe("getCachedChartBars for 1Y / 5Y / All", () => {
     ]);
   });
 
-  it("serves All from the weekly resample with no lower date bound", async () => {
+  it("serves All from the weekly resample from 2006, the earliest history start (a ticker with no business change)", async () => {
     canned.latestDaily = "2026-10-05";
     mocks.lastCompletedSessionDate.mockResolvedValue("2026-10-05");
     canned.weeklyRows = [];
     expect(await getCachedChartBars(connection, uniqueSymbol(), "All")).toEqual([]);
-    expect(mocks.rawMock.mock.calls[0]![1]).toEqual([tickerId, null, null]);
+    expect(mocks.rawMock.mock.calls[0]![1]).toEqual([tickerId, "2006-01-01", "2006-01-01"]);
   });
 
   it("the weekly resample SQL takes the first open, the last close, the extreme high and low, and the summed volume of each ISO week", async () => {
@@ -951,12 +951,12 @@ describe("fetchCachedIvBars", () => {
     expect(readQueries.map((query) => operationArgs(query, "andWhere"))).toEqual([[["trading_date", ">=", "2025-10-06"]], [["trading_date", ">=", "2021-10-06"]]]);
   });
 
-  it("reads the whole history for All, with no date bound", async () => {
+  it("reads the history for All from 2006, the earliest history start", async () => {
     canned.latestDaily = "2026-10-05";
     mocks.lastCompletedSessionDate.mockResolvedValue("2026-10-05");
     await fetchCachedIvBars(uniqueSymbol(), "All");
     const readQuery = queriesOn("daily_price_bars").find((query) => operationArgs(query, "whereNotNull").length > 0)!;
-    expect(operationArgs(readQuery, "andWhere")).toEqual([]);
+    expect(operationArgs(readQuery, "andWhere")).toEqual([["trading_date", ">=", "2006-01-01"]]);
   });
 
   it("warms the cache through the shared connection first when it is stale, then reads", async () => {

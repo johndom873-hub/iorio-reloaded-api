@@ -7,7 +7,7 @@ import { backtestDataFilePath, requireBacktestDataDirectory } from "../backtestD
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { readFileDailyBars, readFileIntradayPrices } from "../backtestFileStockBars.js";
 import { listBacktestDataFileSymbols, readBacktestDataFileContents } from "../dataFileSummary.js";
-import { currentBusinessFromOf, rowsFrom } from "../tickerBusinessChanges.js";
+import { historyStartDateOf, rowsFrom } from "../../lib/tickerBusinessChanges.js";
 import { BacktestSymbolFile } from "../engine/backtestSymbolFile.js";
 import { loadBacktestBarHistory, type StoredDailyBar } from "../engine/backtestBarHistory.js";
 import { readSplitScheduleCache, refreshSplitScheduleForSymbol, type SplitSchedule } from "../engine/splitFactors.js";
@@ -58,7 +58,7 @@ import { sameDayMonthsBefore, sharesPerLot } from "./analysisSuitabilityRule.js"
 // backtest's figures (analysisBacktest.ts). The formulas are in FORMULAS.md, "Analyse window (Vol Farmer v4)".
 
 /** Bumped when a formula or the figures' shape changes: a stored analysis with an older version shows as such. */
-export const analysisFormulasVersion = 9;
+export const analysisFormulasVersion = 10;
 
 export type AnalysisStep = "bars" | "calls" | "earnings_correlation" | "saving" | "backtest";
 export const analysisSteps: readonly AnalysisStep[] = ["bars", "calls", "earnings_correlation", "saving", "backtest"];
@@ -230,14 +230,14 @@ export interface AnalysisFigureProgress {
 const addCalendarDays = (dateIso: string, days: number) => new Date(Date.parse(`${dateIso}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 const yearsBefore = (dateIso: string, years: number) => `${Number(dateIso.slice(0, 4)) - years}${dateIso.slice(4)}`;
 
-/** The symbol's IBKR daily bars as a session reads them: the file's, else the local DB's; from its business change, if any (tickerBusinessChanges.ts). */
+/** The symbol's IBKR daily bars as a session reads them: the file's, else the local DB's; from its history start (its business change, else 2006: tickerBusinessChanges.ts). */
 export async function loadDailyBarsOf(symbol: string, connection: Knex): Promise<{ bars: StoredDailyBar[]; source: "file" | "database" | null }> {
-  const currentBusinessFrom = currentBusinessFromOf(symbol);
+  const historyStartDate = historyStartDateOf(symbol);
   const database = openBacktestDataFileReadOnly(symbol);
   if (database) {
     try {
       const fileBars = readFileDailyBars(database);
-      if (fileBars && fileBars.length > 0) return { bars: rowsFrom(fileBars, currentBusinessFrom), source: "file" };
+      if (fileBars && fileBars.length > 0) return { bars: rowsFrom(fileBars, historyStartDate), source: "file" };
     } finally {
       database.close();
     }
@@ -245,7 +245,7 @@ export async function loadDailyBarsOf(symbol: string, connection: Knex): Promise
   const ticker: { id: string } | undefined = await connection("tickers").where({ symbol }).first("id");
   if (!ticker) return { bars: [], source: null };
   const history = await loadBacktestBarHistory(ticker.id, connection);
-  return { bars: rowsFrom(history.rows, currentBusinessFrom), source: history.rows.length > 0 ? "database" : null };
+  return { bars: rowsFrom(history.rows, historyStartDate), source: history.rows.length > 0 ? "database" : null };
 }
 
 /** What the file says about itself, tolerating files written before a table existed. */

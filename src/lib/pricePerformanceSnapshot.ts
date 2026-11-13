@@ -3,6 +3,8 @@ import { computeIvMetrics } from "./ivMetrics.js";
 import { lastCompletedSessionDate } from "./marketSessionStatus.js";
 import { computePriceTrend, type PriceTrend } from "./priceTrends.js";
 import { easternIsoDate } from "./easternIsoDate.js";
+import { historyStartDateOf, tickerBusinessChanges } from "./tickerBusinessChanges.js";
+import { fullDailyHistoryStartDate } from "../ibkr/historicalDataDuration.js";
 
 // Everything the Price Performance page shows except the live price: end-of-day
 // facts computed from daily_price_bars alone — zero IBKR calls at request time
@@ -142,20 +144,20 @@ export function classifyFreshness(latestDateBySymbol: Record<string, string>, ex
   return { behindSymbols: symbols.filter((symbol) => latestDateBySymbol[symbol]! < expectedSessionDate) };
 }
 
-// "latest" is the newest bar AT OR BEFORE the completed-session cutoff (the first `?` binding). The 1D/2D/3D closes are the
+// "latest" is the newest bar AT OR BEFORE the completed-session cutoff (its `?` binding). The 1D/2D/3D closes are the
 // closes before `sessionsBeforeSql`; 1W/1M/3M/1Y count calendar days back from `daysBackFromSql`. Stored changes: both are the
 // latest bar's date. Live changes: the day after it (so 1D is the latest close itself) and today's Eastern date.
 function referenceCloseJoins(prefix: string, sessionsBeforeSql: string, daysBackFromSql: string): string {
   const sessionsBack = (alias: string, offset: number) => `
   LEFT JOIN LATERAL (
     SELECT close_price FROM daily_price_bars
-    WHERE ticker_id = t.id AND trading_date < ${sessionsBeforeSql}
+    WHERE ticker_id = t.id AND trading_date < ${sessionsBeforeSql} AND trading_date >= history_start.start_date
     ORDER BY trading_date DESC OFFSET ${offset} LIMIT 1
   ) ${prefix}${alias} ON true`;
   const daysBack = (alias: string, days: number) => `
   LEFT JOIN LATERAL (
     SELECT close_price FROM daily_price_bars
-    WHERE ticker_id = t.id AND trading_date <= ${daysBackFromSql} - INTERVAL '${days} days'
+    WHERE ticker_id = t.id AND trading_date <= ${daysBackFromSql} - INTERVAL '${days} days' AND trading_date >= history_start.start_date
     ORDER BY trading_date DESC LIMIT 1
   ) ${prefix}${alias} ON true`;
   return [sessionsBack("d1", 0), sessionsBack("d2", 1), sessionsBack("d3", 2), daysBack("wk", 7), daysBack("mo", 30), daysBack("q", 91), daysBack("yr", 365)].join("");
@@ -214,18 +216,20 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
       m.avg_option_volume AS "avgOptionVolume"
     FROM tickers t
     JOIN shortlist_entries se ON se.ticker_id = t.id AND se.removed_at IS NULL
+    -- Nothing before the ticker's history start is read: its business change, else 2006 (tickerBusinessChanges.ts).
+    CROSS JOIN LATERAL (SELECT COALESCE((?::jsonb ->> t.symbol)::date, ?::date) AS start_date) history_start
     ${historicalCloseJoins}
     LEFT JOIN LATERAL (
       SELECT MIN(low_price) AS low, MAX(high_price) AS high FROM daily_price_bars
-      WHERE ticker_id = t.id AND trading_date <= latest.trading_date AND trading_date >= latest.trading_date - INTERVAL '7 days'
+      WHERE ticker_id = t.id AND trading_date <= latest.trading_date AND trading_date >= latest.trading_date - INTERVAL '7 days' AND trading_date >= history_start.start_date
     ) wkrange ON true
     LEFT JOIN LATERAL (
       SELECT MIN(low_price) AS low, MAX(high_price) AS high FROM daily_price_bars
-      WHERE ticker_id = t.id AND trading_date <= latest.trading_date AND trading_date >= latest.trading_date - INTERVAL '30 days'
+      WHERE ticker_id = t.id AND trading_date <= latest.trading_date AND trading_date >= latest.trading_date - INTERVAL '30 days' AND trading_date >= history_start.start_date
     ) morange ON true
     LEFT JOIN LATERAL (
       SELECT trading_date, close_price FROM daily_price_bars
-      WHERE ticker_id = t.id AND trading_date <= latest.trading_date
+      WHERE ticker_id = t.id AND trading_date <= latest.trading_date AND trading_date >= history_start.start_date
       ORDER BY close_price DESC, trading_date DESC
       LIMIT 1
     ) peak ON true
@@ -239,7 +243,7 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
     ) m ON true
     ORDER BY t.symbol
   `,
-    [completedThroughDate, liveReferenceDate],
+    [JSON.stringify(Object.fromEntries(tickerBusinessChanges.map((change) => [change.symbol, historyStartDateOf(change.symbol)]))), fullDailyHistoryStartDate, completedThroughDate, liveReferenceDate],
   );
   const rawRows = result.rows as RawRow[];
 
@@ -247,10 +251,12 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
   // per ticker per page load). Completed bars only, ascending.
   const closesByTickerId = new Map<string, number[]>();
   if (rawRows.length > 0) {
+    const historyStartByTickerId = Object.fromEntries(rawRows.map((row) => [row.tickerId, historyStartDateOf(row.symbol)]));
     const barRows: { ticker_id: string; close_price: string }[] = await db("daily_price_bars")
       .whereIn("ticker_id", rawRows.map((row) => row.tickerId))
       .andWhere("trading_date", "<=", completedThroughDate)
       .andWhereRaw(`trading_date >= ?::date - INTERVAL '${trendHistoryYears} year'`, [completedThroughDate])
+      .andWhereRaw("trading_date >= (?::jsonb ->> ticker_id::text)::date", [JSON.stringify(historyStartByTickerId)])
       .orderBy([{ column: "ticker_id" }, { column: "trading_date", order: "asc" }])
       .select("ticker_id", "close_price");
     for (const bar of barRows) {
