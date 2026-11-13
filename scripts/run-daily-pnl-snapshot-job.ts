@@ -74,6 +74,7 @@ import { writeBookValueSnapshots } from "../src/books/bookSnapshots.js";
 import { fillWorthlessExpiredOptionPrices } from "../src/lib/expiredOptionWorthlessPrice.js";
 import { fetchOpenLegsOfOpenPositions, type OpenPositionLegRow } from "../src/lib/openPositionLegsForPnlSnapshot.js";
 import { sendLeapsExpiryWarnings } from "../src/lib/leapsExpiryWarnings.js";
+import { checkFlexTokenExpiry } from "../src/lib/flexTokenExpiryNotice.js";
 
 interface RecentAccountSnapshotRow {
   snapshotDate: string;
@@ -448,6 +449,14 @@ async function main(): Promise<void> {
     } catch (error) {
       console.error(`LEAPS expiry warnings failed: ${describeError(error)}`);
       problems.push({ message: `LEAPS expiry warnings failed - ${describeError(error).split("\n")[0]}`, errorCount: 1, nothingUsable: false });
+    }
+    // Flex token expiry notice (flexTokenExpiryNotice.ts): the Flex API does not say when a token expires.
+    try {
+      const flexTokenCheck = await checkFlexTokenExpiry(snapshotDate);
+      if (flexTokenCheck.problem) problems.push({ message: flexTokenCheck.problem, errorCount: 1, nothingUsable: false });
+    } catch (error) {
+      console.error(`Flex token expiry check failed: ${describeError(error)}`);
+      problems.push({ message: `Flex token expiry check failed - ${describeError(error).split("\n")[0]}`, errorCount: 1, nothingUsable: false });
     }
     if (!accountSnapshotWritten) problems.push({ message: `account-level P&L failed for ${snapshotDate} - ${accountSnapshotError}`, errorCount: 1, nothingUsable: true });
     if (greeksFailure) problems.push({ message: greeksFailure, errorCount: legsWithoutGreeks.length, nothingUsable: false });
