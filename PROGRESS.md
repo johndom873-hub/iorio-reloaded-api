@@ -17,6 +17,7 @@ Plain language: the Pulse map's Genosuke card now shows Pluto: its status (the s
 - Data: `GET /pluto/state` every 30 s with the health poll, status from `derivePlutoStatus` (no backend change). Orders today amber from 80% of the cap, red at it; heartbeat red past 150 s. Phone status light "Pluto" follows the status.
 - Lines: Heroku → Pluto and Pluto → Database; Pluto → Database flashes on `order_built`/`order_confirmed`/`order_repriced`/`order_outcome`. The LLM card stays, unlinked (Marcelo); Genosuke's pulses are dropped. Genosuke's server code is unchanged.
 - Checked locally with Playwright at 1706, 1440 and 390 px (Waiting, Paused, Stopped, Off, Not responding; local Pluto state restored after); Running and Held need the trading window and were not seen live.
+- Attention pill (Marcelo 2026-11-13, app `4b6e772`): Pulse's red "ATTENTION NEEDED" now also lists Pluto when it is not responding, stopped by a breaker, paused by itself (crash loop, failed 9:20 ET check) or held; a pause someone chose, off, waiting and running don't count. Held repeats the Gateway reason when the worker is offline (Marcelo chose Held anyway). Checked locally for all but Held, desktop and phone.
 
 ## Prod promotion and Pluto live on prod (Marcelo 2026-11-09)
 Plain language: Pluto now trades the live account with $800,000 of its own, on 10 tickers; the rest of the new $1,050,000 deposit ($250,000) went to Manual. First live session: Mon 9 Nov.
