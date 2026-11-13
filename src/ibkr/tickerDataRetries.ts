@@ -12,10 +12,10 @@ import { connectToIbkrGateway, type IbkrConnection } from "./connectIbkr.js";
 import { IbkrLookupTimeoutError, refreshStoredOptionChain } from "./fetchOptionChain.js";
 import { orderPlutoTickersFirst, refreshTickerStructure } from "./runOptionChainStructureRefresh.js";
 import { nextReqIdFor } from "./sharedReadConnection.js";
-import { enqueueTickerIbkrWork, fetchAndStoreFiveYearHistory } from "./tickerBackfillPipeline.js";
+import { enqueueTickerIbkrWork, fetchAndStoreFullDailyHistory } from "./tickerBackfillPipeline.js";
 
 // Automatic retries (Marcelo 2026-11-09): a ticker left without today's option chain (the 09:00 UTC structure job stopped
-// at a timeout, or a new ticker's setup failed its chain step) or without its 5-year daily history (a setup's history step
+// at a timeout, or a new ticker's setup failed its chain step) or without its daily history back to 2006 (a setup's history step
 // failed) is tried again every 10 minutes, 3 tries a day, through the same queue as new-ticker setups, so two never ask the
 // Gateway at once. A ticker still missing it after its last try raises one alert with the Shortlist action that fixes it.
 
@@ -48,7 +48,7 @@ export interface TickerDataRetryRow {
 
 const kindLabels: Record<TickerDataKind, { what: string; shortlistAction: string }> = {
   option_chain: { what: "option chain", shortlistAction: "Populate Option Chain" },
-  daily_bars_history: { what: "5-year daily history", shortlistAction: "Populate Daily Bars" },
+  daily_bars_history: { what: "daily history back to 2006", shortlistAction: "Populate Daily Bars" },
 };
 
 /** From 09:10 UTC to the 16:00 ET close: e.g. 09:05 UTC no, 14:00 UTC yes, 21:30 UTC (16:30 ET in winter) no. */
@@ -133,7 +133,7 @@ async function loadOptionChainNeeds(tradingDateIso: string): Promise<Omit<Ticker
   return universe.filter((ticker) => fetchedDateByTicker.get(ticker.tickerId) !== tradingDateIso);
 }
 
-/** Shortlisted tickers, none being set up, whose 5-year history is missing or incomplete (the "full" plan). */
+/** Shortlisted tickers, none being set up, whose daily history is missing or short of ~5 years (the "full" plan). */
 async function loadDailyBarsHistoryNeeds(now: Date): Promise<Omit<TickerDataNeed, "kind">[]> {
   const shortlisted: { tickerId: string; symbol: string; contractId: string | number | null }[] = await excludeTickersBeingPrepared(
     db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").whereNull("se.removed_at").select("t.id as tickerId", "t.symbol", "t.ibkr_contract_id as contractId").orderBy("t.symbol"),
@@ -189,7 +189,7 @@ export const defaultTickerDataRetryDependencies: TickerDataRetryDependencies = {
     await refreshTickerStructure(refreshStoredOptionChain, connection.ib, need, tradingDateIso, spotPrice);
   },
   fetchDailyBarsHistory: async (connection, need) => {
-    await fetchAndStoreFiveYearHistory(connection, need.tickerId, need.symbol, { reqId: nextReqIdFor(connection.ib, () => 1) });
+    await fetchAndStoreFullDailyHistory(connection, need.tickerId, need.symbol, { reqId: nextReqIdFor(connection.ib, () => 1) });
     invalidatePricePerformanceSnapshot();
   },
   alert: notifyTelegramTracked,
@@ -202,7 +202,7 @@ export type TickerDataRetryPassResult =
   | { ran: true; outcomes: TickerDataRetryOutcome[]; stoppedAfterTimeout: string | null; notTried: string[] };
 
 /**
- * One pass: every ticker missing today's option chain, then every one missing its 5-year history, Pluto's first, each tried
+ * One pass: every ticker missing today's option chain, then every one missing its history back to 2006, Pluto's first, each tried
  * once if it has tries left today. An IBKR timeout ends the pass (the next one, 10 minutes later, goes on), as the morning job
  * does: the request that timed out cannot be cancelled. A connection that fails costs no ticker a try.
  */

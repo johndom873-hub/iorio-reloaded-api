@@ -18,7 +18,7 @@ export const staleBackfillRunMinutes = 30;
 
 export function buildInitialBackfillSteps(): BackfillStep[] {
   return [
-    { key: "history", label: "Price and implied-volatility history (5 years)", status: "pending", message: null },
+    { key: "history", label: "Price and implied-volatility history (from 2006)", status: "pending", message: null },
     { key: "calendar", label: "Earnings and dividend calendar", status: "pending", message: null },
     { key: "chain_warmup", label: "Option chain strikes (0-90 days)", status: "pending", message: null },
   ];

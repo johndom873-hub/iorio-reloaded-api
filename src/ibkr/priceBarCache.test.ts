@@ -250,9 +250,9 @@ describe("dailyTopUpDurationFor", () => {
     expect(dailyTopUpDurationFor(new Date("2025-10-06T15:00:00Z"), now)).toBe("367 D");
   });
 
-  it("falls back to the full 20 Y backfill when the gap exceeds 365 days", () => {
-    expect(dailyTopUpDurationFor(new Date("2025-10-05T15:00:00Z"), now)).toBe("20 Y");
-    expect(dailyTopUpDurationFor(new Date("2020-01-01T00:00:00Z"), now)).toBe("20 Y");
+  it("falls back to the full history, back to 2006-01-01 (20.8 years before 2026-10-06: 21 Y), when the gap exceeds 365 days", () => {
+    expect(dailyTopUpDurationFor(new Date("2025-10-05T15:00:00Z"), now)).toBe("21 Y");
+    expect(dailyTopUpDurationFor(new Date("2020-01-01T00:00:00Z"), now)).toBe("21 Y");
   });
 });
 
@@ -485,8 +485,8 @@ describe("fetchDailyHistoryFromIbkr", () => {
     const result = await fetchDailyHistoryFromIbkr(connection, "SPY", "1 Y", 5);
     expect(result.bars).toEqual([dailyBar("2026-10-02", 100)]);
     expect([...result.ivByDate.entries()]).toEqual([["2026-10-02", 0.31]]);
-    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, "SPY", BarSizeSetting.DAYS_ONE, "1 Y", 5]);
-    expect(mocks.fetchHistoricalBarsRaw.mock.calls[1]).toEqual([connection, "SPY", BarSizeSetting.DAYS_ONE, "1 Y", 1005, WhatToShow.OPTION_IMPLIED_VOLATILITY]);
+    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, "SPY", BarSizeSetting.DAYS_ONE, "1 Y", 5, WhatToShow.TRADES, { timeoutMs: 120_000 }]);
+    expect(mocks.fetchHistoricalBarsRaw.mock.calls[1]).toEqual([connection, "SPY", BarSizeSetting.DAYS_ONE, "1 Y", 1005, WhatToShow.OPTION_IMPLIED_VOLATILITY, { timeoutMs: 120_000 }]);
   });
 
   it("keeps the price bars with an empty IV map when the IV request fails", async () => {
@@ -530,19 +530,19 @@ describe("backfillTickerHistoryWhenShort", () => {
 
   it("backfills 1 Y of prices and IV for a held ticker with 19 bars (TLT on prod, 2026-11-02)", async () => {
     canned.countRow = { totalBars: "19", ivBars: "19" };
-    mocks.fetchHistoricalBarsRaw.mockImplementation(async (_connection, _symbol, _barSize, _duration, _reqId, whatToShow) => (whatToShow ? [] : [dailyBar("2026-10-02", 81.5), dailyBar("2026-10-05", 81.7)]));
+    mocks.fetchHistoricalBarsRaw.mockImplementation(async (_connection, _symbol, _barSize, _duration, _reqId, whatToShow) => (whatToShow === WhatToShow.OPTION_IMPLIED_VOLATILITY ? [] : [dailyBar("2026-10-02", 81.5), dailyBar("2026-10-05", 81.7)]));
     expect(await backfillTickerHistoryWhenShort(connection, tickerId, "TLT", 7)).toBe(2);
-    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, "TLT", BarSizeSetting.DAYS_ONE, "1 Y", 7]);
+    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, "TLT", BarSizeSetting.DAYS_ONE, "1 Y", 7, WhatToShow.TRADES, { timeoutMs: 120_000 }]);
     expect(mocks.fetchHistoricalBarsRaw.mock.calls[1]![3]).toBe("1 Y");
     expect(mocks.fetchHistoricalBarsRaw.mock.calls[1]![5]).toBe(WhatToShow.OPTION_IMPLIED_VOLATILITY);
   });
 });
 
 describe("topUpDailyBars", () => {
-  it("backfills 20 Y when the ticker has no daily bar yet", async () => {
+  it("backfills the full history (back to 2006: 21 Y) when the ticker has no daily bar yet", async () => {
     canned.latestDaily = null;
     await topUpDailyBars(connection, tickerId, "SPY", 3);
-    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, "SPY", BarSizeSetting.DAYS_ONE, "20 Y", 3]);
+    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, "SPY", BarSizeSetting.DAYS_ONE, "21 Y", 3, WhatToShow.TRADES, { timeoutMs: 120_000 }]);
   });
 
   it("sizes the window from the gap since the newest stored bar (Oct 1 to Oct 6 15:00 is 6 days: 6 + 2 = 8 D)", async () => {
@@ -554,7 +554,7 @@ describe("topUpDailyBars", () => {
   it("reports the count and the first and last UTC trading date of what was fetched, however the bars are ordered", async () => {
     canned.latestDaily = "2026-10-01";
     mocks.fetchHistoricalBarsRaw.mockImplementation(async (_connection, _symbol, _barSize, _duration, _reqId, whatToShow) =>
-      whatToShow ? [] : [dailyBar("2026-10-05", 102), dailyBar("2026-10-02", 100), dailyBar("2026-10-06", 103)],
+      whatToShow === WhatToShow.OPTION_IMPLIED_VOLATILITY ? [] : [dailyBar("2026-10-05", 102), dailyBar("2026-10-02", 100), dailyBar("2026-10-06", 103)],
     );
     expect(await topUpDailyBars(connection, tickerId, "SPY")).toEqual({ barCount: 3, firstTradingDate: "2026-10-02", lastTradingDate: "2026-10-06" });
     // 10-06 is still trading (last completed session 10-05): fetched and reported, not stored.
@@ -600,7 +600,7 @@ describe("getCachedChartBars for 1Y / 5Y / All", () => {
     { trading_date: "2026-10-02", open_price: 101, high_price: 103, low_price: 100, close_price: 102.5, volume: 1800 },
   ];
 
-  it("cold-backfills 20 Y of prices and IV, stores them, then reads 1Y back from the cache", async () => {
+  it("cold-backfills the full history (21 Y) of prices and IV, stores them, then reads 1Y back from the cache", async () => {
     const symbol = uniqueSymbol();
     canned.latestDaily = null;
     canned.dailyRows = cachedRows;
@@ -610,8 +610,8 @@ describe("getCachedChartBars for 1Y / 5Y / All", () => {
 
     const bars = await getCachedChartBars(connection, symbol, "1Y", 4);
 
-    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, symbol, BarSizeSetting.DAYS_ONE, "20 Y", 4]);
-    expect(mocks.fetchHistoricalBarsRaw.mock.calls[1]).toEqual([connection, symbol, BarSizeSetting.DAYS_ONE, "20 Y", 1004, WhatToShow.OPTION_IMPLIED_VOLATILITY]);
+    expect(mocks.fetchHistoricalBarsRaw.mock.calls[0]).toEqual([connection, symbol, BarSizeSetting.DAYS_ONE, "21 Y", 4, WhatToShow.TRADES, { timeoutMs: 120_000 }]);
+    expect(mocks.fetchHistoricalBarsRaw.mock.calls[1]).toEqual([connection, symbol, BarSizeSetting.DAYS_ONE, "21 Y", 1004, WhatToShow.OPTION_IMPLIED_VOLATILITY, { timeoutMs: 120_000 }]);
     expect(insertedRows("daily_price_bars").map((row) => [row.trading_date, row.implied_volatility])).toEqual([
       ["2026-10-02", 0.3],
       ["2026-10-05", null],

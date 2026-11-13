@@ -6,7 +6,7 @@ import { ibkrNoSecurityDefinitionErrorCode } from "../ibkr/fetchNewTickerData.js
 import { UnknownSymbolError } from "../ibkr/findOrCreateTicker.js";
 import { detectPriceAdjustment, tradingDateOf, type StoredBarPrices } from "../ibkr/dailyBarSplitCheck.js";
 import { fetchHistoricalBarsRaw, type PriceBar } from "../ibkr/fetchTickerOverview.js";
-import { historyDurationReaching } from "../ibkr/historicalDataDuration.js";
+import { fullDailyHistoryRequestTimeoutMs, historyDurationReaching } from "../ibkr/historicalDataDuration.js";
 import { ivBarsToDateMap, storeFreshDailyBars } from "../ibkr/priceBarCache.js";
 import { summarizeBackfillBars } from "../lib/backfillBarSummary.js";
 import { normalizeBarVolume } from "../lib/normalizeBarVolume.js";
@@ -109,25 +109,27 @@ export async function fillMissingImpliedVolatility(tickerId: string, impliedVola
 }
 
 /**
- * Fetches the ticker's daily bars and implied volatility from `backtestHistoryStartDate` to now (2 historical requests)
+ * Fetches the ticker's daily bars and implied volatility from `historyStartDate` (default `backtestHistoryStartDate`) to now (2 historical requests)
  * and stores what is missing up to `lastDateToStore` (the last finished session, so a still-forming bar is never stored).
  * Throws when the bars request fails; an implied-volatility failure is reported in the result.
  */
 export async function backfillDailyHistoryForBacktest(
   connection: IbkrConnection,
   ticker: { id: string; symbol: string },
-  options: { lastDateToStore: string; nextRequestId: () => number; now?: Date },
+  options: { lastDateToStore: string; nextRequestId: () => number; now?: Date; historyStartDate?: string },
 ): Promise<BacktestHistoryBackfillResult> {
   const before = await loadStoredRange(ticker.id, db);
-  const duration = historyDurationReaching(backtestHistoryStartDate, options.now ?? new Date());
+  const historyStartDate = options.historyStartDate ?? backtestHistoryStartDate;
+  const duration = historyDurationReaching(historyStartDate, options.now ?? new Date());
+  const requestOptions = { timeoutMs: fullDailyHistoryRequestTimeoutMs };
   const isInRange = (bar: PriceBar) => {
     const tradingDate = tradingDateOf(bar);
-    return tradingDate >= backtestHistoryStartDate && tradingDate <= options.lastDateToStore;
+    return tradingDate >= historyStartDate && tradingDate <= options.lastDateToStore;
   };
 
-  const bars = (await fetchHistoricalBarsRaw(connection, ticker.symbol, BarSizeSetting.DAYS_ONE, duration, options.nextRequestId())).filter(isInRange);
+  const bars = (await fetchHistoricalBarsRaw(connection, ticker.symbol, BarSizeSetting.DAYS_ONE, duration, options.nextRequestId(), WhatToShow.TRADES, requestOptions)).filter(isInRange);
   let impliedVolatilityError: string | null = null;
-  const impliedVolatilityBars = await fetchHistoricalBarsRaw(connection, ticker.symbol, BarSizeSetting.DAYS_ONE, duration, options.nextRequestId(), WhatToShow.OPTION_IMPLIED_VOLATILITY).catch((error: unknown) => {
+  const impliedVolatilityBars = await fetchHistoricalBarsRaw(connection, ticker.symbol, BarSizeSetting.DAYS_ONE, duration, options.nextRequestId(), WhatToShow.OPTION_IMPLIED_VOLATILITY, requestOptions).catch((error: unknown) => {
     impliedVolatilityError = error instanceof Error ? error.message : String(error);
     return [] as PriceBar[];
   });

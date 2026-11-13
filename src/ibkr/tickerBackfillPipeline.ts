@@ -1,6 +1,7 @@
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { fetchDailyHistoryFromIbkr, storeFreshDailyBars } from "./priceBarCache.js";
+import { fullDailyHistoryDuration } from "./historicalDataDuration.js";
 import { refreshStoredOptionChain, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import { captureTickerCalendarEvents } from "../lib/tradingviewCalendarService.js";
 import { captureHistoricalEarnings } from "../lib/apiNinjasEarningsService.js";
@@ -25,8 +26,6 @@ import {
 // that can be backfilled for a ticker, reporting step-by-step progress to
 // ticker_backfill_runs (streamed to the shortlist progress modal). Replaces
 // the old fire-and-forget 1-year backfill in findOrCreateTicker.ts.
-
-export const fiveYearHistoryDuration = "5 Y";
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
@@ -58,8 +57,9 @@ export interface HistoryStepResult {
   invalidBarDates: string[];
 }
 
-export async function fetchAndStoreFiveYearHistory(connection: IbkrConnection, tickerId: string, symbol: string, options: { dryRun?: boolean; reqId?: number } = {}): Promise<HistoryStepResult> {
-  const { bars, ivByDate } = await fetchDailyHistoryFromIbkr(connection, symbol, fiveYearHistoryDuration, options.reqId ?? 1);
+/** The ticker's full daily history and implied volatility, back to 2006 or its listing (historicalDataDuration.ts). */
+export async function fetchAndStoreFullDailyHistory(connection: IbkrConnection, tickerId: string, symbol: string, options: { dryRun?: boolean; reqId?: number } = {}): Promise<HistoryStepResult> {
+  const { bars, ivByDate } = await fetchDailyHistoryFromIbkr(connection, symbol, fullDailyHistoryDuration(new Date()), options.reqId ?? 1);
   const ohlcvBars: DailyOhlcvBar[] = bars.map((bar) => ({ tradingDate: new Date(bar.time * 1000).toISOString().slice(0, 10), open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume }));
   const summary = summarizeBackfillBars(ohlcvBars);
   if (!options.dryRun) await storeFreshDailyBars(connection, tickerId, symbol, { bars, ivByDate }, options.reqId ?? 1);
@@ -165,7 +165,7 @@ export const databaseRunStore: BackfillRunStore = {
 
 const defaultStepWorkers: BackfillStepWorkers = {
   connect: connectToIbkrGateway,
-  fetchHistory: (connection, tickerId, symbol) => fetchAndStoreFiveYearHistory(connection, tickerId, symbol),
+  fetchHistory: (connection, tickerId, symbol) => fetchAndStoreFullDailyHistory(connection, tickerId, symbol),
   captureCalendar: async (tickerId, symbol) => {
     // TradingView (forward-looking next/most-recent earnings + dividends) and API Ninjas (full earnings
     // history) are independent sources writing into the same table -- run them in parallel, not gated on

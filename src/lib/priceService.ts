@@ -90,11 +90,16 @@ export async function loadFallbackStockPrices(symbols: string[]): Promise<Map<st
   try {
     const [knownRows, barRows] = await Promise.all([
       db("last_known_prices").whereIn("symbol", unique).select("symbol", "price", "as_of", "source"),
+      // The newest bar per ticker through the (ticker_id, trading_date) index, not a sort of every stored bar.
       db.raw(
-        `SELECT DISTINCT ON (t.symbol) t.symbol, b.close_price::float AS price, b.trading_date::text AS date
-         FROM daily_price_bars b JOIN tickers t ON t.id = b.ticker_id
-         WHERE t.symbol = ANY(?) AND b.close_price IS NOT NULL
-         ORDER BY t.symbol, b.trading_date DESC`,
+        `SELECT t.symbol, b.close_price::float AS price, b.trading_date::text AS date
+         FROM tickers t
+         JOIN LATERAL (
+           SELECT close_price, trading_date FROM daily_price_bars
+           WHERE ticker_id = t.id AND close_price IS NOT NULL
+           ORDER BY trading_date DESC LIMIT 1
+         ) b ON true
+         WHERE t.symbol = ANY(?)`,
         [unique],
       ),
     ]);

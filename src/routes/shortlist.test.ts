@@ -47,13 +47,13 @@ vi.mock("../pluto/ledger.js", async () => {
 });
 
 const startTickerBackfillMock = vi.fn();
-const fetchAndStoreFiveYearHistoryMock = vi.fn();
+const fetchAndStoreFullDailyHistoryMock = vi.fn();
 vi.mock("../ibkr/tickerBackfillPipeline.js", async () => {
   const actual = await vi.importActual<typeof import("../ibkr/tickerBackfillPipeline.js")>("../ibkr/tickerBackfillPipeline.js");
   return {
     ...actual,
     startTickerBackfill: (...args: unknown[]) => startTickerBackfillMock(...args),
-    fetchAndStoreFiveYearHistory: (...args: unknown[]) => fetchAndStoreFiveYearHistoryMock(...args),
+    fetchAndStoreFullDailyHistory: (...args: unknown[]) => fetchAndStoreFullDailyHistoryMock(...args),
   };
 });
 
@@ -145,7 +145,7 @@ beforeEach(() => {
   fetchNewTickerDataMock.mockReset();
   recordPlutoEventMock.mockReset().mockResolvedValue(undefined);
   startTickerBackfillMock.mockReset().mockImplementation(async (tickerId: string) => fakeBackfillRun(tickerId));
-  fetchAndStoreFiveYearHistoryMock.mockReset();
+  fetchAndStoreFullDailyHistoryMock.mockReset();
   topUpDailyBarsMock.mockReset();
   borrowSharedConnectionOrConnectMock.mockReset();
   nextReqIdForMock.mockReset().mockReturnValue(7);
@@ -783,11 +783,11 @@ describe("POST /shortlist/:tickerId/populate-daily-bars", () => {
     const ticker = await insertTicker();
     const connection = fakeConnection();
     loadDailyBarsStatusMock.mockResolvedValue({ dailyBarsPlan: "full" });
-    fetchAndStoreFiveYearHistoryMock.mockResolvedValue({ barCount: 1250, ivPointCount: 1200 });
+    fetchAndStoreFullDailyHistoryMock.mockResolvedValue({ barCount: 1250, ivPointCount: 1200 });
 
     expect(await callStreamed(`/${ticker.id}/populate-daily-bars`)).toEqual({ status: 200, body: { plan: "full", barCount: 1250, ivPointCount: 1200 } });
     expect(borrowSharedConnectionOrConnectMock).toHaveBeenCalledWith(fakeSharedReadConnection, "populate-daily-bars");
-    expect(fetchAndStoreFiveYearHistoryMock).toHaveBeenCalledWith(connection, ticker.id, ticker.symbol, { reqId: 7 });
+    expect(fetchAndStoreFullDailyHistoryMock).toHaveBeenCalledWith(connection, ticker.id, ticker.symbol, { reqId: 7 });
     expect(topUpDailyBarsMock).not.toHaveBeenCalled();
     expect(connection.disconnect).toHaveBeenCalledTimes(1);
     expect(invalidatePricePerformanceSnapshotMock).toHaveBeenCalledTimes(1);
@@ -801,14 +801,14 @@ describe("POST /shortlist/:tickerId/populate-daily-bars", () => {
 
     expect(await callStreamed(`/${ticker.id}/populate-daily-bars`)).toEqual({ status: 200, body: { plan: "topUp", barsFetched: 3 } });
     expect(topUpDailyBarsMock).toHaveBeenCalledWith(connection, ticker.id, ticker.symbol, 7);
-    expect(fetchAndStoreFiveYearHistoryMock).not.toHaveBeenCalled();
+    expect(fetchAndStoreFullDailyHistoryMock).not.toHaveBeenCalled();
     expect(connection.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it("decides the plan from the stored data: a ticker with no bars gets the full fetch", async () => {
     const ticker = await insertTicker();
     fakeConnection();
-    fetchAndStoreFiveYearHistoryMock.mockResolvedValue({ barCount: 0 });
+    fetchAndStoreFullDailyHistoryMock.mockResolvedValue({ barCount: 0 });
 
     expect((await callStreamed(`/${ticker.id}/populate-daily-bars`)).body.plan).toBe("full");
   });
@@ -817,7 +817,7 @@ describe("POST /shortlist/:tickerId/populate-daily-bars", () => {
     const ticker = await insertTicker();
     const connection = fakeConnection();
     loadDailyBarsStatusMock.mockResolvedValue({ dailyBarsPlan: "full" });
-    fetchAndStoreFiveYearHistoryMock.mockRejectedValue(new Error("pacing violation"));
+    fetchAndStoreFullDailyHistoryMock.mockRejectedValue(new Error("pacing violation"));
 
     expect(await callStreamed(`/${ticker.id}/populate-daily-bars`)).toEqual({ status: 500, body: { error: "pacing violation" } });
     expect(connection.disconnect).toHaveBeenCalledTimes(1);

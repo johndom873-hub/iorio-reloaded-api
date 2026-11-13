@@ -168,7 +168,7 @@ describe("runTickerDataRetryPass", () => {
 describe("the texts", () => {
   it("names the ticker, what is missing, the last error and the Shortlist action", () => {
     expect(describeTickerDataGaveUp("XLE", "daily_bars_history", "Historical data timeout for XLE")).toBe(
-      "⚠️ XLE: the 5-year daily history is still missing after 3 tries today (Historical data timeout for XLE). Shortlist → XLE → Actions → Populate Daily Bars.",
+      "⚠️ XLE: the daily history back to 2006 is still missing after 3 tries today (Historical data timeout for XLE). Shortlist → XLE → Actions → Populate Daily Bars.",
     );
   });
 
@@ -177,7 +177,7 @@ describe("the texts", () => {
     const xle = { ...need("XLE"), kind: "daily_bars_history" as const };
     expect(
       describeTickerDataRetryPass({ ran: true, outcomes: [{ need: xle, attempt: 1, result: "done" }, { need: tlt, attempt: 2, result: "failed", message: "timed out", gaveUp: false }], stoppedAfterTimeout: "TLT", notTried: ["KORU option chain"] }),
-    ).toBe("Ticker data retry: XLE 5-year daily history (try 1 of 3): done; TLT option chain (try 2 of 3): failed — timed out; stopped after TLT's IBKR timeout; next pass in 10 minutes (not tried: KORU option chain).");
+    ).toBe("Ticker data retry: XLE daily history back to 2006 (try 1 of 3): done; TLT option chain (try 2 of 3): failed — timed out; stopped after TLT's IBKR timeout; next pass in 10 minutes (not tried: KORU option chain).");
     expect(describeTickerDataRetryPass({ ran: false, reason: "nothing_due" })).toBeNull();
   });
 });

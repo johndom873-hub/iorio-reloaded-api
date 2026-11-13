@@ -36,6 +36,8 @@ interface RawRow {
   weeklyHigh: string;
   monthlyLow: string;
   monthlyHigh: string;
+  peakClose: string | null;
+  peakDate: string | null;
   impliedVolatility: string | null;
   avgOptionVolume: string | null;
 }
@@ -78,6 +80,11 @@ export interface PricePerformanceRow extends PriceTrend {
    * 1W / 1M / 3M / 1Y: the last close on or before 7 / 30 / 91 / 365 days before today's Eastern date (meta.liveReferenceDate).
    */
   liveReferenceCloses: ReferenceCloses;
+  /** The highest daily close stored up to the latest one (back to 2006 or the listing); the most recent day on a tie. */
+  peakClose: number | null;
+  peakDate: string | null;
+  /** The latest close vs peakClose (drawdownFromPeak). The browser recomputes it against the live price. */
+  drawdown: number | null;
   impliedVolatility: string | null;
   avgOptionVolume: string | null;
   ivRank: number | null;
@@ -118,6 +125,15 @@ function toNumberOrNull(value: string | null): number | null {
 export function percentChange(current: number, reference: number | null): number | null {
   if (reference === null || reference === 0) return null;
   return ((current - reference) / reference) * 100;
+}
+
+/**
+ * Drawdown (Marcelo 2026-11-13): how far a price is below the peak close, (price ÷ peak − 1) × 100; 0 at or above the
+ * peak. Peak $50.00, last close $40.00: −20%. Null without a peak.
+ */
+export function drawdownFromPeak(price: number, peakClose: number | null): number | null {
+  if (peakClose === null || peakClose === 0) return null;
+  return price >= peakClose ? 0 : (price / peakClose - 1) * 100;
 }
 
 /** Pure freshness rule, exported for tests: which tickers' latest completed bar predates the expected session. */
@@ -192,6 +208,8 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
       wkrange.high AS "weeklyHigh",
       morange.low AS "monthlyLow",
       morange.high AS "monthlyHigh",
+      peak.close_price AS "peakClose",
+      to_char(peak.trading_date, 'YYYY-MM-DD') AS "peakDate",
       m.implied_volatility AS "impliedVolatility",
       m.avg_option_volume AS "avgOptionVolume"
     FROM tickers t
@@ -205,6 +223,12 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
       SELECT MIN(low_price) AS low, MAX(high_price) AS high FROM daily_price_bars
       WHERE ticker_id = t.id AND trading_date <= latest.trading_date AND trading_date >= latest.trading_date - INTERVAL '30 days'
     ) morange ON true
+    LEFT JOIN LATERAL (
+      SELECT trading_date, close_price FROM daily_price_bars
+      WHERE ticker_id = t.id AND trading_date <= latest.trading_date
+      ORDER BY close_price DESC, trading_date DESC
+      LIMIT 1
+    ) peak ON true
     -- The IV snapshot of the ticker's latest bar only: an older one would be stale.
     LEFT JOIN LATERAL (
       SELECT *
@@ -265,6 +289,7 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
         close3mAgo: toNumberOrNull(row.liveClose3mAgo),
         close1yAgo: toNumberOrNull(row.liveClose1yAgo),
       };
+      const peakClose = toNumberOrNull(row.peakClose);
       return {
         symbol: row.symbol,
         companyName: row.companyName,
@@ -285,6 +310,9 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
         change1y: percentChange(latestClose, referenceCloses.close1yAgo),
         referenceCloses,
         liveReferenceCloses,
+        peakClose,
+        peakDate: row.peakDate,
+        drawdown: drawdownFromPeak(latestClose, peakClose),
         ...computePriceTrend(closesByTickerId.get(row.tickerId) ?? []),
         impliedVolatility: row.impliedVolatility,
         avgOptionVolume: row.avgOptionVolume,

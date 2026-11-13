@@ -90,7 +90,7 @@ describe("runTickerDataRetryPass on the database", () => {
     expect(alerts).toEqual([]);
     await runTickerDataRetryPass(dependencies);
     expect(tried).toEqual(["NOHIST history", "NOHIST history"]);
-    expect(alerts).toEqual(["⚠️ NOHIST: the 5-year daily history is still missing after 3 tries today (Historical data timeout for NOHIST). Shortlist → NOHIST → Actions → Populate Daily Bars."]);
+    expect(alerts).toEqual(["⚠️ NOHIST: the daily history back to 2006 is still missing after 3 tries today (Historical data timeout for NOHIST). Shortlist → NOHIST → Actions → Populate Daily Bars."]);
     expect((await loadTickerDataRetryRows(today, [ids.noHistory]))[0]).toMatchObject({ attempts: 3 });
     expect((await loadTickerDataRetryRows(today, [ids.noHistory]))[0]!.gaveUpAt).not.toBeNull();
     expect(await runTickerDataRetryPass(dependencies)).toEqual({ ran: false, reason: "nothing_due" });

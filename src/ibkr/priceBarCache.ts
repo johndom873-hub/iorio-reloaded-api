@@ -13,6 +13,7 @@ import { storeDailyBarsCheckingForSplit, type DailyBarStoreResult, type DailyHis
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { recordStockSplit } from "../lib/stockSplits.js";
 import { cachedExtendedHoursChartBars, fetchExtendedHoursChartBars, isExtendedHoursChartRange } from "./extendedHoursChartBars.js";
+import { fullDailyHistoryDuration, fullDailyHistoryRequestTimeoutMs, fullDailyHistoryStartDate } from "./historicalDataDuration.js";
 import type { Knex } from "knex";
 
 // MA99 (technicalIndicators.ts) is the deeper of the two indicator
@@ -39,7 +40,7 @@ type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
  *   just the latest bar): now also backfilled here with real history on
  *   first use, and used for all three of 1Y/5Y/All — 1Y reads it directly,
  *   5Y/All resample it to weekly bars in SQL rather than caching a separate
- *   weekly granularity. A single cold backfill (20 years) covers all three.
+ *   weekly granularity. A single cold backfill (the full history, back to 2006) covers all three.
  *
  * Splits: IBKR returns daily bars adjusted for every split up to the request, while stored rows keep the prices of
  * the day they were fetched. Every daily write goes through storeFreshDailyBars, which compares the days it shares
@@ -75,10 +76,9 @@ const intradayConfig: Record<IntradayRange, { barSize: BarSizeSetting; fullDurat
   "6M": { barSize: BarSizeSetting.HOURS_TWO, fullDuration: "6 M", topUpDuration: "5 D" },
 };
 
-// 1Y/5Y/All all share the same daily-bar cache — a 20-year backfill on first
-// use covers "All", so there's never a second cold fetch needed for the
-// other two once a ticker's daily cache is warm.
-const dailyBackfillDuration = "20 Y";
+// 1Y/5Y/All all share the same daily-bar cache — a full-history backfill
+// (fullDailyHistoryDuration) on first use covers "All", so there's never a
+// second cold fetch needed for the other two once a ticker's daily cache is warm.
 // Top-ups are sized from the gap since the newest cached bar (2026-09-24):
 // a fixed 5-day window left a permanent hole for any ticker not viewed for
 // a while, and a ticker whose newest daily bar is already the last
@@ -92,7 +92,7 @@ export function daysBetweenUtc(from: Date, to: Date): number {
 
 export function dailyTopUpDurationFor(latestCached: Date, now: Date): string {
   const gapDays = daysBetweenUtc(latestCached, now);
-  if (gapDays > dailyTopUpMaximumDays) return dailyBackfillDuration;
+  if (gapDays > dailyTopUpMaximumDays) return fullDailyHistoryDuration(now);
   return `${Math.max(dailyTopUpMinimumDays, gapDays + 2)} D`;
 }
 
@@ -233,7 +233,7 @@ export async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDa
 
 /**
  * Every write of freshly fetched daily bars: stores them, or, when IBKR's prices show a split since the stored rows
- * were fetched, replaces the ticker's whole history with a fresh 20-year fetch (see dailyBarSplitCheck.ts).
+ * were fetched, replaces the ticker's whole history with a fresh full-history fetch, back to 2006 (see dailyBarSplitCheck.ts).
  */
 export async function storeFreshDailyBars(connection: IbkrConnection, tickerId: string, symbol: string, history: DailyHistory, reqId: number): Promise<DailyBarStoreResult> {
   return storeDailyBarsCheckingForSplit(
@@ -252,7 +252,7 @@ export async function storeFreshDailyBars(connection: IbkrConnection, tickerId: 
       },
       fetchSince: (tradingDate) => fetchDailyHistoryFromIbkr(connection, symbol, dailyTopUpDurationFor(new Date(`${tradingDate}T00:00:00Z`), new Date()), nextReqIdFor(connection.ib, () => reqId + 5000)),
       upsertBars: (id, fresh) => upsertDailyBars(id, fresh.bars, fresh.ivByDate),
-      fetchFullHistory: () => fetchDailyHistoryFromIbkr(connection, symbol, dailyBackfillDuration, nextReqIdFor(connection.ib, () => reqId + 2000)),
+      fetchFullHistory: () => fetchDailyHistoryFromIbkr(connection, symbol, fullDailyHistoryDuration(new Date()), nextReqIdFor(connection.ib, () => reqId + 2000)),
       replaceHistory: (id, full) =>
         db.transaction(async (trx) => {
           await upsertDailyBars(id, full.bars, full.ivByDate, trx);
@@ -269,7 +269,7 @@ export async function storeFreshDailyBars(connection: IbkrConnection, tickerId: 
 
 // Explicit backfill for indicator work (MA99/RSI/MACD, 2026-09-01) and IV
 // history (IV Rank/Percentile, ivMetrics.ts) — unlike getCachedChartBars'
-// lazy 20Y backfill above, that path only fires the first time a ticker's
+// lazy full-history backfill above, that path only fires the first time a ticker's
 // 1Y/5Y/All chart is opened with zero cached daily rows; a ticker whose
 // first daily_price_bars row instead came from the nightly job
 // (run-daily-market-data-job.ts, one row/day) has `latestCached` already
@@ -279,7 +279,7 @@ export async function storeFreshDailyBars(connection: IbkrConnection, tickerId: 
 // tickers, and fire-and-forget from findOrCreateTicker.ts on every new
 // ticker/shortlist-add — so depth doesn't depend on chart-opening order.
 // 1Y is enough margin over MA99's 99-close requirement and ivMetrics'
-// 20-day minimum without paying for the lazy path's full 20Y. A failed IV
+// 20-day minimum without paying for the lazy path's full history. A failed IV
 // fetch shouldn't block the price bars an indicator actually needs, so it
 // falls back to no IV data for this pass rather than throwing — same
 // COALESCE-on-merge protection as the daily job covers a partial/failed
@@ -292,12 +292,16 @@ export interface DailyHistoryFromIbkr {
 // Fetch half of the backfill, split out so the Signal Engine's 5-year backfill
 // (scripts/backfillSignalEngineHistory.ts) can inspect the bars (bad bars,
 // dry run) before deciding to write them.
+// A duration in years gets the long-history timeout; nothing before fullDailyHistoryStartDate is kept (a whole-year
+// duration reaches a little further back), so a stored history starts where the backtest data files' does.
 export async function fetchDailyHistoryFromIbkr(connection: IbkrConnection, symbol: string, duration: string, reqId = 1): Promise<DailyHistoryFromIbkr> {
-  const bars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, duration, reqId);
-  const ivBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, duration, nextReqIdFor(connection.ib, () => reqId + 1000), WhatToShow.OPTION_IMPLIED_VOLATILITY).catch(
+  const requestOptions = duration.endsWith(" Y") ? { timeoutMs: fullDailyHistoryRequestTimeoutMs } : {};
+  const isKept = (bar: PriceBar) => new Date(bar.time * 1000).toISOString().slice(0, 10) >= fullDailyHistoryStartDate;
+  const bars = (await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, duration, reqId, WhatToShow.TRADES, requestOptions)).filter(isKept);
+  const ivBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, duration, nextReqIdFor(connection.ib, () => reqId + 1000), WhatToShow.OPTION_IMPLIED_VOLATILITY, requestOptions).catch(
     () => [],
   );
-  return { bars, ivByDate: ivBarsToDateMap(ivBars) };
+  return { bars, ivByDate: ivBarsToDateMap(ivBars.filter(isKept)) };
 }
 
 export async function backfillOneYearOfTickerHistory(connection: IbkrConnection, tickerId: string, symbol: string, reqId = 1): Promise<number> {
@@ -436,17 +440,9 @@ export interface DailyBarsTopUpResult {
 // fetch shouldn't block the price bars; it falls back to no IV data for this pass rather than throwing,
 // and the COALESCE-on-merge in upsertDailyBars keeps already-cached values from being clobbered.
 async function fetchAndUpsertDailyBars(connection: IbkrConnection, tickerId: string, symbol: string, fetchDuration: string, reqId: number): Promise<PriceBar[]> {
-  const freshBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, fetchDuration, reqId);
-  const freshIvBars = await fetchHistoricalBarsRaw(
-    connection,
-    symbol,
-    BarSizeSetting.DAYS_ONE,
-    fetchDuration,
-    nextReqIdFor(connection.ib, () => reqId + 1000),
-    WhatToShow.OPTION_IMPLIED_VOLATILITY,
-  ).catch(() => []);
-  await storeFreshDailyBars(connection, tickerId, symbol, { bars: freshBars, ivByDate: ivBarsToDateMap(freshIvBars) }, reqId);
-  return freshBars;
+  const fresh = await fetchDailyHistoryFromIbkr(connection, symbol, fetchDuration, reqId);
+  await storeFreshDailyBars(connection, tickerId, symbol, fresh, reqId);
+  return fresh.bars;
 }
 
 /**
@@ -455,7 +451,7 @@ async function fetchAndUpsertDailyBars(connection: IbkrConnection, tickerId: str
  */
 export async function topUpDailyBars(connection: IbkrConnection, tickerId: string, symbol: string, reqId = 1): Promise<DailyBarsTopUpResult> {
   const latestCached = await getLatestDailyBarDate(tickerId);
-  const fetchDuration = latestCached ? dailyTopUpDurationFor(latestCached, new Date()) : dailyBackfillDuration;
+  const fetchDuration = latestCached ? dailyTopUpDurationFor(latestCached, new Date()) : fullDailyHistoryDuration(new Date());
   const bars = await fetchAndUpsertDailyBars(connection, tickerId, symbol, fetchDuration, reqId);
   const tradingDates = bars.map((bar) => new Date(bar.time * 1000).toISOString().slice(0, 10)).sort();
   return { barCount: bars.length, firstTradingDate: tradingDates[0] ?? null, lastTradingDate: tradingDates[tradingDates.length - 1] ?? null };
@@ -483,7 +479,7 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
 
     const latestCached = await getLatestDailyBarDate(tickerId);
     if (await dailyCacheNeedsRefresh(latestCached, symbol, range)) {
-      const fetchDuration = latestCached ? dailyTopUpDurationFor(latestCached, new Date()) : dailyBackfillDuration;
+      const fetchDuration = latestCached ? dailyTopUpDurationFor(latestCached, new Date()) : fullDailyHistoryDuration(new Date());
       await fetchAndUpsertDailyBars(connection, tickerId, symbol, fetchDuration, reqId);
       markLiveFetched(symbol, range);
     }

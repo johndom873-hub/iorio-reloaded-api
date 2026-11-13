@@ -37,7 +37,7 @@ if (marketQuoteLoopFlag !== "true" && marketQuoteLoopFlag !== "false") {
   throw new Error(`MARKET_QUOTE_LOOP_ENABLED must be "true" or "false", got: ${marketQuoteLoopFlag}`);
 }
 
-// Explicit on/off like the loop above: the retries of missing option chains and 5-year histories (tickerDataRetries.ts)
+// Explicit on/off like the loop above: the retries of missing option chains and daily histories (tickerDataRetries.ts)
 // send IBKR lookups every 10 minutes, and local dev shares staging's IBKR login.
 const tickerDataRetriesFlag = requireEnvironmentVariable("TICKER_DATA_RETRIES_ENABLED");
 if (tickerDataRetriesFlag !== "true" && tickerDataRetriesFlag !== "false") {

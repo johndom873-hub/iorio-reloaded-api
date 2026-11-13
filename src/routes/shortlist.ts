@@ -7,7 +7,7 @@ import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
 import { isAdminRequest, plutoEnabledRemovalRefusal } from "../lib/sessionUser.js";
 import { searchTickers } from "../ibkr/searchTickers.js";
 import { findOrCreateTicker, addTickerToShortlist, UnknownSymbolError } from "../ibkr/findOrCreateTicker.js";
-import { fetchAndStoreFiveYearHistory, getLatestBackfillRun, startTickerBackfill, type TickerBackfillRun } from "../ibkr/tickerBackfillPipeline.js";
+import { fetchAndStoreFullDailyHistory, getLatestBackfillRun, startTickerBackfill, type TickerBackfillRun } from "../ibkr/tickerBackfillPipeline.js";
 import { topUpDailyBars } from "../ibkr/priceBarCache.js";
 import { loadDailyBarsStatus } from "../lib/dailyBarsStatus.js";
 import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } from "../ibkr/sharedReadConnection.js";
@@ -119,7 +119,7 @@ shortlistRouter.post("/:tickerId/populate-earnings", async (request, response) =
 });
 
 // The Shortlist Actions dropdown's "Populate Daily Bars" item: looks at what is stored and does what is
-// needed (see dailyBarsStatus.ts) -- the full five years when history is missing or incomplete, only the
+// needed (see dailyBarsStatus.ts) -- the full history (back to 2006) when it is missing or incomplete, only the
 // missing sessions when the newest bar is behind, nothing when current. Scoped to daily bars: deliberately
 // NOT startTickerBackfill/retryTickerBackfill, whose full 3-step new-ticker pipeline (history +
 // calendar/dividends + chain-strike warmup) is right for onboarding but wrong for a
@@ -139,9 +139,9 @@ shortlistRouter.post("/:tickerId/populate-daily-bars", async (request, response)
       const reqId = nextReqIdFor(connection.ib, () => 1);
       const result =
         dailyBarsPlan === "full"
-          ? await fetchAndStoreFiveYearHistory(connection, ticker.id, ticker.symbol, { reqId })
+          ? await fetchAndStoreFullDailyHistory(connection, ticker.id, ticker.symbol, { reqId })
           : await topUpDailyBars(connection, ticker.id, ticker.symbol, reqId);
-      // The full 5 years fetched by hand completes the history as a setup's history step does, so the retry pass
+      // The full history fetched by hand completes the history as a setup's history step does, so the retry pass
       // (tickerDataRetries.ts) stops on it, even for a ticker listed less than 5 years.
       if (dailyBarsPlan === "full") await recordTickerDataSuccess(ticker.id, "daily_bars_history", easternIsoDate(new Date()), false);
       invalidatePricePerformanceSnapshot();

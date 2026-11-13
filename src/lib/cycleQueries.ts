@@ -46,7 +46,9 @@ export async function fetchCyclesForTickers(tickerIds: string[] | "all"): Promis
 export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Promise<SymbolCycleInput[]> {
   const filter = tickerIds === "all" ? "" : "AND p.ticker_id = ANY(?)";
   const params = tickerIds === "all" ? [] : [tickerIds];
-  const idFilterForBars = tickerIds === "all" ? "" : "WHERE b.ticker_id = ANY(?)";
+  // Bars from 14 days before the ticker's first leg or fill, not its whole history (back to 2006): every close a cycle
+  // reads is the last one on or before a day of its own legs, fills or marks, and 14 days always holds a session.
+  const idFilterForFirstEvents = tickerIds === "all" ? "" : "WHERE p.ticker_id = ANY(?)";
 
   const [optionRows, stockLegRows, stockTradeRows, barRows, snapshotRows, tickerRows] = await Promise.all([
     db.raw(
@@ -82,7 +84,15 @@ export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Pr
     ),
     db.raw(
       `SELECT b.ticker_id AS "tickerId", b.trading_date::text AS date, b.close_price::float AS close
-       FROM daily_price_bars b ${idFilterForBars} ORDER BY b.trading_date`,
+       FROM daily_price_bars b
+       JOIN (
+         SELECT p.ticker_id, LEAST(MIN(pl.entry_at), MIN(tr.executed_at)) AS first_event_at
+         FROM positions p JOIN position_legs pl ON pl.position_id = p.id LEFT JOIN trades tr ON tr.position_leg_id = pl.id
+         ${idFilterForFirstEvents}
+         GROUP BY p.ticker_id
+       ) first_event ON first_event.ticker_id = b.ticker_id
+       WHERE b.trading_date >= (first_event.first_event_at AT TIME ZONE 'America/New_York')::date - 14
+       ORDER BY b.trading_date`,
       tickerIds === "all" ? [] : [tickerIds],
     ),
     db.raw(
