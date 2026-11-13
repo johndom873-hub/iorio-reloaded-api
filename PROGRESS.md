@@ -4,6 +4,12 @@ Last updated: 2026-11-03. Cleaned up again 2026-11-03 (approved by Marcelo): ret
 
 **Staleness pass, 2026-09-25 (Marcelo asked for a full audit of this file + the archive against actual code/git state).** Corrected in place: commit tags on the Signal Engine section, the scheduled-jobs count/list, the database-schema section, several "not built yet" items that had shipped, and a few self-contradicted entries. Where a claim couldn't be verified from code/git alone (an external artifact's freshness, a prod-only config var, a prod deploy status), it's flagged "needs Marcelo's confirmation" rather than silently closed.
 
+## Pulse: Pluto card replaces Genosuke (Marcelo 2026-11-13; app `06729f4`, not pushed)
+Plain language: the Pulse map's Genosuke card now shows Pluto: its status (the same seven as the Pluto screen: Running, Waiting, Held, Paused, Stopped, Not responding, Off), orders today against the daily cap, working orders, and how long ago its program last checked in. [Mockup](https://claude.ai/artifact/SQ4qsy8W7nH6NnPcVEJHEi) approved.
+- Data: `GET /pluto/state` every 30 s with the health poll, status from `derivePlutoStatus` (no backend change). Orders today amber from 80% of the cap, red at it; heartbeat red past 150 s. Phone status light "Pluto" follows the status.
+- Lines: Heroku → Pluto and Pluto → Database; Pluto → Database flashes on `order_built`/`order_confirmed`/`order_repriced`/`order_outcome`. The LLM card stays, unlinked (Marcelo); Genosuke's pulses are dropped. Genosuke's server code is unchanged.
+- Checked locally with Playwright at 1706, 1440 and 390 px (Waiting, Paused, Stopped, Off, Not responding; local Pluto state restored after); Running and Held need the trading window and were not seen live.
+
 ## Prod promotion and Pluto live on prod (Marcelo 2026-11-09)
 Plain language: Pluto now trades the live account with $800,000 of its own, on 10 tickers; the rest of the new $1,050,000 deposit ($250,000) went to Manual. First live session: Mon 9 Nov.
 - Promoted: API v232 = `f59cb68`, app v120 = `ddc6244`; live worker on `f59cb68`, bound to U21518308. No migrations. Prod had been promoted twice without a PROGRESS entry: v230 = `7e1a3d0` (5 Nov, the books; started that day with Pluto $0, Manual everything) and v231 = `b46c613` (6 Nov), app v119 = `7071f1e`.
