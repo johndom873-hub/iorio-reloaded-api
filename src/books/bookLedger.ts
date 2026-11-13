@@ -10,7 +10,9 @@ import { bookOfLegAt, type TickerBookPeriod } from "./tickerBookPeriods.js";
 // it yet, worked out from the app's own records each time and never stored, so the next statement simply takes its place:
 //   a fill:                ± quantity × price × multiplier − commission (a sale +, a purchase −)
 //   an assigned option leg (no closing trade): a short Put −strike × multiplier × quantity (shares bought), a short Call
-//                          + (shares sold); a long option exercised the other way round
+//                          + (shares sold); a long option exercised the other way round. Only when the app holds no IBKR
+//                          stock fill at the strike for that ticker within a day of the leg's exit: the worker saves the
+//                          shares' fill (a Put's on the new shares' position), which already counts as a fill.
 // Example: 2 AMD $150 Puts sold at $1.20 with $1.30 commission → +$238.70; one of them assigned → −$15,000.
 
 export interface BooksCutover {
@@ -106,6 +108,17 @@ export async function loadProvisionalCashMovements(since: Date, periods: readonl
       .where("p.close_reason", "assigned")
       .whereNotNull("pl.strike_price")
       .whereNotExists(connection("trades").whereRaw("trades.position_leg_id = pl.id").whereRaw(closingTradeOtherThanSettlementSql("trades")))
+      .whereNotExists(
+        connection("trades as stock_fill")
+          .join("position_legs as stock_leg", "stock_leg.id", "stock_fill.position_leg_id")
+          .join("positions as stock_position", "stock_position.id", "stock_leg.position_id")
+          .whereRaw("stock_position.ticker_id = p.ticker_id")
+          .where("stock_leg.leg_type", "stock")
+          .whereRaw("coalesce(stock_fill.ibkr_order_id, '') = '0'")
+          .whereNull("stock_fill.source_order_request_id")
+          .whereRaw("stock_fill.price = pl.strike_price")
+          .whereRaw("stock_fill.executed_at BETWEEN pl.exit_at - interval '1 day' AND pl.exit_at + interval '1 day'"),
+      )
       .select("pl.quantity", "pl.multiplier", "pl.strike_price", "pl.option_type", "pl.side", "pl.exit_at", "p.strategy_key", "p.ticker_id"),
   ]);
   const movements: ProvisionalCashMovement[] = [];
