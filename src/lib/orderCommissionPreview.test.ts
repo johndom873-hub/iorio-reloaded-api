@@ -1,8 +1,8 @@
 import { OrderAction } from "@stoqey/ib";
 import { describe, expect, it } from "vitest";
 import type { OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
-import { buildOrderCommissionPreview, computeNetOptionPremiumDollars, estimateOptionLegsCommissionDollars, readWhatIfCommissionRange } from "./orderCommissionPreview.js";
-import { flatCommissionEstimator } from "./commissionEstimate.js";
+import { buildOrderCommissionPreview, computeNetOptionPremiumDollars, estimateLegsCommissionDollars, readWhatIfCommissionRange } from "./orderCommissionPreview.js";
+import { flatCommissionEstimator, flatStockCommissionEstimator } from "./commissionEstimate.js";
 
 const soldPut: OrderLegPayload = { role: "option", action: OrderAction.SELL, symbol: "AAOI", quantity: 2, unitPrice: 2.5, strike: 30, expiry: "20261120", right: "P" };
 const boughtShares: OrderLegPayload = { role: "stock", action: OrderAction.BUY, symbol: "AAOI", quantity: 200, unitPrice: 31 };
@@ -27,13 +27,13 @@ describe("premium and estimate", () => {
     expect(computeNetOptionPremiumDollars([soldPut, boughtShares])).toBe(500);
     expect(computeNetOptionPremiumDollars([soldPut, { ...soldPut, action: OrderAction.BUY, unitPrice: 1 }])).toBe(300);
   });
-  it("estimates option legs per contract, leaving the stock leg out", () => {
-    expect(estimateOptionLegsCommissionDollars([soldPut, boughtShares], flatCommissionEstimator)).toBeCloseTo(1.36, 10);
+  it("estimates option legs per contract and stock legs per share", () => {
+    expect(estimateLegsCommissionDollars([soldPut, boughtShares], flatCommissionEstimator, flatStockCommissionEstimator)).toBeCloseTo(1.36 + 200 * 0.005, 10);
   });
 });
 
 describe("buildOrderCommissionPreview", () => {
-  const common = { estimator: flatCommissionEstimator, warnThresholdPct: 5 };
+  const common = { estimator: flatCommissionEstimator, stockEstimator: flatStockCommissionEstimator, warnThresholdPct: 5 };
 
   it("uses the what-if maximum, keeps the minimum, and does not warn when commission is a small share", () => {
     const preview = buildOrderCommissionPreview({ ...common, legs: [soldPut], whatIfCommission: { minDollars: 0.9, maxDollars: 1.5 }, whatIfFailureReason: null });
@@ -48,10 +48,10 @@ describe("buildOrderCommissionPreview", () => {
     expect(buildOrderCommissionPreview({ ...common, legs: [{ ...soldPut, unitPrice: 0.2 }], whatIfCommission: { minDollars: 1, maxDollars: 2.1 }, whatIfFailureReason: null }).warn).toBe(true);
   });
 
-  it("falls back to the labelled estimate and says why, noting an excluded stock leg", () => {
+  it("falls back to the labelled estimate, stock leg included, and says why", () => {
     const preview = buildOrderCommissionPreview({ ...common, legs: [soldPut, boughtShares], whatIfCommission: null, whatIfFailureReason: "IBKR what-if timed out." });
-    expect(preview).toMatchObject({ source: "estimate", estimateReason: "IBKR what-if timed out.", estimateExcludesStockLeg: true });
-    expect(preview.commissionDollars).toBeCloseTo(1.36, 10);
+    expect(preview).toMatchObject({ source: "estimate", estimateReason: "IBKR what-if timed out." });
+    expect(preview.commissionDollars).toBeCloseTo(1.36 + 200 * 0.005, 10);
   });
 
   it("always warns on a net debit", () => {

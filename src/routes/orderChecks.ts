@@ -6,7 +6,7 @@ import { loadTickerBySymbol } from "../lib/tickerLookup.js";
 import { OrderAction } from "@stoqey/ib";
 import { findMalformedOptionExpiry, type OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchWhatIfCommissionRange } from "../ibkr/ibkrWhatIfCommission.js";
-import { loadCommissionEstimator } from "../lib/commissionEstimate.js";
+import { loadCommissionEstimator, loadStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { buildOrderCommissionPreview } from "../lib/orderCommissionPreview.js";
 import { loadTradingSettings } from "../lib/tradingSettingsStore.js";
 
@@ -129,9 +129,10 @@ orderChecksRouter.post("/commission-preview", async (request, response) => {
     response.status(400).json({ error: "Unknown symbol." });
     return;
   }
-  const [settings, estimator, whatIf] = await Promise.all([
+  const [settings, estimator, stockEstimator, whatIf] = await Promise.all([
     loadTradingSettings(),
     loadCommissionEstimator(),
+    loadStockCommissionEstimator(),
     fetchWhatIfCommissionRange(parsed.legs).then(
       (range) => ({ range, failureReason: null }),
       (error: unknown) => ({ range: null, failureReason: error instanceof Error ? error.message : String(error) }),
@@ -143,6 +144,7 @@ orderChecksRouter.post("/commission-preview", async (request, response) => {
       whatIfCommission: whatIf.range,
       whatIfFailureReason: whatIf.failureReason,
       estimator,
+      stockEstimator,
       warnThresholdPct: settings.commissionWarnSharePctOfPremium,
     }),
   );

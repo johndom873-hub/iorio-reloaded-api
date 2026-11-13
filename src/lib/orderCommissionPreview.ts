@@ -1,9 +1,9 @@
 import { OrderAction } from "@stoqey/ib";
 import type { OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
-import type { CommissionEstimator } from "./commissionEstimate.js";
+import type { CommissionEstimator, StockCommissionEstimator } from "./commissionEstimate.js";
 
 // What the order setup shows about an order's commission (approved 2026-10-02): IBKR's what-if when it
-// answers, otherwise the trailing-fills estimate labelled as such, next to the order's net premium and the
+// answers, otherwise the trailing-fills estimate labelled as such (option and stock legs, 2026-11-13), next to the order's net premium and the
 // share of it the commission takes. IBKR's what-if returns a range (minCommission..maxCommission) for
 // options, not one figure; the maximum drives the net premium and the warning (Marcelo's choice, 2026-10-02:
 // worst case), the range stays visible.
@@ -18,8 +18,6 @@ export interface OrderCommissionPreview {
   source: CommissionPreviewSource;
   /** Why the exact figure is missing, when source is "estimate". */
   estimateReason: string | null;
-  /** The estimate prices the option legs only; a stock leg's commission is not in it. */
-  estimateExcludesStockLeg: boolean;
   /** Premium received minus premium paid across the option legs, in dollars (negative for a net debit). */
   netPremiumDollars: number;
   /** Commission as a percentage of the net premium's size; null when the net premium is zero. */
@@ -56,11 +54,12 @@ export function readWhatIfCommissionRange(orderState: { commission?: number; min
   return { minDollars: Math.min(min, max), maxDollars: Math.max(min, max) };
 }
 
-/** Pure: option legs only, per-contract estimate for each leg's own side and size. */
-export function estimateOptionLegsCommissionDollars(legs: OrderLegPayload[], estimator: CommissionEstimator): number {
-  return legs
-    .filter((leg) => leg.role === "option")
-    .reduce((sum, leg) => sum + estimator.perContractDollars(leg.action === OrderAction.BUY ? "buy" : "sell", leg.quantity) * leg.quantity, 0);
+/** Pure: each option leg at the per-contract estimate for its side and size, each stock leg at the per-share estimate for its side. */
+export function estimateLegsCommissionDollars(legs: OrderLegPayload[], estimator: CommissionEstimator, stockEstimator: StockCommissionEstimator): number {
+  return legs.reduce((sum, leg) => {
+    const side = leg.action === OrderAction.BUY ? "buy" : "sell";
+    return sum + (leg.role === "option" ? estimator.perContractDollars(side, leg.quantity) : stockEstimator.perShareDollars(side)) * leg.quantity;
+  }, 0);
 }
 
 /** Pure: premium received minus premium paid across the option legs, in dollars. */
@@ -74,10 +73,11 @@ export function buildOrderCommissionPreview(input: {
   /** Why the what-if gave nothing; recorded when the estimate is used. */
   whatIfFailureReason: string | null;
   estimator: CommissionEstimator;
+  stockEstimator: StockCommissionEstimator;
   warnThresholdPct: number;
 }): OrderCommissionPreview {
   const exact = input.whatIfCommission !== null;
-  const commissionDollars = input.whatIfCommission?.maxDollars ?? estimateOptionLegsCommissionDollars(input.legs, input.estimator);
+  const commissionDollars = input.whatIfCommission?.maxDollars ?? estimateLegsCommissionDollars(input.legs, input.estimator, input.stockEstimator);
   const netPremiumDollars = computeNetOptionPremiumDollars(input.legs);
   const commissionSharePctOfPremium = netPremiumDollars === 0 ? null : (commissionDollars / Math.abs(netPremiumDollars)) * 100;
   // A net debit or a zero premium can never absorb the commission: warn whatever the threshold says.
@@ -87,7 +87,6 @@ export function buildOrderCommissionPreview(input: {
     commissionMinDollars: input.whatIfCommission?.minDollars ?? null,
     source: exact ? "ibkr_what_if" : "estimate",
     estimateReason: exact ? null : input.whatIfFailureReason,
-    estimateExcludesStockLeg: !exact && input.legs.some((leg) => leg.role === "stock"),
     netPremiumDollars,
     commissionSharePctOfPremium,
     warnThresholdPct: input.warnThresholdPct,

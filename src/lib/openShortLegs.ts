@@ -12,7 +12,9 @@ export interface OpenShortLeg {
   strike: number;
   right: "C" | "P";
   quantity: number;
-  /** Credit collected per share when the leg was opened. */
+  /** Shares per contract. */
+  multiplier: number;
+  /** Credit collected per share when the leg was opened, net of its opening commission. */
   entryPrice: number;
   entryAtIso: string;
 }
@@ -27,9 +29,9 @@ export function openShortLegPositionsQuery() {
 
 /** Every open short option leg on a covered-call or cash-secured-put position of this ticker (Roll Signals' A side). */
 export async function loadOpenShortLegs(tickerId: string): Promise<OpenShortLeg[]> {
-  const rows: { legId: string; positionId: string; strategyKey: string; expiry: string; strike: string; optionType: "call" | "put"; quantity: number; entryPrice: string; entryAt: Date }[] = await openShortLegPositionsQuery()
+  const rows: { legId: string; positionId: string; strategyKey: string; expiry: string; strike: string; optionType: "call" | "put"; quantity: number; multiplier: number; entryPrice: string; entryAt: Date }[] = await openShortLegPositionsQuery()
     .where("p.ticker_id", tickerId)
-    .select("pl.id as legId", "p.id as positionId", "p.strategy_key as strategyKey", db.raw('pl.expiry_date::text as expiry'), "pl.strike_price as strike", "pl.option_type as optionType", "pl.quantity", "pl.entry_price as entryPrice", "pl.entry_at as entryAt")
+    .select("pl.id as legId", "p.id as positionId", "p.strategy_key as strategyKey", db.raw('pl.expiry_date::text as expiry'), "pl.strike_price as strike", "pl.option_type as optionType", "pl.quantity", "pl.multiplier", "pl.entry_price as entryPrice", "pl.entry_at as entryAt")
     .orderBy(["pl.expiry_date", "pl.strike_price"]);
   return rows.map((row) => ({
     legId: row.legId,
@@ -39,6 +41,7 @@ export async function loadOpenShortLegs(tickerId: string): Promise<OpenShortLeg[
     strike: Number(row.strike),
     right: row.optionType === "call" ? "C" : "P",
     quantity: Number(row.quantity),
+    multiplier: Number(row.multiplier),
     entryPrice: Number(row.entryPrice),
     entryAtIso: new Date(row.entryAt).toISOString(),
   }));

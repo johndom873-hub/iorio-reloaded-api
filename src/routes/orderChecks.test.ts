@@ -31,7 +31,11 @@ const fetchWhatIfCommissionRangeMock = vi.fn();
 vi.mock("../ibkr/ibkrWhatIfCommission.js", () => ({ fetchWhatIfCommissionRange: (...args: unknown[]) => fetchWhatIfCommissionRangeMock(...args) }));
 
 const loadCommissionEstimatorMock = vi.fn();
-vi.mock("../lib/commissionEstimate.js", () => ({ loadCommissionEstimator: (...args: unknown[]) => loadCommissionEstimatorMock(...args) }));
+const loadStockCommissionEstimatorMock = vi.fn();
+vi.mock("../lib/commissionEstimate.js", () => ({
+  loadCommissionEstimator: (...args: unknown[]) => loadCommissionEstimatorMock(...args),
+  loadStockCommissionEstimator: (...args: unknown[]) => loadStockCommissionEstimatorMock(...args),
+}));
 
 const loadTradingSettingsMock = vi.fn();
 vi.mock("../lib/tradingSettingsStore.js", () => ({ loadTradingSettings: (...args: unknown[]) => loadTradingSettingsMock(...args) }));
@@ -61,12 +65,14 @@ afterAll(async () => {
 
 const knownTicker = { tickerId: "ticker-1", symbol: "AAA", companyName: "AAA Co", sector: "Technology" };
 const estimator = { perContractDollars: vi.fn((side: string, contracts: number) => (side === "sell" ? 0.65 : 0.7) + contracts * 0) };
+const stockEstimator = { perShareDollars: vi.fn((side: string) => (side === "sell" ? 0.006 : 0.005)) };
 
 beforeEach(() => {
   evaluateOrderLimitsMock.mockReset().mockResolvedValue({ blocked: false, reasons: [] });
   loadTickerBySymbolMock.mockReset().mockImplementation(async (symbol: string) => (symbol.trim().toUpperCase() === "AAA" ? knownTicker : null));
   fetchWhatIfCommissionRangeMock.mockReset().mockResolvedValue({ minDollars: 1, maxDollars: 2 });
   loadCommissionEstimatorMock.mockReset().mockResolvedValue(estimator);
+  loadStockCommissionEstimatorMock.mockReset().mockResolvedValue(stockEstimator);
   loadTradingSettingsMock.mockReset().mockResolvedValue({ commissionWarnSharePctOfPremium: 5 });
   estimator.perContractDollars.mockClear();
 });
@@ -298,7 +304,6 @@ describe("POST /order-checks/commission-preview: the preview", () => {
       commissionMinDollars: 1,
       source: "ibkr_what_if",
       estimateReason: null,
-      estimateExcludesStockLeg: false,
       netPremiumDollars: 400,
       commissionSharePctOfPremium: 0.5,
       warnThresholdPct: 5,
@@ -326,7 +331,6 @@ describe("POST /order-checks/commission-preview: the preview", () => {
       commissionMinDollars: null,
       source: "estimate",
       estimateReason: "IBKR what-if timed out",
-      estimateExcludesStockLeg: false,
       netPremiumDollars: 400,
       commissionSharePctOfPremium: 0.325,
       warnThresholdPct: 5,
@@ -342,11 +346,12 @@ describe("POST /order-checks/commission-preview: the preview", () => {
     expect(response.json).toMatchObject({ source: "estimate", estimateReason: "gateway offline" });
   });
 
-  it("an estimate for a Covered Call entry says it leaves out the stock leg's commission", async () => {
+  it("an estimate for a Covered Call entry includes the stock leg's commission, per share", async () => {
     fetchWhatIfCommissionRangeMock.mockRejectedValue(new Error("offline"));
     const callLeg = { ...optionLeg, right: "C", strike: 100, quantity: 1 };
     const response = await call("POST", "/order-checks/commission-preview", { legs: [stockLeg, callLeg] });
-    expect(response.json).toMatchObject({ source: "estimate", estimateExcludesStockLeg: true, commissionDollars: 0.65, netPremiumDollars: 200 });
+    expect(response.json).toMatchObject({ source: "estimate", netPremiumDollars: 200 });
+    expect((response.json as { commissionDollars: number }).commissionDollars).toBeCloseTo(0.65 + 100 * 0.005, 10);
   });
 
   it("warns when the commission is above the configured share of the premium, using the threshold from trading settings", async () => {
