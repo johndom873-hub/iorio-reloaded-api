@@ -208,7 +208,13 @@ async function correctCallAway(database: Knex, leg: ExpiredShortOptionLeg, mode:
        FROM position_legs
        WHERE position_id = ? AND leg_type = 'stock' AND side = 'long' AND exit_at IS NOT NULL
          AND exit_at BETWEEN ?::timestamptz - interval '${stockCloseWindow}' AND ?::timestamptz + interval '${stockCloseWindow}'
-         AND (exit_price IS NULL OR abs(exit_price - entry_price) < 0.0001)`,
+         AND (exit_price IS NULL OR abs(exit_price - entry_price) < 0.0001)
+         -- A leg the same position replaced at that instant (shares moved in started a new leg) was not called away.
+         AND NOT EXISTS (
+           SELECT 1 FROM position_legs successor
+           WHERE successor.position_id = position_legs.position_id AND successor.leg_type = 'stock' AND successor.id <> position_legs.id
+             AND successor.entry_at = position_legs.exit_at
+         )`,
       [leg.positionId, leg.exitAt, leg.exitAt],
     )
   ).rows;

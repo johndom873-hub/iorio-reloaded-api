@@ -215,6 +215,25 @@ describe("expiry settlement audit — IBKR's $0 settlement record is not a closi
     expect(await closeReasonOf(coveredCallId)).toBe("assigned");
   });
 
+  it("NVDA: a Covered Call whose stock leg grew that day (300 sh, then a new 400-sh leg) is called away on the 400 only, and relabelled assigned", async () => {
+    const tickerId = await createTicker();
+    const expiryDate = isoDate(daysAgo(3));
+    await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: expiryDate, close_price: 162.85 });
+    const coveredCallId = await insertPosition(tickerId, "covered_call", "expired_worthless");
+    const settledAt = daysAgo(2);
+    const grewAt = new Date(settledAt.getTime() - 12 * 3_600_000); // 10:05 ET, settled 21:44 ET (staging, 13 Nov)
+    const replacedLegId = await insertStockLeg(coveredCallId, 300, 198.4743045, grewAt, 198.4743045, grewAt);
+    await testDb("position_legs").where({ id: replacedLegId }).update({ entry_at: daysAgo(4) });
+    const calledAwayLegId = await insertStockLeg(coveredCallId, 400, 198.4743045, grewAt, 198.4743045, settledAt);
+    await insertExpiredShortOption(coveredCallId, "call", 162.5, 4, expiryDate, settledAt);
+
+    const result = await runExpirySettlementAudit("apply", testDb);
+    expect(result.actions.filter((action) => action.positionId === coveredCallId).map((action) => action.kind)).toEqual(["call_away_stock_exit", "close_reason"]);
+    expect(Number((await testDb("position_legs").where({ id: calledAwayLegId }).first()).exit_price)).toBe(162.5);
+    expect(Number((await testDb("position_legs").where({ id: replacedLegId }).first()).exit_price)).toBe(198.4743045);
+    expect(await closeReasonOf(coveredCallId)).toBe("assigned");
+  });
+
   it("a Call bought back (a real fill, by an app order or not) is still not examined", async () => {
     const tickerId = await createTicker();
     const expiryDate = isoDate(daysAgo(3));
