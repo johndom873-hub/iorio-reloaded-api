@@ -368,6 +368,28 @@ describe("POST /positions/orders/:id/confirm", () => {
     expect(publishNotificationMock).toHaveBeenCalledWith({ type: "order_status", orderId });
   });
 
+  it("stores Follow the mid on a person's Put sale when ticked, and nothing when not", async () => {
+    const ticker = await createTicker();
+    const followed = await insertOrder(ticker.symbol);
+    expect((await call("POST", `/positions/orders/${followed}/confirm`, { followTheMid: true })).status).toBe(200);
+    expect((await orderRow(followed)).payload.followTheMid).toBe(true);
+    const notFollowed = await insertOrder(ticker.symbol);
+    expect((await call("POST", `/positions/orders/${notFollowed}/confirm`, { followTheMid: false })).status).toBe(200);
+    expect((await orderRow(notFollowed)).payload).not.toHaveProperty("followTheMid");
+  });
+
+  it("refuses Follow the mid that is not true or false, and on an order that cannot follow, leaving it unconfirmed", async () => {
+    const ticker = await createTicker();
+    const orderId = await insertOrder(ticker.symbol);
+    const notBoolean = await call("POST", `/positions/orders/${orderId}/confirm`, { followTheMid: "yes" });
+    expect([notBoolean.status, notBoolean.json.error]).toEqual([400, "followTheMid must be true or false."]);
+    const buyback = await insertOrder(ticker.symbol, { request_type: "close_leg" });
+    const refused = await call("POST", `/positions/orders/${buyback}/confirm`, { followTheMid: true });
+    expect([refused.status, refused.json.error]).toEqual([409, "Only a single-leg Call or Put sale, or a LEAPS buy, placed by hand can follow the mid."]);
+    expect((await orderRow(orderId)).status).toBe("pending_confirmation");
+    expect((await orderRow(buyback)).status).toBe("pending_confirmation");
+  });
+
   it("refuses every order on a frozen ticker (a stock split until its records are rewritten), at build and at confirm", async () => {
     const ticker = await createTicker();
     const builtBeforeTheFreeze = await insertOrder(ticker.symbol);

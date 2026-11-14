@@ -2,6 +2,7 @@ import "./lib/installWebCrashAlert.js";
 import { app } from "./app.js";
 import { environment, ibkrMarketDataLinesEnabled, requireEnvironmentVariable } from "./config/env.js";
 import { startStalePendingOrderSweep } from "./lib/stalePendingOrders.js";
+import { startManualOrderFollowTheMid } from "./lib/manualOrderFollowTheMid.js";
 import { startGenosuke } from "./genosuke/bot.js";
 import { sharedLiveConnection, sharedReadConnection } from "./ibkr/sharedReadConnection.js";
 import { installShutdownHandler } from "./lib/installShutdownHandler.js";
@@ -61,6 +62,7 @@ app.listen(port, () => {
     .catch((error) => console.error(`Could not send the start notice: ${error instanceof Error ? error.message : error}`));
   startNotificationBroadcaster();
   startStalePendingOrderSweep();
+  startManualOrderFollowTheMid();
   // New-ticker setups queued in the process this one replaced died with it: close them and start them again.
   resumeInterruptedBackfillRuns()
     .then(({ resumed, notResumed }) => {
