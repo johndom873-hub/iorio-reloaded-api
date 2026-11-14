@@ -25,7 +25,10 @@ import { closingTradeOtherThanSettlementSql } from "./settlementExecution.js";
 //   call ITM -> the position's long stock legs that closed within a day of the
 //     call, at NULL or exit_price = entry_price, get exit_price = strike (only
 //     when their quantity equals the call's share count exactly); position
-//     close_reason -> 'assigned'.
+//     close_reason -> 'assigned'. Only with IBKR's stock fill at the strike (an
+//     assignment fill): without it, a Call whose shares went to another position
+//     was not exercised (close_reason 'assigned' -> 'expired_worthless'), and
+//     anything else is reported. Approved 2026-11-14 (Marcelo).
 //   put ITM  -> close_reason -> 'assigned'; the assigned stock legs (entered
 //     within minutes of the put's close at strike - premium, IBKR's
 //     premium-adjusted average cost that double counts the put credit) and
@@ -189,6 +192,27 @@ async function relabelOutOfTheMoneyAssignment(database: Knex, leg: ExpiredShortO
   if (mode === "apply") await database("position_share_sources").where({ source_position_id: leg.positionId }).del();
 }
 
+/** Shares the leg's position handed to other positions around the option's close (position_share_sources); null when unknown. */
+async function sharesHandedToOtherPositions(database: Knex, leg: ExpiredShortOptionLeg): Promise<number | null> {
+  const row: { total: string | null; unknown: string } | undefined = await database("position_share_sources")
+    .where({ source_position_id: leg.positionId })
+    .whereRaw(`created_at BETWEEN ?::timestamptz - interval '${stockCloseWindow}' AND ?::timestamptz + interval '${stockCloseWindow}'`, [leg.exitAt, leg.exitAt])
+    .first(database.raw("SUM(shares_received)::text AS total"), database.raw("COUNT(*) FILTER (WHERE shares_received IS NULL)::text AS unknown"));
+  if (!row || row.total === null || Number(row.unknown) > 0) return null;
+  return Number(row.total);
+}
+
+async function relabelUnexercisedCall(database: Knex, leg: ExpiredShortOptionLeg, mode: ExpirySettlementMode, actions: ExpirySettlementAction[]): Promise<void> {
+  if (leg.positionStatus !== "closed" || leg.closeReason !== "assigned") return;
+  actions.push({
+    kind: "close_reason",
+    symbol: leg.symbol,
+    positionId: leg.positionId,
+    description: `${leg.symbol} call $${leg.strike} (expiry ${leg.expiryDate}): in the money at the expiry close ${money(leg.expiryClose!)} but not exercised, its shares kept — close_reason assigned -> expired_worthless`,
+  });
+  if (mode === "apply") await database("positions").where({ id: leg.positionId }).update({ close_reason: "expired_worthless" });
+}
+
 async function setCloseReasonAssigned(database: Knex, leg: ExpiredShortOptionLeg, mode: ExpirySettlementMode, actions: ExpirySettlementAction[]): Promise<void> {
   if (leg.positionStatus !== "closed" || !correctableCloseReasons.includes(leg.closeReason)) return;
   actions.push({
@@ -223,6 +247,16 @@ async function correctCallAway(database: Knex, leg: ExpiredShortOptionLeg, mode:
   if (candidates.length === 0) {
     // Either already corrected (exit_price == strike, which the selector excludes) or nothing to fix.
     await setCloseReasonAssigned(database, leg, mode, actions);
+    return;
+  }
+  // In the money is not assigned: the holder may leave a Call unexercised. Shares called away leave IBKR's stock fill at
+  // the strike; without it, shares handed to another position were kept.
+  if (!(await hasAssignmentFill(database, leg))) {
+    if ((await sharesHandedToOtherPositions(database, leg)) === calledAwayShares) {
+      await relabelUnexercisedCall(database, leg, mode, actions);
+      return;
+    }
+    actions.push(reviewAction("skipped", leg, `ITM at expiry (${money(leg.expiryClose!)}) but no stock sale at the strike and the shares were not handed to another position — needs manual review`));
     return;
   }
   if (candidateShares !== calledAwayShares) {

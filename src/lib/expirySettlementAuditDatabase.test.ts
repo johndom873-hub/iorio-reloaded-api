@@ -226,6 +226,7 @@ describe("expiry settlement audit — IBKR's $0 settlement record is not a closi
     await testDb("position_legs").where({ id: replacedLegId }).update({ entry_at: daysAgo(4) });
     const calledAwayLegId = await insertStockLeg(coveredCallId, 400, 198.4743045, grewAt, 198.4743045, settledAt);
     await insertExpiredShortOption(coveredCallId, "call", 162.5, 4, expiryDate, settledAt);
+    await insertTrade(calledAwayLegId, { side: "sell", quantity: 400, price: 162.5, executedAt: settledAt, ibkrOrderId: "0" });
 
     const result = await runExpirySettlementAudit("apply", testDb);
     expect(result.actions.filter((action) => action.positionId === coveredCallId).map((action) => action.kind)).toEqual(["call_away_stock_exit", "close_reason"]);
@@ -245,6 +246,55 @@ describe("expiry settlement audit — IBKR's $0 settlement record is not a closi
     const result = await runExpirySettlementAudit("apply", testDb);
     expect(result.actions.filter((action) => action.positionId === coveredCallId)).toEqual([]);
     expect(await closeReasonOf(coveredCallId)).toBe("closed_via_external_trade");
+  });
+});
+
+describe("expiry settlement audit — a Call in the money that was not exercised (Marcelo 2026-11-14)", () => {
+  /** NVDA on prod, 13 Nov: 9 × $162.50 Calls, close $162.85, IBKR's $0 expiry record and no share sale; the reconcile handed the 900 shares to a new position. */
+  async function seedUnexercisedCall(closeReason: string, handOffShares: number | null) {
+    const tickerId = await createTicker();
+    const expiryDate = isoDate(daysAgo(3));
+    await testDb("daily_price_bars").insert({ ticker_id: tickerId, trading_date: expiryDate, close_price: 162.85 });
+    const coveredCallId = await insertPosition(tickerId, "covered_call", closeReason);
+    const settledAt = daysAgo(2);
+    const stockLegId = await insertStockLeg(coveredCallId, 900, 169.845003, daysAgo(4), 169.845003, settledAt);
+    const callLegId = await insertExpiredShortOption(coveredCallId, "call", 162.5, 9, expiryDate, settledAt);
+    await insertTrade(callLegId, { side: "buy", quantity: 9, price: 0, executedAt: settledAt, ibkrOrderId: "0" });
+    if (handOffShares !== null) {
+      const keptSharesId = (await testDb("positions").insert({ strategy_key: "unstructured", ticker_id: tickerId, status: "open" }).returning(["id"]))[0].id;
+      await insertStockLeg(keptSharesId, 900, 169.845003, settledAt, null, null);
+      await testDb("position_share_sources").insert({ position_id: keptSharesId, source_position_id: coveredCallId, shares_received: handOffShares, created_at: settledAt });
+    }
+    return { coveredCallId, stockLegId };
+  }
+  const stockExitOf = async (legId: string) => Number((await testDb("position_legs").where({ id: legId }).first()).exit_price);
+
+  it("shares handed to another position, no sale at the strike: stays expired_worthless, its shares are not called away", async () => {
+    const { coveredCallId, stockLegId } = await seedUnexercisedCall("expired_worthless", 900);
+    const result = await runExpirySettlementAudit("apply", testDb);
+    expect(result.actions.filter((action) => action.positionId === coveredCallId)).toEqual([]);
+    expect(await closeReasonOf(coveredCallId)).toBe("expired_worthless");
+    expect(await stockExitOf(stockLegId)).toBe(169.845003);
+  });
+
+  it("the same Call labelled assigned is relabelled expired_worthless, and a second run changes nothing", async () => {
+    const { coveredCallId, stockLegId } = await seedUnexercisedCall("assigned", 900);
+    const result = await runExpirySettlementAudit("apply", testDb);
+    expect(result.actions.filter((action) => action.positionId === coveredCallId).map((action) => action.kind)).toEqual(["close_reason"]);
+    expect(await closeReasonOf(coveredCallId)).toBe("expired_worthless");
+    expect(await stockExitOf(stockLegId)).toBe(169.845003);
+    const secondRun = await runExpirySettlementAudit("apply", testDb);
+    expect(secondRun.actions.filter((action) => action.positionId === coveredCallId)).toEqual([]);
+  });
+
+  it("no sale at the strike and the shares not handed over (or only some of them): reported for review, nothing changed", async () => {
+    for (const handOffShares of [null, 400]) {
+      const { coveredCallId, stockLegId } = await seedUnexercisedCall("expired_worthless", handOffShares);
+      const result = await runExpirySettlementAudit("apply", testDb);
+      expect(result.actions.filter((action) => action.positionId === coveredCallId).map((action) => action.kind)).toEqual(["skipped"]);
+      expect(await closeReasonOf(coveredCallId)).toBe("expired_worthless");
+      expect(await stockExitOf(stockLegId)).toBe(169.845003);
+    }
   });
 });
 

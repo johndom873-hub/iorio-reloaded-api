@@ -1,6 +1,7 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { optionExpiryCloseAt, optionExpiryCloseSql } from "../lib/optionExpiryClock.js";
 import { closingTradeOtherThanSettlementSql } from "../lib/settlementExecution.js";
 import type { BookKey, LedgerBookKey } from "./bookKeys.js";
 import { bookOfLegAt, type TickerBookPeriod } from "./tickerBookPeriods.js";
@@ -13,6 +14,9 @@ import { bookOfLegAt, type TickerBookPeriod } from "./tickerBookPeriods.js";
 //                          + (shares sold); a long option exercised the other way round. Only when the app holds no IBKR
 //                          stock fill at the strike for that ticker within a day of the leg's exit: the worker saves the
 //                          shares' fill (a Put's on the new shares' position), which already counts as a fill.
+// An expiry's settlement belongs to the expiry date, where IBKR's statement puts it (16:20 ET), though IBKR books it for
+// the app hours later, often after midnight: IBKR's stock fill for an option that expired before it (no app order, at the
+// strike, for its shares) and an assigned leg closed after its expiry count at the expiry close (Marcelo 2026-11-14).
 // Example: 2 AMD $150 Puts sold at $1.20 with $1.30 commission → +$238.70; one of them assigned → −$15,000.
 
 export interface BooksCutover {
@@ -67,6 +71,8 @@ interface ProvisionalFillRow {
   multiplier: number;
   strategy_key: string;
   ticker_id: string;
+  /** The expiry date of the option this fill settles (IBKR's stock fill booked after that expiry's close), else null. */
+  settles_expiry_date: string | null;
 }
 
 interface ProvisionalAssignmentRow {
@@ -76,8 +82,29 @@ interface ProvisionalAssignmentRow {
   option_type: "call" | "put";
   side: "long" | "short";
   exit_at: Date;
+  expiry_date: string;
   strategy_key: string;
   ticker_id: string;
+}
+
+// IBKR's stock fill settling an option of the ticker that expired before it: no app order, at the strike, for the option's
+// shares, in the direction it delivers (buy for a short Put or long Call), within 36 hours of that expiry's close.
+const settledExpiryDateSql = `
+  CASE WHEN pl.leg_type = 'stock' AND coalesce(tr.ibkr_order_id, '') = '0' AND tr.source_order_request_id IS NULL THEN (
+    SELECT max(settled.expiry_date)::text FROM position_legs settled
+    JOIN positions settled_position ON settled_position.id = settled.position_id
+    WHERE settled_position.ticker_id = p.ticker_id AND settled.leg_type = 'option'
+      AND abs(settled.strike_price - tr.price) < 0.00005 AND settled.quantity * settled.multiplier = tr.quantity
+      AND (tr.side = 'buy') = ((settled.option_type = 'put') = (settled.side = 'short'))
+      AND tr.executed_at >= ${optionExpiryCloseSql("settled.expiry_date")}
+      AND tr.executed_at < ${optionExpiryCloseSql("settled.expiry_date")} + interval '36 hours'
+  ) END`;
+
+/** When a movement counts: an expiry's settlement at the expiry close, anything else when it happened. */
+function settlementAwareAt(happenedAt: Date, settlesExpiryDate: string | null): Date {
+  if (settlesExpiryDate === null) return happenedAt;
+  const expiryClose = optionExpiryCloseAt(settlesExpiryDate);
+  return happenedAt.getTime() > expiryClose.getTime() ? expiryClose : happenedAt;
 }
 
 /** Pure: a fill's cash. Example: sell 2 contracts at $1.20, multiplier 100, commission $1.30 → +$238.70. */
@@ -100,7 +127,7 @@ export async function loadProvisionalCashMovements(since: Date, periods: readonl
       .join("position_legs as pl", "pl.id", "tr.position_leg_id")
       .join("positions as p", "p.id", "pl.position_id")
       .where("tr.executed_at", ">=", since)
-      .select("tr.side", "tr.quantity", "tr.price", "tr.commission", "tr.executed_at", "pl.multiplier", "p.strategy_key", "p.ticker_id"),
+      .select("tr.side", "tr.quantity", "tr.price", "tr.commission", "tr.executed_at", "pl.multiplier", "p.strategy_key", "p.ticker_id", connection.raw(`${settledExpiryDateSql} AS settles_expiry_date`)),
     connection("position_legs as pl")
       .join("positions as p", "p.id", "pl.position_id")
       .where("pl.leg_type", "option")
@@ -119,15 +146,17 @@ export async function loadProvisionalCashMovements(since: Date, periods: readonl
           .whereRaw("stock_fill.price = pl.strike_price")
           .whereRaw("stock_fill.executed_at BETWEEN pl.exit_at - interval '1 day' AND pl.exit_at + interval '1 day'"),
       )
-      .select("pl.quantity", "pl.multiplier", "pl.strike_price", "pl.option_type", "pl.side", "pl.exit_at", "p.strategy_key", "p.ticker_id"),
+      .select("pl.quantity", "pl.multiplier", "pl.strike_price", "pl.option_type", "pl.side", "pl.exit_at", connection.raw("pl.expiry_date::text AS expiry_date"), "p.strategy_key", "p.ticker_id"),
   ]);
   const movements: ProvisionalCashMovement[] = [];
   for (const fill of fills) {
-    const at = new Date(fill.executed_at);
+    const at = settlementAwareAt(new Date(fill.executed_at), fill.settles_expiry_date);
+    if (at.getTime() < since.getTime()) continue;
     movements.push({ book: bookOfLegAt(periods, fill.ticker_id, fill.strategy_key, at), at, kind: "fill", amount: fillCash({ side: fill.side, quantity: fill.quantity, price: Number(fill.price), multiplier: fill.multiplier, commission: fill.commission === null ? null : Number(fill.commission) }) });
   }
   for (const leg of assignments) {
-    const at = new Date(leg.exit_at);
+    const at = settlementAwareAt(new Date(leg.exit_at), leg.expiry_date);
+    if (at.getTime() < since.getTime()) continue;
     movements.push({ book: bookOfLegAt(periods, leg.ticker_id, leg.strategy_key, at), at, kind: "assignment", amount: assignmentCash({ side: leg.side, optionType: leg.option_type, strike: Number(leg.strike_price), multiplier: leg.multiplier, quantity: leg.quantity }) });
   }
   return movements;

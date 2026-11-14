@@ -52,3 +52,48 @@ describe("provisional cash movements of an assignment", () => {
     ]);
   });
 });
+
+describe("provisional cash movements of an expiry IBKR booked after midnight (Marcelo 2026-11-14)", () => {
+  // NBIS on prod: 2 × $145 Puts expired Fri 13 Nov; IBKR's statement dates the assignment 16:20 ET that day, the worker saved
+  // IBKR's records at 01:03 ET Saturday.
+  const bookedAt = new Date("2026-11-14T06:03:56Z");
+  const beforeFridaysStatement = new Date("2026-11-13T05:00:00Z");
+  const afterFridaysStatement = new Date("2026-11-14T05:00:00Z");
+
+  beforeAll(async () => {
+    const tickerId = randomUUID();
+    const putPositionId = randomUUID();
+    const putLegId = randomUUID();
+    const sharesPositionId = randomUUID();
+    const sharesLegId = randomUUID();
+    await db("tickers").insert({ id: tickerId, symbol: "SETL", company_name: "SETL", sector: "Technology" });
+    await db("positions").insert({ id: putPositionId, strategy_key: "cash_secured_put", ticker_id: tickerId, status: "closed", close_reason: "assigned", opened_at: new Date("2026-11-11T15:00:00Z"), closed_at: bookedAt });
+    await db("position_legs").insert({ id: putLegId, position_id: putPositionId, leg_type: "option", side: "short", quantity: 2, option_type: "put", strike_price: 145, expiry_date: "2026-11-13", multiplier: 100, entry_price: 7.7, entry_at: new Date("2026-11-11T15:00:00Z"), exit_price: 0, exit_at: bookedAt });
+    await db("trades").insert({ position_leg_id: putLegId, side: "buy", quantity: 2, price: 0, executed_at: bookedAt, ibkr_order_id: "0", is_closing_trade: true });
+    await db("positions").insert({ id: sharesPositionId, strategy_key: "unstructured", ticker_id: tickerId, status: "open", opened_at: bookedAt });
+    await db("position_legs").insert({ id: sharesLegId, position_id: sharesPositionId, leg_type: "stock", side: "long", quantity: 200, multiplier: 1, entry_price: 145, entry_at: bookedAt });
+    await db("trades").insert({ position_leg_id: sharesLegId, side: "buy", quantity: 200, price: 145, executed_at: bookedAt, ibkr_order_id: "0", is_closing_trade: false });
+    // An app order's fill booked at the same instant keeps its own time.
+    await db("trades").insert({ position_leg_id: sharesLegId, side: "buy", quantity: 1, price: 140, executed_at: bookedAt, ibkr_order_id: "4242", is_closing_trade: false });
+  });
+
+  it("counts the shares bought on the expiry date: provisional until Friday's statement, then left to it", async () => {
+    const amounts = async (since: Date) => (await loadProvisionalCashMovements(since, [])).map((movement) => ({ amount: Math.round(movement.amount * 100) / 100 + 0, at: movement.at.toISOString() })).sort((first, second) => first.amount - second.amount);
+    expect(await amounts(beforeFridaysStatement)).toEqual([
+      { amount: -29_000, at: "2026-11-13T21:00:00.000Z" },
+      { amount: -140, at: "2026-11-14T06:03:56.000Z" },
+      { amount: 0, at: "2026-11-14T06:03:56.000Z" },
+    ]);
+    expect(await amounts(afterFridaysStatement)).toEqual([
+      { amount: -140, at: "2026-11-14T06:03:56.000Z" },
+      { amount: 0, at: "2026-11-14T06:03:56.000Z" },
+    ]);
+  });
+
+  it("an assigned leg with no stock fill also counts at the expiry close", async () => {
+    await db("trades").where({ price: 145, quantity: 200 }).del();
+    const assignmentsAt = async (since: Date) => (await loadProvisionalCashMovements(since, [])).filter((movement) => movement.kind === "assignment").map((movement) => [movement.amount, movement.at.toISOString()]);
+    expect(await assignmentsAt(beforeFridaysStatement)).toEqual([[-29_000, "2026-11-13T21:00:00.000Z"]]);
+    expect(await assignmentsAt(afterFridaysStatement)).toEqual([]);
+  });
+});

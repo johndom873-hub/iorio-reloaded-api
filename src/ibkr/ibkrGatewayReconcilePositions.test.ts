@@ -373,9 +373,11 @@ describe("reconcileHeldPositions — every structure change is its own position"
     const stockConId = (nextConId += 1);
     const callConId = (nextConId += 1);
     const coveredCallId = await insertPosition(ticker.id, "covered_call");
-    await insertStockLeg(coveredCallId, stockConId, 100, 100);
+    const stockLegId = await insertStockLeg(coveredCallId, stockConId, 100, 100);
     await insertShortOptionLeg(coveredCallId, callConId, "call", 105, isoDateDaysFromToday(-2), 2);
     await testDb("daily_price_bars").insert({ ticker_id: ticker.id, trading_date: isoDateDaysFromToday(-2), close_price: 110 });
+    // IBKR's record of the shares sold at the strike.
+    await testDb("trades").insert({ position_leg_id: stockLegId, ibkr_exec_id: `reconcile-test-call-away-${stockLegId}`, ibkr_order_id: "0", side: "sell", quantity: 100, price: 105, executed_at: new Date(Date.now() - 60_000), is_closing_trade: true });
     telegramMessages.length = 0;
 
     const previousMode = process.env.EXPIRY_SETTLEMENT_MODE;
@@ -1650,6 +1652,8 @@ describe("reconcileHeldPositions — IBKR's settlement of an expired option (Mar
     const stockLegId = await insertStockLeg(coveredCallId, stockConId, 100, 100);
     await insertShortOptionLeg(coveredCallId, callConId, "call", 105, expiryDate, 2);
     await testDb("daily_price_bars").insert({ ticker_id: ticker.id, trading_date: expiryDate, close_price: 110 });
+    // IBKR's record of the shares sold at the strike, booked that evening.
+    await testDb("trades").insert({ position_leg_id: stockLegId, ibkr_exec_id: `reconcile-test-settlement-stock-${stockLegId}`, ibkr_order_id: "0", side: "sell", quantity: 100, price: 105, executed_at: easternInstant(expiryDate, 22, 0), is_closing_trade: true });
 
     const previousMode = process.env.EXPIRY_SETTLEMENT_MODE;
     process.env.EXPIRY_SETTLEMENT_MODE = "apply";
