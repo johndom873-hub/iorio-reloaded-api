@@ -23,6 +23,12 @@ export interface ReconciliationDependencies {
   drainPendingOpeningExecutions: (conId: string, newLegId: string) => Promise<void>;
   /** Writes waiting covered-call share fills onto the stock leg of the position holding their call, once it exists. */
   attributeWaitingShareBuys?: () => Promise<void>;
+  /**
+   * Asks IBKR for its recent executions again and waits until they are written. IBKR never sends its expiry settlement
+   * records live (assignments, expiries: order id 0); they came only with the replay after the Gateway's daily drop at
+   * about 05:30 UTC, hours after the pass had closed the legs without them (Marcelo 2026-11-14).
+   */
+  replayRecentExecutions?: () => Promise<void>;
 }
 
 /** Closes a leftover-stock position whose shares are now covered by a newly sold call. */
@@ -685,6 +691,12 @@ async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number, fr
   console.log(
     `Reconciliation #${passId}: ${openLegs.length} open leg(s) tracked in DB, ${legsNoLongerHeld.length} no longer reported by IBKR (will be closed this pass).`,
   );
+  // An expired option IBKR stopped reporting has been settled: its settlement records exist by now but are never sent
+  // live, so they are fetched before the legs close, for the exits, the Puts' decisions and the settlement correction.
+  if (dependencies.replayRecentExecutions && legsNoLongerHeld.some((leg) => leg.is_expired_option)) {
+    console.log(`Reconciliation #${passId}: expired option(s) no longer reported: replaying IBKR's recent executions for their settlement records first.`);
+    await dependencies.replayRecentExecutions().catch((error) => console.error(`Reconciliation #${passId}: execution replay failed: ${error instanceof Error ? error.message : error}`));
+  }
   putCloseReasonByPositionIdThisPass = await decidePutsExpiringThisPass(legsNoLongerHeld);
 
   const positionIdsWithExpiredLeg = new Set<string>();

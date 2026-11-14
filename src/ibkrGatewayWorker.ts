@@ -301,7 +301,7 @@ function setupOrderTrackingListeners(): void {
   });
 
   ib.on(EventName.execDetails, (_reqId, contract, execution) => {
-    executionRecorder.recordExecution(contract, execution).catch((error) => console.error(`Failed to record execution: ${error}`));
+    trackExecutionWrite(executionRecorder.recordExecution(contract, execution)).catch((error) => console.error(`Failed to record execution: ${error}`));
     captureExecutionQuote(ib, contract, execution).catch((error) => console.error(`Failed to capture the quote at execution ${execution.execId}: ${error}`));
   });
 
@@ -328,6 +328,25 @@ const executionRecorder = createExecutionRecorder({
 
 const orderTrackingDependencies = { db, publishNotification };
 
+// Execution writes still running, so a replay can wait for what it asked for (replayRecentExecutionsAndWait).
+const executionWritesInFlight = new Set<Promise<unknown>>();
+function trackExecutionWrite<T>(write: Promise<T>): Promise<T> {
+  executionWritesInFlight.add(write);
+  write.then(
+    () => executionWritesInFlight.delete(write),
+    () => executionWritesInFlight.delete(write),
+  );
+  return write;
+}
+
+/** IBKR's recent executions again, through the same execDetails listener, waiting until each one is written. */
+async function replayRecentExecutionsAndWait(): Promise<void> {
+  const ib = persistentIbkrConnection.getIb();
+  if (!ib) return;
+  await replayRecentIbkrExecutions(ib);
+  await Promise.allSettled([...executionWritesInFlight]);
+}
+
 // Real bug found 2026-08-25 in a full-repo review: reconcilePositionsFromIbkr
 // is fired-and-forgotten from three places (post-execution twice, plus a 60s
 // setInterval) with nothing preventing two passes from running concurrently.
@@ -348,6 +367,7 @@ const reconciliationDependencies: ReconciliationDependencies = {
   notifyTelegram: notifyTelegramDeliveredWithinTimeout,
   drainPendingOpeningExecutions: (conId, newLegId) => executionRecorder.drainPendingOpeningExecutions(conId, newLegId),
   attributeWaitingShareBuys: () => executionRecorder.attributeWaitingShareBuys(),
+  replayRecentExecutions: replayRecentExecutionsAndWait,
 };
 
 async function reconcilePositionsFromIbkr(): Promise<void> {

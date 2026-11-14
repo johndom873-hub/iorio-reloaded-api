@@ -28,6 +28,9 @@ const telegramMessages: string[] = [];
 let telegramDelivers = true;
 // A test sets this to simulate the worker saving a buffered opening fill onto a leg right after the leg is created.
 let drainPendingOpeningExecutionsHook: ((conId: string, newLegId: string) => Promise<void>) | undefined;
+// A test sets this to simulate IBKR's settlement records arriving when the pass asks for its recent executions again.
+let replayRecentExecutionsHook: (() => Promise<void>) | undefined;
+let replayRecentExecutionsCalls = 0;
 const dependencies = {
   notifyTelegram: async (message: string) => {
     telegramMessages.push(message);
@@ -35,6 +38,10 @@ const dependencies = {
   },
   drainPendingOpeningExecutions: async (conId: string, newLegId: string) => {
     await drainPendingOpeningExecutionsHook?.(conId, newLegId);
+  },
+  replayRecentExecutions: async () => {
+    replayRecentExecutionsCalls += 1;
+    await replayRecentExecutionsHook?.();
   },
 };
 
@@ -1173,6 +1180,37 @@ describe("reconcileHeldPositions — fixes from the 2026-10-16 P&L review", () =
       [100, false],
       [200, true],
     ]);
+  });
+
+  it("an assigned Call's settlement records, fetched again before its legs close: the shares exit at the strike and the Covered Call closes as assigned", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    const stockLegId = await insertStockLeg(coveredCallId, stockConId, 100, 198.47);
+    const callLegId = await insertShortOptionLeg(coveredCallId, callConId, "call", 162.5, isoDateDaysFromToday(-1), 1.2);
+    await testDb("daily_price_bars").insert({ ticker_id: ticker.id, trading_date: isoDateDaysFromToday(-1), close_price: 162.85 });
+    const settledAt = new Date(Date.now() - 20_000);
+    // What IBKR's replay delivers (recordExecution's rows): the Call at $0 and the shares sold at the strike, order id 0.
+    replayRecentExecutionsHook = async () => {
+      await testDb("trades").insert({ position_leg_id: callLegId, ibkr_exec_id: `reconcile-test-settle-call-${callLegId}`, ibkr_order_id: "0", side: "buy", quantity: 1, price: 0, executed_at: settledAt, is_closing_trade: true });
+      await testDb("trades").insert({ position_leg_id: stockLegId, ibkr_exec_id: `reconcile-test-settle-stock-${stockLegId}`, ibkr_order_id: "0", side: "sell", quantity: 100, price: 162.5, executed_at: settledAt, is_closing_trade: true });
+    };
+    const callsBefore = replayRecentExecutionsCalls;
+    try {
+      await runPass([]);
+    } finally {
+      replayRecentExecutionsHook = undefined;
+    }
+
+    expect(replayRecentExecutionsCalls).toBe(callsBefore + 1);
+    const stockLeg = await testDb("position_legs").where({ id: stockLegId }).first();
+    expect(Number(stockLeg.exit_price)).toBe(162.5);
+    expect((await testDb("positions").where({ id: coveredCallId }).first()).close_reason).toBe("assigned");
+
+    // A pass with no expired option to close does not ask again.
+    await runPass([]);
+    expect(replayRecentExecutionsCalls).toBe(callsBefore + 1);
   });
 
   it("INTC: a Covered Call's 100 shares back to the 400-share leftover when its Call expires start a new 500-share leg, not a 500-share leg dated from the leftover's entry", async () => {
