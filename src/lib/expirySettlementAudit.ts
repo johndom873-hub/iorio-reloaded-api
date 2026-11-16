@@ -30,7 +30,8 @@ import { closingTradeOtherThanSettlementSql } from "./settlementExecution.js";
 //     was not exercised (close_reason 'assigned' -> 'expired_worthless'), and
 //     anything else is reported. Approved 2026-11-14 (Marcelo).
 //   put ITM  -> close_reason -> 'assigned'; the assigned stock legs (entered
-//     within minutes of the put's close at strike - premium, IBKR's
+//     within minutes of the leg holding IBKR's assignment fill, or of the put's
+//     close without one, at strike - premium, IBKR's
 //     premium-adjusted average cost that double counts the put credit) and
 //     their transfer successors get entry_price = strike, but ONLY when the
 //     chain ends closed — the worker re-syncs an open leg's entry_price to
@@ -156,19 +157,25 @@ async function loadExpiredShortOptionLegs(database: Knex, now: Date): Promise<Ex
 // reconciliation closes the option, an expiry's after it.
 const assignmentFillWindow = "36 hours";
 
-/** Whether the ticker has the stock fill an assignment of this leg makes: no app order, at its strike, for its shares. */
-async function hasAssignmentFill(database: Knex, leg: ExpiredShortOptionLeg): Promise<boolean> {
+/** The stock leg holding the fill an assignment of this leg makes (no app order, at its strike, for its shares), or null without one. */
+async function findAssignmentFillStockLeg(database: Knex, leg: ExpiredShortOptionLeg): Promise<{ id: string; entryAt: Date } | null> {
   const result = await database.raw(
-    `SELECT 1 FROM trades tr
+    `SELECT stock_leg.id, stock_leg.entry_at AS "entryAt" FROM trades tr
      JOIN position_legs stock_leg ON stock_leg.id = tr.position_leg_id
      JOIN positions stock_position ON stock_position.id = stock_leg.position_id
      WHERE stock_position.ticker_id = ? AND stock_leg.leg_type = 'stock' AND tr.source_order_request_id IS NULL
        AND tr.side = ? AND tr.quantity = ? AND abs(tr.price - ?) < 0.00005
        AND tr.executed_at BETWEEN ?::timestamptz - interval '${assignmentFillWindow}' AND ?::timestamptz + interval '${assignmentFillWindow}'
+     ORDER BY tr.executed_at
      LIMIT 1`,
     [leg.tickerId, leg.optionType === "call" ? "sell" : "buy", leg.quantity * leg.multiplier, leg.strike, leg.exitAt, leg.exitAt],
   );
-  return result.rows.length > 0;
+  return result.rows[0] ?? null;
+}
+
+/** Whether the ticker has the stock fill an assignment of this leg makes. */
+async function hasAssignmentFill(database: Knex, leg: ExpiredShortOptionLeg): Promise<boolean> {
+  return (await findAssignmentFillStockLeg(database, leg)) !== null;
 }
 
 async function relabelOutOfTheMoneyAssignment(database: Knex, leg: ExpiredShortOptionLeg, mode: ExpirySettlementMode, actions: ExpirySettlementAction[]): Promise<void> {
@@ -309,6 +316,7 @@ async function findBlendedAssignmentLegs(
   database: Knex,
   leg: ExpiredShortOptionLeg,
   assignedShares: number,
+  assignedSharesEnteredAround: Date | string,
 ): Promise<{ legs: StockLegRow[]; targetEntry: number; totalShares: number; otherShares: number; otherSharesEntryPrice: number } | null> {
   const candidates: StockLegRow[] = (
     await database.raw(
@@ -316,7 +324,7 @@ async function findBlendedAssignmentLegs(
        FROM position_legs pl JOIN positions p ON p.id = pl.position_id
        WHERE p.ticker_id = ? AND pl.leg_type = 'stock' AND pl.side = 'long'
          AND pl.entry_at BETWEEN ?::timestamptz - interval '${assignmentEntryWindowMinutes} minutes' AND ?::timestamptz + interval '${assignmentEntryWindowMinutes} minutes'`,
-      [leg.tickerId, leg.exitAt, leg.exitAt],
+      [leg.tickerId, assignedSharesEnteredAround, assignedSharesEnteredAround],
     )
   ).rows;
   if (candidates.length === 0) return null;
@@ -349,6 +357,10 @@ async function correctPutAssignment(database: Knex, leg: ExpiredShortOptionLeg, 
 
   const assignedShares = leg.quantity * leg.multiplier;
   const expectedPremiumAdjustedEntry = leg.strike - leg.entryPrice;
+  // The assigned shares' leg is the one IBKR's assignment fill went to, which can enter long after the put's close (the worker
+  // disconnected over the settlement closes the put at IBKR's settlement time and opens the leg when it reconnects). Without
+  // the fill, the put's close stands in.
+  const assignedSharesEnteredAround = (await findAssignmentFillStockLeg(database, leg))?.entryAt ?? leg.exitAt;
   let firstLegs: StockLegRow[] = (
     await database.raw(
       `SELECT pl.id, pl.quantity, pl.entry_price::float AS "entryPrice", pl.exit_price::float AS "exitPrice", pl.exit_at AS "exitAt", pl.entry_at AS "entryAt"
@@ -357,7 +369,7 @@ async function correctPutAssignment(database: Knex, leg: ExpiredShortOptionLeg, 
          AND pl.entry_at BETWEEN ?::timestamptz - interval '${assignmentEntryWindowMinutes} minutes' AND ?::timestamptz + interval '${assignmentEntryWindowMinutes} minutes'
          AND (abs(pl.entry_price - ?) <= ? OR abs(pl.entry_price - ?) <= ?)`,
       // Premium-adjusted (uncorrected) OR already at the strike (corrected on an earlier run — stays silent).
-      [leg.tickerId, leg.exitAt, leg.exitAt, expectedPremiumAdjustedEntry, entryToleranceCents, leg.strike, entryToleranceCents],
+      [leg.tickerId, assignedSharesEnteredAround, assignedSharesEnteredAround, expectedPremiumAdjustedEntry, entryToleranceCents, leg.strike, entryToleranceCents],
     )
   ).rows;
   // The entry every assigned-share leg in the chain should end up at: the put's strike, or the blended cost when the assigned shares merged
@@ -366,7 +378,7 @@ async function correctPutAssignment(database: Knex, leg: ExpiredShortOptionLeg, 
   let expectedChainShares = assignedShares;
   let blendedWith: { otherShares: number; otherSharesEntryPrice: number } | null = null;
   if (firstLegs.length === 0) {
-    const blended = await findBlendedAssignmentLegs(database, leg, assignedShares);
+    const blended = await findBlendedAssignmentLegs(database, leg, assignedShares, assignedSharesEnteredAround);
     if (blended) {
       firstLegs = blended.legs;
       targetEntry = blended.targetEntry;

@@ -383,3 +383,60 @@ describe("expiry settlement audit — an out-of-the-money option labelled assign
     expect(await closeReasonOf(putPositionId)).toBe("assigned");
   });
 });
+
+describe("expiry settlement audit — assigned shares entered long after the put's close", () => {
+  // The worker disconnected over the settlement: the put closes at IBKR's settlement time, the shares' leg opens on reconnect.
+  const reconnectDelayMs = 44 * 60_000;
+
+  async function insertAssignmentFill(stockLegId: string, executedAt: Date): Promise<void> {
+    await insertTrade(stockLegId, { side: "buy", quantity: 100, price: 317.5, executedAt, ibkrOrderId: "0" });
+    await testDb("trades").where({ position_leg_id: stockLegId }).update({ is_closing_trade: false });
+  }
+
+  async function seedLateBlendedAssignment(withAssignmentFill: boolean) {
+    const tickerId = await createTicker();
+    const putExitAt = daysAgo(2);
+    const { positionId: putPositionId } = await insertAssignedPut(tickerId, 295.83, putExitAt);
+    const coveredCallPositionId = await insertPosition(tickerId, "covered_call", "expired_worthless");
+    const reconnectAt = new Date(putExitAt.getTime() + reconnectDelayMs);
+    await insertStockLeg(coveredCallPositionId, 100, 327.4909, daysAgo(10), 327.4909, reconnectAt);
+    const leftoverPositionId = await insertPosition(tickerId, "unstructured", null);
+    const mergedLegId = await insertStockLeg(leftoverPositionId, 200, 322.4955, new Date(reconnectAt.getTime() + 1_000), null, null);
+    if (withAssignmentFill) await insertAssignmentFill(mergedLegId, new Date(putExitAt.getTime() - 9 * 3_600_000));
+    return { putPositionId, mergedLegId };
+  }
+
+  it("blended with shares already held, still open: found through the assignment fill, a notice only", async () => {
+    const { putPositionId, mergedLegId } = await seedLateBlendedAssignment(true);
+
+    const result = await runExpirySettlementAudit("apply", testDb);
+    const own = result.actions.filter((action) => action.positionId === putPositionId);
+    expect(own.map((action) => action.kind)).toEqual(["skipped"]);
+    expect(own[0]!.informational).toBe(true);
+    expect(own[0]!.detail).toContain("stock chain is still open");
+    expect(Number((await testDb("position_legs").where({ id: mergedLegId }).first()).entry_price)).toBe(322.4955);
+  });
+
+  it("the same legs without an assignment fill are still reported for review", async () => {
+    const { putPositionId } = await seedLateBlendedAssignment(false);
+
+    const result = await runExpirySettlementAudit("apply", testDb);
+    const own = result.actions.filter((action) => action.positionId === putPositionId);
+    expect(own.map((action) => action.kind)).toEqual(["skipped"]);
+    expect(own[0]!.informational).toBeFalsy();
+    expect(own[0]!.detail).toContain("assigned shares not tracked as a leg");
+  });
+
+  it("a lone assigned leg at strike − premium, since sold: found through the assignment fill and corrected to the strike", async () => {
+    const tickerId = await createTicker();
+    const putExitAt = daysAgo(2);
+    const { positionId: putPositionId } = await insertAssignedPut(tickerId, 295.83, putExitAt);
+    const leftoverPositionId = await insertPosition(tickerId, "unstructured", null);
+    const assignedLegId = await insertStockLeg(leftoverPositionId, 100, 310.1529, new Date(putExitAt.getTime() + reconnectDelayMs), 279.864, daysAgo(1));
+    await insertAssignmentFill(assignedLegId, new Date(putExitAt.getTime() - 9 * 3_600_000));
+
+    const result = await runExpirySettlementAudit("apply", testDb);
+    expect(result.actions.filter((action) => action.positionId === putPositionId).map((action) => action.kind)).toEqual(["put_assigned_stock_entry"]);
+    expect(Number((await testDb("position_legs").where({ id: assignedLegId }).first()).entry_price)).toBe(317.5);
+  });
+});
