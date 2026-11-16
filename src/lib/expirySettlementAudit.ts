@@ -36,6 +36,9 @@ import { closingTradeOtherThanSettlementSql } from "./settlementExecution.js";
 //     their transfer successors get entry_price = strike, but ONLY when the
 //     chain ends closed — the worker re-syncs an open leg's entry_price to
 //     IBKR's average cost every pass, so an open chain is reported, not edited.
+//     A chain handed into a leg at another cost (merged with other shares) is
+//     never edited: a notice while that leg is open, manual review once it
+//     closed. Approved 2026-11-16 (Marcelo).
 //     When the assigned shares merged with shares already held (a covered call that
 //     expired with its shares retained, then a put assigned) IBKR reports ONE leg at the
 //     blended cost, so the target is the blended cost with the put priced at the strike
@@ -398,25 +401,37 @@ async function correctPutAssignment(database: Knex, leg: ExpiredShortOptionLeg, 
   }
 
   const chain: StockLegRow[] = [...firstLegs];
+  // Legs the chain's shares were handed into at another cost (merged with other shares): their cost is a blend this audit
+  // does not own, and the shares are still in them, so the chain is never edited.
+  const mergedIntoLegs: StockLegRow[] = [];
   for (let cursor = 0; cursor < chain.length; cursor += 1) {
     const current = chain[cursor]!;
     if (current.exitAt === null) continue;
-    const successors: StockLegRow[] = (
+    const enteredAtHandover: StockLegRow[] = (
       await database.raw(
         `SELECT pl.id, pl.quantity, pl.entry_price::float AS "entryPrice", pl.exit_price::float AS "exitPrice", pl.exit_at AS "exitAt", pl.entry_at AS "entryAt"
          FROM position_legs pl JOIN positions p ON p.id = pl.position_id
          WHERE p.ticker_id = ? AND pl.leg_type = 'stock' AND pl.side = 'long' AND pl.id <> ?
-           AND abs(extract(epoch FROM pl.entry_at - ?::timestamptz)) <= ${transferWindowSeconds}
-           AND abs(pl.entry_price - ?) < 0.0001`,
-        [leg.tickerId, current.id, current.exitAt, current.exitPrice ?? current.entryPrice],
+           AND abs(extract(epoch FROM pl.entry_at - ?::timestamptz)) <= ${transferWindowSeconds}`,
+        [leg.tickerId, current.id, current.exitAt],
       )
     ).rows.filter((candidate: StockLegRow) => !chain.some((existing) => existing.id === candidate.id));
+    const handoverPrice = current.exitPrice ?? current.entryPrice;
+    const successors = enteredAtHandover.filter((candidate) => Math.abs(candidate.entryPrice - handoverPrice) < 0.0001);
     chain.push(...successors);
+    const handedOverAtCost = current.exitPrice !== null && Math.abs(current.exitPrice - current.entryPrice) < 0.0001;
+    if (successors.length === 0 && handedOverAtCost) {
+      mergedIntoLegs.push(...enteredAtHandover.filter((candidate) => !mergedIntoLegs.some((merged) => merged.id === candidate.id)));
+    }
   }
 
   const chainTotalIsAssignedShares = firstLegs.reduce((sum, stockLeg) => sum + stockLeg.quantity, 0) === expectedChainShares;
-  const chainEndsOpen = chain.some((stockLeg) => stockLeg.exitAt === null);
+  const chainEndsOpen = chain.some((stockLeg) => stockLeg.exitAt === null) || mergedIntoLegs.some((stockLeg) => stockLeg.exitAt === null);
   const chainSkip = classifyAssignedChainSkip(chainTotalIsAssignedShares, chainEndsOpen);
+  if (chainSkip === null && mergedIntoLegs.length > 0) {
+    actions.push(reviewAction("skipped", leg, "assigned, its shares were handed into a leg at another cost (merged with other shares), since closed — manual review"));
+    return;
+  }
   if (chainSkip !== null) {
     actions.push(
       reviewAction(

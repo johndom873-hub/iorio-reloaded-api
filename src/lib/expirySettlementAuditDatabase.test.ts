@@ -440,3 +440,42 @@ describe("expiry settlement audit — assigned shares entered long after the put
     expect(Number((await testDb("position_legs").where({ id: assignedLegId }).first()).entry_price)).toBe(317.5);
   });
 });
+
+describe("expiry settlement audit — assigned shares handed into a leg at another cost (Marcelo 2026-11-16)", () => {
+  // The blended leg is handed over at its own cost and merges, with 300 other shares, into a 500-share leg at a blended cost.
+  async function seedMergedChain(mergedLegClosed: boolean) {
+    const tickerId = await createTicker();
+    const putExitAt = daysAgo(3);
+    const { positionId: putPositionId } = await insertAssignedPut(tickerId, 295.83, putExitAt);
+    const coveredCallPositionId = await insertPosition(tickerId, "covered_call", "expired_worthless");
+    await insertStockLeg(coveredCallPositionId, 100, 327.4909, daysAgo(10), 327.4909, new Date(putExitAt.getTime() + 7_000));
+    const handoverAt = daysAgo(1);
+    const leftoverPositionId = await insertPosition(tickerId, "unstructured", null);
+    const blendedLegId = await insertStockLeg(leftoverPositionId, 200, 318.8219, new Date(putExitAt.getTime() + 8_000), 318.8219, handoverAt);
+    const mergedPositionId = await insertPosition(tickerId, "unstructured", null);
+    await insertStockLeg(mergedPositionId, 500, 300, new Date(handoverAt.getTime() + 1_000), mergedLegClosed ? 290 : null, mergedLegClosed ? daysAgo(0.5) : null);
+    return { putPositionId, blendedLegId };
+  }
+
+  it("the merged leg still open: a notice only, the chain's legs are not edited", async () => {
+    const { putPositionId, blendedLegId } = await seedMergedChain(false);
+
+    const result = await runExpirySettlementAudit("apply", testDb);
+    const own = result.actions.filter((action) => action.positionId === putPositionId);
+    expect(own.map((action) => action.kind)).toEqual(["skipped"]);
+    expect(own[0]!.informational).toBe(true);
+    const blendedLeg = await testDb("position_legs").where({ id: blendedLegId }).first();
+    expect([Number(blendedLeg.entry_price), Number(blendedLeg.exit_price)]).toEqual([318.8219, 318.8219]);
+  });
+
+  it("the merged leg since closed: reported for review, the chain's legs are not edited", async () => {
+    const { putPositionId, blendedLegId } = await seedMergedChain(true);
+
+    const result = await runExpirySettlementAudit("apply", testDb);
+    const own = result.actions.filter((action) => action.positionId === putPositionId);
+    expect(own.map((action) => action.kind)).toEqual(["skipped"]);
+    expect(own[0]!.informational).toBeFalsy();
+    expect(own[0]!.detail).toContain("handed into a leg at another cost");
+    expect(Number((await testDb("position_legs").where({ id: blendedLegId }).first()).entry_price)).toBe(318.8219);
+  });
+});
