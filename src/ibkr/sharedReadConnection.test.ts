@@ -685,7 +685,7 @@ describe("borrowSharedConnectionOrConnect", () => {
     await expect(borrowSharedConnectionOrConnect(connection, "caller")).rejects.toThrow("IBKR Gateway unreachable");
     const shared = await borrowSharedConnectionOrConnect(connection, "caller");
     expect(shared.ib).toBe(latestFakeIb());
-    latestFakeIb().disconnect();
+    latestFakeIb().emit(EventName.disconnected);
     openIbkrTunnelMock.mockImplementation(() => new Promise(() => {}));
     const oneShot = { ib: { id: "one-shot" }, disconnect: vi.fn() };
     connectToIbkrGatewayMock.mockResolvedValue(oneShot);
