@@ -45,6 +45,21 @@ jobs:
           RELEASE_VERSION=""
 
           for i in $(seq 1 60); do
+            # A failed build never creates a release, so check the build first
+            BUILD_STATUS=$(curl -s \
+              -H "Accept: application/vnd.heroku+json; version=3" \
+              -H "Authorization: Bearer $HEROKU_API_KEY" \
+              -H "Range: created_at ..; max=20, order=desc" \
+              "https://api.heroku.com/apps/${APP}/builds" \
+              | jq -r --arg sha "$COMMIT_SHA" \
+                '[.[] | select(.source_blob.version == $sha)] | .[0].status // empty')
+
+            if [ "$BUILD_STATUS" = "failed" ]; then
+              echo "Poll $i: build for $SHORT_SHA failed"
+              STATUS="failed"
+              break
+            fi
+
             RESPONSE=$(curl -s \
               -H "Accept: application/vnd.heroku+json; version=3" \
               -H "Authorization: Bearer $HEROKU_API_KEY" \
