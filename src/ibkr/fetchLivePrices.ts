@@ -1,6 +1,5 @@
 import { EventName, MarketDataType, Option, OptionType, Stock, type IBApi } from "@stoqey/ib";
 import type { Contract } from "@stoqey/ib";
-import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice, logMarketDataEntitlementNotice } from "./requestMarketData.js";
 import { loadFallbackStockPrices, recordStockPrices } from "../lib/priceService.js";
@@ -220,7 +219,7 @@ async function fetchLivePricesFromIbkr(contracts: PriceContract[], timeoutMs: nu
     }
   }
 
-  const connection = await connectToIbkrGateway();
+  const connection = await sharedReadConnection.connectOneShotFallback();
   const { ib } = connection;
   try {
     let nextReqId = 30_000;

@@ -55,7 +55,7 @@ vi.mock("../db/connection.js", () => ({ db: mocks.db }));
 vi.mock("./connectIbkr.js", () => ({ connectToIbkrGateway: mocks.connectToIbkrGateway }));
 vi.mock("./sharedReadConnection.js", () => ({
   nextReqIdFor: (_ib: unknown, fallback: () => number) => fallback(),
-  sharedReadConnection: { borrow: mocks.borrow, allocateReqId: mocks.allocateReqId },
+  sharedReadConnection: { borrow: mocks.borrow, allocateReqId: mocks.allocateReqId, connectOneShotFallback: () => mocks.connectToIbkrGateway() },
 }));
 vi.mock("./requestMarketData.js", () => ({ requestRealtimeMarketData: mocks.requestRealtimeMarketData }));
 vi.mock("./fetchTickerOverview.js", () => ({ fetchHistoricalBarsRaw: mocks.fetchHistoricalBarsRaw }));

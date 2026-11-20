@@ -1,6 +1,5 @@
 import { EventName, type IBApi } from "@stoqey/ib";
 import { environment } from "../config/env.js";
-import { connectToIbkrGateway } from "./connectIbkr.js";
 import { fetchSettledCashForTodaysTrades } from "./fetchSettledCashByDate.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
 import { dedupeInFlight } from "../lib/dedupeInFlight.js";
@@ -147,7 +146,7 @@ async function fetchAccountSummaryUncached(): Promise<AccountSummary> {
     }
   }
 
-  const connection = await connectToIbkrGateway();
+  const connection = await sharedReadConnection.connectOneShotFallback();
   const { ib } = connection;
   const reqId = 9001;
   try {

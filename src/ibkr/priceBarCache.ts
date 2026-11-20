@@ -559,7 +559,7 @@ async function withChartReadConnection<Result>(run: (connection: IbkrConnection,
     }
   }
 
-  const connection = await connectToIbkrGateway();
+  const connection = await sharedReadConnection.connectOneShotFallback();
   try {
     requestRealtimeMarketData(connection.ib);
     return await run(connection, 1);
@@ -613,7 +613,7 @@ export async function fetchCachedIvBars(symbol: string, range: IvChartRange): Pr
         release();
       }
     } else {
-      const connection = await connectToIbkrGateway();
+      const connection = await sharedReadConnection.connectOneShotFallback();
       try {
         requestRealtimeMarketData(connection.ib);
         await getCachedChartBars(connection, symbol, range);

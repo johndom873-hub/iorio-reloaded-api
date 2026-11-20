@@ -1,4 +1,3 @@
-import { connectToIbkrGateway } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { nextReqIdFor, sharedLiveConnection } from "./sharedReadConnection.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
@@ -130,7 +129,7 @@ export async function streamTickerDetail(
       `streamTickerDetail: shared live connection unavailable (${error instanceof Error ? error.message : error}), falling back to a one-shot connection.`,
     );
   }
-  const connection = borrowed ? { ib: borrowed.ib, disconnect: borrowed.release } : await connectToIbkrGateway();
+  const connection = borrowed ? { ib: borrowed.ib, disconnect: borrowed.release } : await sharedLiveConnection.connectOneShotFallback();
   try {
     // Connection-wide setting, called exactly once here — not inside any of
     // getCachedChartBars, which run concurrently on this connection below. A second call

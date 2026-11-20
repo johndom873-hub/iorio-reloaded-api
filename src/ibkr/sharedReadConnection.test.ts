@@ -659,13 +659,40 @@ describe("borrowSharedConnectionOrConnect", () => {
     expect(connectToIbkrGatewayMock).not.toHaveBeenCalled();
   });
 
-  it("falls back to a one-shot connection when the shared one is not ready, and says why", async () => {
+  it("refuses the one-shot fallback at once while the shared connection's latest connect failed, and says why", async () => {
     openIbkrTunnelMock.mockRejectedValue(new Error("tunnel down"));
+    await expect(borrowSharedConnectionOrConnect(createConnection(), "fetchLivePrices")).rejects.toThrow(
+      "IBKR Gateway unreachable: the shared read connection's last connect failed (tunnel down), so no one-shot connection is opened.",
+    );
+    expect(connectToIbkrGatewayMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses the fallback after a handshake timed out, while the next attempt is still in flight, after 3 s rather than 3 s plus a 15 s one-shot", async () => {
+    fakeGateway.behaviour = "hang";
+    const connection = createConnection();
+    const first = connection.borrow().catch((error: Error) => error);
+    await advance(15_000);
+    expect(String(await first)).toContain("not ready within timeout");
+    const pending = borrowSharedConnectionOrConnect(connection, "fetchAccountSummary").catch((error: Error) => error);
+    await advance(3_000);
+    expect(String(await pending)).toContain("last connect failed (Timed out connecting to IBKR Gateway.)");
+    expect(connectToIbkrGatewayMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back again once a later connect has succeeded", async () => {
+    openIbkrTunnelMock.mockRejectedValueOnce(new Error("tunnel down"));
+    const connection = createConnection();
+    await expect(borrowSharedConnectionOrConnect(connection, "caller")).rejects.toThrow("IBKR Gateway unreachable");
+    const shared = await borrowSharedConnectionOrConnect(connection, "caller");
+    expect(shared.ib).toBe(latestFakeIb());
+    latestFakeIb().disconnect();
+    openIbkrTunnelMock.mockImplementation(() => new Promise(() => {}));
     const oneShot = { ib: { id: "one-shot" }, disconnect: vi.fn() };
     connectToIbkrGatewayMock.mockResolvedValue(oneShot);
-    const result = await borrowSharedConnectionOrConnect(createConnection(), "fetchLivePrices");
-    expect(result).toBe(oneShot);
-    expect(console.log).toHaveBeenCalledWith("fetchLivePrices: shared IBKR connection unavailable (tunnel down), falling back to a one-shot connection.");
+    const pending = borrowSharedConnectionOrConnect(connection, "fetchLivePrices");
+    await advance(3_000);
+    expect(await pending).toBe(oneShot);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("fetchLivePrices: shared IBKR connection unavailable"));
   });
 
   it("falls back when the shared connect times out", async () => {
@@ -678,8 +705,10 @@ describe("borrowSharedConnectionOrConnect", () => {
   });
 
   it("propagates a failure of the one-shot fallback", async () => {
-    openIbkrTunnelMock.mockRejectedValue(new Error("tunnel down"));
+    openIbkrTunnelMock.mockImplementation(() => new Promise(() => {}));
     connectToIbkrGatewayMock.mockRejectedValue(new Error("one-shot failed too"));
-    await expect(borrowSharedConnectionOrConnect(createConnection(), "caller")).rejects.toThrow("one-shot failed too");
+    const pending = borrowSharedConnectionOrConnect(createConnection(), "caller").catch((error: Error) => error);
+    await advance(3_000);
+    expect(String(await pending)).toContain("one-shot failed too");
   });
 });

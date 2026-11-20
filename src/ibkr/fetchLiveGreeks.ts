@@ -1,5 +1,4 @@
 import { EventName, MarketDataType, Option, OptionType, type IBApi } from "@stoqey/ib";
-import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice, logMarketDataEntitlementNotice, requestRealtimeMarketData } from "./requestMarketData.js";
 import { randomUUID } from "node:crypto";
@@ -198,7 +197,7 @@ async function fetchLiveGreeksFromIbkr(contracts: GreeksContract[], source: Gree
     }
   }
 
-  const connection = await connectToIbkrGateway();
+  const connection = await sharedReadConnection.connectOneShotFallback();
   const { ib } = connection;
   try {
     let nextReqId = 20_000;

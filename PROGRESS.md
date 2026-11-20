@@ -4,6 +4,19 @@ Last updated: 2026-11-03. Cleaned up again 2026-11-03 (approved by Marcelo): ret
 
 **Staleness pass, 2026-09-25 (Marcelo asked for a full audit of this file + the archive against actual code/git state).** Corrected in place: commit tags on the Signal Engine section, the scheduled-jobs count/list, the database-schema section, several "not built yet" items that had shipped, and a few self-contradicted entries. Where a claim couldn't be verified from code/git alone (an external artifact's freshness, a prod-only config var, a prod deploy status), it's flagged "needs Marcelo's confirmation" rather than silently closed.
 
+## Prod promoted to `81718db`, 2026-11-20 00:29 UTC (Marcelo)
+Plain language: prod now has the settlement fixes, so an assigned option is no longer counted twice in the books; Pluto kept running through it.
+- API v244 = `81718db` (from `8ce7fcc`): backup b070, migrations `20261113100001`–`3` (P&L Analyser tables), worker redeployed by the release phase (`worker_health` reports `81718db`). Frontend promotion requested the same morning.
+- Before: health-check cash gap null since 11-18 04:18 UTC, statement gap $0 on 11-18 and 11-19, no prod orders since 16 Nov.
+- NBIS legs d9ba330a / e5391702 restored by Marcelo (175.5933 / 175.59333535); the new audit's dry run on prod leaves them alone.
+- The new audit flags prod's INTC $100 Put (exp 10-14, leg 0ff62b35, closed, assigned) as manual review every night: acknowledge it (Marcelo). Staging's twin (INTC $115 Put exp 10-07, leg 5ab212d2) acknowledged 2026-11-20.
+- Still due: P&L Analyser `import-account-cash-items` (dry run, then `--apply`), the 2006 daily-history backfill, tonight's 22:30 UTC statement check.
+
+## Reads fail fast while the Gateway is unreachable (Marcelo 2026-11-20; pushed to staging 2026-11-20)
+Plain language: when IBKR's Gateway was down on 14 Nov, the Books and Dashboard cash screens hung for 30 s and then errored. They now answer in about 3 s with IBKR's figures blank.
+- Cause: after the shared read connection's 3 s borrow timeout, each read opened a one-shot connection, whose handshake waited in `ibkrHandshakeQueue.ts` (2 slots, held by the shared connections' own 15 s reconnect attempts) and then used its own 15 s: past Heroku's 30 s limit. Prod 14 Nov 05:23–06:45 UTC: 42 `/books` and 18 `/dashboard/available-cash` H12s, 42 "Timed out connecting" errors.
+- Fix (`sharedReadConnection.ts`, `connectOneShotFallback`): the one-shot fallback is refused at once while that shared connection's latest finished connect attempt failed; cleared by its next success (borrow() brings a waiting reconnect forward). Used by all 7 fallback sites (account summary, live prices, greeks, price/IV bars, ticker search, Ticker Detail stream, `borrowSharedConnectionOrConnect`). 2 tests added, 2 rewritten for the new rule.
+
 ## Settlement audit: NBIS $145 Put alert of 15–16 Nov was a false alarm (Marcelo 2026-11-16; committed `aa09792` + chain fix below, not pushed)
 Plain language: the nightly check of expired options flagged NBIS's $145 Put as "assigned shares not tracked". They were tracked, at the right cost; the check looked for them too soon after the Put closed. Fixed so it looks for them where IBKR's share purchase landed.
 - Cause: the prod Gateway was down 05:21–06:47 UTC on 14 Nov (the daily drop, long that day); IBKR settled at 06:03. On reconnect the worker closed the Put at IBKR's 06:03 time but opened the 500-share leg (300 kept from the $190 Call + 200 assigned, $163.356) at 06:47; the audit only looks ±10 min around the Put's close. Same on main.

@@ -2,7 +2,7 @@ import { IBApi, EventName, MarketDataType, type ErrorCode } from "@stoqey/ib";
 import { environment } from "../config/env.js";
 import { openIbkrTunnel, type IbkrTunnel } from "./ibkrGatewayTunnel.js";
 import { ibkrGatewayPortByTradingMode, ibkrMessagesPerSecondBudget } from "./constants.js";
-import { connectToIbkrGateway } from "./connectIbkr.js";
+import { connectToIbkrGateway, type IbkrConnection } from "./connectIbkr.js";
 import { runIbkrHandshake } from "./ibkrHandshakeQueue.js";
 import { markMarketDataTypeManaged } from "./requestMarketData.js";
 import { reportBackgroundFailure, reportBackgroundRecovery } from "../lib/backgroundFailureAlert.js";
@@ -22,10 +22,12 @@ import { reportBackgroundFailure, reportBackgroundRecovery } from "../lib/backgr
 // prefixed ibkrGateway* itself: this code ships with the web dyno's normal
 // Heroku auto-deploy, not the VPS worker's manual deploy path.
 //
-// Every caller must fall back to connectIbkr.ts's one-shot
-// connectToIbkrGateway() if borrow() throws — this connection existing must
+// Every caller must fall back to a one-shot connection through
+// connectOneShotFallback() if borrow() throws — this connection existing must
 // never make a read *less* reliable than today, only faster when it's
-// healthy. Callers migrated so far: account summary, live prices and
+// healthy. The fallback is refused only while this connection's latest connect
+// attempt failed, when a one-shot to the same Gateway cannot do better (see
+// connectOneShotFallback). Callers migrated so far: account summary, live prices and
 // greeks (one-shot and streaming), price bars and ticker search on the read
 // connection; the Ticker Detail stream on the live connection below. The rest
 // stay on the one-shot path until they are moved and tested one at a time.
@@ -190,6 +192,8 @@ export class SharedReadConnection {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connecting: Promise<void> | null = null;
   private connectedSince: number | null = null;
+  /** Why this connection's most recent finished connect attempt failed; null once one succeeds (and before the first attempt). */
+  private latestConnectFailure: string | null = null;
   private totalReconnects = 0;
   private shuttingDown = false;
   // Shared across every concurrent borrower — replaces each read helper's
@@ -249,7 +253,7 @@ export class SharedReadConnection {
   /**
    * Resolves with the shared connection if already up, or waits up to
    * borrowTimeoutMs for an in-flight (re)connect. Throws if neither happens
-   * in time — the caller must fall back to connectToIbkrGateway() rather
+   * in time — the caller must fall back to connectOneShotFallback() rather
    * than block indefinitely on this connection.
    */
   async borrow(): Promise<BorrowedConnection> {
@@ -286,6 +290,20 @@ export class SharedReadConnection {
     if (!this.ib) throw new Error(`Shared IBKR ${this.options.label} connection not ready.`);
     const ib = this.ib;
     return { ib, release: () => {} };
+  }
+
+  /**
+   * The one-shot connection a caller opens after borrow() failed. Refused at once while this connection's latest connect
+   * attempt failed: the one-shot goes through the same tunnel to the same Gateway, and its handshake would wait in
+   * ibkrHandshakeQueue.ts behind this connection's own reconnect attempts before using its full 15 s, past Heroku's 30 s
+   * request limit. borrow() brings a waiting reconnect forward, so once the Gateway is back the next borrow reconnects
+   * this connection and clears the refusal.
+   */
+  async connectOneShotFallback(): Promise<IbkrConnection> {
+    if (this.latestConnectFailure !== null) {
+      throw new Error(`IBKR Gateway unreachable: the shared ${this.options.label} connection's last connect failed (${this.latestConnectFailure}), so no one-shot connection is opened.`);
+    }
+    return connectToIbkrGateway();
   }
 
   private async connect(): Promise<void> {
@@ -357,6 +375,7 @@ export class SharedReadConnection {
       this.ib = ib;
       this.tunnel = tunnel;
       this.reconnectAttempt = 0;
+      this.latestConnectFailure = null;
       this.connectedSince = Date.now();
       this.outageTracker.markUp(this.options.label);
       console.log(
@@ -377,6 +396,7 @@ export class SharedReadConnection {
       // A connect that fails before it ever succeeded (Gateway down at boot) never reaches handleDisconnect,
       // so without this the outage clock would never start and no alert could fire.
       this.markDown();
+      this.latestConnectFailure = error instanceof Error ? error.message : String(error);
       throw error;
     } finally {
       this.connecting = null;
@@ -434,7 +454,7 @@ export async function borrowSharedConnectionOrConnect(shared: SharedReadConnecti
     return { ib: borrowed.ib, disconnect: borrowed.release };
   } catch (error) {
     console.log(`${callerLabel}: shared IBKR connection unavailable (${error instanceof Error ? error.message : error}), falling back to a one-shot connection.`);
-    return connectToIbkrGateway();
+    return shared.connectOneShotFallback();
   }
 }
 

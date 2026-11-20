@@ -1,5 +1,4 @@
 import { EventName, SecType, type ContractDescription, type IBApi } from "@stoqey/ib";
-import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
 
 export interface TickerSearchResult {
@@ -88,7 +87,7 @@ export async function searchTickers(query: string): Promise<TickerSearchResult[]
     }
   }
 
-  const connection = await connectToIbkrGateway();
+  const connection = await sharedReadConnection.connectOneShotFallback();
   try {
     const matches = await requestMatchingSymbols(connection.ib, 1, query);
     return toSearchResults(matches);

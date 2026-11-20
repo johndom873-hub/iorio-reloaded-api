@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   connect: vi.fn(),
   disconnect: vi.fn(),
 }));
-vi.mock("./sharedReadConnection.js", () => ({ sharedReadConnection: { borrow: mocks.borrow, allocateReqId: mocks.allocateReqId } }));
+vi.mock("./sharedReadConnection.js", () => ({ sharedReadConnection: { borrow: mocks.borrow, allocateReqId: mocks.allocateReqId, connectOneShotFallback: () => mocks.connect() } }));
 vi.mock("./connectIbkr.js", () => ({ connectToIbkrGateway: mocks.connect }));
 
 import { searchTickers } from "./searchTickers.js";

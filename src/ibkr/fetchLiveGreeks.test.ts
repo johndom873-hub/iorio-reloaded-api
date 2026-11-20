@@ -24,7 +24,7 @@ vi.mock("./marketDataLineBudget.js", async (importOriginal) => ({
     if (mocks.releaseError) throw mocks.releaseError;
   },
 }));
-vi.mock("./sharedReadConnection.js", () => ({ sharedReadConnection: { borrow: mocks.borrow, allocateReqId: mocks.allocateReqId } }));
+vi.mock("./sharedReadConnection.js", () => ({ sharedReadConnection: { borrow: mocks.borrow, allocateReqId: mocks.allocateReqId, connectOneShotFallback: () => mocks.connect() } }));
 vi.mock("./connectIbkr.js", () => ({ connectToIbkrGateway: mocks.connect }));
 
 import { fetchLiveGreeks, type GreeksContract } from "./fetchLiveGreeks.js";

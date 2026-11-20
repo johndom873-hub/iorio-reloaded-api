@@ -34,7 +34,7 @@ vi.mock("../lib/priceService.js", () => ({
     return mocks.fallbackPrices;
   },
 }));
-vi.mock("./sharedReadConnection.js", () => ({ sharedReadConnection: { borrow: mocks.borrow, allocateReqId: mocks.allocateReqId } }));
+vi.mock("./sharedReadConnection.js", () => ({ sharedReadConnection: { borrow: mocks.borrow, allocateReqId: mocks.allocateReqId, connectOneShotFallback: () => mocks.connect() } }));
 vi.mock("./connectIbkr.js", () => ({ connectToIbkrGateway: mocks.connect }));
 
 import { fetchLivePrices, requestLivePrices, type PriceContract } from "./fetchLivePrices.js";

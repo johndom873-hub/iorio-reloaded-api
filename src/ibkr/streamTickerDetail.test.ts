@@ -22,7 +22,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./connectIbkr.js", () => ({ connectToIbkrGateway: mocks.connect }));
 vi.mock("./requestMarketData.js", () => ({ requestRealtimeMarketData: (ib: unknown) => void mocks.realtimeRequests.push(ib) }));
 vi.mock("./sharedReadConnection.js", () => ({
-  sharedLiveConnection: { borrow: mocks.borrowLive },
+  sharedLiveConnection: { borrow: mocks.borrowLive, connectOneShotFallback: () => mocks.connect() },
   nextReqIdFor: (_ib: unknown, fallback: () => number) => {
     mocks.nextRequestId += 1;
     void fallback;
