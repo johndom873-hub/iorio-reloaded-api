@@ -4,11 +4,11 @@ Last updated: 2026-11-03. Cleaned up again 2026-11-03 (approved by Marcelo): ret
 
 **Staleness pass, 2026-09-25 (Marcelo asked for a full audit of this file + the archive against actual code/git state).** Corrected in place: commit tags on the Signal Engine section, the scheduled-jobs count/list, the database-schema section, several "not built yet" items that had shipped, and a few self-contradicted entries. Where a claim couldn't be verified from code/git alone (an external artifact's freshness, a prod-only config var, a prod deploy status), it's flagged "needs Marcelo's confirmation" rather than silently closed.
 
-## Positions closed and reopened by a short IBKR reply (Marcelo 2026-11-23; built and verified locally, not committed)
+## Positions closed and reopened by a short IBKR reply (Marcelo 2026-11-23; `54bcf7b` on prod since 2026-11-23 02:23 UTC, API v245 + live worker; prod positions repaired 2026-11-22 23:5x UTC)
 Plain language: on 22 Nov 22:05 UTC prod closed four positions still held (SNXX, GDXJ and TLT LEAPS, 200 GDX shares) as "expired worthless, price unknown" and reopened them a minute later as new positions. IBKR's Gateway was reconnecting to IBKR (it does so daily at 22:05 and 12:15 UTC) and answered the worker's holdings request with 20 of 24. Nothing was traded.
 - Fix (`ibkrGatewayReconcilePositions.ts`): a leg left out of IBKR's reply with nothing to explain it (no closing fill, not past expiry, no assignment fill, not shares past their Call's expiry) closes only when a reply at least 30 s later still leaves it out; until then its whole ticker sits out the pass, like a frozen ticker. Legs with evidence still close at once.
 - Fix: `expired_worthless` only when the option's expiry has passed; a LEAPS gone with no trade is `unknown` (an anomaly is logged).
-- Repair of the four prod positions: `tmp/repairPositionsSplitByShortIbkrReply.ts` (dry run passes on prod; `--apply` for Marcelo to run). Tests: 3 added, 2 changed, an `afterEach` sweep for leftovers; 81/81 pass.
+- Repair of the four prod positions (`tmp/repairPositionsSplitByShortIbkrReply.ts`, run by Marcelo): originals reopened with their open dates, trades and GDX's reason; duplicates and the GDX anomaly deleted; the duplicates' Pulse samples dropped where the original already had that minute (Pulse kept sampling the closed originals). The worker's next passes: 24 of 24 held, nothing closed or opened. Tests: 3 added, 2 changed, an `afterEach` sweep for leftovers; 81/81 pass.
 - Not changed: the health check's position comparison reads a single reply too (alert only).
 
 ## Prod promoted to `81718db`, 2026-11-20 00:29 UTC (Marcelo)
