@@ -6,7 +6,7 @@ import { formatPositionExpiredMessage } from "../lib/formatPositionExpiredMessag
 import { publishNotification } from "../lib/notificationChannel.js";
 import { readExpirySettlementMode, runExpirySettlementAudit, summarizeExpirySettlement } from "../lib/expirySettlementAudit.js";
 import { classifyOptionLegRetirement, type OptionLegRetirementEvidence } from "../lib/optionLegRetirement.js";
-import { optionPastExpirySql } from "../lib/optionExpiryClock.js";
+import { isOptionPastExpiry, optionPastExpirySql } from "../lib/optionExpiryClock.js";
 import { closingTradeOtherThanSettlementSql } from "../lib/settlementExecution.js";
 import { carveClosedSliceFromPartialClose, exitFromClosingFills } from "../lib/partialCloseSlice.js";
 import { costBasisMatchTolerancePerShare, soldFillsEntryPrice, verifyHeldStockCostBasis } from "../lib/stockCostBasisLedger.js";
@@ -246,8 +246,9 @@ async function determineCloseReason(positionId: string): Promise<string> {
     return orderRequest ? "closed_via_app" : "closed_via_external_trade";
   }
 
+  // An option leg that left before its expiry with no trade did not expire (a LEAPS missing from IBKR's report).
   const hasExpiredOptionLeg = position.legs.some(
-    (leg: PositionLegRow) => leg.legType === "option" && leg.exitAt !== null,
+    (leg: PositionLegRow) => leg.legType === "option" && leg.exitAt !== null && leg.expiryDate !== null && isOptionPastExpiry(leg.expiryDate),
   );
   if (hasExpiredOptionLeg) return "expired_worthless";
 
@@ -619,25 +620,31 @@ async function runReconciliationPass(allHeld: IbkrHeldPosition[], passId: number
   // this same pass -- see its own comment for why.
   const heldConIds = new Set(held.map((p) => p.contract.conId).filter((id): id is number => id !== undefined));
 
+  const legsNoLongerHeld = await loadLegsNoLongerHeld(heldConIds, passId, frozenTickerIds);
+  const exitEvidenceByLegId = await weighExitEvidence(legsNoLongerHeld);
+  const awaitingConfirmation = await tickersAwaitingConfirmedAbsence(legsNoLongerHeld, exitEvidenceByLegId, passId);
+
   const bySymbol = new Map<string, IbkrHeldPosition[]>();
   for (const position of held) {
+    if (awaitingConfirmation.symbols.has(position.contract.symbol ?? "")) continue;
     const symbol = position.contract.symbol ?? "UNKNOWN";
     const existing = bySymbol.get(symbol) ?? [];
     existing.push(position);
     bySymbol.set(symbol, existing);
   }
-  heldStockSharesBySymbol = new Map(
-    [...bySymbol].map(([symbol, positionsForSymbol]) => [
-      symbol,
-      positionsForSymbol.filter((p) => p.contract.secType === SecType.STK && p.quantity > 0).reduce((sum, p) => sum + p.quantity, 0),
-    ]),
-  );
+  heldStockSharesBySymbol = new Map();
+  for (const position of held) {
+    if (position.contract.secType !== SecType.STK || !(position.quantity > 0)) continue;
+    const symbol = position.contract.symbol ?? "UNKNOWN";
+    heldStockSharesBySymbol.set(symbol, (heldStockSharesBySymbol.get(symbol) ?? 0) + position.quantity);
+  }
 
   // Legs IBKR no longer holds are closed BEFORE the structure pass, so that
   // pass sees each position's true remaining legs: a covered call whose short
   // call just expired is, by then, a position holding only stock — exactly
   // the shape that must hand its shares to a leftover-stock position.
-  const closedLegCount = await closeLegsNoLongerHeld(heldConIds, passId, frozenTickerIds);
+  const legsToClose = legsNoLongerHeld.filter((leg) => !awaitingConfirmation.tickerIds.has(leg.ticker_id));
+  const closedLegCount = await closeLegsNoLongerHeld(legsToClose, exitEvidenceByLegId, passId);
   await syncHeldStructures(bySymbol, heldConIds, passId);
   await closeOrphanedOpenPositions(passId);
 
@@ -659,53 +666,64 @@ async function runReconciliationPass(allHeld: IbkrHeldPosition[], passId: number
   }
 }
 
-// Anything tracked as open in our DB but no longer reported by IBKR at
-// all — the closing side of "a leg is only ever closed by reconciliation"
-// (see recordExecution in the worker for why a single closing execution
-// can't decide this on its own: a partial close previously flipped an
-// entire multi-lot leg to closed and hid the still-open remainder).
-// exit_price comes from the most recent closing trade already recorded for
-// this leg by recordExecution, if any.
-//
-// An option leg past its own expiry with no closing trade is the
-// "expired worthless" (or exercised/assigned, which also never generates
-// a trade for the option side itself) case, not an unknown close — bug
-// found 2026-08-27: this used to fall back to exit_price=null here too,
-// which silently dropped the leg out of realizedPnl's SUM (it requires
-// exit_price IS NOT NULL) and reported $0 P&L for every expired short
-// option instead of the full premium collected. Only a genuinely
-// ambiguous close (no trade, not past expiry — e.g. closed directly in
-// TWS, or before this worker was deployed) still falls back to null.
-async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number, frozenTickerIds: string[]): Promise<number> {
-  const openLegs = await db("position_legs")
+/** An open leg with a conId that IBKR's reply did not report. */
+interface LegNoLongerHeld {
+  id: string;
+  position_id: string;
+  ticker_id: string;
+  leg_type: string;
+  side: string;
+  option_type: string | null;
+  strike_price: string;
+  quantity: number;
+  multiplier: number;
+  entry_price: string;
+  ibkr_contract_id: string;
+  is_expired_option: boolean;
+  has_closing_trade_other_than_settlement: boolean;
+}
+
+/** What says how a leg IBKR no longer reports ended, weighed before any leg closes. */
+interface LegExitEvidence {
+  /** The weighted average of every closing fill still on the leg (earlier partial closes were carved into their own legs). */
+  closingFillExit: Awaited<ReturnType<typeof exitFromClosingFills>>;
+  /** Expired, assigned at expiry or assigned early: ends at 0. */
+  expiredWithoutTrade: boolean;
+  /** A covered call's shares past the expiry of a sibling option: carried forward, closed at entry. */
+  isRetainedCoveredCallStock: boolean;
+}
+
+function isUnexplainedExit(evidence: LegExitEvidence): boolean {
+  return evidence.closingFillExit === null && !evidence.expiredWithoutTrade && !evidence.isRetainedCoveredCallStock;
+}
+
+// Every open leg whose conId IBKR's reply leaves out. An expired option IBKR stopped reporting has been settled: its
+// settlement records exist by now but are never sent live, so they are fetched first, for the exits, the Puts' decisions
+// and the settlement correction.
+async function loadLegsNoLongerHeld(heldConIds: Set<number>, passId: number, frozenTickerIds: string[]): Promise<LegNoLongerHeld[]> {
+  const openLegs: LegNoLongerHeld[] = await db("position_legs")
     .whereNull("exit_at")
     .whereNotNull("ibkr_contract_id")
     .whereNotIn("position_id", db("positions").whereIn("ticker_id", frozenTickerIds).select("id"))
     .select(
       "*",
+      db.raw("(SELECT p.ticker_id FROM positions p WHERE p.id = position_legs.position_id) AS ticker_id"),
       db.raw(`(leg_type = 'option' AND expiry_date IS NOT NULL AND ${optionPastExpirySql("expiry_date", "?::timestamptz")}) AS is_expired_option`, [new Date()]),
       db.raw(`EXISTS (SELECT 1 FROM trades t WHERE t.position_leg_id = position_legs.id AND ${closingTradeOtherThanSettlementSql("t")}) AS has_closing_trade_other_than_settlement`),
     );
 
   const legsNoLongerHeld = openLegs.filter((leg) => !heldConIds.has(Number(leg.ibkr_contract_id)));
-  console.log(
-    `Reconciliation #${passId}: ${openLegs.length} open leg(s) tracked in DB, ${legsNoLongerHeld.length} no longer reported by IBKR (will be closed this pass).`,
-  );
-  // An expired option IBKR stopped reporting has been settled: its settlement records exist by now but are never sent
-  // live, so they are fetched before the legs close, for the exits, the Puts' decisions and the settlement correction.
+  console.log(`Reconciliation #${passId}: ${openLegs.length} open leg(s) tracked in DB, ${legsNoLongerHeld.length} no longer reported by IBKR.`);
   if (dependencies.replayRecentExecutions && legsNoLongerHeld.some((leg) => leg.is_expired_option)) {
     console.log(`Reconciliation #${passId}: expired option(s) no longer reported: replaying IBKR's recent executions for their settlement records first.`);
     await dependencies.replayRecentExecutions().catch((error) => console.error(`Reconciliation #${passId}: execution replay failed: ${error instanceof Error ? error.message : error}`));
   }
-  putCloseReasonByPositionIdThisPass = await decidePutsExpiringThisPass(legsNoLongerHeld);
+  return legsNoLongerHeld;
+}
 
-  const positionIdsWithExpiredLeg = new Set<string>();
-  let closedLegCount = 0;
-  for (const leg of legsNoLongerHeld) {
-    closedLegCount += 1;
-
-    // The exit is the weighted average of every closing fill still on this leg (earlier partial closes
-    // were already carved into their own closed legs, see upsertPositionLeg), not just the last fill.
+async function weighExitEvidence(legs: LegNoLongerHeld[]): Promise<Map<string, LegExitEvidence>> {
+  const evidenceByLegId = new Map<string, LegExitEvidence>();
+  for (const leg of legs) {
     const closingFillExit = await exitFromClosingFills(leg.id);
 
     // An option that left before its expiry with no trade but whose assignment's stock fill is recorded was assigned
@@ -714,7 +732,6 @@ async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number, fr
     const settledByIbkrOnly = closingFillExit !== null && leg.leg_type === "option" && !leg.has_closing_trade_other_than_settlement;
     const assignedEarly = !closingFillExit && leg.leg_type === "option" && leg.side === "short" && !leg.is_expired_option && (await hasMatchingAssignmentFill(leg));
     const expiredWithoutTrade = settledByIbkrOnly || (!closingFillExit && (leg.is_expired_option || assignedEarly));
-    if (expiredWithoutTrade) positionIdsWithExpiredLeg.add(leg.position_id);
 
     // A covered call's stock leg is never actually sold just because its
     // short call expired worthless -- the shares are simply carried
@@ -737,6 +754,76 @@ async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number, fr
         .first();
       isRetainedCoveredCallStock = expiredSiblingOptionLeg !== undefined;
     }
+    evidenceByLegId.set(leg.id, { closingFillExit, expiredWithoutTrade, isRetainedCoveredCallStock });
+  }
+  return evidenceByLegId;
+}
+
+// IBKR's positions reply can end with holdings missing: while the Gateway reconnects to IBKR's servers (it does so by
+// itself twice a day, about 27 s each time) reqPositions waits and then ends early. A leg left out with nothing to explain
+// it (no closing fill, not past expiry, no assignment fill, not shares past their call's expiry) is therefore closed only
+// once a second reply at least this long after the first still leaves it out. Until then its whole ticker is left out of
+// the pass, like a frozen ticker, so no other step reads that ticker's holdings half-reported.
+const unexplainedAbsenceConfirmationMs = 30_000;
+/** When each such leg was first left out by a reply, cleared as soon as one reports it again (or it gets an explanation). */
+const firstUnexplainedAbsenceAtByLegId = new Map<string, number>();
+
+async function tickersAwaitingConfirmedAbsence(
+  legs: LegNoLongerHeld[],
+  evidenceByLegId: Map<string, LegExitEvidence>,
+  passId: number,
+): Promise<{ tickerIds: Set<string>; symbols: Set<string> }> {
+  const now = Date.now();
+  const unexplainedLegs = legs.filter((leg) => isUnexplainedExit(evidenceByLegId.get(leg.id)!));
+  const unexplainedLegIds = new Set(unexplainedLegs.map((leg) => leg.id));
+  for (const legId of [...firstUnexplainedAbsenceAtByLegId.keys()]) {
+    if (!unexplainedLegIds.has(legId)) firstUnexplainedAbsenceAtByLegId.delete(legId);
+  }
+
+  const tickerIds = new Set<string>();
+  for (const leg of unexplainedLegs) {
+    const firstAbsentAt = firstUnexplainedAbsenceAtByLegId.get(leg.id);
+    if (firstAbsentAt === undefined) firstUnexplainedAbsenceAtByLegId.set(leg.id, now);
+    if (firstAbsentAt === undefined || now - firstAbsentAt < unexplainedAbsenceConfirmationMs) tickerIds.add(leg.ticker_id);
+  }
+  if (tickerIds.size === 0) return { tickerIds, symbols: new Set() };
+
+  const symbols = new Set<string>(await db("tickers").whereIn("id", [...tickerIds]).pluck("symbol"));
+  const awaitingLegs = unexplainedLegs.filter((leg) => tickerIds.has(leg.ticker_id));
+  console.log(
+    `Reconciliation #${passId}: ${awaitingLegs.length} leg(s) left out of IBKR's reply with no trade or expiry to explain it (${awaitingLegs.map((leg) => `conId ${leg.ibkr_contract_id}`).join(", ")}): ${[...symbols].join(", ")} left out of this pass until a reply at least ${unexplainedAbsenceConfirmationMs / 1000}s later confirms.`,
+  );
+  return { tickerIds, symbols };
+}
+
+// Anything tracked as open in our DB but no longer reported by IBKR at
+// all — the closing side of "a leg is only ever closed by reconciliation"
+// (see recordExecution in the worker for why a single closing execution
+// can't decide this on its own: a partial close previously flipped an
+// entire multi-lot leg to closed and hid the still-open remainder).
+// exit_price comes from the most recent closing trade already recorded for
+// this leg by recordExecution, if any.
+//
+// An option leg past its own expiry with no closing trade is the
+// "expired worthless" (or exercised/assigned, which also never generates
+// a trade for the option side itself) case, not an unknown close — bug
+// found 2026-08-27: this used to fall back to exit_price=null here too,
+// which silently dropped the leg out of realizedPnl's SUM (it requires
+// exit_price IS NOT NULL) and reported $0 P&L for every expired short
+// option instead of the full premium collected. Only a genuinely
+// ambiguous close (no trade, not past expiry — e.g. closed directly in
+// TWS, or before this worker was deployed), confirmed by a second reply
+// (tickersAwaitingConfirmedAbsence), still falls back to null.
+async function closeLegsNoLongerHeld(legsToClose: LegNoLongerHeld[], evidenceByLegId: Map<string, LegExitEvidence>, passId: number): Promise<number> {
+  putCloseReasonByPositionIdThisPass = await decidePutsExpiringThisPass(legsToClose);
+
+  const positionIdsWithExpiredLeg = new Set<string>();
+  let closedLegCount = 0;
+  for (const leg of legsToClose) {
+    closedLegCount += 1;
+    const { closingFillExit, expiredWithoutTrade, isRetainedCoveredCallStock } = evidenceByLegId.get(leg.id)!;
+    if (expiredWithoutTrade) positionIdsWithExpiredLeg.add(leg.position_id);
+    firstUnexplainedAbsenceAtByLegId.delete(leg.id);
 
     await db("position_legs")
       .where({ id: leg.id })
@@ -745,7 +832,7 @@ async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number, fr
         exit_at: closingFillExit?.exitAt ?? db.fn.now(),
       });
     console.log(
-      `Reconciliation #${passId}: closed leg ${leg.id} (position ${leg.position_id}, conId ${leg.ibkr_contract_id}) — ${closingFillExit ? `matched closing trade(s) @ ${closingFillExit.exitPrice}` : expiredWithoutTrade ? "expired worthless, no trade" : isRetainedCoveredCallStock ? "stock retained past sibling option's expiry, no trade -- closed at entry price" : "no trade, not past expiry (ambiguous close)"}.`,
+      `Reconciliation #${passId}: closed leg ${leg.id} (position ${leg.position_id}, conId ${leg.ibkr_contract_id}) — ${closingFillExit ? `matched closing trade(s) @ ${closingFillExit.exitPrice}` : expiredWithoutTrade ? "expired worthless, no trade" : isRetainedCoveredCallStock ? "stock retained past sibling option's expiry, no trade -- closed at entry price" : "no trade, not past expiry, confirmed by a second reply (ambiguous close)"}.`,
     );
 
     const remainingOpenLegs = await db("position_legs").where({ position_id: leg.position_id }).whereNull("exit_at");
@@ -759,7 +846,7 @@ async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number, fr
 // The stock fill IBKR reports for an assignment: no app order, at the option's strike, for its shares, on the ticker,
 // within a day and a half of now (the option's leg is being closed this pass).
 const assignmentFillMatchWindowMs = 36 * 3_600_000;
-async function hasMatchingAssignmentFill(optionLeg: { position_id: string; option_type: string; strike_price: string; quantity: number; multiplier: number }): Promise<boolean> {
+async function hasMatchingAssignmentFill(optionLeg: { position_id: string; option_type: string | null; strike_price: string; quantity: number; multiplier: number }): Promise<boolean> {
   const match = await db("trades as tr")
     .join("position_legs as stock_leg", "stock_leg.id", "tr.position_leg_id")
     .join("positions as stock_position", "stock_position.id", "stock_leg.position_id")

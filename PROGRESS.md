@@ -4,13 +4,23 @@ Last updated: 2026-11-03. Cleaned up again 2026-11-03 (approved by Marcelo): ret
 
 **Staleness pass, 2026-09-25 (Marcelo asked for a full audit of this file + the archive against actual code/git state).** Corrected in place: commit tags on the Signal Engine section, the scheduled-jobs count/list, the database-schema section, several "not built yet" items that had shipped, and a few self-contradicted entries. Where a claim couldn't be verified from code/git alone (an external artifact's freshness, a prod-only config var, a prod deploy status), it's flagged "needs Marcelo's confirmation" rather than silently closed.
 
+## Positions closed and reopened by a short IBKR reply (Marcelo 2026-11-23; built and verified locally, not committed)
+Plain language: on 22 Nov 22:05 UTC prod closed four positions still held (SNXX, GDXJ and TLT LEAPS, 200 GDX shares) as "expired worthless, price unknown" and reopened them a minute later as new positions. IBKR's Gateway was reconnecting to IBKR (it does so daily at 22:05 and 12:15 UTC) and answered the worker's holdings request with 20 of 24. Nothing was traded.
+- Fix (`ibkrGatewayReconcilePositions.ts`): a leg left out of IBKR's reply with nothing to explain it (no closing fill, not past expiry, no assignment fill, not shares past their Call's expiry) closes only when a reply at least 30 s later still leaves it out; until then its whole ticker sits out the pass, like a frozen ticker. Legs with evidence still close at once.
+- Fix: `expired_worthless` only when the option's expiry has passed; a LEAPS gone with no trade is `unknown` (an anomaly is logged).
+- Repair of the four prod positions: `tmp/repairPositionsSplitByShortIbkrReply.ts` (dry run passes on prod; `--apply` for Marcelo to run). Tests: 3 added, 2 changed, an `afterEach` sweep for leftovers; 81/81 pass.
+- Not changed: the health check's position comparison reads a single reply too (alert only).
+
 ## Prod promoted to `81718db`, 2026-11-20 00:29 UTC (Marcelo)
 Plain language: prod now has the settlement fixes, so an assigned option is no longer counted twice in the books; Pluto kept running through it.
 - API v244 = `81718db` (from `8ce7fcc`): backup b070, migrations `20261113100001`–`3` (P&L Analyser tables), worker redeployed by the release phase (`worker_health` reports `81718db`). Frontend promotion requested the same morning.
 - Before: health-check cash gap null since 11-18 04:18 UTC, statement gap $0 on 11-18 and 11-19, no prod orders since 16 Nov.
 - NBIS legs d9ba330a / e5391702 restored by Marcelo (175.5933 / 175.59333535); the new audit's dry run on prod leaves them alone.
-- The new audit flags prod's INTC $100 Put (exp 10-14, leg 0ff62b35, closed, assigned) as manual review every night: acknowledge it (Marcelo). Staging's twin (INTC $115 Put exp 10-07, leg 5ab212d2) acknowledged 2026-11-20.
-- Still due: P&L Analyser `import-account-cash-items` (dry run, then `--apply`), the 2006 daily-history backfill, tonight's 22:30 UTC statement check.
+- Frontend: prod app v126 = `f96f858` (00:53 UTC), same as staging.
+- The new audit flagged prod's INTC $100 Put (exp 10-14, leg 0ff62b35, closed, assigned) as manual review every night: acknowledged by Marcelo 00:58 UTC; the audit's dry run then sends no alert. Staging's twin (INTC $115 Put exp 10-07, leg 5ab212d2) acknowledged too.
+- P&L Analyser pre-books cash items imported on prod (Marcelo): 16 of 16 (fees −$33.50, sales tax −$3.02, interest +$206.91, 30 Sep–4 Nov).
+- Daily history back to 2006 backfilled on prod (Marcelo, 28 tickers). AMD (2015) and TLT (2016) start where IBKR's data does, same as staging.
+- Still due: tonight's 22:30 UTC statement check; Price Performance and the P&L Analyser screens on prod once the nightly job has run.
 
 ## Reads fail fast while the Gateway is unreachable (Marcelo 2026-11-20; pushed to staging 2026-11-20)
 Plain language: when IBKR's Gateway was down on 14 Nov, the Books and Dashboard cash screens hung for 30 s and then errored. They now answer in about 3 s with IBKR's figures blank.

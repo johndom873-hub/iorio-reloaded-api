@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import knexLibrary, { type Knex } from "knex";
 import { OptionType, SecType } from "@stoqey/ib";
 import type { IbkrHeldPosition } from "./ibkrGatewayFetchHeldPositions.js";
@@ -154,6 +154,17 @@ async function runPass(held: IbkrHeldPosition[]): Promise<void> {
   await reconcileHeldPositions(held, passCounter, dependencies);
 }
 
+/** A pass whose reply arrives this many seconds from now (only Date is moved; the database's own clock is not). */
+async function runPassSecondsLater(held: IbkrHeldPosition[], seconds: number): Promise<void> {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.now() + seconds * 1000);
+  try {
+    await runPass(held);
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 async function positionsFor(tickerId: string) {
   return testDb("positions").where({ ticker_id: tickerId }).orderBy("opened_at", "asc");
 }
@@ -172,6 +183,12 @@ async function anomaliesFor(positionId: string) {
 
 beforeAll(async () => {
   process.env.EXPIRY_SETTLEMENT_MODE ??= "dry_run";
+});
+
+// A leg left out of IBKR's reply with nothing to explain it closes only once a reply 30 s later still leaves it out, so
+// each test's leftovers are closed after it, by passes a minute apart, before the next test's passes read them.
+afterEach(async () => {
+  for (const minutesLater of [1, 2, 3]) await runPassSecondsLater([], minutesLater * 60);
 });
 
 afterAll(async () => {
@@ -449,7 +466,7 @@ describe("reconcileHeldPositions — every structure change is its own position"
     expect(coveredCall.close_reason).toBe("assigned");
   });
 
-  it("a call that vanishes before expiry with no trade (IBKR report gap) does not restructure anything", async () => {
+  it("a call that vanishes before expiry with no trade (IBKR report gap) stays open until a reply 30 s later confirms, and restructures nothing", async () => {
     const ticker = await createTicker();
     const stockConId = (nextConId += 1);
     const callConId = (nextConId += 1);
@@ -458,6 +475,10 @@ describe("reconcileHeldPositions — every structure change is its own position"
     await insertShortOptionLeg(coveredCallId, callConId, "call", 55, isoDateDaysFromToday(20), 1.2);
 
     await runPass([heldStock(ticker.symbol, stockConId, 100, 50)]);
+    expect((await legsFor(coveredCallId)).every((leg) => leg.exit_at === null)).toBe(true);
+    await runPassSecondsLater([heldStock(ticker.symbol, stockConId, 100, 50)], 20);
+    expect((await legsFor(coveredCallId)).every((leg) => leg.exit_at === null)).toBe(true);
+    await runPassSecondsLater([heldStock(ticker.symbol, stockConId, 100, 50)], 31);
 
     const positions = await positionsFor(ticker.id);
     expect(positions).toHaveLength(1);
@@ -732,6 +753,47 @@ describe("reconcileHeldPositions — a long Put is a hedge, a long Call a LEAPS"
     expect(legs[0]).toMatchObject({ leg_type: "option", side: "long", quantity: 110, option_type: "call" });
     expect(Number(legs[0]!.entry_price)).toBeCloseTo(3.918, 4);
     expect(await anomaliesFor(positions[0]!.id)).toHaveLength(0);
+  });
+
+  it("a reply that leaves out a LEAPS and a second ticker's shares for one pass (the Gateway reconnecting) closes and opens nothing", async () => {
+    const leapsTicker = await createTicker();
+    const stockTicker = await createTicker();
+    const leapsStockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const stockConId = (nextConId += 1);
+    const fullReply = [
+      heldStock(leapsTicker.symbol, leapsStockConId, 4000, 9),
+      heldLongOption(leapsTicker.symbol, callConId, OptionType.Call, 3.5, isoDateDaysFromToday(54), 82.67, 80),
+      heldStock(stockTicker.symbol, stockConId, 200, 86.355),
+    ];
+    await runPass(fullReply);
+    const positionIdsBefore = [...(await positionsFor(leapsTicker.id)), ...(await positionsFor(stockTicker.id))].map((position) => position.id).sort();
+
+    await runPassSecondsLater([heldStock(leapsTicker.symbol, leapsStockConId, 4000, 9)], 60);
+    await runPassSecondsLater(fullReply, 109);
+
+    const positionsAfter = [...(await positionsFor(leapsTicker.id)), ...(await positionsFor(stockTicker.id))];
+    expect(positionsAfter.map((position) => position.id).sort()).toEqual(positionIdsBefore);
+    expect(positionsAfter.every((position) => position.status === "open")).toBe(true);
+    const legs = await testDb("position_legs").whereIn("position_id", positionIdsBefore);
+    expect(legs.every((leg) => leg.exit_at === null)).toBe(true);
+  });
+
+  it("a LEAPS IBKR stops reporting with no trade closes once a reply 30 s later confirms, as an unknown close, not expired worthless", async () => {
+    const ticker = await createTicker();
+    const callConId = (nextConId += 1);
+    await runPass([heldLongOption(ticker.symbol, callConId, OptionType.Call, 84, isoDateDaysFromToday(572), 365.27, 70)]);
+    const [leaps] = await positionsFor(ticker.id);
+
+    await runPassSecondsLater([], 60);
+    expect((await positionsFor(ticker.id))[0]!.status).toBe("open");
+    await runPassSecondsLater([], 120);
+
+    const [closed] = await positionsFor(ticker.id);
+    expect(closed!.id).toBe(leaps!.id);
+    expect(closed!.status).toBe("closed");
+    expect(closed!.close_reason).toBe("unknown");
+    expect((await legsFor(leaps!.id))[0]!.exit_price).toBeNull();
   });
 
   it("a long put alone becomes one hedge position", async () => {
@@ -1852,6 +1914,8 @@ describe("reconcileHeldPositions — share-source links count the shares each po
     expect(await linksOf(newCoveredCallId)).toEqual([{ source_position_id: oldCoveredCallId, shares_received: 100 }]);
     await runPass(holdings(1));
     await runPass(holdings(2));
+    const lastOldCallLot = await testDb("position_legs").where({ ibkr_contract_id: String(oldCallConId) }).whereNull("exit_at").first("id");
+    await insertClosingFill(lastOldCallLot.id, 1, 0.8, 0, "buy");
     await runPass(holdings(3));
 
     expect(await linksOf(newCoveredCallId)).toEqual([{ source_position_id: oldCoveredCallId, shares_received: 300 }]);
