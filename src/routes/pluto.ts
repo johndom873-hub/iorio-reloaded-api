@@ -11,7 +11,6 @@ import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
 import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, loadPlutoTickerSettingsAudit, PlutoTickerNotFoundError, PlutoTickerSettingsValidationError, updatePlutoAllocations, updatePlutoTickerSettings, type PlutoTickerSettingsField, type PlutoTickerSettingsInput } from "../pluto/tickerSettingsStore.js";
 import { loadPlutoBookValueNow, loadPlutoTickerAllocations } from "../pluto/tickerAllocations.js";
-import { createExpiringPromiseCache } from "../lib/expiringPromiseCache.js";
 import { loadCurrentPlutoSettingsVersion } from "../pluto/settingsVersions.js";
 import { loadPlutoHowItWorks } from "../pluto/howItWorks.js";
 import { loadVolFarmerV4Screen } from "../pluto/volFarmerV4Screen.js";
@@ -40,18 +39,42 @@ async function currentUserDisplayName(request: Request): Promise<string> {
   return (row?.display_name as string | undefined) ?? "an operator";
 }
 
-// One live read shared by the screens polling /pluto/state, kept briefly; a read slower than the timeout is abandoned
-// (it still finishes and fills the cache) so the state never waits on IBKR's prices.
-const plutoLiveBookValueCache = createExpiringPromiseCache<number | null>({ ttlMs: 15_000, maxEntries: 1 });
+// The live value is served at once from the last read and refreshed in the background once it is 15 s old, so a poll never
+// waits on IBKR's prices after the first; a last read older than 2 min (or none, after a restart) is waited for, up to 3 s,
+// then last night's snapshot stands in.
+const plutoLiveBookValueRefreshAfterMs = 15_000;
+const plutoLiveBookValueUsableForMs = 120_000;
 const plutoLiveBookValueTimeoutMs = 3_000;
+let plutoLiveBookValueLastRead: { value: number; readAtMs: number } | null = null;
+let plutoLiveBookValueRefresh: Promise<void> | null = null;
+
+function refreshLivePlutoBookValue(): Promise<void> {
+  plutoLiveBookValueRefresh ??= loadPlutoBookValueNow()
+    .then((value) => {
+      if (value !== null) plutoLiveBookValueLastRead = { value, readAtMs: Date.now() };
+    })
+    .catch(() => {})
+    .finally(() => {
+      plutoLiveBookValueRefresh = null;
+    });
+  return plutoLiveBookValueRefresh;
+}
 
 async function loadLivePlutoBookValueWithinTimeout(): Promise<number | null> {
-  const noAnswer = new Promise<null>((resolve) => setTimeout(() => resolve(null), plutoLiveBookValueTimeoutMs).unref?.());
-  try {
-    return await Promise.race([plutoLiveBookValueCache.get("pluto", loadPlutoBookValueNow), noAnswer]);
-  } catch {
-    return null;
+  const ageMs = plutoLiveBookValueLastRead === null ? Infinity : Date.now() - plutoLiveBookValueLastRead.readAtMs;
+  if (ageMs >= plutoLiveBookValueRefreshAfterMs) {
+    const refresh = refreshLivePlutoBookValue();
+    if (ageMs >= plutoLiveBookValueUsableForMs) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const noAnswer = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, plutoLiveBookValueTimeoutMs);
+      });
+      await Promise.race([refresh, noAnswer]);
+      clearTimeout(timer);
+    }
   }
+  const lastRead = plutoLiveBookValueLastRead as { value: number; readAtMs: number } | null;
+  return lastRead !== null && Date.now() - lastRead.readAtMs < plutoLiveBookValueUsableForMs ? lastRead.value : null;
 }
 
 plutoRouter.get("/state", async (_request: Request, response: Response) => {
