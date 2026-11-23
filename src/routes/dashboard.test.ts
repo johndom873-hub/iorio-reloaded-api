@@ -8,9 +8,10 @@ import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import type { Knex } from "knex";
+import { easternTodaySql } from "../lib/easternTodaySql.js";
 
 // The real dashboardRouter on a small express app, against a private copy of the test database's tables (the account cards read
-// global tables and CURRENT_DATE windows, so they need exact table contents). The IBKR / exposure boundaries are mocked, the
+// global tables and windows cut on today's New York date, so they need exact table contents). The IBKR / exposure boundaries are mocked, the
 // strategy-attribution engine delegates to the real one unless a test overrides it.
 vi.mock("../db/connection.js", async () => {
   const { createIsolatedTestDatabase } = await import("../lib/testSupport/isolatedTestSchema.js");
@@ -101,8 +102,9 @@ function isoWeekday(isoDate: string): number {
   return ((new Date(`${isoDate}T00:00:00Z`).getUTCDay() + 6) % 7) + 1;
 }
 
-async function databaseToday(): Promise<string> {
-  return (await testDb.raw("SELECT CURRENT_DATE::text AS today")).rows[0].today;
+/** Today's New York date, the one the week / month / year windows are cut on (easternTodaySql). */
+async function easternToday(): Promise<string> {
+  return (await testDb.raw(`SELECT ${easternTodaySql}::text AS today`)).rows[0].today;
 }
 
 interface SnapshotInput {
@@ -118,7 +120,7 @@ async function insertSnapshots(rows: SnapshotInput[]): Promise<void> {
 }
 
 // The money columns are numeric(_, 4), so pg returns them as text with four decimals ("250.5000").
-// Dates in 2020 sit outside every CURRENT_DATE window (week / month / year), so only the Day card sees them.
+// Dates in 2020 sit outside every week / month / year window (week / month / year), so only the Day card sees them.
 const outsideWindowsDates = { friday: "2020-03-13", monday: "2020-03-16", tuesday: "2020-03-17" };
 
 describe("authentication", () => {
@@ -474,7 +476,7 @@ describe("GET /dashboard/summary", () => {
   });
 
   it("week / month / year sums include exactly the snapshots on or after this Monday / the 1st / Jan 1, and the as-of fields come from the latest row", async () => {
-    const today = await databaseToday();
+    const today = await easternToday();
     const weekStart = addDays(today, -(isoWeekday(today) - 1));
     const monthStart = `${today.slice(0, 7)}-01`;
     const yearStart = `${today.slice(0, 4)}-01-01`;
@@ -500,7 +502,7 @@ describe("GET /dashboard/summary", () => {
   });
 
   it("account YTD unrealized is the latest unrealized minus the last snapshot before Jan 1; realized is the plug so that realized + unrealized = year", async () => {
-    const today = await databaseToday();
+    const today = await easternToday();
     const yearStart = `${today.slice(0, 4)}-01-01`;
     await insertSnapshots([
       { snapshot_date: addDays(yearStart, -10), daily_pnl: 77, unrealized_pnl: 1000 },
@@ -516,7 +518,7 @@ describe("GET /dashboard/summary", () => {
   });
 
   it("with no snapshot before Jan 1 the YTD unrealized baseline is zero", async () => {
-    const today = await databaseToday();
+    const today = await easternToday();
     await insertSnapshots([{ snapshot_date: today, daily_pnl: 500, unrealized_pnl: 5000 }]);
     const { json } = await get("/dashboard/summary");
     expect(json.accountUnrealizedYtd).toBe(5000);
@@ -524,7 +526,7 @@ describe("GET /dashboard/summary", () => {
   });
 
   it("with a null latest unrealized figure it counts as zero", async () => {
-    const today = await databaseToday();
+    const today = await easternToday();
     await insertSnapshots([{ snapshot_date: today, daily_pnl: 500, unrealized_pnl: null }]);
     const { json } = await get("/dashboard/summary");
     expect(json.accountUnrealizedYtd).toBe(0);
@@ -568,7 +570,7 @@ describe("GET /dashboard/period-pnl-by-strategy", () => {
       excludedByPeriod: { day: [], week: [], month: [], year: [] },
     });
     // The Day card needs two consecutive sessions; today's row is in the week, month and year windows.
-    const today = await databaseToday();
+    const today = await easternToday();
     const weekday = isoWeekday(today);
     const previousSession = addDays(today, weekday === 1 ? -3 : weekday === 7 ? -2 : -1);
     await insertSnapshots([
@@ -595,13 +597,13 @@ describe("GET /dashboard/period-pnl-by-strategy", () => {
       buckets: { csp: period(50), cc: period(0), unstructured: period(0), hedge: period(0), leaps: period(0) },
       excludedByPeriod: { day: [], week: [], month: [], year: [] },
     });
-    const today = await databaseToday();
+    const today = await easternToday();
     await insertSnapshots([{ snapshot_date: today, daily_pnl: 20 }]);
     expect((await get("/dashboard/period-pnl-by-strategy")).json.residual).toMatchObject({ week: -30, month: -30, year: -30 });
   });
 
   it("end to end on real ledger rows: a CSP open since last year lands in the CSP row, the rest of the account total is residual", async () => {
-    const today = await databaseToday();
+    const today = await easternToday();
     const weekday = isoWeekday(today);
     const previousSession = addDays(today, weekday === 1 ? -3 : weekday === 7 ? -2 : -1);
     await insertSnapshots([

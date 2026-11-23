@@ -24,7 +24,29 @@ interface OpenLegRow {
  * happened, and it can't help at all if the worker itself is down. This is
  * the alerting layer for exactly that gap.
  */
+// IBKR's positions reply can end with holdings missing while the Gateway reconnects to IBKR's servers (it does so by itself
+// twice a day, about 27 s each time). A discrepancy is a Pluto breaker (systemChecks.ts), so one is reported only if IBKR's
+// holdings, read again this long after the first read, still show it: the second read's problems are the result.
+export const positionMismatchConfirmationMs = 30_000;
+
+/** Runs the comparison; when it finds problems, waits and runs it again, and returns what the second run finds. */
+export async function confirmPositionMismatches(compare: () => Promise<string[]>, wait: (milliseconds: number) => Promise<void>): Promise<string[]> {
+  const firstProblems = await compare();
+  if (firstProblems.length === 0) return firstProblems;
+  console.log(`checkPositionReconciliation: ${firstProblems.length} problem(s) on the first read; reading IBKR's holdings again in ${positionMismatchConfirmationMs / 1000}s to confirm.`);
+  await wait(positionMismatchConfirmationMs);
+  return compare();
+}
+
+function waitMilliseconds(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 export async function checkPositionReconciliation(ib: IBApi): Promise<string[]> {
+  return confirmPositionMismatches(() => compareHeldPositionsWithOpenLegs(ib), waitMilliseconds);
+}
+
+async function compareHeldPositionsWithOpenLegs(ib: IBApi): Promise<string[]> {
   // A frozen ticker (a stock split until its records are rewritten, tickerFreeze.ts) differs from IBKR by design and is
   // already stopped and alerted on its own: left out, so it does not pause Pluto on every other ticker.
   const frozenSymbols = await frozenSymbolSet();

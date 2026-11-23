@@ -1,11 +1,12 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { Knex } from "knex";
+import { easternTodaySql } from "./easternTodaySql.js";
 import type { CycleInput, CycleOptionLeg, CycleBucket } from "./cycles.js";
 import type { CyclePeriod } from "./cyclePeriodPnl.js";
 
 // The real baseline / snapshot-mark SQL runs against a private copy of the test database's tables (the baselines depend on global
-// tables and on CURRENT_DATE); only the ledger loader is replaced by hand-built fixtures, so the day / week / month / year
+// tables and on today's New York date); only the ledger loader is replaced by hand-built fixtures, so the day / week / month / year
 // attribution can be worked out by hand.
 vi.mock("../db/connection.js", async () => {
   const { createIsolatedTestDatabase } = await import("./testSupport/isolatedTestSchema.js");
@@ -53,8 +54,9 @@ function previousWeekdayFallback(isoDate: string): string {
   return addDays(isoDate, weekday === 1 ? -3 : weekday === 7 ? -2 : -1);
 }
 
-async function databaseToday(): Promise<string> {
-  return (await testDb.raw("SELECT CURRENT_DATE::text AS today")).rows[0].today;
+/** Today's New York date, the one the week / month / year windows are cut on (easternTodaySql). */
+async function easternToday(): Promise<string> {
+  return (await testDb.raw(`SELECT ${easternTodaySql}::text AS today`)).rows[0].today;
 }
 
 async function insertAccountSnapshot(snapshotDate: string): Promise<void> {
@@ -107,9 +109,9 @@ describe("loadBaselineDates", () => {
     expect((await loadBaselineDates())!.day).toBe("2026-03-16");
   });
 
-  it("Week / Month / Year baselines are the last trading day before this Monday / the 1st / Jan 1 (by the database's CURRENT_DATE)", async () => {
+  it("Week / Month / Year baselines are the last trading day before this Monday / the 1st / Jan 1 (by today's New York date)", async () => {
     await insertAccountSnapshot("2026-03-17");
-    const today = await databaseToday();
+    const today = await easternToday();
     const weekStart = addDays(today, -(isoWeekday(today) - 1));
     const monthStart = `${today.slice(0, 7)}-01`;
     const yearStart = `${today.slice(0, 4)}-01-01`;
@@ -121,7 +123,7 @@ describe("loadBaselineDates", () => {
 
   it("takes Week / Month / Year baselines from the calendar when it has open days before each boundary", async () => {
     await insertAccountSnapshot("2026-03-17");
-    const today = await databaseToday();
+    const today = await easternToday();
     const weekStart = addDays(today, -(isoWeekday(today) - 1));
     // An open day 4 days before this Monday; the days between it and the Monday are closed holidays.
     await insertCalendarDay(addDays(weekStart, -4), true);
@@ -164,7 +166,7 @@ function ledgerInput(optionLegs: CycleOptionLeg[], openPositionPremiumPnl: Map<s
 // Latest account snapshot = the database's today. The marks of a leg that gains $1 per day are seeded on every baseline day:
 // mark(date) = nowMark - (days between that date and today). Period P&L of such a leg then equals the days since the baseline.
 async function seedBaselinesAndDailyGainingMarks(positionIds: string[], nowMark: number, skippedPeriods: CyclePeriod[] = []) {
-  const today = await databaseToday();
+  const today = await easternToday();
   await insertAccountSnapshot(today);
   const baselines = (await loadBaselineDates())!;
   const daysSinceBaseline = Object.fromEntries(cyclePeriods.map((period) => [period, daysBetween(baselines[period], today)])) as Record<CyclePeriod, number>;
