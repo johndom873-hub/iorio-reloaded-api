@@ -10,7 +10,8 @@ import { isAdminRequest } from "../lib/sessionUser.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
 import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, loadPlutoTickerSettingsAudit, PlutoTickerNotFoundError, PlutoTickerSettingsValidationError, updatePlutoAllocations, updatePlutoTickerSettings, type PlutoTickerSettingsField, type PlutoTickerSettingsInput } from "../pluto/tickerSettingsStore.js";
-import { loadPlutoTickerAllocations } from "../pluto/tickerAllocations.js";
+import { loadPlutoBookValueNow, loadPlutoTickerAllocations } from "../pluto/tickerAllocations.js";
+import { createExpiringPromiseCache } from "../lib/expiringPromiseCache.js";
 import { loadCurrentPlutoSettingsVersion } from "../pluto/settingsVersions.js";
 import { loadPlutoHowItWorks } from "../pluto/howItWorks.js";
 import { loadVolFarmerV4Screen } from "../pluto/volFarmerV4Screen.js";
@@ -39,6 +40,20 @@ async function currentUserDisplayName(request: Request): Promise<string> {
   return (row?.display_name as string | undefined) ?? "an operator";
 }
 
+// One live read shared by the screens polling /pluto/state, kept briefly; a read slower than the timeout is abandoned
+// (it still finishes and fills the cache) so the state never waits on IBKR's prices.
+const plutoLiveBookValueCache = createExpiringPromiseCache<number | null>({ ttlMs: 15_000, maxEntries: 1 });
+const plutoLiveBookValueTimeoutMs = 3_000;
+
+async function loadLivePlutoBookValueWithinTimeout(): Promise<number | null> {
+  const noAnswer = new Promise<null>((resolve) => setTimeout(() => resolve(null), plutoLiveBookValueTimeoutMs).unref?.());
+  try {
+    return await Promise.race([plutoLiveBookValueCache.get("pluto", loadPlutoBookValueNow), noAnswer]);
+  } catch {
+    return null;
+  }
+}
+
 plutoRouter.get("/state", async (_request: Request, response: Response) => {
   const [state, settings, working, plutoOrdersToday, ordersToday, workingOrders, agentHealth, enabledCount, book, lastSnapshot, lastModeChange, lastCheckedPass, unfilledCancelMinutes] = await Promise.all([
     loadPlutoState(),
@@ -55,9 +70,12 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
     db("pluto_passes").whereNotNull("system_checks").orderBy("started_at", "desc").first("id", "started_at", "system_checks"),
     loadOrderUnfilledCancelMinutes(),
   ]);
-  // The book tile uses Pluto's book value at last night's snapshot (no IBKR round trip on a screen load); the agent's
-  // passes use the live figure (src/books/bookFigures.ts).
-  const plutoBookValue = lastSnapshot ? Number(lastSnapshot.book_value) : null;
+  // The book tile shows Pluto's live book value, as its rounds and the Account Exposure card read it; when the live read
+  // is slow or fails, last night's snapshot stands in, dated by plutoBookValueAsOf (null when the figure is live).
+  const lastSnapshotValue = lastSnapshot ? Number(lastSnapshot.book_value) : null;
+  const liveBookValue = await loadLivePlutoBookValueWithinTimeout();
+  const plutoBookValue = liveBookValue ?? lastSnapshotValue;
+  const plutoBookValueAsOf = liveBookValue !== null || !lastSnapshot ? null : String(lastSnapshot.snapshot_date).slice(0, 10);
   const session = await resolvePlutoSession(new Date(), settings);
   const openPositionsBySymbol: Record<string, number> = {};
   for (const position of book.openPositions) openPositionsBySymbol[position.symbol] = (openPositionsBySymbol[position.symbol] ?? 0) + 1;
@@ -91,7 +109,7 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
       openPositionsBySymbol,
       workingOrdersBySymbol,
       plutoBookValue,
-      plutoBookValueAsOf: lastSnapshot ? String(lastSnapshot.snapshot_date).slice(0, 10) : null,
+      plutoBookValueAsOf,
     },
     agent: agentHealth
       ? {
