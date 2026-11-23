@@ -74,6 +74,8 @@ import { booksStartFromStatement } from "../src/books/cutover.js";
 import { writeBookValueSnapshots } from "../src/books/bookSnapshots.js";
 import { fillWorthlessExpiredOptionPrices } from "../src/lib/expiredOptionWorthlessPrice.js";
 import { fetchOpenLegsOfOpenPositions, type OpenPositionLegRow } from "../src/lib/openPositionLegsForPnlSnapshot.js";
+import { isOptionPastExpiry } from "../src/lib/optionExpiryClock.js";
+import { formatExpiryAsIsoDate } from "../src/lib/expiryFormat.js";
 import { sendLeapsExpiryWarnings } from "../src/lib/leapsExpiryWarnings.js";
 import { checkFlexTokenExpiry } from "../src/lib/flexTokenExpiryNotice.js";
 import { writeAttributionSnapshots } from "../src/lib/pnlAttributionSnapshots.js";
@@ -459,7 +461,8 @@ async function main(): Promise<void> {
       }
     }
     // A night with no greeks saved leaves the position cards' Delta/Gamma blank after hours: the run completes with errors (P&L rows stay written).
-    const legsWithoutGreeks = optionLegRows.filter((leg) => !legsWithGreeks.has(leg.legId));
+    // A leg past its 16:00 ET expiry has no greeks to save (IBKR answers inconsistently for it and its delta is 0): never counted as missing.
+    const legsWithoutGreeks = optionLegRows.filter((leg) => !legsWithGreeks.has(leg.legId) && !isOptionPastExpiry(formatExpiryAsIsoDate(leg.expiryDate!)));
     const greeksFailure =
       legsWithoutGreeks.length === 0
         ? null
