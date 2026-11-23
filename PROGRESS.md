@@ -4,6 +4,11 @@ Last updated: 2026-11-03. Cleaned up again 2026-11-03 (approved by Marcelo): ret
 
 **Staleness pass, 2026-09-25 (Marcelo asked for a full audit of this file + the archive against actual code/git state).** Corrected in place: commit tags on the Signal Engine section, the scheduled-jobs count/list, the database-schema section, several "not built yet" items that had shipped, and a few self-contradicted entries. Where a claim couldn't be verified from code/git alone (an external artifact's freshness, a prod-only config var, a prod deploy status), it's flagged "needs Marcelo's confirmation" rather than silently closed.
 
+## Telegram dates read "Fri 20 Nov", not "Fri 11-20" (Marcelo 2026-11-24; `e10c6d6` on staging v361; not yet on prod)
+Plain language: the morning check and the job alerts on Telegram wrote dates month first ("Fri 11-20 18:00 ET") and the heading as "Mon 2026-11-23". They now read "Fri 20 Nov 18:00 ET" and "Mon 23 Nov", like the rest of the app.
+- `formatEasternDateTime` builds on `formatWeekdayDayMonth`; `formatDateWithWeekday` removed. The deadline line now says "has not started for Mon 5 Oct". Alert keys keep ISO dates.
+- To confirm: the next staging morning digest.
+
 ## Pluto status tile shows the live book value (Marcelo 2026-11-23; `43eda28` pushed to staging; not yet on prod)
 Plain language: the Pluto screen's "capital in use … of $X" used last night's closing book value ($655.7k on prod), while Account Exposure showed the live one ($738k). The tile now shows the live value too; if the live read is slow (over 3 s) or fails it falls back to last night's, as before.
 - `/pluto/state` reads `loadPlutoBookValueNow` through a 15 s shared cache (`src/routes/pluto.ts`); `plutoBookValueAsOf` is null when live.
