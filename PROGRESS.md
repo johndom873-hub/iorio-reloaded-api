@@ -4,6 +4,13 @@ Last updated: 2026-11-03. Cleaned up again 2026-11-03 (approved by Marcelo): ret
 
 **Staleness pass, 2026-09-25 (Marcelo asked for a full audit of this file + the archive against actual code/git state).** Corrected in place: commit tags on the Signal Engine section, the scheduled-jobs count/list, the database-schema section, several "not built yet" items that had shipped, and a few self-contradicted entries. Where a claim couldn't be verified from code/git alone (an external artifact's freshness, a prod-only config var, a prod deploy status), it's flagged "needs Marcelo's confirmation" rather than silently closed.
 
+## Pluto status tile shows the live book value (Marcelo 2026-11-23; `43eda28` pushed to staging; not yet on prod)
+Plain language: the Pluto screen's "capital in use … of $X" used last night's closing book value ($655.7k on prod), while Account Exposure showed the live one ($738k). The tile now shows the live value too; if the live read is slow (over 3 s) or fails it falls back to last night's, as before.
+- `/pluto/state` reads `loadPlutoBookValueNow` through a 15 s shared cache (`src/routes/pluto.ts`); `plutoBookValueAsOf` is null when live.
+- Friday 2026-11-20's snapshot was correct: Pluto + Manual ($960,305) matched the account net-liq snapshot ($960,269).
+- Open: live positions were $128k above Friday's close before Monday's open; not established whether a real gap or stale prices. Compare IBKR's net-liq with the Account Exposure card.
+- Staging build and the screen not yet checked after the push.
+
 ## Nightly greeks alert ignores expired options; BIP screener alert explained (Marcelo 2026-11-23; committed and pushed to staging)
 Plain language: the 20 Nov alert about two missing "greeks" (COIN, NBIS) was about options that had already expired worthless that day, so nothing was lost. The nightly check no longer counts an expired option as missing; a live option without greeks still alerts. The BIP screener alert is stale stored data: BIP's saved IBKR id points to a retired listing, and the screener never refreshes it. Not fixed yet; waiting on tonight's run. To confirm: expiry Friday 2026-11-27 raises no greeks alert.
 
