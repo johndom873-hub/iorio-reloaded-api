@@ -66,3 +66,31 @@ describe("executePlutoOrder: a refusal at confirm", () => {
     expect(tripPlutoBreaker).not.toHaveBeenCalled();
   });
 });
+
+describe("executePlutoOrder: a Call on shares held (Marcelo 2026-11-23)", () => {
+  const callOpen = (buyEveryShare: boolean) => ({ kind: "strategy_open" as const, actionId: "a10", symbol: "IBIT", strategyKey: "covered_call" as const, contract: { expiry: "2026-11-23", strike: 36, right: "C" as const, dte: 0 }, plan: { quantity: 16, limitPrice: 0.15, notional: 0, fullSizeQuantity: 16 }, buyEveryShare, reasons: ["Vol Farmer v4."], scoresSnapshot: {} });
+
+  it("asks the route never to buy shares with it; a Call that buys its shares asks for every share instead", async () => {
+    const build = async (buyEveryShare: boolean) => {
+      const post = vi.fn(async (path: string, _body: unknown) => (path === "/positions/orders" ? { id: "o10", status: "pending_confirmation" } : { id: "o10", status: "submitted" }));
+      await executePlutoOrder({ post } as never, settings, callOpen(buyEveryShare));
+      return post.mock.calls[0]![1] as Record<string, unknown>;
+    };
+    const onHeldShares = await build(false);
+    expect(onHeldShares).toMatchObject({ symbol: "IBIT", strategyKey: "covered_call", coverWithHeldShares: true, plutoActionId: "a10" });
+    expect(onHeldShares).not.toHaveProperty("buyEveryShare");
+    const withItsShares = await build(true);
+    expect(withItsShares).toMatchObject({ buyEveryShare: true });
+    expect(withItsShares).not.toHaveProperty("coverWithHeldShares");
+  });
+
+  it("the route refusing it while the ledger lacks the shares (HTTP 409) is a blocked action, no breaker", async () => {
+    const reason = "IBIT: the ledger shows 1400 free uncovered shares, 1600 needed for 16 Calls on held shares; no shares are bought with it.";
+    const post = vi.fn(async () => {
+      throw new InternalApiError(409, reason);
+    });
+    const result = await executePlutoOrder({ post } as never, settings, callOpen(false));
+    expect(result).toEqual({ outcome: "blocked", orderId: null, detail: `build refused: ${reason}` });
+    expect(tripPlutoBreaker).not.toHaveBeenCalled();
+  });
+});

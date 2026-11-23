@@ -168,7 +168,8 @@ function buildOrder(api: InternalApiClient, input: ExecuteInput): Promise<OrderR
     symbol: input.symbol,
     strategyKey: input.strategyKey,
     option,
-    ...(input.buyEveryShare ? { buyEveryShare: true } : {}),
+    // A Call on shares held never buys any (Marcelo 2026-11-23): the route refuses it while the ledger lacks them.
+    ...(input.buyEveryShare ? { buyEveryShare: true } : input.strategyKey === "covered_call" ? { coverWithHeldShares: true } : {}),
     signalSnapshot: input.scoresSnapshot,
     plutoActionId: input.actionId,
   });

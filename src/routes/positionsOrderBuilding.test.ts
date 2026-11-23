@@ -1418,7 +1418,7 @@ describe("POST /positions/orders/:id/reprice (follow the mid)", () => {
     };
     expect(await errorOf(confirmed)).toBe("Only an order working at IBKR can have its limit changed.");
     expect(await errorOf(filled)).toBe("Only an order working at IBKR can have its limit changed.");
-    expect(await errorOf(combo)).toBe("Only a single-leg option order can have its limit changed.");
+    expect(await errorOf(combo)).toBe("Only a single-leg option order, or a single-leg share order of Pluto's, can have its limit changed.");
     expect(await errorOf(changedTwentyTimes)).toBe("This order's limit has already been changed 20 times.");
     await settle();
     expect(notifiedOrderIds).toEqual([]);

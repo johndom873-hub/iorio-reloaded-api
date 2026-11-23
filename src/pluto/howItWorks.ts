@@ -5,6 +5,7 @@ import { regularCloseEt } from "../lib/marketSessionStatus.js";
 import { roundToCents } from "../lib/positionOrderRules.js";
 import { optionLimitCentsGivenUp, optionLimitPriceGivingUpOneCent } from "../lib/optionLimitPrice.js";
 import { followTheMidCheckIntervalSeconds, followTheMidIsOn, maxLimitPriceChangesPerOrder } from "../lib/orderLimitPriceChanges.js";
+import { ledgerCatchUpRetrySeconds, ledgerMismatchHoldSeconds } from "./ledgerCheck.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { tradingSessionsPerYear } from "../lib/tradingSessionsHeld.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
@@ -78,9 +79,13 @@ export interface PlutoHowItWorks {
     optionCentsGivenUp: number;
     /** Whether working orders follow the mid here (off on production for now, orderLimitPriceChanges.ts). */
     followsTheMid: boolean;
-    /** Follow the mid: a working Call on shares held, Put or buyback is checked every this many seconds and its limit moved, at most maxLimitChangesPerOrder times. */
+    /** Follow the mid: a working Call on shares held, Put, buyback or share order is checked every this many seconds and its limit moved, at most maxLimitChangesPerOrder times. */
     followTheMidCheckSeconds: number;
     maxLimitChangesPerOrder: number;
+    /** The ledger check (ledgerCheck.ts): a round that waits for the positions to show a fill runs again this many seconds later… */
+    ledgerCatchUpRetrySeconds: number;
+    /** …and a ticker whose memory and positions still disagree after this many seconds is held, a person told. */
+    ledgerMismatchHoldSeconds: number;
     /** % of the pot the first position's shares are bought with; the Puts sell on the rest. */
     firstPositionPct: number;
     putsStartCallYieldPct: number;
@@ -212,6 +217,8 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       followsTheMid: figures.followsTheMid,
       followTheMidCheckSeconds: followTheMidCheckIntervalSeconds,
       maxLimitChangesPerOrder: maxLimitPriceChangesPerOrder,
+      ledgerCatchUpRetrySeconds,
+      ledgerMismatchHoldSeconds,
       firstPositionPct: settings.volFarmerV4FirstPositionPct,
       putsStartCallYieldPct: settings.volFarmerV4PutsStartCallYieldPct,
       putMaxAbsDelta: settings.volFarmerV4PutMaxAbsDelta,

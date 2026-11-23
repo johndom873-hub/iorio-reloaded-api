@@ -59,9 +59,12 @@ import {
   volFarmerV4BuyBackMinutesBeforeWindowEnd,
   volFarmerV4RulesOf,
   type VolFarmerV4Memory,
+  type VolFarmerV4OrderOutcome,
   type VolFarmerV4PendingOrder,
   type VolFarmerV4PlannedOrder,
 } from "./volFarmerV4LiveBook.js";
+import { describeLedgerVerdict, judgeTickerLedger, ledgerCatchUpRetrySeconds, loadLedgerMismatchSince, memoryOptionLegIds, saveLedgerMismatch, type LedgerCheckVerdict } from "./ledgerCheck.js";
+import { takeInOneOffShares } from "./oneOffShareTakeIns.js";
 import { loadVolFarmerV4LeapsLook, loadVolFarmerV4LeftoverStockLeg, loadVolFarmerV4LegStatuses, loadVolFarmerV4Memory, loadVolFarmerV4OrderOutcomes, loadVolFarmerV4StepImpliedVolatility, saveVolFarmerV4LastRound, saveVolFarmerV4Memory, type VolFarmerV4LeapsLook, type VolFarmerV4RoundFigures } from "./volFarmerV4LookLoader.js";
 
 // One Pluto round under Vol Farmer v4 (Marcelo 2026-10-31; Vol Farmer v2's from 2026-10-27): every enabled ticker gets a
@@ -143,6 +146,8 @@ export interface VolFarmerV4RoundSummary {
   planned: number;
   sent: number;
   notes: string[];
+  /** The round waited for the ledger to catch up on a fill (ledgerCheck.ts): another round is due this many seconds later. */
+  retryAfterSeconds?: number;
 }
 
 /** An option order the round sends, ready for the executor: what it is, its live price and its record. */
@@ -220,8 +225,9 @@ export async function runVolFarmerV4Round(input: VolFarmerV4RoundInput): Promise
     defaultOptionQuoteBandPlannerDependencies.loadClock(input.todayIso),
     loadCommissionEstimator(),
     loadStockCommissionEstimator(),
-    // Pluto's book (Marcelo 2026-11-05): Pluto spends only its own cash, measured on its own value (src/books/bookFigures.ts).
-    loadBooksLiveState({ fetchSummary: () => fetchPlutoAccountSummary(), now }),
+    // Pluto's book value for the pot of holdings adopted at a first look; the round's own figures are read again once the
+    // ledger is known to agree with every ticker's memory (below).
+    loadBooksLiveState({ withoutAccountSummary: true, now }),
     loadLastFilledPlutoActionAtBySymbol(),
   ]);
   const summary: VolFarmerV4RoundSummary = { looked: [], planned: 0, sent: 0, notes: [] };
@@ -231,34 +237,17 @@ export async function runVolFarmerV4Round(input: VolFarmerV4RoundInput): Promise
     summary.notes.push("the Pluto and Manual books have not been started yet, so Pluto sends nothing");
     return summary;
   }
-  const plutoBook = books.books.pluto;
   // The tickers share Pluto's budget (Marcelo 2026-10-28): they take their turn in the day's order, so the one that finds
   // the free cash short is a different one each day.
   const turnOrder = volFarmerV4TurnOrder(v4Tickers.map((ticker) => ticker.symbol), Math.round(Date.parse(`${input.todayIso}T00:00:00Z`) / 86_400_000));
   const tickers = [...v4Tickers].sort((a, b) => turnOrder.indexOf(a.symbol) - turnOrder.indexOf(b.symbol));
   const allocationBySymbol = effectiveAllocationPctBySymbol(enabled);
-  const [bookCounts, bookCommittedAtStart] = await Promise.all([loadSafetyLimitBookCounts(enabled, now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol))]);
-  // What the round's own orders commit is counted once: the book's commitment and the orders in flight are read at its
-  // start, and each order it sends adds to them as it goes.
-  const round = {
-    bookCounts,
-    bookCommitted: bookCommittedAtStart,
-    /** Cash the round's earlier orders tie up, gone for the next tickers. */
-    committedThisRound: 0,
-    optionCommissionDollars: (contracts: number) => optionCommissions.perContractDollars("sell", contracts) * contracts,
-    stockCommissionDollars: (shares: number) => stockCommissions.perShareDollars("buy") * shares,
-    commissions: { option: optionCommissions, stock: stockCommissions },
-    plutoBookValue: plutoBook.bookValue,
-    plutoAvailableCash: plutoBook.availableCash ?? 0,
-    plutoAvailableSettledCash: plutoBook.availableSettledCash,
-    /** The cash every opening order must leave (Risk & Limits' min cash reserve, of Pluto's book value): already out of the available cash; a buyback may use it. */
-    cashReserveDollars: plutoBook.minCashReserve,
-  };
+  const potFractionOf = (ticker: PlutoTickerSettings) => tickerPotFraction(allocationBySymbol.get(ticker.symbol) ?? 0, settings);
   const lastRounds = new Map<string, LastRound>();
-  const potDollarsOf = (ticker: PlutoTickerSettings) => tickerPotFraction(allocationBySymbol.get(ticker.symbol) ?? 0, settings) * plutoBook.bookValue;
   const leapsDue: PlutoTickerSettings[] = [];
   try {
-    // Every ticker's new cycle, Calls and Puts first; then, in the same order, the LEAPS due, on the free cash left.
+    // 1. Every ticker's memory brought up to date and compared with the ledger (ledgerCheck.ts) before anything is sized.
+    const preparedBySymbol = new Map<string, PreparedTickerLook>();
     for (const ticker of tickers) {
       const lastRound: LastRound = { notes: [], figures: null };
       lastRounds.set(ticker.symbol, lastRound);
@@ -271,7 +260,56 @@ export async function runVolFarmerV4Round(input: VolFarmerV4RoundInput): Promise
         lastRound.notes.push(`ticker cooldown, ${cooldown.detail}`);
         continue;
       }
-      const looked = await lookAtTicker({ input, ticker, potDollars: potDollarsOf(ticker), clock, round, summary, lastRound, pass: "cycles_calls_puts" });
+      preparedBySymbol.set(ticker.symbol, await prepareTickerLook({ input, ticker, potDollars: potFractionOf(ticker) * books.books.pluto.bookValue, lastRound, pass: "cycles_calls_puts" }));
+    }
+    // A ledger catching up on a fill reads Pluto's book value low by what was bought (its cash is gone, its shares not counted
+    // yet): every pot would be sized on it, so the whole round waits and another runs shortly.
+    const catchingUp = [...preparedBySymbol].filter(([, prepared]) => prepared.verdict?.kind === "catching_up");
+    if (catchingUp.length > 0) {
+      for (const [symbol, prepared] of preparedBySymbol) {
+        const lastRound = lastRounds.get(symbol)!;
+        if (prepared.kind === "ready") await saveVolFarmerV4Memory(tickers.find((ticker) => ticker.symbol === symbol)!.tickerId, prepared.memory, prepared.adopted);
+        const own = prepared.verdict?.kind === "catching_up" ? prepared.verdict : null;
+        lastRound.notes.push(own !== null ? `the round waits: ${describeLedgerVerdict(own)}` : `the round waits for the ledger to catch up on ${catchingUp.map(([waiting]) => waiting).join(", ")}`);
+      }
+      summary.retryAfterSeconds = ledgerCatchUpRetrySeconds;
+      return summary;
+    }
+    for (const [symbol, prepared] of preparedBySymbol) {
+      if (prepared.verdict?.kind === "held") await noticePlutoTicker(symbol, "ledger_mismatch", settings, now);
+    }
+
+    // 2. Pluto's book read now that the ledger agrees with every ticker's memory: its pots' and its budget's base.
+    const booksNow = await loadBooksLiveState({ fetchSummary: () => fetchPlutoAccountSummary(), now });
+    if (!booksNow.ready) {
+      summary.notes.push("the Pluto and Manual books have not been started yet, so Pluto sends nothing");
+      return summary;
+    }
+    const plutoBook = booksNow.books.pluto;
+    const [bookCounts, bookCommittedAtStart] = await Promise.all([loadSafetyLimitBookCounts(enabled, now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol))]);
+    // What the round's own orders commit is counted once: the book's commitment and the orders in flight are read at its
+    // start, and each order it sends adds to them as it goes.
+    const round = {
+      bookCounts,
+      bookCommitted: bookCommittedAtStart,
+      /** Cash the round's earlier orders tie up, gone for the next tickers. */
+      committedThisRound: 0,
+      optionCommissionDollars: (contracts: number) => optionCommissions.perContractDollars("sell", contracts) * contracts,
+      stockCommissionDollars: (shares: number) => stockCommissions.perShareDollars("buy") * shares,
+      commissions: { option: optionCommissions, stock: stockCommissions },
+      plutoBookValue: plutoBook.bookValue,
+      plutoAvailableCash: plutoBook.availableCash ?? 0,
+      plutoAvailableSettledCash: plutoBook.availableSettledCash,
+      /** The cash every opening order must leave (Risk & Limits' min cash reserve, of Pluto's book value): already out of the available cash; a buyback may use it. */
+      cashReserveDollars: plutoBook.minCashReserve,
+    };
+    const potDollarsOf = (ticker: PlutoTickerSettings) => potFractionOf(ticker) * plutoBook.bookValue;
+
+    // 3. Every ticker's new cycle, Calls and Puts first; then, in the same order, the LEAPS due, on the free cash left.
+    for (const ticker of tickers) {
+      const prepared = preparedBySymbol.get(ticker.symbol);
+      if (prepared === undefined) continue;
+      const looked = await lookAtTicker({ input, ticker, potDollars: potDollarsOf(ticker), clock, round, summary, lastRound: lastRounds.get(ticker.symbol)!, pass: "cycles_calls_puts", prepared });
       if (looked.leapsDue) leapsDue.push(ticker);
     }
     for (const ticker of leapsDue) await lookAtTicker({ input, ticker, potDollars: potDollarsOf(ticker), clock, round, summary, lastRound: lastRounds.get(ticker.symbol)!, pass: "leaps" });
@@ -322,23 +360,41 @@ function capHolding(settings: PlutoSettings, tickerCounts: TickerCounts, round: 
   return caps.find(([room]) => room < 1)?.[1] ?? null;
 }
 
+/** A ticker's memory brought up to date for a look (its ended orders settled, its holdings adopted) and its ledger verdict. */
+type PreparedTickerLook =
+  /** Nothing to look at this round (a share order still working, holdings not adoptable yet): the memory is saved. */
+  | { kind: "skip"; verdict: LedgerCheckVerdict | null }
+  | { kind: "ready"; memory: VolFarmerV4Memory; positions: Awaited<ReturnType<typeof loadOpenPositionFigures>>; openLegs: PositionLegFigures[]; adopted: boolean; verdict: LedgerCheckVerdict };
+
 /**
- * A ticker's look at one of the round's passes: "cycles_calls_puts" runs v4's steps 1 to 3 and sends their orders,
- * answering whether its LEAPS (a purchase or a top-up) is due; "leaps" looks again, after every ticker's first pass, and
- * sends only the LEAPS, on the free cash left then.
+ * Steps 1 and 2 of a ticker's look, before anything is sized: its ended orders settled, its holdings adopted (and Calls sold
+ * outside Pluto taken in), then its memory compared with its open positions (ledgerCheck.ts). A share order still working is
+ * compared as if it ended with the fills it has, so a part fill the ledger has not recorded is caught too.
  */
-async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: PlutoTickerSettings; potDollars: number; clock: Awaited<ReturnType<typeof defaultOptionQuoteBandPlannerDependencies.loadClock>>; round: RoundState; summary: VolFarmerV4RoundSummary; lastRound: LastRound; pass: "cycles_calls_puts" | "leaps" }): Promise<{ leapsDue: boolean }> {
-  const { input, ticker, potDollars, clock, round, summary, lastRound, pass } = context;
-  const { settings, now } = input;
+async function prepareTickerLook(context: { input: VolFarmerV4RoundInput; ticker: PlutoTickerSettings; potDollars: number; lastRound: LastRound; pass: "cycles_calls_puts" | "leaps" }): Promise<PreparedTickerLook> {
+  const { input, ticker, potDollars, lastRound, pass } = context;
   const { symbol, tickerId } = ticker;
   const note = (text: string) => lastRound.notes.push(text);
-  const nothingDue = { leapsDue: false };
+  const nowMs = input.now.getTime();
+  // Compared as if every order still working had ended with the fills it has so far: what it planned is not in the ledger
+  // yet, what filled is (or is the ledger catching up). A Call order with nothing filled counts as no Call; a part fill as its part.
+  const judge = async (memory: VolFarmerV4Memory, openLegs: PositionLegFigures[], outcomes: ReadonlyMap<string, VolFarmerV4OrderOutcome>): Promise<LedgerCheckVerdict> => {
+    const state = structuredClone(memory.state);
+    for (const order of memory.pending) settleVolFarmerV4Order(state, order, { ...(outcomes.get(order.actionId) ?? unfilledVolFarmerV4Outcome), working: false });
+    const [legStatusById, mismatchSince] = await Promise.all([loadVolFarmerV4LegStatuses(memoryOptionLegIds(state)), loadLedgerMismatchSince(tickerId)]);
+    const verdict = judgeTickerLedger({ state, openLegs, legStatusById, nowMs, mismatchSinceMs: mismatchSince?.getTime() ?? null });
+    // A ticker that agrees, as nearly all do at nearly every round, writes only when a disagreement just ended.
+    const write = verdict.kind === "matches" ? mismatchSince !== null : verdict.kind !== "settling";
+    if (write) await saveLedgerMismatch(tickerId, verdict);
+    return verdict;
+  };
 
   // 1. The orders sent at earlier rounds that are done replace their plan with their fills.
   let memory = await loadVolFarmerV4Memory(tickerId);
   let settledAnOrder = false;
+  let outcomes = new Map<string, VolFarmerV4OrderOutcome>();
   if (memory !== null && memory.pending.length > 0) {
-    const outcomes = await loadVolFarmerV4OrderOutcomes(memory.pending.map((order) => order.actionId));
+    outcomes = await loadVolFarmerV4OrderOutcomes(memory.pending.map((order) => order.actionId));
     const stillWorking: VolFarmerV4PendingOrder[] = [];
     for (const order of memory.pending) {
       const outcome = outcomes.get(order.actionId) ?? unfilledVolFarmerV4Outcome;
@@ -351,17 +407,17 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
     }
     memory.pending = stillWorking;
   }
+  const positions = await loadOpenPositionFigures(tickerId);
+  const openLegs = positions.flatMap((position) => position.legs.filter((leg) => leg.exitAt === null));
   // A share order still working: the ticker waits for it, its options to be planned on the shares it ends with.
   const workingShareOrder = memory?.pending.find((order) => order.kind === "buy_shares" || order.kind === "sell_shares");
   if (memory !== null && workingShareOrder !== undefined) {
     if (pass === "cycles_calls_puts") note(`waits for its ${workingShareOrder.kind === "buy_shares" ? "purchase" : "sale"} of ${workingShareOrder.shares ?? 0} shares to end`);
     await saveVolFarmerV4Memory(tickerId, memory, false);
-    return nothingDue;
+    return { kind: "skip", verdict: await judge(memory, openLegs, outcomes) };
   }
 
   // 2. The ticker's holdings: a first look adopts them (or starts afresh when flat).
-  const positions = await loadOpenPositionFigures(tickerId);
-  const openLegs = positions.flatMap((position) => position.legs.filter((leg) => leg.exitAt === null));
   let adopted = false;
   if (memory === null) {
     if (openLegs.length === 0) memory = { state: newVolFarmerV4SymbolState(), pending: [] };
@@ -371,7 +427,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
       const adoption = adoptVolFarmerV4Holdings({ positions, cycleBreakEvenPerShare: cycle?.breakEvenPerShare ?? null, potDollars });
       if ("waiting" in adoption) {
         note(adoption.waiting);
-        return nothingDue;
+        return { kind: "skip", verdict: null };
       }
       memory = { state: adoption.state, pending: [] };
       adopted = true;
@@ -406,6 +462,36 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
         putContracts: 0,
       });
     }
+  }
+  if (!adopted) {
+    const takenIn = await takeInOneOffShares({ tickerId, symbol, memory, passId: input.passId });
+    if (takenIn !== null) note(takenIn);
+  }
+  // Holdings adopted at this look are the ledger's own: nothing to compare.
+  const verdict: LedgerCheckVerdict = adopted ? { kind: "matches" } : await judge(memory, openLegs, outcomes);
+  if (adopted) await saveLedgerMismatch(tickerId, verdict);
+  return { kind: "ready", memory, positions, openLegs, adopted, verdict };
+}
+
+/**
+ * A ticker's look at one of the round's passes: "cycles_calls_puts" runs v4's steps 1 to 3 and sends their orders,
+ * answering whether its LEAPS (a purchase or a top-up) is due; "leaps" looks again, after every ticker's first pass, and
+ * sends only the LEAPS, on the free cash left then. The first pass gets its memory prepared by the round (prepareTickerLook);
+ * the second prepares it again, and a ticker whose memory and ledger disagree then sends no LEAPS.
+ */
+async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: PlutoTickerSettings; potDollars: number; clock: Awaited<ReturnType<typeof defaultOptionQuoteBandPlannerDependencies.loadClock>>; round: RoundState; summary: VolFarmerV4RoundSummary; lastRound: LastRound; pass: "cycles_calls_puts" | "leaps"; prepared?: PreparedTickerLook }): Promise<{ leapsDue: boolean }> {
+  const { input, ticker, potDollars, clock, round, summary, lastRound, pass } = context;
+  const { settings, now } = input;
+  const { symbol, tickerId } = ticker;
+  const note = (text: string) => lastRound.notes.push(text);
+  const nothingDue = { leapsDue: false };
+  const prepared = context.prepared ?? (await prepareTickerLook({ input, ticker, potDollars, lastRound, pass }));
+  if (prepared.kind === "skip") return nothingDue;
+  const { memory, positions, openLegs, adopted, verdict } = prepared;
+  if (verdict.kind === "catching_up" || verdict.kind === "held") {
+    note(`nothing is sent: ${describeLedgerVerdict(verdict)}`);
+    await saveVolFarmerV4Memory(tickerId, memory, adopted);
+    return nothingDue;
   }
 
   // 3. The market and the book at this round.
@@ -744,16 +830,41 @@ function followTheMidOf(marketWatch: Pick<PlutoMarketWatch, "burst">, symbol: st
 }
 
 /**
+ * Follow the mid for one of v4's share orders (Marcelo 2026-11-23): the mid of Pluto's own stock quote, priced as the order
+ * was sent (optionMidLimitPrice: to the cent, never past the bid or ask), every followTheMidCheckIntervalSeconds, with no
+ * spread limit; null leaves the order where it is (no two-sided quote of the last maximumLiveQuoteAgeMs, Pluto off or paused).
+ * Example: a sale of 100 NVDA sent at 168.97 with the quote now 168.86 / 168.87 moves to 168.87.
+ */
+export function followTheMidOfShareOrder(marketWatch: Pick<PlutoMarketWatch, "snapshot">, symbol: string, side: "sell" | "buy", nowMs: () => number = () => Date.now()): PlutoFollowTheMid | undefined {
+  if (!followTheMidIsOn(readAppEnvironment())) return undefined;
+  return {
+    priceNow: async () => {
+      const state = await loadPlutoState();
+      if (state.mode !== "on" || state.paused) return null;
+      const quote = marketWatch.snapshot(symbol);
+      const fresh = quote !== null && quote.updatedAtMs !== null && nowMs() - quote.updatedAtMs <= maximumLiveQuoteAgeMs;
+      if (!fresh || quote.bid === null || quote.ask === null || !(quote.bid > 0) || quote.ask < quote.bid) return null;
+      return optionMidLimitPrice(quote.bid, quote.ask, side);
+    },
+  };
+}
+
+/**
  * Follow the mid for a v4 order a new process adopted (the agent restarted while it worked): the same rules it was sent
  * with, rebuilt from its action. A sale of a Call on shares held or a Put follows within v4's spread limit; a buyback
- * follows at any spread; anything else (two legs, LEAPS, shares) does not.
+ * follows at any spread; a share order at the mid of the stock quote; anything else (two legs, LEAPS) does not.
  */
 export function followTheMidOfAdoptedOrder(
-  marketWatch: Pick<PlutoMarketWatch, "burst">,
+  marketWatch: Pick<PlutoMarketWatch, "burst" | "snapshot">,
   settings: PlutoSettings,
   order: { executionStrategy: string | null; kind: string; symbol: string; contract: unknown; legs: readonly { role: "stock" | "option" }[] },
 ): PlutoFollowTheMid | undefined {
-  if (order.executionStrategy !== "vol_farmer_v4" || order.legs.length !== 1 || order.legs[0]!.role !== "option") return undefined;
+  if (order.executionStrategy !== "vol_farmer_v4" || order.legs.length !== 1) return undefined;
+  if (order.legs[0]!.role === "stock") {
+    if (order.kind === "buy_shares") return followTheMidOfShareOrder(marketWatch, order.symbol, "buy");
+    if (order.kind === "close_shares") return followTheMidOfShareOrder(marketWatch, order.symbol, "sell");
+    return undefined;
+  }
   const contract = (order.contract ?? {}) as { expiry?: string; strike?: number; right?: "C" | "P"; strategyKey?: string };
   if (!contract.expiry || contract.strike === undefined) return undefined;
   const right = contract.right ?? (contract.strategyKey === "cash_secured_put" ? "P" : "C");
@@ -991,7 +1102,8 @@ async function sendShareOrder(context: { input: VolFarmerV4RoundInput; ticker: P
     round.bookCommitted += notional;
     round.committedThisRound += notional;
   }
-  input.trackWatch(watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: buying ? "buy" : "sell", multiplier: 1 }, description: result.detail, cancelByMs: input.cancelByMs }), result.orderId, ticker.symbol);
+  const followTheMid = followTheMidOfShareOrder(input.marketWatch, ticker.symbol, buying ? "buy" : "sell");
+  input.trackWatch(watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: buying ? "buy" : "sell", multiplier: 1 }, description: result.detail, cancelByMs: input.cancelByMs, ...(followTheMid ? { followTheMid } : {}) }), result.orderId, ticker.symbol);
   return { actionId, sent: true, detail: `${result.detail} (${formatWholeDollars(limitPrice! * shares)})` };
 }
 

@@ -52,6 +52,10 @@ const harness = vi.hoisted(() => ({
   /** One option contract's commission, as the round's estimator gives it. */
   optionCommission: 0.65,
   notices: [] as { symbol: string; reason: string }[],
+  /** When each ticker's memory and ledger were first seen to disagree (ledgerCheck.ts). */
+  ledgerMismatchSince: new Map<string, Date>(),
+  /** Pluto's mode and pause, read by the followers of working orders. */
+  plutoState: { mode: "on", paused: false },
 }));
 
 /** The orders sent and still working, with the notional the in-flight order requests count them at. */
@@ -148,8 +152,19 @@ vi.mock("./volFarmerV4LookLoader.js", () => ({
   loadVolFarmerV4StepImpliedVolatility: async () => harness.stepImpliedVolatility,
   loadVolFarmerV4LeftoverStockLeg: async () => harness.leftoverStockLeg,
 }));
+// The ledger check's own rules run (ledgerCheck.ts); when a disagreement was first seen is kept here.
+vi.mock("./ledgerCheck.js", async (original) => ({
+  ...(await original<object>()),
+  loadLedgerMismatchSince: async (tickerId: string) => harness.ledgerMismatchSince.get(tickerId) ?? null,
+  saveLedgerMismatch: async (tickerId: string, verdict: { kind: string; sinceMs?: number }) => {
+    if (verdict.kind === "matches") harness.ledgerMismatchSince.delete(tickerId);
+    else if (verdict.sinceMs !== undefined) harness.ledgerMismatchSince.set(tickerId, new Date(verdict.sinceMs));
+  },
+}));
+vi.mock("./oneOffShareTakeIns.js", () => ({ takeInOneOffShares: async () => null }));
+vi.mock("./stateStore.js", () => ({ loadPlutoState: async () => harness.plutoState }));
 
-const { followTheMidOfAdoptedOrder, isVolFarmerV4BuyBackRound, runVolFarmerV4Round, volFarmerV4CallsLeftToBeAssignedNote, volFarmerV4CallsToBuyBack, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
+const { followTheMidOfAdoptedOrder, followTheMidOfShareOrder, isVolFarmerV4BuyBackRound, runVolFarmerV4Round, volFarmerV4CallsLeftToBeAssignedNote, volFarmerV4CallsToBuyBack, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
 
 /** v4 at its defaults: Calls expiring at today's close, 80% of the pot in shares, rebalanced. */
 const v4Settings = { ...plutoSafetyLimitsSettingsFixture, ...plutoVolFarmerV4SettingsFixture, excessAllowancePct: 0, maxQuoteAgeMinutes: 10, burstLines: 10, telegramVerbosity: "actions" };
@@ -238,6 +253,7 @@ beforeEach(() => {
   harness.previousClose = 99.5;
   harness.notices.length = 0;
   harness.optionCommission = 0.65;
+  harness.ledgerMismatchSince.clear();
 });
 
 describe("runVolFarmerV4Round", () => {
@@ -595,6 +611,70 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
     expect(memory.state.first).toMatchObject({ shares: 1_900, calls: [{ legId: "action:action-2", shares: 1_900 }] });
   });
 
+  describe("the ledger catching up on a fill (Marcelo 2026-11-23: IBIT's 200 shares bought twice)", () => {
+    async function topUpFilledLedgerBehind(): Promise<void> {
+      roundSettings = { ...v4Settings, volFarmerV4OptionsExpiry: "next" };
+      holdingFirstPosition(1_000);
+      await round();
+      harness.outcomes.set("action-1", filledPurchase(900, 100));
+      // The purchase has filled; the reconciliation has not yet written it into the leg's quantity.
+    }
+
+    it("the whole round waits, sends nothing and asks for another 15 s later; once the ledger shows the shares, the Calls go", async () => {
+      await topUpFilledLedgerBehind();
+      const waited = await round(false, "2026-10-27", { now: new Date("2026-10-27T15:00:53Z") });
+      expect(waited.retryAfterSeconds).toBe(15);
+      expect(harness.executed.map((order) => order.kind)).toEqual(["shares_buy"]);
+      expect(harness.lastRounds.get("t-VFT")!.notes).toContain("the round waits: the ledger is catching up on a fill (shares: Pluto's memory 1900, the ledger 1000), since 11:00 ET");
+      // The purchase is settled into the memory at once, so the wait never depends on the look running.
+      expect((harness.memory.get("t-VFT") as VolFarmerV4Memory).pending).toEqual([]);
+
+      harness.positionsByTickerId.set("t-VFT", [{ strategyKey: "unstructured", status: "open", legs: [stockLeg("s1", 1_900)] }]);
+      const caughtUp = await round(false, "2026-10-27", { now: new Date("2026-10-27T15:01:08Z") });
+      expect(caughtUp.retryAfterSeconds).toBeUndefined();
+      expect(harness.executed.map((order) => [order.kind, (order.plan as { quantity: number }).quantity])).toEqual([["shares_buy", 900], ["strategy_open", 19]]);
+      expect(harness.ledgerMismatchSince.has("t-VFT")).toBe(false);
+    });
+
+    it("still apart 120 s after it was first seen: the ticker is held, a person told; the round's other tickers go on", async () => {
+      await topUpFilledLedgerBehind();
+      harness.enabled = [...harness.enabled, { tickerId: "t-OTH", symbol: "OTH", allocationPct: 50 }];
+      await round(false, "2026-10-27", { now: new Date("2026-10-27T15:00:53Z") });
+      const held = await round(false, "2026-10-27", { now: new Date("2026-10-27T15:02:53Z") });
+      expect(held.retryAfterSeconds).toBeUndefined();
+      expect(harness.notices).toEqual([{ symbol: "VFT", reason: "ledger_mismatch" }]);
+      expect(harness.lastRounds.get("t-VFT")!.notes).toContain("nothing is sent: held: Pluto's memory and the ledger disagree since 11:00 ET (shares: Pluto's memory 1900, the ledger 1000); a person needs to look");
+      expect(harness.executed.filter((order) => order.symbol === "VFT").map((order) => order.kind)).toEqual(["shares_buy"]);
+      // OTH, flat, opens its cycle.
+      expect(harness.executed.filter((order) => order.symbol === "OTH").map((order) => order.kind)).toEqual(["strategy_open"]);
+    });
+
+    it("a share order still working with a part fill the ledger has not recorded: the round waits too", async () => {
+      roundSettings = { ...v4Settings, volFarmerV4OptionsExpiry: "next" };
+      holdingFirstPosition(1_000);
+      await round();
+      harness.outcomes.set("action-1", { ...filledPurchase(400, 100), working: true });
+      expect((await round()).retryAfterSeconds).toBe(15);
+      harness.positionsByTickerId.set("t-VFT", [{ strategyKey: "unstructured", status: "open", legs: [stockLeg("s1", 1_400)] }]);
+      expect((await round()).retryAfterSeconds).toBeUndefined();
+      expect(harness.lastRounds.get("t-VFT")!.notes).toContain("waits for its purchase of 900 shares to end");
+    });
+
+    it("a Call order still working is not a disagreement: nothing of it is in the ledger until it fills", async () => {
+      roundSettings = { ...v4Settings, volFarmerV4OptionsExpiry: "next" };
+      holdingFirstPosition(1_000);
+      await round();
+      harness.outcomes.set("action-1", filledPurchase(900, 100));
+      harness.positionsByTickerId.set("t-VFT", [{ strategyKey: "unstructured", status: "open", legs: [stockLeg("s1", 1_900)] }]);
+      await round();
+      expect(harness.executed.at(-1)).toMatchObject({ kind: "strategy_open" });
+      // The Call works: the next round neither waits nor sends a second one.
+      const next = await round();
+      expect(next.retryAfterSeconds).toBeUndefined();
+      expect(harness.executed).toHaveLength(2);
+    });
+  });
+
   it("holds a share order back while another order of the ticker works, and sends nothing of the look", async () => {
     topUpDue();
     const memory = harness.memory.get("t-VFT") as VolFarmerV4Memory;
@@ -839,22 +919,57 @@ describe("volFarmerV4NoCallQuotedReason", () => {
 });
 
 describe("followTheMidOfAdoptedOrder: an order adopted after a restart keeps following as it was sent", () => {
-  const marketWatch = { burst: vi.fn(async () => []) };
+  const marketWatch = { burst: vi.fn(async () => []), snapshot: vi.fn(() => null) };
   const settings = { ...plutoVolFarmerV4SettingsFixture } as never;
   const order = (kind: string, extra: Record<string, unknown> = {}) => ({ executionStrategy: "vol_farmer_v4", kind, symbol: "NVDA", contract: { strategyKey: "covered_call", expiry: "2026-11-09", strike: 180, right: "C" }, legs: [{ role: "option" as const }], ...extra });
 
-  it("a Call on shares held, a Put and a buyback follow", () => {
+  it("a Call on shares held, a Put, a buyback and a share order (Marcelo 2026-11-23) follow", () => {
     expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("open_covered_call"))).toBeDefined();
     expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("open_cash_secured_put", { contract: { strategyKey: "cash_secured_put", expiry: "2026-11-09", strike: 170, right: "P" } }))).toBeDefined();
     expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("close_leg"))).toBeDefined();
+    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("buy_shares", { legs: [{ role: "stock" }], contract: { strategyKey: "shares" } }))).toBeDefined();
+    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("close_shares", { legs: [{ role: "stock" }], contract: { strategyKey: "shares" } }))).toBeDefined();
   });
 
-  it("a Call sent with its shares (two legs), a LEAPS, shares, another strategy's order or one without its contract do not", () => {
+  it("a Call sent with its shares (two legs), a LEAPS, another strategy's order or one without its contract do not", () => {
     expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("open_covered_call", { legs: [{ role: "stock" }, { role: "option" }] }))).toBeUndefined();
     expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("buy_leaps"))).toBeUndefined();
     expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("sell_leaps"))).toBeUndefined();
-    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("buy_shares", { legs: [{ role: "stock" }] }))).toBeUndefined();
+    expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("open_covered_call", { legs: [{ role: "stock" }] }))).toBeUndefined();
     expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("open_covered_call", { executionStrategy: "edge_margin" }))).toBeUndefined();
     expect(followTheMidOfAdoptedOrder(marketWatch, settings, order("open_covered_call", { contract: null }))).toBeUndefined();
+  });
+});
+
+describe("followTheMidOfShareOrder: a working share order follows the mid of Pluto's stock quote (Marcelo 2026-11-23)", () => {
+  // 23 Nov, NVDA: a sale of 100 shares sent at 168.97 rested above the market (bid 168.86 / ask 168.87) for 15 minutes.
+  const nowMs = Date.parse("2026-11-23T15:00:30Z");
+  const watchQuoting = (bid: number | null, ask: number | null, ageMs = 1_000) => ({ snapshot: () => ({ symbol: "NVDA", last: 168.86, previousClose: 170, bid, ask, updatedAtMs: nowMs - ageMs }) });
+
+  it("moves to the mid to the cent, never past the bid or ask: a sale rounds up, a purchase down", async () => {
+    harness.plutoState = { mode: "on", paused: false };
+    expect(await followTheMidOfShareOrder(watchQuoting(168.86, 168.87), "NVDA", "sell", () => nowMs)!.priceNow()).toBe(168.87);
+    expect(await followTheMidOfShareOrder(watchQuoting(168.86, 168.87), "NVDA", "buy", () => nowMs)!.priceNow()).toBe(168.86);
+    expect(await followTheMidOfShareOrder(watchQuoting(35.5, 35.6), "IBIT", "buy", () => nowMs)!.priceNow()).toBe(35.55);
+  });
+
+  it("leaves the order where it is with no two-sided quote of the last 15 seconds, or with Pluto off or paused", async () => {
+    harness.plutoState = { mode: "on", paused: false };
+    expect(await followTheMidOfShareOrder(watchQuoting(168.86, 168.87, 16_000), "NVDA", "sell", () => nowMs)!.priceNow()).toBeNull();
+    expect(await followTheMidOfShareOrder(watchQuoting(null, 168.87), "NVDA", "sell", () => nowMs)!.priceNow()).toBeNull();
+    harness.plutoState = { mode: "on", paused: true };
+    expect(await followTheMidOfShareOrder(watchQuoting(168.86, 168.87), "NVDA", "sell", () => nowMs)!.priceNow()).toBeNull();
+    harness.plutoState = { mode: "off", paused: false };
+    expect(await followTheMidOfShareOrder(watchQuoting(168.86, 168.87), "NVDA", "sell", () => nowMs)!.priceNow()).toBeNull();
+    harness.plutoState = { mode: "on", paused: false };
+  });
+
+  it("a share order the round sends is watched with its follower", async () => {
+    roundSettings = { ...v4Settings, volFarmerV4OptionsExpiry: "next" };
+    holdingFirstPosition(1_000);
+    const { watchPlutoOrder } = await import("./executor.js");
+    vi.mocked(watchPlutoOrder).mockClear();
+    await round();
+    expect(vi.mocked(watchPlutoOrder).mock.calls[0]![2]).toMatchObject({ reference: { side: "buy", multiplier: 1 }, followTheMid: { priceNow: expect.any(Function) } });
   });
 });

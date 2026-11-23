@@ -332,3 +332,34 @@ describe("v4's buyback on the live book", () => {
     expect(book.openOptionContracts()).toEqual([{ expiry: "2026-11-06", strike: 100 }]);
   });
 });
+
+describe("a Call order on held shares that bought shares anyway (Marcelo 2026-11-23)", () => {
+  // 23 Nov, IBIT: 16 Calls sold on 1,600 shares held, the order route also bought 200 at $35.57 ($7,114.34 with commission).
+  const callOnHeldShares = (): VolFarmerV4PendingOrder => ({ ref: "action:ee", actionId: "ee", kind: "covered_call", expiry: "2026-11-23", strike: 36, contracts: 16, startsCycle: false, contractsByPosition: { first: 16, second: 0 }, plannedPremiumByPosition: { first: 240, second: 0 }, leapsBeforeSale: null });
+  const holding1600 = () => ({ ...newVolFarmerV4SymbolState(), first: { shares: 1_600, costPerShare: 41.08545, premiums: [{ legId: "action:ee", dollars: 240, shares: 1_600 }], calls: [{ legId: "action:ee", shares: 1_600 }], puts: [] } });
+  const filled = { working: false, filledContracts: 16, optionLegIds: ["leg-c"], optionNetDollars: 214.25, sharesBought: 200, sharesCostDollars: 7_114.34, sharesSold: 0 };
+
+  it("takes the shares into the first position at what they cost, the Calls still covering 1,600", () => {
+    const state = holding1600();
+    expect(settleVolFarmerV4Order(state, callOnHeldShares(), filled)).toBe("200 shares the Call order bought were taken into the first position");
+    expect(state.first!.shares).toBe(1_800);
+    expect(state.first!.costPerShare).toBeCloseTo((1_600 * 41.08545 + 7_114.34) / 1_800, 10);
+    expect(state.first!.calls).toEqual([{ legId: "leg-c", shares: 1_600 }]);
+    expect(state.first!.premiums).toEqual([{ legId: "leg-c", dollars: 214.25, shares: 1_800 }]);
+    expect(volFarmerV4BreakEven(state.first!)).toBeCloseTo(state.first!.costPerShare - 214.25 / 1_800, 10);
+  });
+
+  it("an order that bought no shares, or one that opens a cycle with its shares, is settled as before", () => {
+    const none = holding1600();
+    expect(settleVolFarmerV4Order(none, callOnHeldShares(), { ...filled, sharesBought: 0, sharesCostDollars: 0 })).toBeNull();
+    expect(none.first!.shares).toBe(1_600);
+    const opening = holding1600();
+    settleVolFarmerV4Order(opening, { ...callOnHeldShares(), startsCycle: true }, { ...filled, sharesBought: 1_600, sharesCostDollars: 56_912 });
+    expect(opening.first!.shares).toBe(1_600);
+    expect(opening.first!.costPerShare).toBeCloseTo(35.57, 10);
+  });
+
+  it("a part fill says both", () => {
+    expect(settleVolFarmerV4Order(holding1600(), callOnHeldShares(), { ...filled, filledContracts: 10 })).toBe("the Call order on 36, 10 of 16 filled; 200 shares the Call order bought were taken into the first position");
+  });
+});

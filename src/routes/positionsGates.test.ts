@@ -292,6 +292,60 @@ describe("POST /positions/orders", () => {
     }
   });
 
+  it("a Pluto Call on held shares (coverWithHeldShares) never buys shares: refused while the ledger lacks them, sent alone once it holds them", async () => {
+    const ticker = await createTicker();
+    // 23 Nov, IBIT: a top-up of 200 had filled, the ledger still showed 1,400 shares, and 16 Calls need 1,600.
+    const [held] = await testDb("positions").insert({ strategy_key: "unstructured", ticker_id: ticker.id, status: "open" }).returning("id");
+    createdPositionIds.push(held.id);
+    const [stockLeg] = await testDb("position_legs").insert({ position_id: held.id, leg_type: "stock", side: "long", quantity: 1400, multiplier: 1, entry_price: 41, entry_at: new Date(Date.now() - 86_400_000) }).returning("id");
+    const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates-cover-with-held-shares" }), model_called: false }).returning("id");
+    const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_covered_call", symbol: ticker.symbol, outcome: "order_built", execution_strategy: "vol_farmer_v4" }).returning("id");
+    const callOption = { ...optionBody, quantity: 16, strikePrice: 110 };
+    try {
+      const refused = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "covered_call", option: callOption, coverWithHeldShares: true, plutoActionId: action.id });
+      expect(refused.status).toBe(409);
+      expect(refused.json.error).toBe(`${ticker.symbol}: the ledger shows 1400 free uncovered shares, 1600 needed for 16 Calls on held shares; no shares are bought with it.`);
+      expect(await testDb("order_requests").where({ pluto_action_id: action.id })).toEqual([]);
+
+      // The reconciliation has recorded the purchase: the Calls go out on the shares held, with no stock leg.
+      await testDb("position_legs").where({ id: stockLeg.id }).update({ quantity: 1600 });
+      const sent = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "covered_call", option: callOption, coverWithHeldShares: true, plutoActionId: action.id });
+      expect(sent.status).toBe(201);
+      expect(sent.json.payload.legs).toEqual([{ role: "option", action: "SELL", symbol: ticker.symbol, quantity: 16, unitPrice: callOption.limitPrice, strike: 110, expiry: "20261120", right: "C" }]);
+
+      // Only Pluto's Call on held shares may ask, never with shares of its own or buyEveryShare.
+      for (const body of [{ coverWithHeldShares: true }, { coverWithHeldShares: true, plutoActionId: action.id, stock: { quantity: 1600, limitPrice: 100 } }, { coverWithHeldShares: true, buyEveryShare: true, plutoActionId: action.id }, { coverWithHeldShares: "yes", plutoActionId: action.id }]) {
+        expect((await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "covered_call", option: callOption, ...body })).status).toBe(400);
+      }
+      expect((await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "cash_secured_put", option: optionBody, coverWithHeldShares: true, plutoActionId: action.id })).status).toBe(400);
+    } finally {
+      await testDb("order_requests").where({ requested_by_user_id: userId }).del();
+      await testDb("pluto_actions").where({ id: action.id }).del();
+      await testDb("pluto_passes").where({ id: pass.id }).del();
+    }
+  });
+
+  it("a working share order of Pluto's can have its limit changed (it follows the mid, Marcelo 2026-11-23); a manual one cannot", async () => {
+    const ticker = await createTicker();
+    const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates-share-reprice" }), model_called: false }).returning("id");
+    const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "close_shares", symbol: ticker.symbol, outcome: "confirmed", execution_strategy: "vol_farmer_v4" }).returning("id");
+    const sale = { symbol: ticker.symbol, strategyKey: "unstructured", legs: [{ role: "stock", action: "SELL", symbol: ticker.symbol, quantity: 100, unitPrice: 168.97 }] };
+    const [plutoOrder] = await testDb("order_requests").insert({ requested_by_user_id: userId, request_type: "close_position", payload: JSON.stringify(sale), status: "submitted", pluto_action_id: action.id, ibkr_order_id: 78 }).returning("id");
+    const [manualOrder] = await testDb("order_requests").insert({ requested_by_user_id: userId, request_type: "close_position", payload: JSON.stringify(sale), status: "submitted", ibkr_order_id: 79 }).returning("id");
+    try {
+      const followed = await call("POST", `/positions/orders/${plutoOrder.id}/reprice`, { limitPrice: 168.87 });
+      expect(followed.status).toBe(200);
+      expect((await orderRow(plutoOrder.id)).payload.limitPriceChangeRequest).toEqual({ limitPrice: 168.87, requestedAt: expect.any(String) });
+      const manual = await call("POST", `/positions/orders/${manualOrder.id}/reprice`, { limitPrice: 168.87 });
+      expect(manual.status).toBe(409);
+      expect(manual.json.error).toBe("Only a single-leg option order, or a single-leg share order of Pluto's, can have its limit changed.");
+    } finally {
+      await testDb("order_requests").whereIn("id", [plutoOrder.id, manualOrder.id]).del();
+      await testDb("pluto_actions").where({ id: action.id }).del();
+      await testDb("pluto_passes").where({ id: pass.id }).del();
+    }
+  });
+
   it("stores the economic-calendar events and one-line warning on the built order", async () => {
     const ticker = await createTicker();
     fetchMacroEventWarningEventsMock.mockResolvedValue([{ title: "FOMC Rate Decision", eventDate: "2026-11-04" }]);

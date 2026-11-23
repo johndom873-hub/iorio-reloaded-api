@@ -10,10 +10,11 @@ import type { PlutoSettings } from "./settingsStore.js";
 // not sent again, so a restart does not resend it. The texts carry no figures; the round's notes and the event log hold
 // the details.
 
-export type PlutoTickerNoticeReason = "split_guard";
+export type PlutoTickerNoticeReason = "split_guard" | "ledger_mismatch";
 
 const tickerNoticeTexts: Record<PlutoTickerNoticeReason, (symbol: string) => string> = {
   split_guard: (symbol) => `${symbol} is stopped: its price is about a split's factor away from the previous close with no split recorded. A person needs to look.`,
+  ledger_mismatch: (symbol) => `${symbol} is stopped: Pluto's record of its holdings has disagreed with the account's positions for over 2 minutes. A person needs to look.`,
 };
 
 export interface PlutoNoticeDependencies {

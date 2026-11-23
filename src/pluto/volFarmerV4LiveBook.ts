@@ -1,5 +1,6 @@
 import type { BacktestVolFarmerSettings, BacktestVolFarmerV2Settings, BacktestVolFarmerV3Settings } from "../backtest/backtestTypes.js";
 import {
+  addVolFarmerV4Shares,
   newVolFarmerV4SymbolState,
   removeVolFarmerV4Shares,
   volFarmerV4CallPremiumShare,
@@ -197,7 +198,9 @@ export function settleVolFarmerV4Order(state: VolFarmerV4SymbolState, order: Vol
       }
       settleVolFarmerV4Premium(position, order, { dollars: filled === 0 ? 0 : (outcome.optionNetDollars * got) / filled, shares: got * 100, legId: outcome.optionLegIds[0] ?? order.ref }, order.plannedPremiumByPosition[name]);
     }
-    return filled === order.contracts ? null : `the Call order on ${order.strike}${shortBy}`;
+    const takenIn = takeInSharesBoughtWithCallOnHeldShares(state, order, outcome);
+    const callNote = filled === order.contracts ? null : `the Call order on ${order.strike}${shortBy}`;
+    return [callNote, takenIn].filter((text) => text !== null).join("; ") || null;
   }
   if (order.kind === "cash_secured_put") {
     const second = state.second;
@@ -266,6 +269,21 @@ function settleVolFarmerV4CallBuyBack(state: VolFarmerV4SymbolState, order: VolF
  * 100 planned at $80 ($8,001 with commission): the steps' (39,000 + 8,001) ÷ 500 = $94.00 becomes (47,001 − 8,001 +
  * 7,951) ÷ 500 = $93.90 when they filled at $79.50.
  */
+/**
+ * Shares a Call order on held shares bought anyway (Marcelo 2026-11-23): the order is the account's truth, so its shares join
+ * the position whose Call it sold (the first, else the second) at what they cost, commission included, by the top-up arithmetic.
+ * Pluto's Calls on held shares tell the order route never to buy shares, so this is a backstop. A Call order that opens a cycle or
+ * rebuilds the first position buys its shares on purpose and is settled above. Example: 16 Calls on 1,600 shares held, the
+ * order also bought 200 at $35.57 ($7,114 + $1.25): the first position holds 1,800, its cost per share blended.
+ */
+function takeInSharesBoughtWithCallOnHeldShares(state: VolFarmerV4SymbolState, order: VolFarmerV4PendingOrder, outcome: VolFarmerV4OrderOutcome): string | null {
+  if (order.startsCycle || order.buysShares === true || outcome.sharesBought <= 0) return null;
+  const name = state.first !== null && (order.contractsByPosition.first > 0 || state.second === null) ? "first" : state.second !== null ? "second" : null;
+  if (name === null) return null;
+  addVolFarmerV4Shares(state[name]!, outcome.sharesBought, outcome.sharesCostDollars);
+  return `${outcome.sharesBought} shares the Call order bought were taken into the ${name} position`;
+}
+
 function settleVolFarmerV4SharePurchase(state: VolFarmerV4SymbolState, order: VolFarmerV4PendingOrder, outcome: VolFarmerV4OrderOutcome): string | null {
   const planned = order.shares ?? 0;
   const bought = outcome.sharesBought;

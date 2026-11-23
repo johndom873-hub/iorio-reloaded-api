@@ -924,6 +924,11 @@ interface OpenOrderRequestBody {
    * shares held (Vol Farmer v4 keeps those for its own Calls), priced as the auto-fill does.
    */
   buyEveryShare?: unknown;
+  /**
+   * Pluto's orders only (Marcelo 2026-11-23): a Covered Call sold on shares Pluto holds. No stock leg is ever added; the order
+   * is refused while the ledger's free uncovered shares are fewer than its Calls cover (a fill the ledger has not recorded yet).
+   */
+  coverWithHeldShares?: unknown;
 }
 
 // A snapshot is a plain object of modest size; the shape itself is the app's (SignalOrderSnapshot) and is not re-validated here.
@@ -1053,7 +1058,7 @@ async function buildPlutoSharePurchase(request: Request, response: Response): Pr
 }
 
 positionsRouter.post("/orders", async (request, response) => {
-  const { symbol, strategyKey, stock, option, buyEveryShare } = request.body as OpenOrderRequestBody;
+  const { symbol, strategyKey, stock, option, buyEveryShare, coverWithHeldShares } = request.body as OpenOrderRequestBody;
   if (strategyKey === "shares") {
     await buildPlutoSharePurchase(request, response);
     return;
@@ -1064,6 +1069,14 @@ positionsRouter.post("/orders", async (request, response) => {
   }
   if (buyEveryShare && (strategyKey !== "covered_call" || stock !== undefined || !(request.body as { plutoActionId?: unknown }).plutoActionId)) {
     response.status(400).json({ error: "buyEveryShare is for a Pluto Covered Call entry with an auto-filled stock leg only." });
+    return;
+  }
+  if (coverWithHeldShares !== undefined && typeof coverWithHeldShares !== "boolean") {
+    response.status(400).json({ error: "coverWithHeldShares must be true or false." });
+    return;
+  }
+  if (coverWithHeldShares && (strategyKey !== "covered_call" || stock !== undefined || buyEveryShare || !(request.body as { plutoActionId?: unknown }).plutoActionId)) {
+    response.status(400).json({ error: "coverWithHeldShares is for a Pluto Covered Call on held shares only, with no stock leg and not with buyEveryShare." });
     return;
   }
 
@@ -1170,6 +1183,14 @@ positionsRouter.post("/orders", async (request, response) => {
     const availableUncovered = Math.max(0, uncoveredShares - committedByCalls - soldBySales);
     const shortfall = Math.max(0, requiredShares - availableUncovered);
     excessUncoveredShares = Math.max(0, availableUncovered - requiredShares);
+
+    // Pluto's Call on held shares never buys any: short of free uncovered shares in the ledger, it is refused and planned again later.
+    if (coverWithHeldShares && shortfall > 0) {
+      response.status(409).json({
+        error: `${ticker.symbol}: the ledger shows ${availableUncovered} free uncovered shares, ${requiredShares} needed for ${option.quantity} Calls on held shares; no shares are bought with it.`,
+      });
+      return;
+    }
 
     if (shortfall > 0) {
       const livePrices = await fetchPricesPoolFirst([{ key: "stock", legType: "stock", symbol: ticker.symbol }]);

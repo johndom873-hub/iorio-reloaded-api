@@ -553,6 +553,15 @@ export class PlutoAgent {
     try {
       const summary = await runPlutoPass(request, this.context);
       if (summary.skippedOnSystemChecks) result = "skipped_on_system_checks";
+      // The round waited for the ledger to catch up on a fill (ledgerCheck.ts): another looks at every ticker shortly.
+      if (summary.retryAfterSeconds !== undefined) {
+        const timer = setTimeout(() => {
+          this.retryTimers.delete(timer);
+          this.queueForcedRound("ledger_catch_up", { afterSeconds: summary.retryAfterSeconds }, null);
+        }, summary.retryAfterSeconds * 1000);
+        timer.unref?.();
+        this.retryTimers.add(timer);
+      }
       console.log(`Pluto round ${summary.passId} (${request.trigger}): ${summary.outcome ?? `nothing sent — ${summary.skippedReason}`}`);
     } catch (error) {
       result = "failed";
