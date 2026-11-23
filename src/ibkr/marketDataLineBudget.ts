@@ -1,13 +1,19 @@
+import type { Knex } from "knex";
 import { db } from "../db/connection.js";
-import { ibkrMarketDataLinesEnabled } from "../config/env.js";
+import { environment, ibkrMarketDataLinesEnabled } from "../config/env.js";
+import { easternTodaySql } from "../lib/easternTodaySql.js";
 
-// IBKR caps market-data lines at 100 per TWS username, shared across every
-// connection on that login (verified against IBKR's docs 2026-09-21) — not
-// per connection, which fetchOptionChain.ts's live chain and the nightly
-// capture job (captureOptionQuoteBatch.ts) each used to assume independently.
-// Budgeted at 90, not 100, to leave headroom for TWS itself and the
-// small one-shot lookups (single pricing snapshots, the health check's SPY
-// probe) that aren't worth coordinating here — see PROGRESS.md.
+// IBKR's market-data lines are shared across every connection on one TWS username (verified against IBKR's docs
+// 2026-09-21), and the allocation is IBKR's formula: max(100, monthly commissions ÷ $8, equity × 100 ÷ $1M).
+// Measured on prod's live login: 100 on 2026-11-23 at $964k net liquidation, exactly the formula.
+//
+// The budget follows that formula conservatively (Marcelo 2026-11-23):
+//   - equity is the lowest net liquidation of the last 5 nightly snapshots, so a rise counts only once it has held;
+//   - commissions are left out (which month IBKR counts is unknown, and our own record of them is incomplete);
+//   - 10 lines stay spare for TWS and the one-shot lookups that aren't booked here (the health check's SPY probe);
+//   - only on the live account: the paper login's allocation was never measured, so it stays at the floor;
+//   - no snapshot in the last 7 days means the floor.
+// Example: lowest of the last 5 nights $1,210,000 → max(100, 121) − 10 = 111 lines; at $964,402 → max(100, 96) − 10 = 90.
 //
 // Priority reservations (approved 2026-09-24): the market quote loop and
 // Pluto's agent reserve their lines with `priority: true`. A priority reservation only has
@@ -15,7 +21,49 @@ import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 // from what every non-priority holder may take — so live screens can never
 // starve the loop; they get whatever is left ("Fit" variant) and the live
 // pool sheds subscriptions to match (marketDataPool.ts).
-export const totalMarketDataLineBudget = 90;
+export const ibkrMarketDataLineFloor = 100;
+export const marketDataLineHeadroom = 10;
+export const netLiquidationDollarsPerMarketDataLine = 10_000;
+export const nightlySnapshotsForMarketDataLineCeiling = 5;
+export const maximumSnapshotAgeDaysForMarketDataLineCeiling = 7;
+
+/** The budget at IBKR's floor: what the paper login, and the live one without a recent snapshot, always get. */
+export const totalMarketDataLineBudget = ibkrMarketDataLineFloor - marketDataLineHeadroom;
+
+export interface MarketDataLineBudget {
+  /** Lines every holder together may reserve. */
+  budget: number;
+  /** IBKR's allocation as this budget estimates it (budget + headroom). */
+  estimatedIbkrCeiling: number;
+  /** The net liquidation the estimate used (the lowest recent night), null when it used the floor. */
+  netLiquidationUsed: number | null;
+}
+
+/** Pure: the budget from the recent nightly net liquidations (any order); only the live account follows equity. */
+export function computeMarketDataLineBudget(input: { tradingMode: "paper" | "live"; recentNightlyNetLiquidations: number[] }): MarketDataLineBudget {
+  const usable = input.recentNightlyNetLiquidations.filter((value) => Number.isFinite(value) && value > 0);
+  if (input.tradingMode !== "live" || usable.length === 0) {
+    return { budget: totalMarketDataLineBudget, estimatedIbkrCeiling: ibkrMarketDataLineFloor, netLiquidationUsed: null };
+  }
+  const lowestNetLiquidation = Math.min(...usable);
+  const estimatedIbkrCeiling = Math.max(ibkrMarketDataLineFloor, Math.floor(lowestNetLiquidation / netLiquidationDollarsPerMarketDataLine));
+  return { budget: estimatedIbkrCeiling - marketDataLineHeadroom, estimatedIbkrCeiling, netLiquidationUsed: lowestNetLiquidation };
+}
+
+/** The budget now: the last 5 nightly snapshots dated within the last 7 Eastern days. */
+export async function loadMarketDataLineBudget(connection: Knex | Knex.Transaction = db, tradingMode: "paper" | "live" = environment.ibkrTradingMode): Promise<MarketDataLineBudget> {
+  if (tradingMode !== "live") return computeMarketDataLineBudget({ tradingMode, recentNightlyNetLiquidations: [] });
+  const { rows } = await connection.raw(
+    `SELECT net_liquidation_value::float AS net_liquidation
+       FROM account_pnl_snapshots
+      WHERE net_liquidation_value IS NOT NULL
+        AND snapshot_date > ${easternTodaySql} - ?::int
+      ORDER BY snapshot_date DESC
+      LIMIT ?`,
+    [maximumSnapshotAgeDaysForMarketDataLineCeiling, nightlySnapshotsForMarketDataLineCeiling],
+  );
+  return computeMarketDataLineBudget({ tradingMode: "live", recentNightlyNetLiquidations: rows.map((row: { net_liquidation: number }) => row.net_liquidation) });
+}
 
 export interface LineReservationResult {
   ok: boolean;
@@ -67,7 +115,8 @@ export async function reserveMarketDataLines(holder: string, lines: number, ttlS
       [holder],
     );
     const usage: LineUsage = { priorityInUse: rows[0].priority_in_use, otherInUse: rows[0].other_in_use };
-    const availableLines = computeAvailableLines(usage, priority);
+    const { budget } = await loadMarketDataLineBudget(trx);
+    const availableLines = computeAvailableLines(usage, priority, budget);
     if (lines > availableLines) return { ok: false, availableLines, priorityLinesHeld: usage.priorityInUse };
 
     await trx("ibkr_market_data_line_reservations")
@@ -81,13 +130,16 @@ export async function reserveMarketDataLines(holder: string, lines: number, ttlS
 /** Lines a non-priority holder could reserve right now, without reserving any (0 when lines are disabled here). */
 export async function loadAvailableMarketDataLines(): Promise<number> {
   if (!ibkrMarketDataLinesEnabled()) return 0;
-  const { rows } = await db.raw(
-    `SELECT COALESCE(SUM(lines) FILTER (WHERE priority), 0)::int AS priority_in_use,
-            COALESCE(SUM(lines) FILTER (WHERE NOT priority), 0)::int AS other_in_use
-       FROM ibkr_market_data_line_reservations
-      WHERE expires_at > now()`,
-  );
-  return computeAvailableLines({ priorityInUse: rows[0].priority_in_use, otherInUse: rows[0].other_in_use }, false);
+  const [{ rows }, { budget }] = await Promise.all([
+    db.raw(
+      `SELECT COALESCE(SUM(lines) FILTER (WHERE priority), 0)::int AS priority_in_use,
+              COALESCE(SUM(lines) FILTER (WHERE NOT priority), 0)::int AS other_in_use
+         FROM ibkr_market_data_line_reservations
+        WHERE expires_at > now()`,
+    ),
+    loadMarketDataLineBudget(),
+  ]);
+  return computeAvailableLines({ priorityInUse: rows[0].priority_in_use, otherInUse: rows[0].other_in_use }, false, budget);
 }
 
 /** Extends an existing reservation's expiry — for a long-lived holder kept alive by a heartbeat. No-op if the reservation already expired; the next reserve() call will re-establish it. */
@@ -133,7 +185,7 @@ const lineHolderLabels: Record<string, string> = {
  * really has open (it can hold fewer than it reserved); every other holder fills its reservation for
  * as long as it holds it (the market quote loop keeps its window full, snapshots reserve exactly their size).
  */
-export function summarizeMarketDataLineUsage(reservations: { holder: string; lines: number }[], poolOpenLines: number): MarketDataLineUsage {
+export function summarizeMarketDataLineUsage(reservations: { holder: string; lines: number }[], poolOpenLines: number, budget: number): MarketDataLineUsage {
   const linesByLabel = new Map<string, number>([["Screens", poolOpenLines]]);
   for (const { holder, lines } of reservations) {
     const prefix = holder.split(":")[0]!;
@@ -142,7 +194,7 @@ export function summarizeMarketDataLineUsage(reservations: { holder: string; lin
     linesByLabel.set(label, (linesByLabel.get(label) ?? 0) + lines);
   }
   const byUse = [...linesByLabel].map(([label, lines]) => ({ label, lines })).filter((use) => use.lines > 0);
-  return { inUse: byUse.reduce((sum, use) => sum + use.lines, 0), budget: totalMarketDataLineBudget, byUse };
+  return { inUse: byUse.reduce((sum, use) => sum + use.lines, 0), budget, byUse };
 }
 
 export async function loadActiveMarketDataLineReservations(): Promise<{ holder: string; lines: number }[]> {

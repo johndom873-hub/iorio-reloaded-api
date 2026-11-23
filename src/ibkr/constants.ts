@@ -23,3 +23,6 @@ export const ibkrMessagesPerSecondBudget = {
   /** VPS worker: orders, positions, executions — a handful of messages per minute. */
   worker: 5,
 } as const;
+
+/** IBKR's refusal of a market-data line as over the login's allocation: "Max number of tickers has been reached". */
+export const ibkrMaxTickersReachedCode = 101;

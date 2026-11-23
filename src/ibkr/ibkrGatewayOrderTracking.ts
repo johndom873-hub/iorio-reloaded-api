@@ -369,6 +369,18 @@ export const lateClosingFillWindowMs = 36 * 3_600_000;
 
 /** Most commission reports held while waiting for their trade row; the oldest is dropped beyond this. */
 export const maxPendingCommissions = 500;
+/** Most commission reports remembered for the missing-commission log line; the oldest is forgotten beyond this. */
+export const maxRememberedCommissionReports = 2_000;
+/** A fill counts as missing its commission this long after it, and is checked within the replay's look-back. */
+export const missingCommissionAfterMs = 10 * 60_000;
+export const missingCommissionLookBackMs = 6 * 3_600_000;
+
+interface CommissionReportReceived {
+  commission: number | null;
+  currency: string | null;
+  receivedAt: Date;
+  outcome: "written" | "held for its trade row" | "not known yet";
+}
 
 // IBKR sends Double.MAX_VALUE when a commission isn't known yet.
 function isRealCommission(value: number | undefined): value is number {
@@ -387,6 +399,10 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
   const { db } = dependencies;
   const pendingOpeningExecutions = new Map<string, { contract: Contract; execution: Execution; receivedAt: Date }[]>();
   const pendingCommissionsByExecId = new Map<string, number>();
+  // Every commission report this worker has received, for the missing-commission check (reportTradesMissingTheirCommission).
+  const commissionReportsReceived = new Map<string, CommissionReportReceived>();
+  const recorderStartedAt = new Date();
+  const tradesReportedMissingTheirCommission = new Set<string>();
   let openingFillReconciliationTimer: ReturnType<typeof setTimeout> | null = null;
 
   function requestReconciliationAfterOpeningFills(): void {
@@ -583,17 +599,36 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
     console.log(`Execution ${execution.execId}: closing fill for leg ${leg.id}, closed before it arrived${exit ? `; exit now ${exit.exitPrice}` : ""}.`);
   }
 
+  function rememberCommissionReport(execId: string, received: CommissionReportReceived): void {
+    if (commissionReportsReceived.size >= maxRememberedCommissionReports) commissionReportsReceived.delete(commissionReportsReceived.keys().next().value!);
+    commissionReportsReceived.set(execId, received);
+  }
+
   async function recordCommission(report: CommissionReport): Promise<void> {
-    if (!report.execId || !isRealCommission(report.commission)) return;
+    if (!report.execId) {
+      console.log(`Commission report without an execution id ignored (commission ${report.commission} ${report.currency ?? ""}).`);
+      return;
+    }
+    if (!isRealCommission(report.commission)) {
+      rememberCommissionReport(report.execId, { commission: report.commission ?? null, currency: report.currency ?? null, receivedAt: new Date(), outcome: "not known yet" });
+      console.log(`Commission report for execution ${report.execId}: IBKR's "not known yet" value (${report.commission}), ignored until a later report.`);
+      return;
+    }
     const updatedRowCount = await db("trades").where({ ibkr_exec_id: report.execId }).update({ commission: report.commission });
     if (updatedRowCount > 0) {
       pendingCommissionsByExecId.delete(report.execId);
+      rememberCommissionReport(report.execId, { commission: report.commission, currency: report.currency ?? null, receivedAt: new Date(), outcome: "written" });
+      console.log(`Commission ${report.commission} ${report.currency ?? ""} for execution ${report.execId} written to its trade row.`);
       return;
     }
     if (pendingCommissionsByExecId.size >= maxPendingCommissions) {
-      pendingCommissionsByExecId.delete(pendingCommissionsByExecId.keys().next().value!);
+      const droppedExecId = pendingCommissionsByExecId.keys().next().value!;
+      pendingCommissionsByExecId.delete(droppedExecId);
+      console.warn(`Held commission for execution ${droppedExecId} dropped: more than ${maxPendingCommissions} held.`);
     }
     pendingCommissionsByExecId.set(report.execId, report.commission);
+    rememberCommissionReport(report.execId, { commission: report.commission, currency: report.currency ?? null, receivedAt: new Date(), outcome: "held for its trade row" });
+    console.log(`Commission ${report.commission} ${report.currency ?? ""} for execution ${report.execId} arrived before its trade row: held until the row is written.`);
   }
 
   async function applyPendingCommission(execId: string): Promise<void> {
@@ -601,6 +636,55 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
     if (commission === undefined) return;
     await db("trades").where({ ibkr_exec_id: execId }).update({ commission });
     pendingCommissionsByExecId.delete(execId);
+    console.log(`Held commission ${commission} for execution ${execId} written to its new trade row.`);
+  }
+
+  /** What this worker knows about one execution's commission, for the missing-commission log line. */
+  function describeCommissionKnowledge(execId: string): string {
+    const received = commissionReportsReceived.get(execId);
+    const receivedText = received
+      ? `a report arrived at ${received.receivedAt.toISOString()} (${received.commission} ${received.currency ?? ""}, ${received.outcome})`
+      : `no report received since this worker started at ${recorderStartedAt.toISOString()}`;
+    const held = pendingCommissionsByExecId.get(execId);
+    const heldText = held === undefined ? "none held in memory" : `${held} held in memory`;
+    // A corrected execution keeps the id's first two parts and changes the last ones (….01.01 → ….01.02).
+    const idStem = execId.split(".").slice(0, 2).join(".");
+    const relatedIds = [...commissionReportsReceived.keys()].filter((otherId) => otherId !== execId && otherId.startsWith(`${idStem}.`));
+    const relatedText = relatedIds.length === 0 ? "" : `; reports for related execution ids: ${relatedIds.map((otherId) => `${otherId} (${commissionReportsReceived.get(otherId)!.commission})`).join(", ")}`;
+    return `${receivedText}, ${heldText}${relatedText}`;
+  }
+
+  /**
+   * App fills (order id not 0: IBKR's expiry and assignment records carry 0 and no commission) still without a commission
+   * 10 minutes after the fill, within the replay's look-back: each is logged once with what this worker received for it.
+   * Returns the newly found execution ids, so the caller can ask IBKR to replay and check again.
+   */
+  async function reportTradesMissingTheirCommission(now: Date = new Date()): Promise<string[]> {
+    const missing: { ibkr_exec_id: string; ibkr_order_id: string; executed_at: Date }[] = await db("trades")
+      .whereNull("commission")
+      .whereNotIn("ibkr_order_id", ["0", ""])
+      .where("executed_at", "<", new Date(now.getTime() - missingCommissionAfterMs))
+      .where("executed_at", ">", new Date(now.getTime() - missingCommissionLookBackMs))
+      .select("ibkr_exec_id", "ibkr_order_id", "executed_at");
+    const newlyMissing = missing.filter((trade) => !tradesReportedMissingTheirCommission.has(trade.ibkr_exec_id));
+    for (const trade of newlyMissing) {
+      tradesReportedMissingTheirCommission.add(trade.ibkr_exec_id);
+      console.warn(`Trade ${trade.ibkr_exec_id} (order ${trade.ibkr_order_id}, filled ${new Date(trade.executed_at).toISOString()}) still has no commission: ${describeCommissionKnowledge(trade.ibkr_exec_id)}.`);
+    }
+    return newlyMissing.map((trade) => trade.ibkr_exec_id);
+  }
+
+  /** After IBKR replayed its executions: logs, per execution, whether the replay brought its commission. */
+  async function reportCommissionsAfterReplay(execIds: string[]): Promise<void> {
+    if (execIds.length === 0) return;
+    const rows: { ibkr_exec_id: string; commission: string | null }[] = await db("trades").whereIn("ibkr_exec_id", execIds).select("ibkr_exec_id", "commission");
+    for (const row of rows) {
+      console.warn(
+        row.commission === null
+          ? `Trade ${row.ibkr_exec_id}: still no commission after IBKR replayed its executions (${describeCommissionKnowledge(row.ibkr_exec_id)}).`
+          : `Trade ${row.ibkr_exec_id}: IBKR's replay brought its commission (${row.commission}), so the first report was lost on our side.`,
+      );
+    }
   }
 
   async function insertOpeningTradeRow(positionLegId: string, _contract: Contract, execution: Execution, receivedAt: Date): Promise<void> {
@@ -762,5 +846,7 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
     attributeWaitingShareBuys,
     bufferedOpeningExecutionCount: (conId: string) => pendingOpeningExecutions.get(conId)?.length ?? 0,
     pendingCommissionCount: () => pendingCommissionsByExecId.size,
+    reportTradesMissingTheirCommission,
+    reportCommissionsAfterReplay,
   };
 }

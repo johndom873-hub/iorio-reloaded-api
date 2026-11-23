@@ -11,12 +11,13 @@ describe("summarizeMarketDataLineUsage", () => {
         { holder: "snapshot:prices:2", lines: 3 },
       ],
       20,
+      90,
     );
     expect(usage).toEqual({ inUse: 74, budget: 90, byUse: [{ label: "Screens", lines: 20 }, { label: "Market quote loop", lines: 50 }, { label: "Snapshots", lines: 4 }] });
   });
 
   it("leaves out uses holding nothing, and names an unknown holder by its prefix", () => {
-    expect(summarizeMarketDataLineUsage([{ holder: "newJob:x", lines: 2 }], 0)).toEqual({ inUse: 2, budget: 90, byUse: [{ label: "newJob", lines: 2 }] });
-    expect(summarizeMarketDataLineUsage([{ holder: "pluto_agent", lines: 12 }], 0).byUse).toContainEqual({ label: "Pluto", lines: 12 });
+    expect(summarizeMarketDataLineUsage([{ holder: "newJob:x", lines: 2 }], 0, 111)).toEqual({ inUse: 2, budget: 111, byUse: [{ label: "newJob", lines: 2 }] });
+    expect(summarizeMarketDataLineUsage([{ holder: "pluto_agent", lines: 12 }], 0, 90).byUse).toContainEqual({ label: "Pluto", lines: 12 });
   });
 });

@@ -35,6 +35,8 @@ import { requestCancelOfUnfilledOrders } from "./ibkr/ibkrGatewayUnfilledOrderSw
 import { alertOnStaleOrderRequests } from "./ibkr/ibkrGatewayStaleOrderAlert.js";
 import { waitUntilDrained } from "./lib/waitUntilDrained.js";
 import { computeSourceClosureHash } from "./lib/computeSourceClosureHash.js";
+import { ibkrMaxTickersReachedCode } from "./ibkr/constants.js";
+import { createDatabaseMarketDataLineLimitHitRecorder } from "./ibkr/marketDataLineLimitHits.js";
 
 installCrashHandlers("worker");
 
@@ -314,8 +316,12 @@ function setupOrderTrackingListeners(): void {
   // A rejected/errored order surfaces only as an error event keyed by the order id (see handleOrderErrorEvent).
   ib.on(EventName.error, (error, code, reqId) => {
     void handleOrderErrorEvent(error, code, reqId, { ...orderTrackingDependencies, recentLimitPriceChanges, syncFollowedOrderLimits });
+    // The quotes taken around orders are market-data lines too: IBKR refusing one as over the limit is recorded.
+    if (Number(code) === ibkrMaxTickersReachedCode) void recordMarketDataLineLimitHit({ requestId: reqId, code: Number(code), message: error.message });
   });
 }
+
+const recordMarketDataLineLimitHit = createDatabaseMarketDataLineLimitHitRecorder("ibkr_gateway_worker", () => persistentIbkrConnection.getIb());
 
 // The trades ledger: executions and commissions, plus what the position reconciliation drains into it (ibkr/ibkrGatewayOrderTracking.ts).
 const executionRecorder = createExecutionRecorder({
@@ -504,6 +510,19 @@ async function main(): Promise<void> {
   setInterval(() => {
     reconcilePositionsFromIbkr().catch((error) => console.error(`Periodic reconciliation failed: ${error}`));
   }, reconciliationIntervalMs);
+
+  // App fills still without a commission 10 minutes on are logged with what this worker received for them, then IBKR is
+  // asked to replay its executions once, which resends their commission reports: whether the commission then arrives tells
+  // a report lost on our side from one IBKR never sent.
+  const missingCommissionCheckIntervalMs = 5 * 60_000;
+  setInterval(() => {
+    void (async () => {
+      const missing = await executionRecorder.reportTradesMissingTheirCommission();
+      if (missing.length === 0) return;
+      await replayRecentExecutionsAndWait();
+      await executionRecorder.reportCommissionsAfterReplay(missing);
+    })().catch((error) => console.error(`Missing-commission check failed: ${error}`));
+  }, missingCommissionCheckIntervalMs);
 
   // Proves the event loop is still alive and reports connection health even
   // when nothing else is logging — added because the worker has needed

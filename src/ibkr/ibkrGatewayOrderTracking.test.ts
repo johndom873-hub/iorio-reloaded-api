@@ -1,6 +1,6 @@
 import type { CommissionReport, Contract, Execution, IBApi } from "@stoqey/ib";
 import knexLibrary, { type Knex } from "knex";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppNotification } from "../lib/notificationChannel.js";
 import type { OrderRequestPayload } from "./ibkrGatewayOrderPayload.js";
 
@@ -21,6 +21,7 @@ const {
   handleOrderErrorEvent,
   handleOrderStatusEvent,
   maxPendingCommissions,
+  missingCommissionAfterMs,
   openingFillReconciliationDelayMs,
   reconcileStaleOrderRequests,
   syncFollowedOrderLimitsWithIbkr,
@@ -1157,6 +1158,66 @@ describe("execution recorder", () => {
       expect(recorder.pendingCommissionCount()).toBe(1);
       await recorder.recordExecution(contractOf(conId), execution);
       expect(Number((await tradeOf(execution.execId!)).commission)).toBe(1.5);
+    });
+
+    describe("fills still without a commission", () => {
+      // executionOf's IBKR time: 6 Oct 2026 10:30 ET.
+      const filledAt = Date.parse("2026-10-06T14:30:00Z");
+      const minutesAfterFill = (minutes: number) => new Date(filledAt + minutes * 60_000);
+      const warnings = () => vi.mocked(console.warn).mock.calls.map((call) => String(call[0]));
+
+      beforeEach(() => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "log").mockImplementation(() => {});
+      });
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      async function recordFill(overrides: Partial<Execution> = {}): Promise<Execution> {
+        const conId = nextConId();
+        await createLeg("long", conId);
+        const execution = executionOf({ side: "SLD", ...overrides });
+        await recorder.recordExecution(contractOf(conId), execution);
+        return execution;
+      }
+
+      it("reports an app fill once, 10 minutes after it, saying no report ever arrived", async () => {
+        const execution = await recordFill();
+        expect(await recorder.reportTradesMissingTheirCommission(minutesAfterFill(9))).not.toContain(execution.execId);
+        expect(await recorder.reportTradesMissingTheirCommission(new Date(filledAt + missingCommissionAfterMs + 60_000))).toContain(execution.execId);
+        expect(await recorder.reportTradesMissingTheirCommission(minutesAfterFill(20))).not.toContain(execution.execId);
+        expect(warnings().find((line) => line.includes(execution.execId!))).toMatch(/still has no commission: no report received since this worker started at .*, none held in memory\./);
+      });
+
+      it("leaves out IBKR's expiry and assignment records (order id 0) and fills that have their commission", async () => {
+        const expiry = await recordFill({ orderId: 0 });
+        const withCommission = await recordFill();
+        await recorder.recordCommission(report(withCommission.execId, 1.3));
+        const reported = await recorder.reportTradesMissingTheirCommission(minutesAfterFill(20));
+        expect(reported).not.toContain(expiry.execId);
+        expect(reported).not.toContain(withCommission.execId);
+      });
+
+      it("names a 'not known yet' report and a report for a corrected execution id", async () => {
+        const stem = `test-${Math.random().toString(36).slice(2, 10)}.6aedddef`;
+        const execution = await recordFill({ execId: `${stem}.01.01` });
+        await recorder.recordCommission(report(execution.execId, Number.MAX_VALUE));
+        await recorder.recordCommission(report(`${stem}.01.02`, 7.48));
+        await recorder.reportTradesMissingTheirCommission(minutesAfterFill(20));
+        const line = warnings().find((warning) => warning.startsWith(`Trade ${execution.execId}`))!;
+        expect(line).toContain("(1.7976931348623157e+308 , not known yet)");
+        expect(line).toContain(`reports for related execution ids: ${stem}.01.02 (7.48)`);
+      });
+
+      it("after IBKR's replay, says whether the commission arrived", async () => {
+        const lost = await recordFill();
+        const neverSent = await recordFill();
+        await recorder.recordCommission(report(lost.execId, 2.5));
+        await recorder.reportCommissionsAfterReplay([lost.execId!, neverSent.execId!]);
+        expect(warnings()).toContainEqual(`Trade ${lost.execId}: IBKR's replay brought its commission (2.5000), so the first report was lost on our side.`);
+        expect(warnings().find((line) => line.startsWith(`Trade ${neverSent.execId}`))).toContain("still no commission after IBKR replayed its executions");
+      });
     });
 
     it(`holds at most ${maxPendingCommissions} and drops the oldest first`, async () => {

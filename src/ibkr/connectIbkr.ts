@@ -1,7 +1,7 @@
 import { IBApi, EventName, type ErrorCode } from "@stoqey/ib";
 import { environment } from "../config/env.js";
 import { openIbkrTunnel } from "./ibkrGatewayTunnel.js";
-import { ibkrGatewayPortByTradingMode, ibkrMessagesPerSecondBudget } from "./constants.js";
+import { ibkrGatewayPortByTradingMode, ibkrMaxTickersReachedCode, ibkrMessagesPerSecondBudget } from "./constants.js";
 import { runIbkrHandshake } from "./ibkrHandshakeQueue.js";
 
 export interface IbkrConnection {
@@ -21,6 +21,19 @@ export interface IbkrConnectionNotice {
 // routine "OK" and "inactive but available" notices are not logged.
 const loggedConnectionNoticeCodes: ReadonlySet<number> = new Set([1100, 1101, 1102, 2103, 2105, 2110, 2157]);
 
+// IBKR's "Max number of tickers has been reached" on any connection of this process is recorded (marketDataLineLimitHits.ts),
+// asking IBKR for the live net liquidation on the connection it refused. Loaded on the first refusal only.
+let connectionLastRefusedALine: IBApi | null = null;
+let lineLimitHitRecorder: Promise<(hit: { requestId: number; code: number; message: string }) => Promise<void>> | null = null;
+
+function recordMarketDataLineLimitHit(ib: IBApi, hit: { requestId: number; code: number; message: string }): void {
+  connectionLastRefusedALine = ib;
+  lineLimitHitRecorder ??= import("./marketDataLineLimitHits.js").then(({ createDatabaseMarketDataLineLimitHitRecorder }) =>
+    createDatabaseMarketDataLineLimitHitRecorder(process.env.DYNO ?? `pid ${process.pid}`, () => connectionLastRefusedALine),
+  );
+  lineLimitHitRecorder.then((record) => record(hit)).catch((error) => console.error(`Could not record the market-data line refusal: ${error}`));
+}
+
 /**
  * Opens the SSH tunnel to the IBKR VPS, then connects @stoqey/ib to Gateway
  * through it. Resolves once IBKR has actually accepted the connection
@@ -30,7 +43,7 @@ const loggedConnectionNoticeCodes: ReadonlySet<number> = new Set([1100, 1101, 11
  * farm-status ones arrive in the same packet as nextValidId: a listener attached after this resolves misses them. So
  * `onNotice` is attached before connecting and receives every notice for the connection's lifetime.
  */
-export async function connectToIbkrGateway(options: { onNotice?: (notice: IbkrConnectionNotice) => void } = {}): Promise<IbkrConnection> {
+export async function connectToIbkrGateway(options: { onNotice?: (notice: IbkrConnectionNotice) => void; recordMarketDataLineLimitHits?: boolean } = {}): Promise<IbkrConnection> {
   const sshPrivateKey = Buffer.from(environment.ibkrTunnelSshPrivateKeyBase64, "base64");
 
   const tunnel = await openIbkrTunnel({
@@ -73,6 +86,7 @@ export async function connectToIbkrGateway(options: { onNotice?: (notice: IbkrCo
           // anything else. Account-wide notices (farm status) come as EventName.info, handled below.
           ib.on(EventName.error, (error, code, reqId) => {
             console.log(`IBKR connection event (reqId=${reqId}, code=${code}): ${error.message}`);
+            if (Number(code) === ibkrMaxTickersReachedCode && options.recordMarketDataLineLimitHits !== false) recordMarketDataLineLimitHit(ib, { requestId: reqId, code: Number(code), message: error.message });
           });
           resolve({
             ib,

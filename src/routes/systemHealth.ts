@@ -19,7 +19,7 @@ import { marketQuoteLoopStatus } from "../lib/marketQuoteLoop.js";
 import { fetchTradingHalt } from "../lib/platformControls.js";
 import { workerHeartbeatStaleAfterSeconds } from "../lib/tradingGate.js";
 import { marketDataPoolSnapshot } from "../ibkr/marketDataPool.js";
-import { loadActiveMarketDataLineReservations, summarizeMarketDataLineUsage } from "../ibkr/marketDataLineBudget.js";
+import { loadActiveMarketDataLineReservations, loadMarketDataLineBudget, summarizeMarketDataLineUsage } from "../ibkr/marketDataLineBudget.js";
 
 export const systemHealthRouter = Router();
 systemHealthRouter.use(requireAuth);
@@ -215,11 +215,12 @@ systemHealthRouter.get("/web-dyno", (_request, response) => {
 // at all — it's a plain web-dyno query against order_requests, no round
 // trip needed.
 async function loadGatewayHealth() {
-  const [health, orderCountResult, reservations, tradingHalt] = await Promise.all([
+  const [health, orderCountResult, reservations, tradingHalt, lineBudget] = await Promise.all([
     db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
     db("order_requests").whereIn("status", ["confirmed", "submitted", "cancel_requested"]).count("* as count").first(),
     loadActiveMarketDataLineReservations(),
     fetchTradingHalt(),
+    loadMarketDataLineBudget(),
   ]);
 
   if (!health) {
@@ -244,7 +245,7 @@ async function loadGatewayHealth() {
     inFlightOrderCount: Number(orderCountResult?.count ?? 0),
     // IBKR market-data lines in use across every process sharing the login (web dyno pool, capture,
     // Day Signals, one-off snapshots), against the shared budget — see summarizeMarketDataLineUsage.
-    marketDataLines: summarizeMarketDataLineUsage(reservations, marketDataPoolSnapshot().openLineCount),
+    marketDataLines: summarizeMarketDataLineUsage(reservations, marketDataPoolSnapshot().openLineCount, lineBudget.budget),
     staleOrMissing: heartbeatStale,
   };
 }
