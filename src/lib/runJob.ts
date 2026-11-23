@@ -11,7 +11,7 @@ export function buildJobDiedMidRunMessage(jobName: string, previousRunStartedAt:
   return `⚠️ ${jobName} died mid-run: the run started ${formatEasternDateTime(previousRunStartedAt)} never finished (process killed or out of memory). A new run is starting.`;
 }
 
-/** "the previous run (Tue 10-13 10:00 ET)" / "the previous 3 runs (since Mon 10-12 10:00 ET)". Times are Eastern. */
+/** "the previous run (Tue 13 Oct 10:00 ET)" / "the previous 3 runs (since Mon 12 Oct 10:00 ET)". Times are Eastern. */
 function describePreviousRuns(runCount: number, sinceStartedAt: Date): string {
   return runCount === 1 ? `the previous run (${formatEasternDateTime(sinceStartedAt)})` : `the previous ${runCount} runs (since ${formatEasternDateTime(sinceStartedAt)})`;
 }

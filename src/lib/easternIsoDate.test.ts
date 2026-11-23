@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calendarDaysBetween, easternInstant, easternIsoDate, easternMinutesOfDay, formatDateWithWeekday, formatEasternDateTime, formatEasternTime, formatWeekdayDayMonth, weekdaysAfterUntil } from "./easternIsoDate.js";
+import { calendarDaysBetween, easternInstant, easternIsoDate, easternMinutesOfDay, formatEasternDateTime, formatEasternTime, formatWeekdayDayMonth, weekdaysAfterUntil } from "./easternIsoDate.js";
 
 describe("Eastern time formatting", () => {
   it("shows summer clock time (EDT, UTC-4)", () => {
@@ -16,16 +16,15 @@ describe("Eastern time formatting", () => {
 
   it("adds weekday and date, using the Eastern calendar day rather than the UTC one", () => {
     // 2026-10-03 02:30 UTC is still Friday 22:30 in New York.
-    expect(formatEasternDateTime(new Date("2026-10-03T02:30:00Z"))).toBe("Fri 10-02 22:30 ET");
+    expect(formatEasternDateTime(new Date("2026-10-03T02:30:00Z"))).toBe("Fri 2 Oct 22:30 ET");
   });
 
   it("omits the date for an instant on the given Eastern day only", () => {
     expect(formatEasternDateTime(new Date("2026-10-05T14:06:00Z"), "2026-10-05")).toBe("10:06 ET");
-    expect(formatEasternDateTime(new Date("2026-10-03T02:30:00Z"), "2026-10-05")).toBe("Fri 10-02 22:30 ET");
+    expect(formatEasternDateTime(new Date("2026-10-03T02:30:00Z"), "2026-10-05")).toBe("Fri 2 Oct 22:30 ET");
   });
 
   it("puts the weekday on a plain calendar date", () => {
-    expect(formatDateWithWeekday("2026-10-05")).toBe("Mon 2026-10-05");
     expect(formatWeekdayDayMonth("2026-11-02")).toBe("Mon 2 Nov");
   });
 });

@@ -126,11 +126,11 @@ describe("reportJobDeadlines", () => {
     expect(recorded.throttledAlerts).toEqual([
       {
         alertKey: "deadline:session_close_read:2031-03-03",
-        message: "⏰ session_close_read has not started for 2031-03-03 (was due 04:00 ET, deadline passed at 04:10 ET). Check the Heroku Scheduler entry and the job's clock guard.",
+        message: "⏰ session_close_read has not started for Mon 3 Mar (was due 04:00 ET, deadline passed at 04:10 ET). Check the Heroku Scheduler entry and the job's clock guard.",
       },
       {
         alertKey: "deadline:pluto_split_check:2031-03-03",
-        message: "⏰ pluto_split_check has not started for 2031-03-03 (was due 04:00 ET, deadline passed at 04:10 ET). Check the Heroku Scheduler entry and the job's clock guard.",
+        message: "⏰ pluto_split_check has not started for Mon 3 Mar (was due 04:00 ET, deadline passed at 04:10 ET). Check the Heroku Scheduler entry and the job's clock guard.",
       },
     ]);
   });
@@ -191,7 +191,7 @@ describe("sendMorningDigestIfDue", () => {
     expect(await sendMorningDigestIfDue(utc("2031-03-03T15:50:00Z"))).toBe(true);
     expect(await sendMorningDigestIfDue(utc("2031-03-03T16:30:00Z"))).toBe(false);
     expect(recorded.directMessages).toHaveLength(1);
-    expect(recorded.directMessages[0]!.split("\n")[0]).toContain("Iorio morning check Mon 2031-03-03");
+    expect(recorded.directMessages[0]!.split("\n")[0]).toContain("Iorio morning check Mon 3 Mar");
     expect(recorded.directMessages[0]).toContain("option_chain_structure_refresh 04:00 ET");
     expect(recorded.directMessages[0]).not.toContain("UTC");
   });
@@ -199,7 +199,7 @@ describe("sendMorningDigestIfDue", () => {
   it("lists undelivered alerts and clears them once the digest was delivered", async () => {
     recorded.undelivered = [{ alertKey: "undelivered:1", alertedAt: utc("2031-03-02T14:00:00Z"), message: "⚠️ something failed\nmore" }];
     await sendMorningDigestIfDue(utc("2031-03-03T15:50:00Z"));
-    expect(recorded.directMessages[0]).toContain("Alerts Telegram could not deliver\n• Sun 03-02 09:00 ET — ⚠️ something failed");
+    expect(recorded.directMessages[0]).toContain("Alerts Telegram could not deliver\n• Sun 2 Mar 09:00 ET — ⚠️ something failed");
     expect(recorded.clearedUndeliveredKeys).toEqual(["undelivered:1"]);
   });
 

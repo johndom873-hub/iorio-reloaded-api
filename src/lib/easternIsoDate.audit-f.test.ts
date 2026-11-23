@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { easternInstant, easternIsoDate, easternMinutesOfDay, formatEasternDateTime, formatEasternTime, formatDateWithWeekday } from "./easternIsoDate.js";
+import { easternInstant, easternIsoDate, easternMinutesOfDay, formatEasternDateTime, formatEasternTime, formatWeekdayDayMonth } from "./easternIsoDate.js";
 
 // Audit F (2026-10-07): easternDateIso (marketSessionStatus.ts) was removed and its callers moved to easternIsoDate.
 // These pin the replacement to the removed implementation, and pin the moved easternInstant / new easternMinutesOfDay.
@@ -146,14 +146,14 @@ describe("the other cached formatters keep their output", () => {
   it("formatEasternTime / formatEasternDateTime at midnight and across DST", () => {
     expect(formatEasternTime(utc("2026-10-07T04:00:00Z"))).toBe("00:00 ET");
     expect(formatEasternTime(utc("2026-11-01T06:30:00Z"))).toBe("01:30 ET");
-    expect(formatEasternDateTime(utc("2026-10-02T22:30:00Z"))).toBe("Fri 10-02 18:30 ET");
+    expect(formatEasternDateTime(utc("2026-10-02T22:30:00Z"))).toBe("Fri 2 Oct 18:30 ET");
     expect(formatEasternDateTime(utc("2026-10-03T00:30:00Z"), "2026-10-02")).toBe("20:30 ET");
-    expect(formatEasternDateTime(utc("2026-10-03T00:30:00Z"), "2026-10-03")).toBe("Fri 10-02 20:30 ET");
+    expect(formatEasternDateTime(utc("2026-10-03T00:30:00Z"), "2026-10-03")).toBe("Fri 2 Oct 20:30 ET");
   });
 
-  it("formatDateWithWeekday is the calendar weekday whatever the process time zone", () => {
-    expect(formatDateWithWeekday("2026-10-05")).toBe("Mon 2026-10-05");
-    expect(formatDateWithWeekday("2026-03-08")).toBe("Sun 2026-03-08");
-    expect(formatDateWithWeekday("2026-11-01")).toBe("Sun 2026-11-01");
+  it("formatWeekdayDayMonth is the calendar weekday whatever the process time zone", () => {
+    expect(formatWeekdayDayMonth("2026-10-05")).toBe("Mon 5 Oct");
+    expect(formatWeekdayDayMonth("2026-03-08")).toBe("Sun 8 Mar");
+    expect(formatWeekdayDayMonth("2026-11-01")).toBe("Sun 1 Nov");
   });
 });

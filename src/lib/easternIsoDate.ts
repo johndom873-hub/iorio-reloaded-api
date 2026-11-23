@@ -52,15 +52,12 @@ export function easternInstant(dateIso: string, hour: number, minute: number): D
 
 const easternPartsFormatter = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York",
-  weekday: "short",
-  month: "2-digit",
-  day: "2-digit",
   hour: "2-digit",
   minute: "2-digit",
   hourCycle: "h23",
 });
 
-type EasternParts = { weekday: string; month: string; day: string; hour: string; minute: string };
+type EasternParts = { hour: string; minute: string };
 
 /** The fields have no seconds and the offset changes only on whole UTC hours, so one reading serves its UTC minute. */
 const easternPartsByUtcMinute = new Map<number, EasternParts>();
@@ -70,7 +67,7 @@ function easternParts(at: Date): EasternParts {
   const cached = easternPartsByUtcMinute.get(utcMinute);
   if (cached) return { ...cached };
   const parts = Object.fromEntries(easternPartsFormatter.formatToParts(at).map((part) => [part.type, part.value]));
-  const read: EasternParts = { weekday: parts.weekday!, month: parts.month!, day: parts.day!, hour: parts.hour!, minute: parts.minute! };
+  const read: EasternParts = { hour: parts.hour!, minute: parts.minute! };
   if (easternPartsByUtcMinute.size >= easternCacheLimit) easternPartsByUtcMinute.clear();
   easternPartsByUtcMinute.set(utcMinute, read);
   return { ...read };
@@ -89,24 +86,20 @@ export function formatEasternTime(at: Date): string {
 }
 
 /**
- * Weekday, date and clock time in America/New_York, e.g. "Fri 10-02 18:30 ET". When `omitDateOnEasternDay` is the
+ * Weekday, date and clock time in America/New_York, e.g. "Fri 2 Oct 18:30 ET". When `omitDateOnEasternDay` is the
  * instant's own Eastern date, only the clock time is shown ("18:30 ET"): a digest's "today" lines need no date.
  */
 export function formatEasternDateTime(at: Date, omitDateOnEasternDay?: string): string {
-  if (omitDateOnEasternDay !== undefined && easternIsoDate(at) === omitDateOnEasternDay) return formatEasternTime(at);
-  const { weekday, month, day, hour, minute } = easternParts(at);
-  return `${weekday} ${month}-${day} ${hour}:${minute} ET`;
+  const dateIso = easternIsoDate(at);
+  if (omitDateOnEasternDay !== undefined && dateIso === omitDateOnEasternDay) return formatEasternTime(at);
+  return `${formatWeekdayDayMonth(dateIso)} ${formatEasternTime(at)}`;
 }
 
-/** A calendar date with its weekday, e.g. "Mon 2026-10-05". The date is a plain calendar date, so no time zone applies. */
+/** The weekday of a plain calendar date, e.g. "Mon" for 2026-10-05: no time zone applies. */
 const utcWeekdayFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short" });
 const weekdayOfDate = (dateIso: string): string => utcWeekdayFormatter.format(new Date(`${dateIso}T12:00:00Z`));
 
-export function formatDateWithWeekday(dateIso: string): string {
-  return `${weekdayOfDate(dateIso)} ${dateIso}`;
-}
-
-/** The same date as weekday, day and month (formatDayMonth), e.g. "Mon 2 Nov": a session named in an alert. */
+/** A calendar date as weekday, day and month (formatDayMonth), e.g. "Mon 2 Nov": a session named in an alert or digest. */
 export function formatWeekdayDayMonth(dateIso: string): string {
   return `${weekdayOfDate(dateIso)} ${formatDayMonth(dateIso)}`;
 }

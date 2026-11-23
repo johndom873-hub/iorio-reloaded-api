@@ -1,4 +1,4 @@
-import { formatEasternDateTime, formatEasternTime, easternIsoDate } from "./easternIsoDate.js";
+import { formatEasternDateTime, formatEasternTime, formatWeekdayDayMonth, easternIsoDate } from "./easternIsoDate.js";
 import { easternInstant } from "./marketSessionStatus.js";
 import type { JobRunStatus } from "./jobRunStatus.js";
 
@@ -98,7 +98,7 @@ export function evaluateJobDeadlines(input: {
     if (input.now >= startByAt && jobRuns.length === 0) {
       problems.push({
         alertKey: `deadline:${job.jobName}:${dateIso}`,
-        message: `⏰ ${job.jobName} has not started for ${input.easternDateIsoOf(scheduledAt)} (was due ${formatEasternTime(scheduledAt)}, deadline passed at ${formatEasternTime(startByAt)}). Check the Heroku Scheduler entry and the job's clock guard.`,
+        message: `⏰ ${job.jobName} has not started for ${formatWeekdayDayMonth(input.easternDateIsoOf(scheduledAt))} (was due ${formatEasternTime(scheduledAt)}, deadline passed at ${formatEasternTime(startByAt)}). Check the Heroku Scheduler entry and the job's clock guard.`,
       });
     }
   }

@@ -3,7 +3,7 @@ import { readAppEnvironment } from "./appEnvironment.js";
 import { evaluateDataInvariants, loadDataInvariantInputs, type InvariantResult } from "./dataInvariants.js";
 import { expectedScheduledJobs, evaluateJobDeadlines, evaluatePendingJobs, runFallsInSlot, scheduledInstant, slotDateIso, type JobRunSummary } from "./jobDeadlines.js";
 import { easternInstant, resolveIsOpenDay } from "./marketSessionStatus.js";
-import { formatDateWithWeekday, formatEasternDateTime, formatEasternTime, easternIsoDate } from "./easternIsoDate.js";
+import { formatEasternDateTime, formatEasternTime, formatWeekdayDayMonth, easternIsoDate } from "./easternIsoDate.js";
 import { readGitSha } from "./readGitSha.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 import { reportBackgroundFailure } from "./backgroundFailureAlert.js";
@@ -98,7 +98,7 @@ export function buildMorningDigest(input: {
   for (const invariant of failingChecks) problemLines.push(`❌ Data check, ${invariant.name}: ${invariant.detail}`);
 
   const problemCount = jobProblemCount + failingChecks.length + input.undelivered.length + input.deadlineProblems.length;
-  const dayLabel = formatDateWithWeekday(input.dateIso);
+  const dayLabel = formatWeekdayDayMonth(input.dateIso);
   const header =
     problemCount > 0
       ? `⚠️ Iorio morning check ${dayLabel}: ${problemCount} problem(s)`
