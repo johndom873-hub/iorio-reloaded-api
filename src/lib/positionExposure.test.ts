@@ -56,11 +56,11 @@ function position(overrides: Partial<OpenPositionRow> = {}): OpenPositionRow {
 }
 
 function stockLeg(overrides: Partial<OpenLegRow> = {}): OpenLegRow {
-  return { positionId: "p1", strategyKey: "covered_call", legType: "stock", side: "long", quantity: 100, multiplier: 1, entryPrice: "50", optionType: null, strikePrice: null, expiryDate: null, symbol: "AAA", ...overrides };
+  return { legId: "l1", positionId: "p1", strategyKey: "covered_call", legType: "stock", side: "long", quantity: 100, multiplier: 1, entryPrice: "50", optionType: null, strikePrice: null, expiryDate: null, symbol: "AAA", ...overrides };
 }
 
 function optionLeg(overrides: Partial<OpenLegRow> = {}): OpenLegRow {
-  return { positionId: "p1", strategyKey: "covered_call", legType: "option", side: "short", quantity: 1, multiplier: 100, entryPrice: "2", optionType: "call", strikePrice: "55", expiryDate: "20261120", symbol: "AAA", ...overrides };
+  return { legId: "l2", positionId: "p1", strategyKey: "covered_call", legType: "option", side: "short", quantity: 1, multiplier: 100, entryPrice: "2", optionType: "call", strikePrice: "55", expiryDate: "20261120", symbol: "AAA", ...overrides };
 }
 
 function queriesOn(table: string): RecordedQuery[] {

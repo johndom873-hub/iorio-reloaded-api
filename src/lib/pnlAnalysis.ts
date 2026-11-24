@@ -3,8 +3,10 @@ import type { BookKey } from "../books/bookKeys.js";
 import { bookPerformanceRows, loadBookDailySeries } from "../books/bookDashboard.js";
 import type { CycleBucket } from "./cycles.js";
 import { fetchCyclesForTickers } from "./cycleQueries.js";
-import { easternInstant } from "./easternIsoDate.js";
+import { easternInstant, easternIsoDate } from "./easternIsoDate.js";
 import { attributionBuckets, splitNightAtMoves } from "./pnlAttribution.js";
+import { loadLiveNight, type LiveNight } from "./pnlAnalysisLiveNight.js";
+import { attributionRowsForNight, closedShortOptionRows, computeAttributionMoveNights, loadAttributionLedger } from "./pnlAttributionSnapshots.js";
 import { computeDailyPerformancePoints, type DailyPerformancePoint } from "./performanceReturns.js";
 import { computeBookRiskFigures, type BookRiskFigures } from "./performanceRisk.js";
 import { loadRiskFreeRateLookup } from "./riskFreeRate.js";
@@ -98,7 +100,14 @@ export interface PnlAnalysis {
   books: Record<AnalysisBook, BookAnalysis>;
   /** Per symbol: the cycles that overlap the range (the drill-down's rows) and whether one is open now. Filled by loadPnlAnalysis. */
   cyclesBySymbol: Record<string, TickerCycleSummary>;
+  /**
+   * The live night (pnlAnalysisLiveNight.ts) when the range runs to today: `live` when today is the range's last night,
+   * taken at `capturedAt`; `unavailable` when it should be but IBKR's account value could not be read. Null otherwise.
+   */
+  live: LiveNightNote | null;
 }
+
+export type LiveNightNote = { state: "live"; night: string; capturedAt: string; legsAtLastClose: string[] } | { state: "unavailable"; night: string; reason: string };
 
 export interface TickerCycleSummary {
   inRange: number;
@@ -270,12 +279,18 @@ export function resolveRange(nights: readonly string[], firstDay: string | null,
   return { baselineNight, lastNight };
 }
 
-/** The figures of the range from `firstDay` to `lastDay` (YYYY-MM-DD, inclusive); either null = the whole history. */
-export async function loadPnlAnalysis(firstDay: string | null, lastDay: string | null): Promise<PnlAnalysis> {
-  const [accountRows, plutoSeries, manualSeries, bookCaptures, attributionNights, riskFreeAt, ledgerItems, accountItems, closedShortOptions] = await Promise.all([
+/**
+ * The figures of the range from `firstDay` to `lastDay` (YYYY-MM-DD, inclusive); either null = the whole history. With
+ * `live`, a range that runs to today ends with today's live night when one applies (pnlAnalysisLiveNight.ts).
+ */
+export async function loadPnlAnalysis(firstDay: string | null, lastDay: string | null, options: { live?: boolean } = {}): Promise<PnlAnalysis> {
+  const liveStatus = options.live && (lastDay === null || lastDay >= easternIsoDate()) ? await loadLiveNight() : null;
+  const liveNight = liveStatus?.state === "live" ? liveStatus.liveNight : null;
+  const liveBookSnapshot = (book: BookKey) => (liveNight === null ? null : { snapshotDate: liveNight.night, bookValue: liveNight.bookValues[book], capturedAt: liveNight.capturedAt });
+  const [storedAccountRows, plutoSeries, manualSeries, storedBookCaptures, storedAttributionNights, riskFreeAt, ledgerItems, accountItems, storedClosedShortOptions] = await Promise.all([
     db.raw(`SELECT snapshot_date::text AS night, captured_at AS "capturedAt", net_liquidation_value::float AS nav, net_cash_flow::float AS flow FROM account_pnl_snapshots ORDER BY snapshot_date`).then((result) => result.rows as AccountNightRow[]),
-    loadBookDailySeries("pluto"),
-    loadBookDailySeries("manual"),
+    loadBookDailySeries("pluto", liveBookSnapshot("pluto")),
+    loadBookDailySeries("manual", liveBookSnapshot("manual")),
     db.raw(`SELECT book_key AS book, snapshot_date::text AS night, captured_at AS "capturedAt" FROM book_value_snapshots WHERE book_key IN ('pluto', 'manual') ORDER BY captured_at`).then((result) => result.rows as { book: BookKey; night: string; capturedAt: Date }[]),
     db.raw(`SELECT snapshot_date::text AS night FROM pnl_attribution_nights`).then((result) => new Set((result.rows as { night: string }[]).map((row) => row.night))),
     loadRiskFreeRateLookup(),
@@ -283,6 +298,9 @@ export async function loadPnlAnalysis(firstDay: string | null, lastDay: string |
     db.raw(`SELECT kind, symbol, amount::float AS amount, effective_at AS "effectiveAt" FROM account_cash_items`).then((result) => result.rows as AccountCashItemRow[]),
     loadClosedShortOptions(),
   ]);
+  const accountRows = liveNight === null ? storedAccountRows : [...storedAccountRows, { night: liveNight.night, capturedAt: liveNight.capturedAt, nav: liveNight.accountNetLiquidationValue, flow: liveNight.accountCashFlow }];
+  const bookCaptures = liveNight === null ? storedBookCaptures : [...storedBookCaptures, ...(["pluto", "manual"] as const).map((book) => ({ book, night: liveNight.night, capturedAt: liveNight.capturedAt }))];
+  const attributionNights = liveNight === null ? storedAttributionNights : new Set([...storedAttributionNights, liveNight.night]);
   const range = resolveRange(accountRows.map((row) => row.night), firstDay, lastDay);
   const storedRows: StoredRow[] =
     range === null
@@ -298,10 +316,42 @@ export async function loadPnlAnalysis(firstDay: string | null, lastDay: string |
             [range.baselineNight, range.lastNight],
           )
         ).rows;
-  const moveRows = range === null ? [] : await loadMoveRows(range.baselineNight, range.lastNight);
-  const analysis = buildPnlAnalysis({ accountRows, plutoSeries, manualSeries, bookCaptures, attributionNights, storedRows, moveRows, ledgerItems, accountItems, closedShortOptions, riskFreeAt }, firstDay, lastDay);
+  const storedMoveRows = range === null ? [] : await loadMoveRows(range.baselineNight, range.lastNight);
+  const live = liveNight === null ? null : await liveNightAttribution(liveNight);
+  const analysis = buildPnlAnalysis(
+    {
+      accountRows,
+      plutoSeries,
+      manualSeries,
+      bookCaptures,
+      attributionNights,
+      storedRows: live === null ? storedRows : [...storedRows, ...live.rows],
+      moveRows: live === null ? storedMoveRows : [...storedMoveRows, ...live.moveRows],
+      ledgerItems,
+      accountItems,
+      closedShortOptions: live === null ? storedClosedShortOptions : live.closedShortOptions,
+      riskFreeAt,
+    },
+    firstDay,
+    lastDay,
+  );
   if (analysis.range !== null) analysis.cyclesBySymbol = summarizeTickerCycles(await fetchCyclesForTickers("all"), analysis.range);
+  if (liveNight !== null && analysis.range?.lastNight === liveNight.night) analysis.live = { state: "live", night: liveNight.night, capturedAt: liveNight.capturedAt.toISOString(), legsAtLastClose: liveNight.legsAtLastClose };
+  else if (liveStatus?.state === "unavailable") analysis.live = { state: "unavailable", night: liveStatus.night, reason: liveStatus.reason };
   return analysis;
+}
+
+/**
+ * The live night's attribution, computed as the nightly step computes a stored night (pnlAttributionSnapshots.ts) with the
+ * live night's prices: every ticker's rows, the moves between the books since the last night, and the closed short
+ * options with today's closes on the live night.
+ */
+async function liveNightAttribution(liveNight: LiveNight): Promise<{ rows: StoredRow[]; moveRows: StoredMoveRow[]; closedShortOptions: StoredClosedShortOption[] }> {
+  const storedLedger = await loadAttributionLedger();
+  const ledger = { ...storedLedger, nights: [...storedLedger.nights, liveNight.night], capturedAtByNight: new Map([...storedLedger.capturedAtByNight, [liveNight.night, liveNight.capturedAt]]) };
+  const rows = attributionRowsForNight(liveNight.night, ledger.symbolInputs, liveNight.fallbackMarks, ledger.periods, liveNight.snapshotPrices, liveNight.capturedAt);
+  const moveRows = (await computeAttributionMoveNights([liveNight.night], ledger)).get(liveNight.night) ?? [];
+  return { rows, moveRows, closedShortOptions: closedShortOptionRows(ledger, ledger.nights) };
 }
 
 /** The stored attribution at moves between the books, for the nights after `baselineNight` through `lastNight`. */
@@ -347,7 +397,7 @@ export function buildPnlAnalysis(inputs: PnlAnalysisInputs, firstDay: string | n
   const nights = accountRows.map((row) => row.night);
   const booksFirstNight = plutoSeries[0]?.snapshotDate ?? manualSeries[0]?.snapshotDate ?? null;
   const emptyBook = (): BookAnalysis => ({ risk: null, tradeStats: null, nights: [], tickers: [], tickerCash: [], missingAttributionNights: [] });
-  const empty: PnlAnalysis = { firstNight: nights[0] ?? null, lastNight: nights.at(-1) ?? null, booksFirstNight, range: null, books: { all: emptyBook(), pluto: emptyBook(), manual: emptyBook() }, cyclesBySymbol: {} };
+  const empty: PnlAnalysis = { firstNight: nights[0] ?? null, lastNight: nights.at(-1) ?? null, booksFirstNight, range: null, books: { all: emptyBook(), pluto: emptyBook(), manual: emptyBook() }, cyclesBySymbol: {}, live: null };
   const range = resolveRange(nights, firstDay, lastDay);
   if (range === null) return empty;
   const { baselineNight, lastNight } = range;
@@ -449,5 +499,5 @@ export function buildPnlAnalysis(inputs: PnlAnalysisInputs, firstDay: string | n
       missingAttributionNights,
     };
   }
-  return { firstNight: nights[0]!, lastNight: nights.at(-1)!, booksFirstNight, range: { baselineNight, lastNight }, books, cyclesBySymbol: {} };
+  return { firstNight: nights[0]!, lastNight: nights.at(-1)!, booksFirstNight, range: { baselineNight, lastNight }, books, cyclesBySymbol: {}, live: null };
 }

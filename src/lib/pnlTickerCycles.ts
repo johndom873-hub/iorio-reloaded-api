@@ -3,9 +3,11 @@ import { bookOfTickerAt, loadTickerBookPeriods } from "../books/tickerBookPeriod
 import type { BookKey } from "../books/bookKeys.js";
 import { loadCycleInputsForTickers } from "./cycleQueries.js";
 import { deriveCycles, type CycleBucket } from "./cycles.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 import { bookBaselineNight, resolveRange, type AnalysisBook } from "./pnlAnalysis.js";
 import { attributeTickerCycles, attributionBuckets, bucketBookAtNight, isEmptyBucketAttribution, splitNightAtMoves, type BucketAttribution } from "./pnlAttribution.js";
 import { cycleInputAsOfNight, cycleInputAtMove, loadBookMoves, loadNightlyMarks, nightCapturedAtOrAfter, nightEndsAt } from "./pnlAttributionSnapshots.js";
+import { loadLiveNight } from "./pnlAnalysisLiveNight.js";
 
 // The P&L Analyser's drill-down (Marcelo 2026-11-13): one ticker's cycles over a range, each bucket's change split by the
 // book it was in each night (split at a move between the books, as nightChanges does), computed on request from the same as-of-night ledger and snapshot prices as the stored
@@ -38,16 +40,19 @@ function calendarDaysBetween(earlier: string, later: string): number {
   return Math.round((Date.parse(`${later}T00:00:00Z`) - Date.parse(`${earlier}T00:00:00Z`)) / 86_400_000);
 }
 
-/** Null when the symbol is unknown. */
-export async function loadTickerCycleAnalysis(symbol: string, book: AnalysisBook, firstDay: string | null, lastDay: string | null): Promise<TickerCycleAnalysis | null> {
+/** Null when the symbol is unknown. With `live`, a range that runs to today ends with today's live night, as loadPnlAnalysis's. */
+export async function loadTickerCycleAnalysis(symbol: string, book: AnalysisBook, firstDay: string | null, lastDay: string | null, options: { live?: boolean } = {}): Promise<TickerCycleAnalysis | null> {
   const ticker = await db("tickers").where({ symbol }).first("id");
   if (!ticker) return null;
-  const [nightRows, booksFirst] = await Promise.all([
+  const [nightRows, booksFirst, liveStatus] = await Promise.all([
     db.raw(`SELECT snapshot_date::text AS night, captured_at AS "capturedAt" FROM account_pnl_snapshots ORDER BY snapshot_date`),
     db("book_value_snapshots").first(db.raw("min(snapshot_date)::text AS first")),
+    options.live && (lastDay === null || lastDay >= easternIsoDate()) ? loadLiveNight() : Promise.resolve(null),
   ]);
-  const nights: string[] = nightRows.rows.map((row: { night: string }) => row.night);
+  const liveNight = liveStatus?.state === "live" ? liveStatus.liveNight : null;
+  const nights: string[] = [...nightRows.rows.map((row: { night: string }) => row.night), ...(liveNight === null ? [] : [liveNight.night])];
   const capturedAtByNight = new Map<string, Date>(nightRows.rows.map((row: { night: string; capturedAt: Date }) => [row.night, new Date(row.capturedAt)]));
+  if (liveNight !== null) capturedAtByNight.set(liveNight.night, liveNight.capturedAt);
   const range = resolveRange(nights, firstDay, lastDay);
   if (range === null) return { symbol, range: null, rows: [] };
   const baselineNight = bookBaselineNight(book, range.baselineNight, booksFirst?.first ?? null);
@@ -55,6 +60,10 @@ export async function loadTickerCycleAnalysis(symbol: string, book: AnalysisBook
   const rangeNights = nights.filter((night) => night >= baselineNight && night <= range.lastNight);
 
   const [[symbolInput], periods, marks, allMoves] = await Promise.all([loadCycleInputsForTickers([ticker.id]), loadTickerBookPeriods(), loadNightlyMarks(rangeNights, "nightlySnapshot"), loadBookMoves()]);
+  if (liveNight !== null && rangeNights.includes(liveNight.night)) {
+    marks.snapshotMarksByNight.set(liveNight.night, liveNight.fallbackMarks);
+    marks.snapshotPricesByNight?.set(liveNight.night, liveNight.snapshotPrices);
+  }
   if (!symbolInput) return { symbol, range: { baselineNight, lastNight: range.lastNight }, rows: [] };
 
   // Each night: every cycle's attribution by bucket, keyed by its start.

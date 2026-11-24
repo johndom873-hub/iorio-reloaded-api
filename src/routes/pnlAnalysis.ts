@@ -4,7 +4,8 @@ import { loadTickerCycleAnalysis } from "../lib/pnlTickerCycles.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 
 // The P&L Analyser (Marcelo 2026-11-13): GET /pnl-analysis?from=YYYY-MM-DD&to=YYYY-MM-DD, every book at once (All, Pluto,
-// Manual), from the stored nightly attribution (lib/pnlAnalysis.ts). Either date left out = the whole history.
+// Manual), from the stored nightly attribution (lib/pnlAnalysis.ts). Either date left out = the whole history. A range that
+// runs to today ends with today's live night during the trading day (lib/pnlAnalysisLiveNight.ts).
 export const pnlAnalysisRouter = Router();
 pnlAnalysisRouter.use(requireAuth);
 
@@ -26,7 +27,7 @@ pnlAnalysisRouter.get("/", async (request, response) => {
     response.status(400).json({ error: "from must not be after to" });
     return;
   }
-  response.json(await loadPnlAnalysis(from, to));
+  response.json(await loadPnlAnalysis(from, to, { live: true }));
 });
 
 // One ticker's cycles over the same range (lib/pnlTickerCycles.ts): GET /pnl-analysis/ticker-cycles?symbol=NVDA&book=all|pluto|manual&from&to.
@@ -47,7 +48,7 @@ pnlAnalysisRouter.get("/ticker-cycles", async (request, response) => {
     response.status(400).json({ error: "from and to must be dates as YYYY-MM-DD, from not after to" });
     return;
   }
-  const analysis = await loadTickerCycleAnalysis(symbol, book, from, to);
+  const analysis = await loadTickerCycleAnalysis(symbol, book, from, to, { live: true });
   if (analysis === null) {
     response.status(404).json({ error: `Unknown ticker ${symbol}` });
     return;

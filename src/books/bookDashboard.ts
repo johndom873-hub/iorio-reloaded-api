@@ -26,12 +26,16 @@ export interface BookDailyRow {
   dailyPnl: number | null;
 }
 
-/** The book's nightly values with each night's moves and P&L, oldest first. */
-export async function loadBookDailySeries(book: BookKey): Promise<BookDailyRow[]> {
-  const [snapshots, moves] = await Promise.all([
+/**
+ * The book's nightly values with each night's moves and P&L, oldest first. `liveSnapshot`, when given, is a value taken now
+ * that ends the series as one more night (the P&L Analyser's live night).
+ */
+export async function loadBookDailySeries(book: BookKey, liveSnapshot: { snapshotDate: string; bookValue: number; capturedAt: Date } | null = null): Promise<BookDailyRow[]> {
+  const [storedSnapshots, moves] = await Promise.all([
     db("book_value_snapshots").where({ book_key: book }).orderBy("snapshot_date").select(db.raw("snapshot_date::text AS snapshot_date"), "book_value", "captured_at") as Promise<{ snapshot_date: string; book_value: string; captured_at: Date }[]>,
     db("book_cash_entries").where({ book_key: book }).whereIn("kind", ["deposit_split", "book_move"]).select("amount", "effective_at") as Promise<{ amount: string; effective_at: Date }[]>,
   ]);
+  const snapshots = liveSnapshot === null ? storedSnapshots : [...storedSnapshots, { snapshot_date: liveSnapshot.snapshotDate, book_value: String(liveSnapshot.bookValue), captured_at: liveSnapshot.capturedAt }];
   return snapshots.map((snapshot, index) => {
     const previous = index === 0 ? null : snapshots[index - 1]!;
     const capturedAt = new Date(snapshot.captured_at).getTime();

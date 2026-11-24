@@ -4,7 +4,7 @@ import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { settledCashForTrading } from "../lib/accountContext.js";
 import { environment } from "../config/env.js";
 import { computeInFlightOrderNotional, inFlightOrderRequestsQuery } from "../lib/orderLimits.js";
-import { loadOpenLegMarketValues } from "../lib/positionExposure.js";
+import { loadOpenLegMarketValues, type OpenLegMarketValue } from "../lib/positionExposure.js";
 import { loadTradingSettings } from "../lib/tradingSettingsStore.js";
 import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { bookKeys, otherBook, type BookKey } from "./bookKeys.js";
@@ -51,6 +51,8 @@ export type BooksLiveState =
       confirmedThrough: Date;
       /** Each book's min cash reserve, % of its book value: Pluto's own setting, Manual's Risk & Limits'. */
       minCashReservePctByBook: Record<BookKey, number>;
+      /** The open legs as valued in the book values, with each leg's price and where it came from. */
+      legValues: OpenLegMarketValue[];
     };
 
 export interface BookFiguresInput {
@@ -187,5 +189,6 @@ export async function loadBooksLiveState(options: LoadBooksLiveStateOptions = {}
     cashGapAgainstIbkr,
     confirmedThrough,
     minCashReservePctByBook,
+    legValues,
   };
 }

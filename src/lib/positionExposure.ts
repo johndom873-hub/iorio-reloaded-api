@@ -17,6 +17,7 @@ import { sleepUnlessAborted } from "./sleepUnlessAborted.js";
 // else at its entry_price (opened since the last nightly run), rather than
 // dropping the position from every view.
 interface OpenLegRow {
+  legId: string;
   positionId: string;
   strategyKey: string;
   legType: "stock" | "option";
@@ -94,6 +95,7 @@ async function resolveOpenPositionsAndLegs(symbol?: string): Promise<{ positions
     })
     .whereNull("pl.exit_at")
     .select(
+      "pl.id as legId",
       "pl.position_id as positionId",
       "p.strategy_key as strategyKey",
       "pl.leg_type as legType",
@@ -162,10 +164,20 @@ export function computeExposureRows(positions: OpenPositionRow[], legs: OpenLegR
 }
 
 export interface OpenLegMarketValue {
+  legId: string;
   positionId: string;
   strategyKey: string;
   tickerId: string;
   symbol: string;
+  legType: "stock" | "option";
+  optionType: "call" | "put" | null;
+  strikePrice: number | null;
+  /** YYYYMMDD, options only. */
+  expiryDate: string | null;
+  quantity: number;
+  /** The price the leg is valued at, and where it came from: a live price, else its last nightly close, else its entry. */
+  price: number;
+  priceSource: "live" | "lastClose" | "entry";
   /** The leg's market value at its mark, a short leg negative: what the books count as the position's worth (no Put collateral, which is cash). */
   marketValue: number;
 }
@@ -173,9 +185,25 @@ export interface OpenLegMarketValue {
 /** Pure: each open leg's market value, priced as computeExposureRows prices it (live, else last close, else entry). */
 export function computeLegMarketValues(legs: OpenLegRow[], pricesByKey: Record<string, number | null>): OpenLegMarketValue[] {
   return legs.map((leg, index) => {
-    const fallbackPrice = leg.lastClosingPrice !== null && leg.lastClosingPrice !== undefined ? Number(leg.lastClosingPrice) : Number(leg.entryPrice);
-    const price = pricesByKey[String(index)] ?? fallbackPrice;
-    return { positionId: leg.positionId, strategyKey: leg.strategyKey, tickerId: leg.tickerId ?? "", symbol: leg.symbol, marketValue: price * leg.quantity * leg.multiplier * (leg.side === "short" ? -1 : 1) };
+    const livePrice = pricesByKey[String(index)] ?? null;
+    const hasLastClose = leg.lastClosingPrice !== null && leg.lastClosingPrice !== undefined;
+    const price = livePrice ?? (hasLastClose ? Number(leg.lastClosingPrice) : Number(leg.entryPrice));
+    const priceSource = livePrice !== null ? "live" : hasLastClose ? "lastClose" : "entry";
+    return {
+      legId: leg.legId,
+      positionId: leg.positionId,
+      strategyKey: leg.strategyKey,
+      tickerId: leg.tickerId ?? "",
+      symbol: leg.symbol,
+      legType: leg.legType,
+      optionType: leg.optionType,
+      strikePrice: leg.strikePrice === null ? null : Number(leg.strikePrice),
+      expiryDate: leg.expiryDate,
+      quantity: Number(leg.quantity),
+      price,
+      priceSource,
+      marketValue: price * leg.quantity * leg.multiplier * (leg.side === "short" ? -1 : 1),
+    };
   });
 }
 
