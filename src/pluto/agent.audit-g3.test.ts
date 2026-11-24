@@ -39,6 +39,7 @@ vi.mock("../lib/notifyTelegram.js", () => ({
   notifyTelegram: vi.fn(async () => true),
 }));
 vi.mock("../lib/readGitSha.js", () => ({ readGitSha: () => "abc1234" }));
+vi.mock("../lib/liveTradingSessions.js", () => ({ loadLiveTradingSessions: async () => ({ openDays: [], sessionsHeldTo: () => 1 }) }));
 vi.mock("./executor.js", () => ({ loadWorkingPlutoOrders: async () => [], watchPlutoOrder: vi.fn() }));
 vi.mock("./ledger.js", () => ({
   closeAbandonedPlutoPasses: vi.fn(async () => 0),
@@ -49,7 +50,7 @@ vi.mock("./ledger.js", () => ({
 vi.mock("./marketWatch.js", () => ({ PlutoMarketWatch: class {} }));
 vi.mock("./passRunner.js", () => ({ runPlutoPass: vi.fn() }));
 vi.mock("./sessionSchedule.js", () => ({ resolvePlutoSession: vi.fn() }));
-vi.mock("./settingsStore.js", () => ({ loadPlutoSettings: async () => ({ dailyCostCeilingUsd: 5 }) }));
+vi.mock("./settingsStore.js", () => ({ loadPlutoSettings: async () => ({ dailyCostCeilingUsd: 5, volFarmerV4CallsInTheMoneyAtLastLook: "assigned" }) }));
 vi.mock("./readinessProbes.js", () => ({
   createPlutoReadinessProbes: () => {
     const probe = (name: string) => async () => {

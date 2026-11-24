@@ -8,7 +8,7 @@ import { formatWholeDollars } from "../lib/formatWholeDollars.js";
 import { daysToExpiry, describeOptionContract, formatDayMonth } from "../lib/optionContractLabel.js";
 import { isLastSessionBeforeWeekend } from "../lib/tradingWeek.js";
 import { nextListedExpiryAfter } from "./optionQuoteBandPlan.js";
-import { volFarmerV4BuyBackMinutesBeforeWindowEnd, type volFarmerV4RulesOf } from "./volFarmerV4LiveBook.js";
+import type { volFarmerV4RulesOf } from "./volFarmerV4LiveBook.js";
 import type { VolFarmerV4ScreenOption, VolFarmerV4ScreenTicker } from "./volFarmerV4Screen.js";
 
 // The Pluto screen's Vol Farmer v4 card, Next action column (approved mockup https://claude.ai/artifact/LVNUtVCEJEEwgRLj5Zuiua,
@@ -134,6 +134,8 @@ export interface VolFarmerV4NextActionsInput {
   todayIso: string;
   /** A session today and the window's end not yet reached: a Call sold now would expire at today's close. */
   windowOpenToday: boolean;
+  /** v4's buyback minutes as the screen words them (Marcelo 2026-11-24), e.g. "15:28–15:59 ET", and whether today's are not over yet. */
+  buyBackMinutes: { label: string; openToday: boolean };
   /** Pluto off, paused or a breaker tripped (describePlutoBlock): its words. */
   blockReason: string | null;
   /** The stored chain's expiries, YYYYMMDD. */
@@ -316,7 +318,7 @@ export function describeVolFarmerV4NextActions(input: VolFarmerV4NextActionsInpu
     addShares("sell_shares", "Sell shares", sell === null ? "No price above the band within reach." : `Sells ${sell.shares} shares if ${symbol} is at $${sell.price.toFixed(2)} or above, ${from} (the first position keeps one lot; more shares at higher prices).`);
   }
 
-  // Buy back a Call: v4's setting for Calls in the money in the window's last minutes.
+  // Buy back a Call: v4's setting for Calls in the money in its buyback minutes, from shortly before the window's end until a minute before the close.
   const callsInTheMoney = rules.v3.callsInTheMoneyAtLastLook;
   const workingBuyBack = ticker.workingOrders.find((order) => order.kind === "buy_back_call");
   if (workingBuyBack !== undefined) {
@@ -328,14 +330,14 @@ export function describeVolFarmerV4NextActions(input: VolFarmerV4NextActionsInpu
     add("buy_back_call", "Buy back a Call", "not_due", "Buy back a Call", detail, detail);
   } else {
     const days = input.openDays.filter((day) => day >= todayIso);
-    const usable = (day: string) => day > todayIso || input.windowOpenToday;
+    const usable = (day: string) => day > todayIso || input.buyBackMinutes.openToday;
     const buyBackDay = callsInTheMoney === "bought_back" ? (days.find(usable) ?? null) : (days.find((day, index) => usable(day) && isLastSessionBeforeWeekend(day, days[index + 1] ?? null)) ?? null);
     const target = buyBackDay === null ? null : (openCalls.filter((call) => call.expiry >= buyBackDay).sort((a, b) => a.expiry.localeCompare(b.expiry))[0] ?? null);
     if (buyBackDay === null || target === null) {
-      const detail = `Not before the Calls expire: v4 buys a Call in the money back only in the last ${volFarmerV4BuyBackMinutesBeforeWindowEnd} minutes${callsInTheMoney === "bought_back_before_weekends" ? " before a weekend" : ""}${buyBackDay === null ? "" : ` (next: ${formatWeekdayDayMonth(buyBackDay)})`}.`;
+      const detail = `Not before the Calls expire: v4 buys a Call in the money back only at ${input.buyBackMinutes.label}${callsInTheMoney === "bought_back_before_weekends" ? " before a weekend" : ""}${buyBackDay === null ? "" : ` (next: ${formatWeekdayDayMonth(buyBackDay)})`}.`;
       add("buy_back_call", "Buy back a Call", "not_due", "Buy back a Call", detail, detail);
     } else {
-      const detail = `${formatWeekdayDayMonth(buyBackDay)}, last ${volFarmerV4BuyBackMinutesBeforeWindowEnd} minutes: the ${shortContract(target, "C")} · ${formatWeekdayDayMonth(target.expiry)} is bought back if it is in the money.`;
+      const detail = `${formatWeekdayDayMonth(buyBackDay)}, ${input.buyBackMinutes.label}: the ${shortContract(target, "C")} · ${formatWeekdayDayMonth(target.expiry)} is bought back whenever it is in the money.`;
       add("buy_back_call", "Buy back a Call", "waiting", `Buy back the ${shortContract(target, "C")} on ${formatWeekdayDayMonth(buyBackDay)}`, detail, detail);
     }
   }

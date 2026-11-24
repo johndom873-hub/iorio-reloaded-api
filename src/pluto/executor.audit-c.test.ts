@@ -123,7 +123,7 @@ describe("watchPlutoOrder — fills recorded after the status (2026-10-08)", () 
 
 describe("follow the mid (Marcelo 2026-11-07)", () => {
   const working = (unitPrice: number, extra: Record<string, unknown> = {}) => ({ id: "o1", status: "submitted", errorMessage: null, payload: { legs: [{ role: "option" as const, action: "SELL", unitPrice, quantity: 3 }], ...extra } });
-  const followed = (priceNow: number | null) => ({ actionId: "a1", orderId: "o1", symbol: "NVDA", followTheMid: { priceNow: async () => priceNow } });
+  const followed = (priceNow: number | null, maxChanges = 20) => ({ actionId: "a1", orderId: "o1", symbol: "NVDA", followTheMid: { priceNow: async () => priceNow, maxChanges } });
   const apiPosting = (post: () => Promise<unknown> = async () => ({})) => ({ get: vi.fn(), post: vi.fn(post) }) as never as { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn> };
 
   beforeEach(() => vi.mocked(recordPlutoEvent).mockClear());
@@ -154,13 +154,30 @@ describe("follow the mid (Marcelo 2026-11-07)", () => {
     expect(vi.mocked(recordPlutoEvent)).toHaveBeenCalledWith("warning", expect.objectContaining({ orderId: "o1", message: expect.stringContaining("no longer followed") }));
   });
 
+  it("a buyback of a Call in the money follows up to its 60th change (Marcelo 2026-11-24)", async () => {
+    const changesOf = (count: number) => Array.from({ length: count }, () => ({ at: "x", from: 1.5, to: 1.49 }));
+    expect(await followTheMidOnce(apiPosting() as never, followed(1.4, 60), working(1.5, { limitPriceChanges: changesOf(20) }) as never)).toBe(true);
+    expect(await followTheMidOnce(apiPosting() as never, followed(1.4, 60), working(1.5, { limitPriceChanges: changesOf(59) }) as never)).toBe(true);
+    expect(await followTheMidOnce(apiPosting() as never, followed(1.4, 60), working(1.5, { limitPriceChanges: changesOf(60) }) as never)).toBe(false);
+  });
+
+  it("the watch stops following at the close, and cancels nothing itself", async () => {
+    const responses = [working(1.5), working(1.5), { ...working(1.5), status: "cancelled", updatedAt: new Date().toISOString() }];
+    const api = { get: vi.fn(async () => responses.shift()), post: vi.fn(async () => ({})) };
+    let clock = 0;
+    await watchPlutoOrder(api as never, settings, { actionId: "a1", orderId: "o1", symbol: "NVDA", reference: { price: 1.5, side: "buy", multiplier: 100 }, description: "Buy back 3× NVDA $190 Call", followUntilMs: 100_000, followTheMid: { priceNow: async () => 1.4, maxChanges: 60 } }, { pollIntervalMs: 0, now: () => (clock += 31_000) });
+    // The clock moves 31 s at every read: the first check (62 s, 93 s) is before the close at 100 s and follows; the second
+    // (155 s, 186 s) is past it and does not; nothing is cancelled at any time.
+    expect(api.post).toHaveBeenCalledExactlyOnceWith("/positions/orders/o1/reprice", { limitPrice: 1.4 });
+  });
+
   it("the watch follows every 30 s, and judges the fill against the limit it filled at", async () => {
     // Sent at 1.50, changed to 1.40 and filled there: 6.7% under the first limit would trip the 5% breaker, 0% under its own does not.
     fillRows.push({ side: "SELL", quantity: 3, price: "1.40", multiplier: 100 });
     const responses = [working(1.5), working(1.4), { ...working(1.4), status: "filled", updatedAt: new Date().toISOString() }];
     const api = { get: vi.fn(async () => responses.shift()), post: vi.fn(async () => ({})) };
     let clock = 0;
-    await watchPlutoOrder(api as never, settings, { actionId: "a1", orderId: "o1", symbol: "NVDA", reference: { price: 1.5, side: "sell", multiplier: 100 }, description: "Sell 3× NVDA $190 Call", followTheMid: { priceNow: async () => 1.4 } }, { pollIntervalMs: 0, now: () => (clock += 31_000) });
+    await watchPlutoOrder(api as never, settings, { actionId: "a1", orderId: "o1", symbol: "NVDA", reference: { price: 1.5, side: "sell", multiplier: 100 }, description: "Sell 3× NVDA $190 Call", followTheMid: { priceNow: async () => 1.4, maxChanges: 20 } }, { pollIntervalMs: 0, now: () => (clock += 31_000) });
     expect(api.post).toHaveBeenCalledExactlyOnceWith("/positions/orders/o1/reprice", { limitPrice: 1.4 });
     expect(vi.mocked(tripPlutoBreaker)).not.toHaveBeenCalled();
     const update = vi.mocked(updatePlutoAction).mock.calls.at(-1)![1] as { outcome: string; fillPrice: number };
@@ -174,25 +191,25 @@ describe("a followed order's fills, each against the limit IBKR held when it exe
   // Sent at 1.05, changed to 1.29 at 15:03:00.
   const changes = [{ at: "2026-11-09T15:03:00.000Z", from: 1.05, to: 1.29 }];
   const filled = (extra: Record<string, unknown> = {}) => ({ id: "o1", status: "filled", errorMessage: null, updatedAt: new Date().toISOString(), payload: { legs: [{ role: "option", action: "SELL", unitPrice: 1.29, quantity: 4 }], limitPriceChanges: changes, ...extra } });
-  const watch = (followTheMid: { priceNow: () => Promise<number | null> } | undefined) =>
+  const watch = (followTheMid: { priceNow: () => Promise<number | null>; maxChanges: number } | undefined) =>
     watchPlutoOrder({ get: vi.fn(async () => filled()), post: vi.fn(async () => ({})) } as never, settings, { actionId: "a1", orderId: "o1", symbol: "NVDA", reference: { price: 1.04, side: "sell", multiplier: 100 }, description: "Sell 4× NVDA $180 Call", ...(followTheMid ? { followTheMid } : {}) }, { pollIntervalMs: 0 });
 
   it("2 filled at 1.05 before the change and 2 at 1.29 after it: no slippage, no breaker (against the last limit alone it is 9.3%)", async () => {
     fillRows.push({ side: "SELL", quantity: 2, price: "1.05", multiplier: 100, executed_at: new Date(changedAt - 60_000) });
     fillRows.push({ side: "SELL", quantity: 2, price: "1.29", multiplier: 100, executed_at: new Date(changedAt + 60_000) });
-    await watch({ priceNow: async () => null });
+    await watch({ priceNow: async () => null, maxChanges: 20 });
     expect(vi.mocked(tripPlutoBreaker)).not.toHaveBeenCalled();
   });
 
   it("all 4 filled at 1.20 a minute after the change to 1.29: 7.0% under its limit trips the 5% breaker", async () => {
     fillRows.push({ side: "SELL", quantity: 4, price: "1.20", multiplier: 100, executed_at: new Date(changedAt + 60_000) });
-    await watch({ priceNow: async () => null });
+    await watch({ priceNow: async () => null, maxChanges: 20 });
     expect(vi.mocked(tripPlutoBreaker)).toHaveBeenCalledWith("fill_slippage", expect.stringContaining("vs its limits (average) 1.29 (7.0% past it"));
   });
 
   it("a fill seconds after the change may have met the limit before it: the kinder limit counts", async () => {
     fillRows.push({ side: "SELL", quantity: 4, price: "1.05", multiplier: 100, executed_at: new Date(changedAt + 5_000) });
-    await watch({ priceNow: async () => null });
+    await watch({ priceNow: async () => null, maxChanges: 20 });
     expect(vi.mocked(tripPlutoBreaker)).not.toHaveBeenCalled();
   });
 

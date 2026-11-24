@@ -325,6 +325,30 @@ describe("POST /positions/orders", () => {
     }
   });
 
+  it("a buyback of Pluto's of a Call in the money can have its limit changed up to 60 times (Marcelo 2026-11-24), another order 20", async () => {
+    const ticker = await createTicker();
+    const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates-buyback-reprice" }), model_called: false }).returning("id");
+    const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "close_leg", symbol: ticker.symbol, contract: JSON.stringify({ strategyKey: "covered_call", expiry: "2026-11-23", strike: 49.5, right: "C" }), outcome: "confirmed", execution_strategy: "vol_farmer_v4" }).returning("id");
+    const changes = (count: number) => Array.from({ length: count }, () => ({ at: "2026-11-23T20:40:00.000Z", from: 0.25, to: 0.24 }));
+    const buyBack = (count: number) => ({ symbol: ticker.symbol, strategyKey: "covered_call", legs: [{ role: "option", action: "BUY", symbol: ticker.symbol, quantity: 36, unitPrice: 0.24, strike: 49.5, expiry: "20261123", right: "C" }], limitPriceChanges: changes(count) });
+    const [changedTwenty] = await testDb("order_requests").insert({ requested_by_user_id: userId, request_type: "close_position", payload: JSON.stringify(buyBack(20)), status: "submitted", pluto_action_id: action.id, ibkr_order_id: 86 }).returning("id");
+    const [changedSixty] = await testDb("order_requests").insert({ requested_by_user_id: userId, request_type: "close_position", payload: JSON.stringify(buyBack(60)), status: "submitted", pluto_action_id: action.id, ibkr_order_id: 87 }).returning("id");
+    const [manualTwenty] = await testDb("order_requests").insert({ requested_by_user_id: userId, request_type: "close_position", payload: JSON.stringify(buyBack(20)), status: "submitted", ibkr_order_id: 88 }).returning("id");
+    try {
+      expect((await call("POST", `/positions/orders/${changedTwenty.id}/reprice`, { limitPrice: 0.26 })).status).toBe(200);
+      const sixty = await call("POST", `/positions/orders/${changedSixty.id}/reprice`, { limitPrice: 0.26 });
+      expect(sixty.status).toBe(409);
+      expect(sixty.json.error).toBe("This order's limit has already been changed 60 times.");
+      const manual = await call("POST", `/positions/orders/${manualTwenty.id}/reprice`, { limitPrice: 0.26 });
+      expect(manual.status).toBe(409);
+      expect(manual.json.error).toBe("This order's limit has already been changed 20 times.");
+    } finally {
+      await testDb("order_requests").whereIn("id", [changedTwenty.id, changedSixty.id, manualTwenty.id]).del();
+      await testDb("pluto_actions").where({ id: action.id }).del();
+      await testDb("pluto_passes").where({ id: pass.id }).del();
+    }
+  });
+
   it("a working share order of Pluto's can have its limit changed (it follows the mid, Marcelo 2026-11-23); a manual one cannot", async () => {
     const ticker = await createTicker();
     const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates-share-reprice" }), model_called: false }).returning("id");

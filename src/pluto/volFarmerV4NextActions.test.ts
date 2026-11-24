@@ -32,6 +32,7 @@ function dram(overrides: Partial<VolFarmerV4NextActionsInput> = {}): VolFarmerV4
     rules,
     todayIso: "2026-11-04",
     windowOpenToday: true,
+    buyBackMinutes: { label: "15:28–15:59 ET", openToday: true },
     blockReason: null,
     expirations: everyDayExpiries,
     openDays,
@@ -65,13 +66,13 @@ describe("the Next action column", () => {
     expect(line(result, "sell_shares").detail).toBe("Sells 300 shares if DRAM is at $56.96 or above, once the $46 Call · Wed 4 Nov has expired (the first position keeps one lot; more shares at higher prices).");
     expect(line(result, "buy_shares").detail).toContain("Buys 300 shares if DRAM is at $34.17 or below");
     expect(line(result, "buy_leaps").detail).toContain("Needs a second position holding shares");
-    expect(line(result, "buy_back_call").detail).toBe("Not before the Calls expire: v4 buys a Call in the money back only in the last 2 minutes before a weekend (next: Fri 6 Nov).");
+    expect(line(result, "buy_back_call").detail).toBe("Not before the Calls expire: v4 buys a Call in the money back only at 15:28–15:59 ET before a weekend (next: Fri 6 Nov).");
   });
 
   it("INTC, selling Friday expiries only: 4 of its 5 lots have no Call, and its $108 Call is bought back on Friday if in the money", () => {
     const result = describeVolFarmerV4NextActions(dram({ ticker: { symbol: "INTC", waiting: false, first: position(500, 106.67, [{ strike: 108, expiry: "2026-11-06", contracts: 1 }]), second: null, leaps: null, workingOrders: [], lastRoundNotes: [], lastRoundFigures: figuresOf(57_249.29, 29_117.5) }, state: stateOf(500, 106.67), expirations: fridaysOnly, stockPrice: 93.52 }));
     expect(result.nextAction).toEqual({ state: "waiting", text: "Sell Calls on 4 lots", sub: "Fri 6 Nov (0DTE) · INTC has no expiry until Fri 6 Nov", alert: null });
-    expect(line(result, "buy_back_call")).toMatchObject({ state: "waiting", detail: "Fri 6 Nov, last 2 minutes: the $108 Call · Fri 6 Nov is bought back if it is in the money." });
+    expect(line(result, "buy_back_call")).toMatchObject({ state: "waiting", detail: "Fri 6 Nov, 15:28–15:59 ET: the $108 Call · Fri 6 Nov is bought back whenever it is in the money." });
     expect(line(result, "sell_shares").detail).toContain("once the $108 Call · Fri 6 Nov has expired");
   });
 

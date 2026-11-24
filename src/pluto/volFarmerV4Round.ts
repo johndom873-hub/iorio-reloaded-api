@@ -1,6 +1,9 @@
 import { db } from "../db/connection.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
-import { followTheMidIsOn } from "../lib/orderLimitPriceChanges.js";
+import { followTheMidIsOn, maxLimitPriceChangesPerOrder } from "../lib/orderLimitPriceChanges.js";
+import { maxLimitPriceChangesPerPlutoCallBuyBack } from "../lib/orderLimitPriceChangeRequests.js";
+import { formatEasternTime } from "../lib/easternIsoDate.js";
+import { describeVolFarmerV4BuyBackMinutes } from "./buyBackChecks.js";
 import type { SymbolFileQuote } from "../backtest/engine/backtestSymbolFile.js";
 import { sharesPerContract } from "../backtest/engine/backtestBook.js";
 import { baselineMinimumBid, baselineQuoteRejection } from "../backtest/engine/baselineSaleSteps.js";
@@ -41,7 +44,7 @@ import { loadFinishedOptionQuoteBandCycle, loadOptionQuoteBandQuotes } from "./o
 import { latestCycleQuotes } from "./latestBandQuotes.js";
 import { loadOpenPositionFigures } from "./openPositionFigures.js";
 import { loadSafetyLimitBookCounts, plutoOrdersSentToday } from "./safetyLimits.js";
-import { recordCommissionCapSkip, recordPlutoAction, recordPlutoEvent, type PlutoActionKind, type PlutoGateResult } from "./ledger.js";
+import { recordCommissionCapSkip, recordPlutoAction, recordPlutoEvent, updatePlutoAction, type PlutoActionKind, type PlutoGateResult } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { tickerCooldownStatus } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
@@ -132,9 +135,14 @@ export interface VolFarmerV4RoundInput {
   /** IBKR's settled cash (the cash account's): null when IBKR reported none, and then nothing is bought. */
   settledCashValue: number | null;
   netLiquidationValue: number;
-  cancelByMs: number | null;
-  /** Today's trading window end (the session's, clamped before the close): v4's buyback runs in the minutes before it. */
+  /** Today's session close: a working order follows the mid until then (it ends there, a DAY order). */
+  closeAtMs: number | null;
+  /** Today's trading window end (the session's, clamped before the close): v4's buyback minutes start shortly before it. */
   windowEndAtMs: number | null;
+  /** When v4 sends its last buyback (the session's buyBacksStopAtMs): after the window, a round only buys back until then. */
+  buyBacksStopAtMs: number | null;
+  /** The clock read just before a buyback is sent (Date.now() when absent; tests pass their own). */
+  currentTimeMs?: () => number;
   /** Only these symbols (a round about some tickers); empty = every enabled ticker. */
   symbols: string[];
   /** SPY's stress level holds: no opening order, a sale of LEAPS or shares only. */
@@ -179,15 +187,15 @@ export function isVolFarmerV4BuyBackRound(input: { callsInTheMoneyAtLastLook: Vo
 /**
  * Pure: in v4's buyback minutes on a day its setting does not buy back, why each of its Calls expiring today in the money
  * is left to be assigned; null outside those minutes or with none. Example (bought back before weekends only, a Monday,
- * the window ending 15:30 ET, at 15:29): "the window's last 2 minutes: $41.5 Call · 9 Nov (0DTE) · 11× in the money at
- * 41.78, not bought back (only on the last session before a weekend), left to be assigned".
+ * the window ending 15:30 ET, at 15:29): "the buyback minutes (15:28–15:59 ET): $41.5 Call · 9 Nov (0DTE) · 11× in the
+ * money at 41.78, not bought back (only on the last session before a weekend), left to be assigned".
  */
-export function volFarmerV4CallsLeftToBeAssignedNote(input: { callsInTheMoneyAtLastLook: VolFarmerV3CallsInTheMoneyAtLastLook; nowMs: number; windowEndAtMs: number | null; buyBackRound: boolean; calls: readonly VolFarmerV4CallToBuyBack[]; stockPrice: number }): string | null {
+export function volFarmerV4CallsLeftToBeAssignedNote(input: { callsInTheMoneyAtLastLook: VolFarmerV3CallsInTheMoneyAtLastLook; nowMs: number; windowEndAtMs: number | null; buyBacksStopAtMs: number | null; buyBackRound: boolean; calls: readonly VolFarmerV4CallToBuyBack[]; stockPrice: number }): string | null {
   if (input.buyBackRound || input.windowEndAtMs === null || input.calls.length === 0) return null;
   if (input.nowMs < input.windowEndAtMs - volFarmerV4BuyBackMinutesBeforeWindowEnd * 60_000) return null;
   const why = input.callsInTheMoneyAtLastLook === "assigned" ? "the setting leaves Calls in the money to be assigned" : "only on the last session before a weekend";
   const calls = input.calls.map((call) => `${describeOptionContract({ strike: call.strike, right: "C", expiry: call.expiry, dte: 0 })} · ${call.contracts}×`).join(", ");
-  return `the window's last ${volFarmerV4BuyBackMinutesBeforeWindowEnd} minutes: ${calls} in the money at ${input.stockPrice.toFixed(2)}, not bought back (${why}), left to be assigned`;
+  return `${describeVolFarmerV4BuyBackMinutes(input.windowEndAtMs, input.buyBacksStopAtMs)}: ${calls} in the money at ${input.stockPrice.toFixed(2)}, not bought back (${why}), left to be assigned`;
 }
 
 /** A Call v4 buys back: its leg, the contracts the leg holds and each position's of them. */
@@ -474,6 +482,39 @@ async function prepareTickerLook(context: { input: VolFarmerV4RoundInput; ticker
 }
 
 /**
+ * The memory of Pluto's tickers brought up to date with their orders that have ended, when no round runs (Marcelo
+ * 2026-11-24): after the buyback minutes, or when the agent starts outside them. It is a round's step 1 alone: each ended
+ * order's plan replaced by its fills, the orders still working kept as planned; nothing is compared, sized or sent. Example:
+ * a buyback of 36 TQQQ Calls fills at 15:59:58: its cost goes against the first position's premiums and the Call leaves the
+ * memory at once, instead of at the next morning's first round. Answers each ticker that changed, with the settling's notes.
+ */
+export async function settleVolFarmerV4EndedOrders(symbols: readonly string[] | null): Promise<{ symbol: string; notes: string[] }[]> {
+  const enabled = await loadEnabledPlutoTickerSettings();
+  const settled: { symbol: string; notes: string[] }[] = [];
+  for (const ticker of enabled) {
+    if (symbols !== null && !symbols.includes(ticker.symbol)) continue;
+    const memory = await loadVolFarmerV4Memory(ticker.tickerId);
+    if (memory === null || memory.pending.length === 0) continue;
+    const outcomes = await loadVolFarmerV4OrderOutcomes(memory.pending.map((order) => order.actionId));
+    const notes: string[] = [];
+    const stillWorking: VolFarmerV4PendingOrder[] = [];
+    for (const order of memory.pending) {
+      const outcome = outcomes.get(order.actionId) ?? unfilledVolFarmerV4Outcome;
+      if (outcome.working) stillWorking.push(order);
+      else {
+        const note = settleVolFarmerV4Order(memory.state, order, outcome);
+        if (note !== null) notes.push(note);
+      }
+    }
+    if (stillWorking.length === memory.pending.length) continue;
+    memory.pending = stillWorking;
+    await saveVolFarmerV4Memory(ticker.tickerId, memory, false);
+    settled.push({ symbol: ticker.symbol, notes });
+  }
+  return settled;
+}
+
+/**
  * A ticker's look at one of the round's passes: "cycles_calls_puts" runs v4's steps 1 to 3 and sends their orders,
  * answering whether its LEAPS (a purchase or a top-up) is due; "leaps" looks again, after every ticker's first pass, and
  * sends only the LEAPS, on the free cash left then. The first pass gets its memory prepared by the round (prepareTickerLook);
@@ -540,11 +581,19 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
     await saveVolFarmerV4Memory(tickerId, memory, adopted);
     return nothingDue;
   }
+  // After the window only buybacks go (Marcelo 2026-11-24), and today buys none back: the ticker's memory is brought up to
+  // date and nothing is planned.
+  if (input.windowEndAtMs !== null && now.getTime() >= input.windowEndAtMs) {
+    if (pass === "cycles_calls_puts") note("the window has ended: only Calls in the money are bought back after it, and none is bought back today");
+    await saveVolFarmerV4Memory(tickerId, memory, adopted);
+    return nothingDue;
+  }
   if (pass === "cycles_calls_puts") {
     const leftToBeAssigned = volFarmerV4CallsLeftToBeAssignedNote({
       callsInTheMoneyAtLastLook: settings.volFarmerV4CallsInTheMoneyAtLastLook,
       nowMs: now.getTime(),
       windowEndAtMs: input.windowEndAtMs,
+      buyBacksStopAtMs: input.buyBacksStopAtMs,
       buyBackRound,
       calls: volFarmerV4CallsToBuyBack({ state: memory.state, openLegs, pending: memory.pending, stockPrice, todayIso: clock.todayIso }),
       stockPrice,
@@ -719,16 +768,18 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
 }
 
 /**
- * v4's buyback (Marcelo 2026-11-02): each Call to buy back, quoted live and bought back one cent past the mid (optionLimitPriceGivingUpOneCent) through the
- * close route, its shares kept, if the settled cash left pays for it (contracts × 100 × the limit, with commission). One
- * without a two-sided live quote, or that the settled cash can't pay for, is left to be assigned (tried again at a later
- * round of the minutes); one sent is pending until it settles. Example: 38 $100 Calls, the stock at $101.00, quoted
- * 1.05 / 1.15: bought back at 1.11, $4,218 + $25.84 commission, with $40,000 of settled cash left.
+ * v4's buyback (Marcelo 2026-11-02; until a minute before the close since 2026-11-24): each Call to buy back, quoted live and
+ * bought back one cent past the mid (optionLimitPriceGivingUpOneCent) through the close route, its shares kept, if the
+ * settled cash left pays for it (contracts × 100 × the limit, with commission). One without a two-sided live quote, that
+ * the settled cash can't pay for, or whose order ends unfilled, is tried again at a later round of the minutes, while it is
+ * still in the money; at the stop time none is sent and it is left to be assigned. One sent is pending until it settles and
+ * follows the mid until the close, at most maxLimitPriceChangesPerPlutoCallBuyBack times. Example: 38 $100 Calls, the stock
+ * at $101.00, quoted 1.05 / 1.15: bought back at 1.11, $4,218 + $25.84 commission, with $40,000 of settled cash left.
  */
 async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; ticker: PlutoTickerSettings; memory: VolFarmerV4Memory; openLegs: readonly PositionLegFigures[]; stockPrice: number; clock: { todayIso: string }; round: RoundState; summary: VolFarmerV4RoundSummary; note: (text: string) => void }): Promise<void> {
   const { input, ticker, memory, stockPrice, clock, round, summary, note } = context;
   const { settings } = input;
-  const minutes = `the window's last ${volFarmerV4BuyBackMinutesBeforeWindowEnd} minutes`;
+  const minutes = describeVolFarmerV4BuyBackMinutes(input.windowEndAtMs, input.buyBacksStopAtMs);
   const calls = volFarmerV4CallsToBuyBack({ state: memory.state, openLegs: context.openLegs, pending: memory.pending, stockPrice, todayIso: clock.todayIso });
   if (calls.length === 0) {
     const working = memory.pending.filter((order) => order.kind === "buy_back_call").length;
@@ -781,6 +832,13 @@ async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; t
       note(`the buyback of ${call.contracts}× ${label} is not sent (${detail}): the Call is left to be assigned unless a later round of ${minutes} buys it back`);
       continue;
     }
+    // The quote burst takes a few seconds: a round that began just before the stop time sends nothing after it.
+    if (input.buyBacksStopAtMs !== null && (input.currentTimeMs ?? Date.now)() >= input.buyBacksStopAtMs) {
+      const stoppedAt = formatEasternTime(new Date(input.buyBacksStopAtMs));
+      await updatePlutoAction(actionId, { outcome: "blocked", blockReason: `buybacks stop at ${stoppedAt}` });
+      note(`the buyback of ${call.contracts}× ${label} is not sent: buybacks stop at ${stoppedAt}, so the Call is left to be assigned`);
+      continue;
+    }
     await recordPlutoEvent("action_validated", { passId: input.passId, actionId, symbol: ticker.symbol, quantity: call.contracts, limitPrice, reasons: [chosenBecause] });
     const result = await executePlutoOrder(input.api, settings, {
       kind: "call_buy_back",
@@ -801,7 +859,7 @@ async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; t
     round.committedThisRound += costDollars;
     memory.pending.push(pendingVolFarmerV4CallBuyBack(actionId, call));
     input.trackWatch(
-      watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: "buy", multiplier: 100 }, description: result.detail, cancelByMs: input.cancelByMs, followTheMid: followTheMidOf(input.marketWatch, ticker.symbol, contract, "buy", null) }),
+      watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: "buy", multiplier: 100 }, description: result.detail, followUntilMs: input.closeAtMs, followTheMid: followTheMidOf(input.marketWatch, ticker.symbol, contract, "buy", null, maxLimitPriceChangesPerPlutoCallBuyBack) }),
       result.orderId,
       ticker.symbol,
     );
@@ -814,9 +872,10 @@ async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; t
  * when `maxSpreadPctOfMid` is given; Pluto off or paused).
  */
 /** How a working order follows the mid; undefined where following is off (production, orderLimitPriceChanges.ts). */
-function followTheMidOf(marketWatch: Pick<PlutoMarketWatch, "burst">, symbol: string, contract: { expiry: string; strike: number; right: "C" | "P" }, side: "sell" | "buy", maxSpreadPctOfMid: number | null): PlutoFollowTheMid | undefined {
+function followTheMidOf(marketWatch: Pick<PlutoMarketWatch, "burst">, symbol: string, contract: { expiry: string; strike: number; right: "C" | "P" }, side: "sell" | "buy", maxSpreadPctOfMid: number | null, maxChanges: number = maxLimitPriceChangesPerOrder): PlutoFollowTheMid | undefined {
   if (!followTheMidIsOn(readAppEnvironment())) return undefined;
   return {
+    maxChanges,
     priceNow: async () => {
       const state = await loadPlutoState();
       if (state.mode !== "on" || state.paused) return null;
@@ -838,6 +897,7 @@ function followTheMidOf(marketWatch: Pick<PlutoMarketWatch, "burst">, symbol: st
 export function followTheMidOfShareOrder(marketWatch: Pick<PlutoMarketWatch, "snapshot">, symbol: string, side: "sell" | "buy", nowMs: () => number = () => Date.now()): PlutoFollowTheMid | undefined {
   if (!followTheMidIsOn(readAppEnvironment())) return undefined;
   return {
+    maxChanges: maxLimitPriceChangesPerOrder,
     priceNow: async () => {
       const state = await loadPlutoState();
       if (state.mode !== "on" || state.paused) return null;
@@ -870,7 +930,7 @@ export function followTheMidOfAdoptedOrder(
   const right = contract.right ?? (contract.strategyKey === "cash_secured_put" ? "P" : "C");
   const followed = { expiry: contract.expiry, strike: Number(contract.strike), right };
   if (order.kind === "open_covered_call" || order.kind === "open_cash_secured_put") return followTheMidOf(marketWatch, order.symbol, followed, "sell", volFarmerV4RulesOf(settings).farmer.maxSpreadPctOfMid);
-  if (order.kind === "close_leg") return followTheMidOf(marketWatch, order.symbol, followed, "buy", null);
+  if (order.kind === "close_leg") return followTheMidOf(marketWatch, order.symbol, followed, "buy", null, maxLimitPriceChangesPerPlutoCallBuyBack);
   return undefined;
 }
 
@@ -1011,7 +1071,7 @@ async function sendOrder(context: {
       symbol: ticker.symbol,
       reference: { price: limitPrice!, side: item.side, multiplier: 100, ...(result.otherReferenceLegs ? { otherLegs: result.otherReferenceLegs } : {}) },
       description: result.detail,
-      cancelByMs: input.cancelByMs,
+      followUntilMs: input.closeAtMs,
       // A Call on shares held or a Put follows the mid; a Call that buys its shares with it (two legs) and a LEAPS do not.
       ...(!isLeaps && !buysShares ? { followTheMid: followTheMidOf(input.marketWatch, ticker.symbol, contract, item.side, farmer.maxSpreadPctOfMid) } : {}),
     }),
@@ -1103,7 +1163,7 @@ async function sendShareOrder(context: { input: VolFarmerV4RoundInput; ticker: P
     round.committedThisRound += notional;
   }
   const followTheMid = followTheMidOfShareOrder(input.marketWatch, ticker.symbol, buying ? "buy" : "sell");
-  input.trackWatch(watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: buying ? "buy" : "sell", multiplier: 1 }, description: result.detail, cancelByMs: input.cancelByMs, ...(followTheMid ? { followTheMid } : {}) }), result.orderId, ticker.symbol);
+  input.trackWatch(watchPlutoOrder(input.api, settings, { actionId, orderId: result.orderId, symbol: ticker.symbol, reference: { price: limitPrice!, side: buying ? "buy" : "sell", multiplier: 1 }, description: result.detail, followUntilMs: input.closeAtMs, ...(followTheMid ? { followTheMid } : {}) }), result.orderId, ticker.symbol);
   return { actionId, sent: true, detail: `${result.detail} (${formatWholeDollars(limitPrice! * shares)})` };
 }
 

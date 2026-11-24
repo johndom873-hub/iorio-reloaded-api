@@ -10,7 +10,7 @@ import type { PlutoOrderPlan } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { classifyRoutineOrderProblem, routineOrderProblemLabels } from "./routineOrderProblems.js";
 import { tripPlutoBreaker } from "./stateStore.js";
-import { followTheMidCheckIntervalSeconds, limitPriceChangeRefusalWindowSeconds, maxLimitPriceChangesPerOrder, type LimitPriceChange, type LimitPriceChangeRequest } from "../lib/orderLimitPriceChanges.js";
+import { followTheMidCheckIntervalSeconds, limitPriceChangeRefusalWindowSeconds, type LimitPriceChange, type LimitPriceChangeRequest } from "../lib/orderLimitPriceChanges.js";
 import { limitChangeableOrderStatuses } from "../lib/orderRequestStatuses.js";
 
 /**
@@ -20,13 +20,15 @@ import { limitChangeableOrderStatuses } from "../lib/orderRequestStatuses.js";
  */
 export interface PlutoFollowTheMid {
   priceNow(): Promise<number | null>;
+  /** At most this many limit changes (maxLimitPriceChangesFor: 60 on a buyback of a Call in the money, else 20). */
+  maxChanges: number;
 }
 
 // Execution (design round 3, items 6 and 22): the agent never writes an order row itself. It builds
 // through the same route the screens use — POST /positions/orders — with the
 // scores snapshot (live, fresh quotes only) and its pluto_action_id, confirms (Adaptive Normal on a single
-// leg; a combo is a plain net-limit order), then watches the order and cancels it before the session close
-// (the platform's unfilled-order sweep cancels it sooner when it sits unfilled). The order gate every order
+// leg; a combo is a plain net-limit order), then watches it until it ends: the platform's unfilled-order sweep cancels one
+// that sits unfilled (not a buyback of a Call in the money), and a DAY order still working ends at the close. The order gate every order
 // passes (halt, account binding, limits including working orders, delta band, close gate, limit-price check,
 // active-order conflict, 15-minute staleness) runs on the way and again in the worker before placement; a
 // refusal at the routes is a blocked action, never a retry. A routine problem once the order reached the worker (drifted
@@ -421,13 +423,13 @@ export async function loadOrderFills(orderId: string): Promise<PlutoFill[]> {
 }
 
 /**
- * Polls the order until IBKR is done with it or the timeout passes (then asks for a cancel and keeps
- * polling until the cancel lands). Records the outcome and the fill price, and checks the fill against the reference (fill_slippage).
+ * Polls the order until IBKR is done with it (a DAY order still working ends at the close), following the mid until
+ * `followUntilMs` (the session close). Records the outcome and the fill price, and checks the fill against the reference (fill_slippage).
  */
 export async function watchPlutoOrder(
   api: InternalApiClient,
   settings: PlutoSettings,
-  input: { actionId: string; orderId: string; symbol: string; reference: PlutoFillReference; description: string; cancelByMs?: number | null; startedAtMs?: number; followTheMid?: PlutoFollowTheMid },
+  input: { actionId: string; orderId: string; symbol: string; reference: PlutoFillReference; description: string; followUntilMs?: number | null; startedAtMs?: number; followTheMid?: PlutoFollowTheMid },
   options: { pollIntervalMs?: number; now?: () => number } = {},
 ): Promise<WatchResult> {
   const pollIntervalMs = options.pollIntervalMs ?? 5_000;
@@ -435,9 +437,9 @@ export async function watchPlutoOrder(
   // An adopted order (agent restarted while it was working) keeps its original clock.
   const startedAt = input.startedAtMs ?? now();
   // The platform's unfilled-order sweep (Risk & Limits) cancels an order left unfilled too long, Pluto's included
-  // (Marcelo 2026-10-05). Pluto only adds the cancel shortly before the session close, which the sweep does not know.
-  const cancelAtMs = input.cancelByMs ?? Number.POSITIVE_INFINITY;
-  let cancelRequested = false;
+  // (Marcelo 2026-10-05), its buybacks of Calls in the money excepted. Pluto cancels none itself (Marcelo 2026-11-24): one
+  // still working at the close ends there, a DAY order.
+  const followUntilMs = input.followUntilMs ?? Number.POSITIVE_INFINITY;
   let nextFollowAtMs = startedAt + followTheMidCheckIntervalSeconds * 1000;
   let following = input.followTheMid !== undefined;
   for (;;) {
@@ -501,19 +503,9 @@ export async function watchPlutoOrder(
       }
       return { outcome, detail: order.errorMessage ?? outcome };
     }
-    if (following && !cancelRequested && now() >= nextFollowAtMs && now() <= cancelAtMs) {
+    if (following && now() >= nextFollowAtMs && now() < followUntilMs) {
       nextFollowAtMs = now() + followTheMidCheckIntervalSeconds * 1000;
       following = await followTheMidOnce(api, input, order);
-    }
-    if (!cancelRequested && now() > cancelAtMs) {
-      cancelRequested = true;
-      const why = "session close approaching";
-      try {
-        await api.post(`/positions/orders/${input.orderId}/cancel`, {});
-        await recordPlutoEvent("warning", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, message: `${why} — cancel requested` });
-      } catch (error) {
-        console.warn(`Pluto watch: cancel request failed for ${input.orderId} — ${error instanceof Error ? error.message : error}`);
-      }
     }
   }
 }
@@ -526,7 +518,7 @@ export async function watchPlutoOrder(
 export async function followTheMidOnce(api: InternalApiClient, input: { actionId: string; orderId: string; symbol: string; followTheMid?: PlutoFollowTheMid }, order: OrderRequestResponse): Promise<boolean> {
   const legs = order.payload?.legs ?? [];
   if (!input.followTheMid || legs.length !== 1 || !(limitChangeableOrderStatuses as readonly string[]).includes(order.status)) return true;
-  if ((order.payload?.limitPriceChanges?.length ?? 0) >= maxLimitPriceChangesPerOrder) return false;
+  if ((order.payload?.limitPriceChanges?.length ?? 0) >= input.followTheMid.maxChanges) return false;
   // The worker has not sent the previous change yet.
   if (order.payload?.limitPriceChangeRequest) return true;
   const currentLimit = Number(legs[0]!.unitPrice);

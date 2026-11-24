@@ -12,7 +12,11 @@ import { readGitSha } from "../lib/readGitSha.js";
 import { plutoAgentHolderHeader, type PlutoAgentLease } from "./agentLease.js";
 import type { PlutoConfig } from "./config.js";
 import { loadWorkingPlutoOrders, watchPlutoOrder } from "./executor.js";
-import { followTheMidOfAdoptedOrder } from "./volFarmerV4Round.js";
+import { followTheMidOfAdoptedOrder, settleVolFarmerV4EndedOrders } from "./volFarmerV4Round.js";
+import { loadPlutoCallsExpiringToday, symbolsDueForBuyBackCheck, volFarmerV4BuyBackCheckSeconds, volFarmerV4BuysBackToday, type PlutoCallExpiringToday } from "./buyBackChecks.js";
+import { volFarmerV4BuyBackMinutesBeforeWindowEnd } from "./volFarmerV4LiveBook.js";
+import { fetchPooledPricesOnly } from "../ibkr/pricePool.js";
+import { loadLiveTradingSessions } from "../lib/liveTradingSessions.js";
 import { closeAbandonedPlutoPasses, recordPlutoEvent, type PlutoTrigger } from "./ledger.js";
 import { PlutoMarketWatch } from "./marketWatch.js";
 import { runPlutoPass, type PassRequest, type PassRunnerContext } from "./passRunner.js";
@@ -35,6 +39,10 @@ import { easternIsoDate, easternMinutesOfDay } from "../lib/easternIsoDate.js";
 //   - one continuous loop: every bandQuotePollSeconds it reads the option quote band's quotes and analyses the tickers whose
 //     contracts carry a quote newer than the one Pluto last analysed; events that change a decision without a new
 //     quote (an order ending, a cooldown ending, a position closing, a settings change) queue a forced round;
+//   - v4's buyback minutes (Marcelo 2026-11-24), from shortly before the window's end until a minute before the close: a
+//     ticker whose stock trades at or above the strike of a Call expiring today gets a buyback round (buyBackChecks.ts);
+//     after the window only those tickers' stock lines are held and only buybacks go;
+//   - no round runs outside both: an order that ends then is settled into its ticker's memory at once (settle-only);
 //   - rounds run one at a time, never overlapping; order watches outlive their round.
 
 const heartbeatIntervalMs = 45_000;
@@ -66,6 +74,14 @@ export class PlutoAgent {
   private wakeLoop: (() => void) | null = null;
   private readonly watches = new Set<Promise<unknown>>();
   private readonly watchedOrderIds = new Set<string>();
+  /** The ticker of each order watched: a ticker with an order working gets no buyback round of the quote watch. */
+  private readonly watchedOrderSymbols = new Map<string, string>();
+  /** Tickers whose ended orders wait to be settled into their memory while no round runs; "all" after a restart or the minutes' end. */
+  private settleRequested: Set<string> | "all" | null = "all";
+  /** When each ticker last got a buyback round of the quote watch. */
+  private readonly lastBuyBackCheckAtMs = new Map<string, number>();
+  /** Pluto's Calls expiring today, read again at most every volFarmerV4BuyBackCheckSeconds. */
+  private callsExpiringToday: { dateIso: string; loadedAtMs: number; calls: PlutoCallExpiringToday[] } | null = null;
   /** A round is running: its orders may be working before their watches start (adoptWorkingOrders). */
   private roundInFlight = false;
   /** Rounds started by this process: adoptWorkingOrders drops a read that a round started during. */
@@ -73,7 +89,8 @@ export class PlutoAgent {
   private openingLook: OpeningLookProgress = { doneFor: null, incompleteFor: null };
   /** The opening look queued or running: it counts as done only once its round has run (a failed one is re-queued by housekeeping). */
   private pendingOpeningLook: { todayIso: string; decision: OpeningLookDecision } | null = null;
-  private watching = false;
+  /** What Pluto's stock lines are held for: the window, or the buyback minutes after it (null: none held). */
+  private phase: PlutoAgentPhase = null;
   /** Today's window position, from the last housekeeping tick: the loop stops at the window's end without waiting for the next tick. */
   private tradingWindow: TradingWindowClock | null = null;
   /** Inside the window and allowed to act: the heartbeat reports IBKR connection changes only then. */
@@ -108,13 +125,15 @@ export class PlutoAgent {
       trackWatch: (promise, orderId, symbol) => {
         this.watches.add(promise);
         this.watchedOrderIds.add(orderId);
+        this.watchedOrderSymbols.set(orderId, symbol);
         promise
-          .then((result) => this.onOrderEnded(symbol, result))
-          .catch((error) => console.error(`Pluto: order watch failed — ${error instanceof Error ? error.message : error}`))
           .finally(() => {
             this.watches.delete(promise);
             this.watchedOrderIds.delete(orderId);
-          });
+            this.watchedOrderSymbols.delete(orderId);
+          })
+          .then((result) => this.onOrderEnded(symbol, result))
+          .catch((error) => console.error(`Pluto: order watch failed — ${error instanceof Error ? error.message : error}`));
       },
     };
   }
@@ -210,13 +229,18 @@ export class PlutoAgent {
     const dateIso = easternIsoDate(now);
     const session = await computeMarketSessionStatus(now).catch(() => ({ state: "closed" as const }));
     const plutoSession = await resolvePlutoSession(now, this.settings!);
+    const nextSessionIso = plutoSession.isOpen ? (await loadLiveTradingSessions(now)).openDays.find((day) => day > dateIso) : undefined;
     return {
       dateIso,
+      marketOpen: session.state === "open",
       insideWindow: session.state === "open" && isInsideTradingWindow(now, dateIso, plutoSession.windowStartEt, plutoSession.windowEndEt),
       isOpenDay: plutoSession.isOpen,
       windowStartAtMs: plutoSession.windowStartAtMs,
       windowEndAtMs: plutoSession.windowEndAtMs,
       windowEndEt: plutoSession.windowEndEt,
+      buyBacksToday: plutoSession.isOpen && volFarmerV4BuysBackToday(this.settings!.volFarmerV4CallsInTheMoneyAtLastLook, dateIso, nextSessionIso),
+      buyBacksStopAtMs: plutoSession.buyBacksStopAtMs,
+      buyBacksStopEt: plutoSession.buyBacksStopEt,
     };
   }
 
@@ -260,25 +284,33 @@ export class PlutoAgent {
       this.marketWatch.updateSettings(this.settings);
       await this.adoptWorkingOrders();
       const { allowed, window } = await this.isAllowedToAct();
-      const insideWindow = window.insideWindow;
       this.tradingWindow = window;
-      this.activeInWindow = allowed && insideWindow;
-      if (!allowed || !insideWindow) {
-        if (this.watching) {
+      this.activeInWindow = allowed && window.insideWindow;
+      const phase = allowed ? plutoAgentPhase(window, Date.now()) : null;
+      // The buyback minutes need only the tickers with a Call expiring today; with none, nothing is held after the window.
+      const buyBackSymbols = phase === "buy_backs" ? [...new Set((await this.loadCallsExpiringToday(window.dateIso, true)).map((call) => call.symbol))].sort() : [];
+      if (phase === null || (phase === "buy_backs" && buyBackSymbols.length === 0)) {
+        if (this.phase !== null) {
           await this.marketWatch.stop();
-          this.watching = false;
-          await recordPlutoEvent("lines_changed", { held: 0, reason: allowed ? "outside the trading window" : "not allowed to act" });
+          this.phase = null;
+          // Rounds stop here: whatever ended since the last one is settled now, and later endings as they come.
+          this.settleRequested = "all";
+          await recordPlutoEvent("lines_changed", { held: 0, reason: !allowed ? "not allowed to act" : window.insideWindow ? "outside the trading window" : "outside the trading window and the buyback minutes" });
         }
         await this.recordWindowEvents(window, false);
         return;
       }
-      await this.recordWindowEvents(window, true);
-      const enabled: { symbol: string }[] = await db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").whereNull("se.removed_at").where("se.bot_enabled", true).select("t.symbol");
-      const symbols = enabled.map((row) => row.symbol).sort();
+      await this.recordWindowEvents(window, phase === "window");
+      const symbols = phase === "buy_backs" ? buyBackSymbols : (await db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").whereNull("se.removed_at").where("se.bot_enabled", true).select("t.symbol")).map((row: { symbol: string }) => row.symbol).sort();
       const result = await this.marketWatch.watch(symbols);
-      if (result.ok !== this.watching) await recordPlutoEvent("lines_changed", { held: result.ok ? symbols.length + 1 : 0, detail: result.detail });
-      this.watching = result.ok;
-      if (!result.ok) return;
+      const phaseNow = result.ok ? phase : null;
+      if (phaseNow !== this.phase) {
+        const detail = phaseNow === "buy_backs" ? `${symbols.length} stock line(s) for the Calls expiring today (${symbols.join(", ")}), until ${window.buyBacksStopEt} ET: buybacks only` : result.detail;
+        await recordPlutoEvent("lines_changed", { held: result.ok ? symbols.length + 1 : 0, detail });
+        if (phaseNow === null) this.settleRequested = "all";
+      }
+      this.phase = phaseNow;
+      if (phaseNow !== "window") return;
 
       await this.queueOpeningLookIfDue();
     } catch (error) {
@@ -354,7 +386,7 @@ export class PlutoAgent {
             symbol: order.symbol,
             reference: order.reference,
             description: order.description,
-            cancelByMs: session.cancelByMs,
+            followUntilMs: session.closeAtMs,
             startedAtMs: order.createdAtMs,
             // It keeps following the mid as it did before the restart.
             followTheMid: followTheMidOfAdoptedOrder(this.marketWatch, this.settings, order),
@@ -458,9 +490,17 @@ export class PlutoAgent {
     this.queueForcedRound("settings_changed", { fields, by: notification.payload.by ?? null }, null);
   }
 
-  /** An order Pluto placed has ended: its budget and the ticker are free again, and a fill starts the ticker's cooldown. */
+  /**
+   * An order Pluto placed has ended: its budget and the ticker are free again, and a fill starts the ticker's cooldown. With
+   * no round to come (outside the window and the buyback minutes), its ticker's memory is settled at once instead.
+   */
   private onOrderEnded(symbol: string, result: unknown): void {
     const outcome = (result as { outcome?: string } | null)?.outcome ?? "unknown";
+    if (this.phase === null) {
+      if (this.settleRequested === null) this.settleRequested = new Set([symbol]);
+      else if (this.settleRequested !== "all") this.settleRequested.add(symbol);
+      this.wakeLoop?.();
+    }
     this.queueForcedRound("order_ended", { symbol, outcome }, null);
     const filled = outcome === "filled" || outcome === "partially_filled" || outcome === "cancelled_partially_filled";
     const cooldownMinutes = this.settings?.safetyTickerCooldownMinutes ?? 0;
@@ -495,17 +535,20 @@ export class PlutoAgent {
   }
 
   private async loopIteration(): Promise<void> {
-    if (this.watching && this.tradingWindow && Date.now() >= this.tradingWindow.windowEndAtMs) {
-      // The window has just ended: housekeeping releases the lines and writes the close now, not at its next tick.
+    if (this.phase !== null && this.tradingWindow && plutoAgentPhase(this.tradingWindow, Date.now()) !== this.phase) {
+      // The window or the buyback minutes have just ended: housekeeping changes the lines and writes the close now, not at
+      // its next tick.
       await this.housekeeping();
       // A tick already running returns at once: skip the round, the next iteration looks again.
-      if (this.watching) return;
+      if (this.phase !== null && plutoAgentPhase(this.tradingWindow, Date.now()) !== this.phase) return;
     }
-    if (!this.watching) {
-      // Not allowed to act, outside the window, or no market data (housekeeping decides). Events queued meanwhile are
-      // moot: the first round once Pluto may act again analyses every contract quoted today anyway.
+    if (this.phase === null) {
+      // Not allowed to act, outside the window and the buyback minutes, or no market data (housekeeping decides). Events
+      // queued meanwhile are moot: the first round once Pluto may act again analyses every contract quoted today anyway.
+      // Orders that ended are settled into their tickers' memory meanwhile.
       this.forcedRounds.length = 0;
       this.pendingOpeningLook = null;
+      await this.settleEndedOrdersIfRequested();
       return;
     }
     const forced = this.forcedRounds.shift();
@@ -533,10 +576,64 @@ export class PlutoAgent {
       }
       return;
     }
+    if (await this.runBuyBackRoundIfDue()) return;
+    // After the window, new option quotes change nothing: only the buybacks go.
+    if (this.phase !== "window") return;
     const newlyFinished = findNewlyFinishedBandCycles(await loadTodaysFinishedBandCycles(), this.lastAnalysedFinishedAtMs);
     if (newlyFinished.symbols.length === 0) return;
     await this.runRoundSafely({ trigger: "band_quotes_update", triggerDetail: { symbols: newlyFinished.symbols }, symbols: newlyFinished.symbols, force: false });
     rememberAnalysed(newlyFinished.stamps, this.lastAnalysedFinishedAtMs);
+  }
+
+  /** Pluto's Calls expiring today, read again when older than volFarmerV4BuyBackCheckSeconds (or when `fresh`). */
+  private async loadCallsExpiringToday(dateIso: string, fresh = false): Promise<PlutoCallExpiringToday[]> {
+    const cached = this.callsExpiringToday;
+    const nowMs = Date.now();
+    if (!fresh && cached !== null && cached.dateIso === dateIso && nowMs - cached.loadedAtMs < volFarmerV4BuyBackCheckSeconds * 1000) return cached.calls;
+    const calls = await loadPlutoCallsExpiringToday(dateIso);
+    this.callsExpiringToday = { dateIso, loadedAtMs: nowMs, calls };
+    return calls;
+  }
+
+  /**
+   * In v4's buyback minutes, a buyback round for the tickers whose stock now trades at or above the strike of a Call
+   * expiring today (buyBackChecks.ts), on this process's pooled stock price. Answers whether one ran.
+   */
+  private async runBuyBackRoundIfDue(): Promise<boolean> {
+    const window = this.tradingWindow;
+    if (window === null || !window.buyBacksToday) return false;
+    const nowMs = Date.now();
+    if (nowMs < window.windowEndAtMs - volFarmerV4BuyBackMinutesBeforeWindowEnd * 60_000 || nowMs >= window.buyBacksStopAtMs) return false;
+    const calls = await this.loadCallsExpiringToday(window.dateIso);
+    if (calls.length === 0) return false;
+    const due = symbolsDueForBuyBackCheck({
+      nowMs,
+      calls,
+      stockPriceOf: (symbol) => fetchPooledPricesOnly([{ key: "stock", legType: "stock", symbol }])["stock"] ?? null,
+      lastCheckedAtMs: this.lastBuyBackCheckAtMs,
+      symbolsWithWorkingOrders: new Set(this.watchedOrderSymbols.values()),
+      intervalMs: volFarmerV4BuyBackCheckSeconds * 1000,
+    });
+    if (due.length === 0) return false;
+    for (const symbol of due) this.lastBuyBackCheckAtMs.set(symbol, nowMs);
+    await this.runRoundSafely({ trigger: "buy_back_check", triggerDetail: { symbols: due }, symbols: due, force: true });
+    return true;
+  }
+
+  /** The settle-only step (settleVolFarmerV4EndedOrders) for the tickers whose orders ended while no round runs. */
+  private async settleEndedOrdersIfRequested(): Promise<void> {
+    const requested = this.settleRequested;
+    if (requested === null || this.stopped) return;
+    if (this.lease && !(await this.lease.confirmHeld())) return;
+    this.settleRequested = null;
+    try {
+      const settled = await settleVolFarmerV4EndedOrders(requested === "all" ? null : [...requested]);
+      for (const { symbol, notes } of settled) console.log(`Pluto: ${symbol}'s ended orders settled into its memory outside a round${notes.length > 0 ? ` (${notes.join("; ")})` : ""}.`);
+    } catch (error) {
+      // Asked again: the next iteration retries.
+      this.settleRequested = requested;
+      console.warn(`Pluto: settling ended orders failed — ${error instanceof Error ? error.message : error}`);
+    }
   }
 
   /**
@@ -595,12 +692,32 @@ export class PlutoAgent {
 
 interface TradingWindowClock {
   dateIso: string;
+  /** The regular session is open. */
+  marketOpen: boolean;
   /** Regular session open and the clock inside Pluto's window. */
   insideWindow: boolean;
   isOpenDay: boolean;
   windowStartAtMs: number;
   windowEndAtMs: number;
   windowEndEt: string;
+  /** v4 buys back Calls in the money today (its setting, and the weekend rule), until buyBacksStopAtMs. */
+  buyBacksToday: boolean;
+  buyBacksStopAtMs: number;
+  buyBacksStopEt: string;
+}
+
+/** What Pluto holds its stock lines for: its window, the buyback minutes after it, or nothing. */
+export type PlutoAgentPhase = "window" | "buy_backs" | null;
+
+/**
+ * Pure: Pluto's phase at `nowMs`. Example (window 10:00–15:30 ET, close 16:00, buybacks every day): 15:29 the window,
+ * 15:45 the buyback minutes, 15:59 and later nothing; under "before weekends only" on a Tuesday, nothing after 15:30.
+ */
+export function plutoAgentPhase(window: Pick<TradingWindowClock, "marketOpen" | "insideWindow" | "isOpenDay" | "windowEndAtMs" | "buyBacksToday" | "buyBacksStopAtMs">, nowMs: number): PlutoAgentPhase {
+  // insideWindow is as of the last housekeeping tick: the window's end is read off the clock.
+  if (window.insideWindow && nowMs < window.windowEndAtMs) return "window";
+  if (window.isOpenDay && window.marketOpen && window.buyBacksToday && nowMs >= window.windowEndAtMs && nowMs < window.buyBacksStopAtMs) return "buy_backs";
+  return null;
 }
 
 export function currentRelease(): string | null {

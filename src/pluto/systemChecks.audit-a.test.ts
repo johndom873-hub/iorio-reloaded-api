@@ -49,7 +49,7 @@ vi.mock("../lib/marketSessionStatus.js", async () => {
 });
 vi.mock("../lib/platformControls.js", () => ({ fetchTradingHalt: async () => ({ enabled: false }) }));
 vi.mock("../lib/tradingGate.js", () => ({ classifyTradingStatus: () => ({ state: "ok", reason: null }) }));
-vi.mock("./sessionSchedule.js", () => ({ resolvePlutoSession: async () => ({ windowStartEt: "09:45", windowEndEt: "15:30", closeTimeEt: "16:00", closeSource: "ibkr_liquid_hours", closeReadAt: "x", cancelByMs: 0 }) }));
+vi.mock("./sessionSchedule.js", () => ({ resolvePlutoSession: async () => ({ windowStartEt: "09:45", windowEndEt: "15:30", closeTimeEt: "16:00", closeSource: "ibkr_liquid_hours", closeReadAt: "x", buyBacksStopAtMs: 0 }) }));
 vi.mock("./stateStore.js", () => ({ loadPlutoState: async () => ({ mode: "on", paused: false, breakers: {} }), describePlutoBlock: () => null }));
 vi.mock("../lib/notifyTelegram.js", () => ({ notifyPlutoTelegram: vi.fn(), notifyTelegram: vi.fn() }));
 

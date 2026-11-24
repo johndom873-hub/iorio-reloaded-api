@@ -43,7 +43,7 @@ vi.mock("./systemChecks.js", () => ({
   runPlutoSystemChecks: async () => ({
     failures: harness.systemChecksOk ? [] : ["account_data: account summary failed: timeout"],
     checks: harness.systemChecksOk ? {} : { account_data: { ok: false, detail: "account summary failed: timeout" } },
-    context: { state: { stressOverrideDate: null }, todayEasternIso: "2026-10-07", session: { cancelByMs: 123 }, netLiquidationValue: harness.netLiquidationValue, totalCashValue: 400_000 },
+    context: { state: { stressOverrideDate: null }, todayEasternIso: "2026-10-07", session: { closeAtMs: 123, windowEndAtMs: 100, buyBacksStopAtMs: 120 }, netLiquidationValue: harness.netLiquidationValue, totalCashValue: 400_000 },
   }),
 }));
 vi.mock("../lib/notifyTelegram.js", () => ({ notifyPlutoTelegram: vi.fn() }));
@@ -70,7 +70,7 @@ describe("runPlutoPass", () => {
   it("runs Vol Farmer v4's round with the account's figures and the round's symbols, and reports a sent order as a trade", async () => {
     harness.outcome = { looked: ["AAA"], planned: 2, sent: 1, notes: [] };
     const summary = await runPlutoPass(round(["AAA"]), context);
-    expect(harness.rounds).toEqual([expect.objectContaining({ passId: "pass-1", todayIso: "2026-10-07", totalCashValue: 400_000, netLiquidationValue: 1_000_000, cancelByMs: 123, symbols: ["AAA"], stressed: false })]);
+    expect(harness.rounds).toEqual([expect.objectContaining({ passId: "pass-1", todayIso: "2026-10-07", totalCashValue: 400_000, netLiquidationValue: 1_000_000, closeAtMs: 123, windowEndAtMs: 100, buyBacksStopAtMs: 120, symbols: ["AAA"], stressed: false })]);
     expect(summary).toEqual({ passId: "pass-1", skippedReason: null, outcome: "trade" });
     expect(ledger.finishPlutoPass).toHaveBeenCalledWith("pass-1", expect.objectContaining({ candidateCount: 2, skippedReason: null }));
   });

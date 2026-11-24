@@ -4,8 +4,28 @@ import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { limitChangeableOrderStatuses } from "./orderRequestStatuses.js";
 import { fetchTradingHalt } from "./platformControls.js";
 import { maxLimitPriceChangesPerOrder, type LimitPriceChangeRequest } from "./orderLimitPriceChanges.js";
+import { plutoCallBuyBackActionKind } from "../ibkr/ibkrGatewayUnfilledOrderSweep.js";
 
 const orderRequestsChannel = "order_requests_channel";
+
+/**
+ * At most this many limit changes on one of Pluto's buybacks of a Call in the money (Marcelo 2026-11-24): it may work from
+ * 15:28 until the close, half an hour at one change per check. IBKR's daily (orders + changes + cancels) ÷ (fills + 1)
+ * stays far under its 20: 14 orders with 13 filled and one buyback changed 60 times is (14 + 60) ÷ 14 ≈ 5.3.
+ */
+export const maxLimitPriceChangesPerPlutoCallBuyBack = 60;
+
+/** Pure: the most limit changes an order may have, by whether it is one of Pluto's buybacks of a Call. */
+export function maxLimitPriceChangesFor(isPlutoCallBuyBack: boolean): number {
+  return isPlutoCallBuyBack ? maxLimitPriceChangesPerPlutoCallBuyBack : maxLimitPriceChangesPerOrder;
+}
+
+/** Whether the order is one of Pluto's buybacks of a Call in the money (its action, as the unfilled-order sweep reads it). */
+async function isPlutoCallBuyBackOrder(plutoActionId: string | null): Promise<boolean> {
+  if (!plutoActionId) return false;
+  const action = await db("pluto_actions").where({ id: plutoActionId, kind: plutoCallBuyBackActionKind }).whereRaw("contract->>'right' = 'C'").first("id");
+  return action !== undefined;
+}
 
 export type LimitPriceChangeRequestResult = { ok: true } | { ok: false; status: 404 | 409; error: string };
 
@@ -13,7 +33,7 @@ export type LimitPriceChangeRequestResult = { ok: true } | { ok: false; status: 
  * Asks for a working single-leg order's limit to change (follow the mid, orderLimitPriceChanges.ts): records the request on
  * the payload and NOTIFYs the worker, which runs the live limit-price check and sends the same IBKR order again at the new
  * limit (changeSubmittedOrderLimit), or drops the change with its reason. Refused when the order is not working, not a single
- * leg (an option, or Pluto's share order, Marcelo 2026-11-23), already changed maxLimitPriceChangesPerOrder times, while
+ * leg (an option, or Pluto's share order, Marcelo 2026-11-23), already changed maxLimitPriceChangesFor times, while
  * trading is halted, and for a Pluto order from anyone but the agent holding Pluto's lease (`agentHolder`). Used by POST
  * /positions/orders/:id/reprice (Pluto) and the web process's follower of manual orders (manualOrderFollowTheMid.ts).
  */
@@ -23,12 +43,13 @@ export async function requestOrderLimitPriceChange(orderRequestId: string, limit
   const payload = orderRequest.payload as OrderRequestPayload;
   const singleLegRole = payload.legs.length === 1 ? payload.legs[0]!.role : null;
   const changeableLeg = singleLegRole === "option" || (singleLegRole === "stock" && Boolean(orderRequest.pluto_action_id));
+  const maxChanges = maxLimitPriceChangesFor(await isPlutoCallBuyBackOrder(orderRequest.pluto_action_id));
   const refusal = !(limitChangeableOrderStatuses as readonly string[]).includes(orderRequest.status)
     ? "Only an order working at IBKR can have its limit changed."
     : !changeableLeg
       ? "Only a single-leg option order, or a single-leg share order of Pluto's, can have its limit changed."
-      : (payload.limitPriceChanges?.length ?? 0) >= maxLimitPriceChangesPerOrder
-        ? `This order's limit has already been changed ${maxLimitPriceChangesPerOrder} times.`
+      : (payload.limitPriceChanges?.length ?? 0) >= maxChanges
+        ? `This order's limit has already been changed ${maxChanges} times.`
         : (await fetchTradingHalt()).enabled
           ? "Trading is halted."
           : orderRequest.pluto_action_id

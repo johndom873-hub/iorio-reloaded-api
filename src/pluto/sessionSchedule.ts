@@ -5,13 +5,14 @@ import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // Today's session for Pluto (approved 2026-09-28): the close comes from IBKR's liquid hours for
 // SPY, read every trading morning by the option-chain structure job in every environment
-// (lib/sessionCloseFromIbkr.ts) and stored in market_calendar.close_time, so every screen sees half days too. The trading window ends `closeMarginMinutes` before the close and
-// working orders are cancelled `cancelMarginMinutes` before it, whatever the configured window.
+// (lib/sessionCloseFromIbkr.ts) and stored in market_calendar.close_time, so every screen sees half days too. The trading window ends `closeMarginMinutes` before the close,
+// whatever the configured window; v4's buybacks of Calls in the money go on until `buyBacksStopMinutesBeforeClose` before it
+// (Marcelo 2026-11-24), and an order still working then stays at IBKR until the close (a DAY order, it ends there).
 
 /** Window end is never later than this long before the session close (15:30 on a 16:00 day, 12:30 on a 13:00 day). */
 export const closeMarginMinutes = 30;
-/** Working Pluto orders are cancelled this long before the close at the latest. */
-export const cancelMarginMinutes = 2;
+/** v4 sends its last buyback of a Call in the money this long before the close (15:59 on a 16:00 day, 12:59 on a 13:00 day). */
+export const buyBacksStopMinutesBeforeClose = 1;
 
 export type PlutoSessionCloseSource = SessionCloseSource | "fallback_list";
 
@@ -24,9 +25,10 @@ export interface PlutoSession {
   windowStartEt: string;
   /** The configured window end, clamped to closeMarginMinutes before the close. */
   windowEndEt: string;
-  cancelByEt: string;
+  /** When v4 sends its last buyback: buyBacksStopMinutesBeforeClose before the close. */
+  buyBacksStopEt: string;
   closeAtMs: number;
-  cancelByMs: number;
+  buyBacksStopAtMs: number;
   windowStartAtMs: number;
   windowEndAtMs: number;
 }
@@ -63,7 +65,7 @@ export async function resolvePlutoSession(now: Date, settings: Pick<PlutoSetting
   }
   const close = hhmmParts(closeTimeEt);
   const closeAtMs = easternInstant(dateIso, close.hour, close.minute).getTime();
-  const cancelByEt = hhmmFromMinutes(minutesOfDay(closeTimeEt) - cancelMarginMinutes);
+  const buyBacksStopEt = hhmmFromMinutes(minutesOfDay(closeTimeEt) - buyBacksStopMinutesBeforeClose);
   const windowEndEt = effectiveWindowEndEt(settings.windowEndEt, closeTimeEt);
   const windowStart = hhmmParts(settings.windowStartEt);
   const windowEnd = hhmmParts(windowEndEt);
@@ -75,9 +77,9 @@ export async function resolvePlutoSession(now: Date, settings: Pick<PlutoSetting
     closeReadAt: schedule.closeReadAt,
     windowStartEt: settings.windowStartEt,
     windowEndEt,
-    cancelByEt,
+    buyBacksStopEt,
     closeAtMs,
-    cancelByMs: closeAtMs - cancelMarginMinutes * 60_000,
+    buyBacksStopAtMs: closeAtMs - buyBacksStopMinutesBeforeClose * 60_000,
     windowStartAtMs: easternInstant(dateIso, windowStart.hour, windowStart.minute).getTime(),
     windowEndAtMs: easternInstant(dateIso, windowEnd.hour, windowEnd.minute).getTime(),
   };

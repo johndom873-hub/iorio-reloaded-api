@@ -116,7 +116,11 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   const closeKnown = session.closeSource !== "regular" || session.closeReadAt !== null;
   record("session_close", closeKnown, `closes ${session.closeTimeEt} ET (${session.closeSource === "ibkr_liquid_hours" ? "IBKR liquid hours" : session.closeSource === "fallback_list" ? "fallback list, IBKR not read yet" : "assumed regular, IBKR not read yet"})`);
   const inWindow = isInsideTradingWindow(now, todayEasternIso, session.windowStartEt, session.windowEndEt);
-  record("trading_window", inWindow, `${inWindow ? "inside" : "outside"} ${session.windowStartEt}–${session.windowEndEt} ET${session.windowEndEt !== settings.windowEndEt ? ` (configured end ${settings.windowEndEt}, pulled in by the ${session.closeTimeEt} close)` : ""}`);
+  // After the window a round may still buy back Calls in the money until a minute before the close (Marcelo 2026-11-24); the
+  // round itself sends nothing else then (volFarmerV4Round.ts).
+  const inBuyBackMinutes = !inWindow && now.getTime() >= session.windowEndAtMs && now.getTime() < session.buyBacksStopAtMs;
+  const pulledIn = session.windowEndEt !== settings.windowEndEt ? ` (configured end ${settings.windowEndEt}, pulled in by the ${session.closeTimeEt} close)` : "";
+  record("trading_window", inWindow || inBuyBackMinutes, inBuyBackMinutes ? `after the ${session.windowStartEt}–${session.windowEndEt} ET window${pulledIn}: buybacks of Calls in the money only, until ${session.buyBacksStopEt} ET` : `${inWindow ? "inside" : "outside"} ${session.windowStartEt}–${session.windowEndEt} ET${pulledIn}`);
 
   try {
     const workerRow = await db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first();

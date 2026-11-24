@@ -12,6 +12,7 @@ import { daysToExpiry, describeOptionContract } from "../lib/optionContractLabel
 import { loadPreviousClose } from "../lib/tickerCalendarQueries.js";
 import { formatTradePrice, toIsoExpiry } from "../lib/tradeMessageFormatting.js";
 import { resolvePlutoSession } from "./sessionSchedule.js";
+import { describeVolFarmerV4BuyBackHours } from "./buyBackChecks.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoTickerAllocations } from "./tickerAllocations.js";
 import { plutoOrdersSentToday, loadPlutoOrdersSentToday } from "./safetyLimits.js";
@@ -199,6 +200,7 @@ async function withNextActions(base: VolFarmerV4ScreenTickerBase[], tickers: Plu
     ]);
     const blockReason = describePlutoBlock(plutoState);
     const windowOpenToday = session.isOpen && now.getTime() < session.windowEndAtMs;
+    const buyBackMinutes = { label: describeVolFarmerV4BuyBackHours(session.windowEndAtMs, session.buyBacksStopAtMs), openToday: session.isOpen && now.getTime() < session.buyBacksStopAtMs };
     const expirationsByTickerId = new Map(chainRows.map((row) => [row.ticker_id, row.expirations]));
     const bandPriceByTickerId = new Map<string, number>();
     for (const row of quoteRows) if (!bandPriceByTickerId.has(row.ticker_id)) bandPriceByTickerId.set(row.ticker_id, Number(row.stock_price));
@@ -219,6 +221,7 @@ async function withNextActions(base: VolFarmerV4ScreenTickerBase[], tickers: Plu
           rules: volFarmerV4RulesOf(settings, settingsOfTicker),
           todayIso,
           windowOpenToday,
+          buyBackMinutes,
           blockReason,
           expirations: expirationsByTickerId.get(settingsOfTicker.tickerId) ?? [],
           openDays: liveSessions.openDays.filter((day) => day >= todayIso),

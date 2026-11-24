@@ -5,6 +5,8 @@ import { db } from "../db/connection.js";
 import { loadRealizedPnlByActionId, type PlutoActionRealizedPnl } from "../pluto/actionRealizedPnl.js";
 import { loadPlutoBook } from "../pluto/book.js";
 import { resolvePlutoSession } from "../pluto/sessionSchedule.js";
+import { volFarmerV4BuysBackToday } from "../pluto/buyBackChecks.js";
+import { loadLiveTradingSessions } from "../lib/liveTradingSessions.js";
 import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
 import { isAdminRequest } from "../lib/sessionUser.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
@@ -100,6 +102,9 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
   const plutoBookValue = liveBookValue ?? lastSnapshotValue;
   const plutoBookValueAsOf = liveBookValue !== null || !lastSnapshot ? null : String(lastSnapshot.snapshot_date).slice(0, 10);
   const session = await resolvePlutoSession(new Date(), settings);
+  // Whether v4 buys back Calls in the money today, from shortly before the window's end until buyBacksStopAt (the screen's window tile).
+  const nextSessionIso = session.isOpen ? (await loadLiveTradingSessions()).openDays.find((day) => day > session.dateIso) : undefined;
+  const buyBacksToday = session.isOpen && volFarmerV4BuysBackToday(settings.volFarmerV4CallsInTheMoneyAtLastLook, session.dateIso, nextSessionIso);
   const openPositionsBySymbol: Record<string, number> = {};
   for (const position of book.openPositions) openPositionsBySymbol[position.symbol] = (openPositionsBySymbol[position.symbol] ?? 0) + 1;
   const workingOrdersBySymbol: Record<string, number> = {};
@@ -121,6 +126,8 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
       windowStartAt: new Date(session.windowStartAtMs).toISOString(),
       windowEndAt: new Date(session.windowEndAtMs).toISOString(),
       closeAt: new Date(session.closeAtMs).toISOString(),
+      buyBacksStopAt: new Date(session.buyBacksStopAtMs).toISOString(),
+      buyBacksToday,
     },
     // The newest round's system checks: what currently holds Pluto back (worker offline, SPY stress…) between analyses.
     lastChecks: lastCheckedPass ? { passId: lastCheckedPass.id, startedAt: new Date(lastCheckedPass.started_at).toISOString(), checks: lastCheckedPass.system_checks } : null,

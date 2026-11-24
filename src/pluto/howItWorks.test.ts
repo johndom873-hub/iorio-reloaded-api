@@ -38,7 +38,7 @@ describe("buildPlutoHowItWorks", () => {
       leapsMinDte: 180, leapsAbsDelta: 0.6, leapsMaxAllocationPct: 10,
       rebalanceBandPct: 20, rebalances: "both_positions", firstPositionAfterCalledAway: "wait", optionsExpiry: "today", optionsMaxDaysToExpiry: 45,
       callStrikeFloor: "none", putsSold: "calls_yield_little", putStrikeCap: "first_break_even_less_step", trimsSell: "higher_break_even_first",
-      topUpCapPct: 0, callsInTheMoneyAtLastLook: "assigned", alwaysHoldTheStock: "on", alwaysHoldTheStockOtherwise: ["HOOD"], buyBackMinutesBeforeWindowEnd: 2, buyBackStartsEt: "15:28", buyBackCancelledAtEt: "15:58",
+      topUpCapPct: 0, callsInTheMoneyAtLastLook: "assigned", alwaysHoldTheStock: "on", alwaysHoldTheStockOtherwise: ["HOOD"], buyBackMinutesBeforeWindowEnd: 2, buyBackStartsEt: "15:28", buyBacksStopEt: "15:59", buyBackCheckSeconds: 5, buyBackMaxLimitChanges: 60,
     });
     // Pot 240,000; 80% = 192,000: floor(192,000 ÷ 10,000.50) = 19 lots. The band ± 20% of the pot, 48,000. At $70 the lots are
     // worth 133,000, under 144,000: topped up to floor(192,000 ÷ 7,000.50) = 27; at $130, 247,000 over 240,000: trimmed to
@@ -75,7 +75,7 @@ describe("buildPlutoHowItWorks", () => {
 
   it("times the buyback from the window's end, and quotes the setting as it is", () => {
     const values = buildPlutoHowItWorks({ ...settings, windowEndEt: "15:00", volFarmerV4CallsInTheMoneyAtLastLook: "bought_back_before_weekends" }, figures).volFarmerV4;
-    expect(values).toMatchObject({ callsInTheMoneyAtLastLook: "bought_back_before_weekends", buyBackStartsEt: "14:58", buyBackCancelledAtEt: "15:58", example: { buyBackTimeEt: "14:59" } });
+    expect(values).toMatchObject({ callsInTheMoneyAtLastLook: "bought_back_before_weekends", buyBackStartsEt: "14:58", buyBacksStopEt: "15:59", example: { buyBackTimeEt: "14:59" } });
     // A 140% allowance doubles the pot to 480,000: 38 lots, 38 × 111 = $4,218 + $25.84.
     expect(buildPlutoHowItWorks({ ...settings, excessAllowancePct: 140 }, figures).volFarmerV4.example).toMatchObject({ pot: 480_000, lots: 38, buyBackCostDollars: 4_218, buyBackCommissionDollars: 25.84 });
   });

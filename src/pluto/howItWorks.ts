@@ -10,8 +10,10 @@ import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { tradingSessionsPerYear } from "../lib/tradingSessionsHeld.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
 import { openingLookFallbackEtMinutes } from "./openingLook.js";
-import { cancelMarginMinutes, closeMarginMinutes, hhmmFromMinutes, hhmmMinutesBefore } from "./sessionSchedule.js";
+import { buyBacksStopMinutesBeforeClose, closeMarginMinutes, hhmmFromMinutes, hhmmMinutesBefore } from "./sessionSchedule.js";
 import { volFarmerV4BuyBackMinutesBeforeWindowEnd } from "./volFarmerV4LiveBook.js";
+import { volFarmerV4BuyBackCheckSeconds } from "./buyBackChecks.js";
+import { maxLimitPriceChangesPerPlutoCallBuyBack } from "../lib/orderLimitPriceChangeRequests.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadEnabledPlutoTickerSettings, tickerPotFraction, type PlutoTickerSettings } from "./tickerSettingsStore.js";
 
@@ -114,10 +116,16 @@ export interface PlutoHowItWorks {
     alwaysHoldTheStock: PlutoSettings["volFarmerV4AlwaysHoldTheStock"];
     /** The enabled tickers whose own Always hold the stock is the other value, alphabetical. */
     alwaysHoldTheStockOtherwise: string[];
-    /** The buyback's minutes before the window's end, from buyBackStartsEt (HH:MM ET); a buyback still working is cancelled at buyBackCancelledAtEt on a regular day. */
+    /**
+     * The buyback minutes (Marcelo 2026-11-24): from buyBackMinutesBeforeWindowEnd before the window's end (buyBackStartsEt)
+     * until buyBacksStopEt on a regular day; a ticker's stock is checked against its Call's strike at most every
+     * buyBackCheckSeconds, and a buyback working follows the mid up to buyBackMaxLimitChanges times, until the close.
+     */
     buyBackMinutesBeforeWindowEnd: number;
     buyBackStartsEt: string;
-    buyBackCancelledAtEt: string;
+    buyBacksStopEt: string;
+    buyBackCheckSeconds: number;
+    buyBackMaxLimitChanges: number;
     example: {
       /** Pluto's book value in the example: the pots' base since the Pluto and Manual books (2026-11-05). */
       plutoBookValue: number;
@@ -245,7 +253,9 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
         .sort(),
       buyBackMinutesBeforeWindowEnd: volFarmerV4BuyBackMinutesBeforeWindowEnd,
       buyBackStartsEt: hhmmMinutesBefore(settings.windowEndEt, volFarmerV4BuyBackMinutesBeforeWindowEnd),
-      buyBackCancelledAtEt: hhmmMinutesBefore(regularCloseEt, cancelMarginMinutes),
+      buyBacksStopEt: hhmmMinutesBefore(regularCloseEt, buyBacksStopMinutesBeforeClose),
+      buyBackCheckSeconds: volFarmerV4BuyBackCheckSeconds,
+      buyBackMaxLimitChanges: maxLimitPriceChangesPerPlutoCallBuyBack,
       example: {
         plutoBookValue: volFarmerV4ExamplePlutoBookValue,
         allocationPct: volFarmerV4ExampleAllocationPct,
