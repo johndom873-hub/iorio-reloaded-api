@@ -1011,7 +1011,7 @@ function sellCalls(input: VolFarmerV4LookInput, orders: readonly CallOrder[], bu
       startsCycle,
       ...(buysShares ? { buysShares: true as const } : {}),
       description,
-      chosenBecause: `vol farmer v2: the highest premium yield at or above the ${group.map((order) => order.name).join(" and ")} position's break-even, ${contracts < group.reduce((sum, order) => sum + uncoveredLots(order.position, sharesPerContractOnCycleScale), 0) ? "the volume covering the most lots" : "its volume covering every lot"}`,
+      chosenBecause: `vol farmer v2: the highest premium yield ${input.v3.callStrikeFloor === "none" ? "above the price" : `at or above the ${group.map((order) => order.name).join(" and ")} position's break-even`}, ${contracts < group.reduce((sum, order) => sum + uncoveredLots(order.position, sharesPerContractOnCycleScale), 0) ? "the volume covering the most lots" : "its volume covering every lot"}`,
       candidateScores: { premiumYield: call.premiumYield, delta: call.delta, impliedVolatility: call.impliedVolatility, timeValue: call.timeValue, dte: call.dte, bid: call.bid, ask: call.ask, volumeCap: call.volumeCap, stockPrice, ...breakEvensBefore },
     });
     for (const order of group) order.position.calls.push({ legId: callLegId, shares: order.contracts * sharesPerContractOnCycleScale });
