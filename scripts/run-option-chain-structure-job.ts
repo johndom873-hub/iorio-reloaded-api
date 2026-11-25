@@ -17,7 +17,7 @@
 
 import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
-import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { buildStructureJobOutcome, runOptionChainStructureRefresh } from "../src/ibkr/runOptionChainStructureRefresh.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { fetchSpyLiquidHours } from "../src/ibkr/fetchLiquidHours.js";
@@ -88,4 +88,4 @@ async function main(): Promise<void> {
   );
 }
 
-runScript("run-option-chain-structure-job", main, () => db.destroy());
+runScript("run-option-chain-structure-job", main, () => closeDatabaseAfterPendingWrites());

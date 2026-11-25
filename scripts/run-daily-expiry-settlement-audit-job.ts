@@ -17,7 +17,7 @@
 import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import "dotenv/config";
-import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { runJob } from "../src/lib/runJob.js";
 import { buildExpiryAuditFailureMessage, readExpirySettlementMode, runExpirySettlementAudit, summarizeExpirySettlement } from "../src/lib/expirySettlementAudit.js";
 
@@ -39,4 +39,4 @@ async function main() {
   });
 }
 
-runScript("run-daily-expiry-settlement-audit-job", main, () => db.destroy());
+runScript("run-daily-expiry-settlement-audit-job", main, () => closeDatabaseAfterPendingWrites());

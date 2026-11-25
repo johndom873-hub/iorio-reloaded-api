@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { installCrashHandlers } from "./lib/installCrashHandlers.js";
-import { db } from "./db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "./lib/closeDatabaseAfterPendingWrites.js";
 import { notifyPlutoTelegram } from "./lib/notifyTelegram.js";
 import { currentRelease, PlutoAgent } from "./pluto/agent.js";
 import { agentLeaseRetryIntervalMs, PlutoAgentLease, type AgentLeaseTaken } from "./pluto/agentLease.js";
@@ -21,7 +21,7 @@ installCrashHandlers("pluto_agent");
 const decision = decidePlutoStart();
 if (!decision.start) {
   console.log(`Pluto agent not starting: ${decision.reason}.`);
-  await db.destroy();
+  await closeDatabaseAfterPendingWrites();
   process.exit(0);
 }
 
@@ -44,7 +44,7 @@ async function shutdown(reason: PlutoStopReason): Promise<void> {
   await agent?.stop();
   await stopNotice;
   await lease.release().catch((error) => console.warn(`Pluto agent lease: release failed — ${error instanceof Error ? error.message : error}`));
-  await db.destroy();
+  await closeDatabaseAfterPendingWrites();
   process.exit(0);
 }
 process.on("SIGTERM", () => void shutdown("sigterm"));

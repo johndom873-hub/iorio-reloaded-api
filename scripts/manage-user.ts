@@ -14,6 +14,7 @@
 //   npm run manage-user -- enable <username>
 
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { hashPassword } from "../src/lib/auth.js";
 import { deleteAllPasskeysForUser } from "../src/lib/passkeys.js";
 import { accessLevels, type AccessLevel } from "../src/lib/sessionUser.js";
@@ -157,4 +158,4 @@ main()
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   })
-  .finally(() => db.destroy());
+  .finally(() => closeDatabaseAfterPendingWrites());

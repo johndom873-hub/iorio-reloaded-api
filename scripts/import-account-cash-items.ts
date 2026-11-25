@@ -2,6 +2,7 @@ import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { XMLParser } from "fast-xml-parser";
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { fetchFlexStatements } from "../src/ibkr/fetchFlexCashTransactions.js";
 import { accountCashItemsFromStatement, accountCashItemTotals } from "../src/lib/accountCashItems.js";
 import { easternIsoDate } from "../src/lib/easternIsoDate.js";
@@ -52,4 +53,4 @@ if (!apply) {
     .returning("id");
   console.log(`Stored ${inserted.length} new item(s) of ${items.length}.`);
 }
-await db.destroy();
+await closeDatabaseAfterPendingWrites();

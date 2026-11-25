@@ -9,6 +9,7 @@
 //   npm run ticker:unfreeze -- --env staging --ticker SMCI [--force]            unfreezes (refused while a split is pending, unless --force)
 import "dotenv/config";
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { applySplitRecordRewrite, loadSplitRecordRewritePlan, undoSplitRecordRewrite, type SplitRewritePlan } from "../src/lib/stockSplitRewrite.js";
 import { unfreezeTicker } from "../src/lib/tickerFreeze.js";
 import { clearDownState } from "../src/lib/throttledAlert.js";
@@ -97,4 +98,4 @@ main()
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   })
-  .finally(() => db.destroy());
+  .finally(() => closeDatabaseAfterPendingWrites());

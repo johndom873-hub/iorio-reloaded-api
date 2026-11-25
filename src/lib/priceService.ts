@@ -31,7 +31,7 @@ const flushDebounceMs = 250;
 const lastWrite = new Map<string, { price: number; at: number }>();
 const pendingWrites = new Map<string, { price: number; source: "live" | "frozen" | "daily_close" }>();
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
-let flushInFlight = false;
+let runningFlush: Promise<void> | null = null;
 let anotherFlushNeeded = false;
 
 /** Records real last-trade prices (fire-and-forget safe: never throws into a price stream). */
@@ -48,20 +48,53 @@ export async function recordStockPrices(entries: { symbol: string; price: number
 }
 
 function scheduleFlush(): void {
-  if (flushTimer || flushInFlight) return;
+  if (flushTimer || runningFlush) return;
   flushTimer = setTimeout(() => {
     flushTimer = null;
     void flushPendingWrites();
   }, flushDebounceMs);
 }
 
+/**
+ * Writes the prices still waiting for their debounced flush, after any flush already running. A process calls it before
+ * closing the database: a flush whose timer fires after `db.destroy()` fails with "Unable to acquire a connection".
+ */
+export async function flushPendingStockPriceWrites(): Promise<void> {
+  for (;;) {
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+    if (runningFlush) {
+      await runningFlush;
+      continue;
+    }
+    if (pendingWrites.size === 0) return;
+    await flushPendingWrites();
+  }
+}
+
 async function flushPendingWrites(): Promise<void> {
-  if (flushInFlight) {
+  if (runningFlush) {
     anotherFlushNeeded = true;
     return;
   }
   if (pendingWrites.size === 0) return;
-  flushInFlight = true;
+  const flush = writePendingBatch();
+  runningFlush = flush;
+  try {
+    await flush;
+  } finally {
+    runningFlush = null;
+    if (anotherFlushNeeded || pendingWrites.size > 0) {
+      anotherFlushNeeded = false;
+      scheduleFlush();
+    }
+  }
+}
+
+/** Never rejects: a failed write is logged and its prices are retried by the next call that records them. */
+async function writePendingBatch(): Promise<void> {
   const batch = [...pendingWrites.entries()];
   pendingWrites.clear();
   const now = Date.now();
@@ -73,12 +106,6 @@ async function flushPendingWrites(): Promise<void> {
     for (const [symbol, entry] of batch) lastWrite.set(symbol, { price: entry.price, at: now });
   } catch (error) {
     console.warn(`priceService: could not record prices — ${error instanceof Error ? error.message : error}`);
-  } finally {
-    flushInFlight = false;
-    if (anotherFlushNeeded || pendingWrites.size > 0) {
-      anotherFlushNeeded = false;
-      scheduleFlush();
-    }
   }
 }
 

@@ -24,6 +24,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import knexConfigs from "../src/db/knexfile.js";
 import { environment, requireEnvironmentVariable } from "../src/config/env.js";
 import { notifyTelegram } from "../src/lib/notifyTelegram.js";
@@ -334,5 +335,5 @@ runScript(
       process.exitCode = 1;
     }
   },
-  () => db.destroy(),
+  () => closeDatabaseAfterPendingWrites(),
 );

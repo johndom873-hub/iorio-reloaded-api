@@ -15,6 +15,7 @@
 import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { buildCalendarCaptureJobOutcome, earningsFetchSource, selectAlertWorthyUnresolved, type CalendarFetchFailure, type UnresolvedTicker } from "../src/lib/calendarCaptureOutcome.js";
 import { runJob } from "../src/lib/runJob.js";
 import { captureMajorMacroEvents, reportMajorMacroEventHorizon } from "../src/lib/macroEventCalendar.js";
@@ -118,4 +119,4 @@ async function main(): Promise<void> {
   });
 }
 
-runScript("run-daily-calendar-capture-job", main, () => db.destroy());
+runScript("run-daily-calendar-capture-job", main, () => closeDatabaseAfterPendingWrites());

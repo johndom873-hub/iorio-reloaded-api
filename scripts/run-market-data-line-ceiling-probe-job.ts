@@ -16,7 +16,7 @@
 import "dotenv/config";
 import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
-import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { marketDataLineCeilingProbeJobName, runMarketDataLineCeilingProbe } from "../src/ibkr/marketDataLineCeilingProbeJob.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
@@ -29,4 +29,4 @@ async function main(): Promise<void> {
   await runJob(marketDataLineCeilingProbeJobName, runMarketDataLineCeilingProbe);
 }
 
-runScript("run-market-data-line-ceiling-probe-job", main, () => db.destroy());
+runScript("run-market-data-line-ceiling-probe-job", main, () => closeDatabaseAfterPendingWrites());

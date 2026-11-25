@@ -11,6 +11,7 @@
 import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { requireEnvironmentVariable } from "../src/config/env.js";
 import { parseMarketStatus } from "../src/lib/marketStatusParsing.js";
 import { runJob } from "../src/lib/runJob.js";
@@ -67,4 +68,4 @@ async function main(): Promise<void> {
   });
 }
 
-runScript("sync-market-calendar", main, () => db.destroy());
+runScript("sync-market-calendar", main, () => closeDatabaseAfterPendingWrites());

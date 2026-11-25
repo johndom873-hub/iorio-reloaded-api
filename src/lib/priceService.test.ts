@@ -165,6 +165,46 @@ describe("priceService", () => {
     });
   });
 
+  describe("flushPendingStockPriceWrites", () => {
+    it("writes a queued price at once, and the debounce timer writes nothing more afterwards", async () => {
+      await service.recordStockPrices([{ symbol: "SPY", price: 600.5, source: "live" }]);
+      await service.flushPendingStockPriceWrites();
+      expect(database.state.inserts).toHaveLength(1);
+      expect(database.state.inserts[0]!.rows).toMatchObject([{ symbol: "SPY", price: 600.5, source: "live" }]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(database.state.inserts).toHaveLength(1);
+    });
+
+    it("waits for a write already running, then writes the prices queued meanwhile", async () => {
+      let releaseFirstWrite: () => void = () => undefined;
+      database.state.insertImplementation = () => new Promise<void>((resolve) => (releaseFirstWrite = resolve));
+      await service.recordStockPrices([{ symbol: "AAPL", price: 190, source: "live" }]);
+      await vi.advanceTimersByTimeAsync(250);
+      await service.recordStockPrices([{ symbol: "MSFT", price: 410, source: "live" }]);
+
+      let flushed = false;
+      const flush = service.flushPendingStockPriceWrites().then(() => (flushed = true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(flushed).toBe(false);
+
+      database.state.insertImplementation = null;
+      releaseFirstWrite();
+      await flush;
+      expect(database.state.inserts).toHaveLength(2);
+      expect(database.state.inserts[1]!.rows).toMatchObject([{ symbol: "MSFT", price: 410 }]);
+    });
+
+    it("resolves when the write fails, and with nothing queued writes nothing", async () => {
+      await service.flushPendingStockPriceWrites();
+      expect(database.state.inserts).toHaveLength(0);
+
+      database.state.insertImplementation = () => Promise.reject(new Error("Unable to acquire a connection"));
+      await service.recordStockPrices([{ symbol: "AAPL", price: 190, source: "live" }]);
+      await expect(service.flushPendingStockPriceWrites()).resolves.toBeUndefined();
+      expect(console.warn).toHaveBeenCalledWith("priceService: could not record prices — Unable to acquire a connection");
+    });
+  });
+
   describe("loadFallbackStockPrices", () => {
     it("returns an empty map and queries nothing for no symbols", async () => {
       expect((await service.loadFallbackStockPrices([])).size).toBe(0);

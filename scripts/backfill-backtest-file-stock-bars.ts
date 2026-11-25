@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { isIbkrPacingOrOutageError } from "../src/backtest/backfillDailyHistory.js";
 import { normalizeBacktestSymbol } from "../src/backtest/backtestDataDirectory.js";
@@ -96,4 +96,4 @@ main()
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   })
-  .finally(() => db.destroy());
+  .finally(() => closeDatabaseAfterPendingWrites());

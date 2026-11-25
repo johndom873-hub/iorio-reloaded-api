@@ -12,6 +12,7 @@
 //   node dist/scripts/resolveStuckJobRuns.js
 
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 
 const errorMessage =
   "Orphaned by an external process kill (web dyno was briefly on Eco, whose 30-min idle-sleep SIGTERM'd in-flight Heroku Scheduler dynos mid-run) — root cause fixed 2026-08-25 by switching back to Basic. Manually resolved 2026-08-26, see PROGRESS.md.";
@@ -39,4 +40,4 @@ main()
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   })
-  .finally(() => db.destroy());
+  .finally(() => closeDatabaseAfterPendingWrites());

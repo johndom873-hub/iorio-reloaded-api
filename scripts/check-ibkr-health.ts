@@ -19,7 +19,7 @@
 import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import { runIbkrHealthCheckJob } from "../src/ibkr/checkIbkrHealthJob.js";
-import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 
 // No weekend skip here (removed 2026-08-30) -- unlike the market-data jobs,
 // every check this job runs is weekend-safe on its own: the Gateway
@@ -54,4 +54,4 @@ async function main(): Promise<void> {
   await runIbkrHealthCheckJob();
 }
 
-runScript("check-ibkr-health", main, () => db.destroy());
+runScript("check-ibkr-health", main, () => closeDatabaseAfterPendingWrites());

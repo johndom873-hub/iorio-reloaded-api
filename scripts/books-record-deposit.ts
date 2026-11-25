@@ -9,6 +9,7 @@
 // On a Heroku dyno: node dist/scripts/books-record-deposit.js with the same arguments.
 import "dotenv/config";
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { loadLedgerCashByBook } from "../src/books/bookLedger.js";
 import { loadUnmatchedRecordedDeposits, recordDepositBeforeStatement } from "../src/books/recordedDeposits.js";
 import { formatSignedDollars } from "../src/lib/formatSignedDollars.js";
@@ -68,5 +69,5 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    await db.destroy();
+    await closeDatabaseAfterPendingWrites();
   });

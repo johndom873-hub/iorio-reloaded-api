@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { backfillDailyHistoryForBacktest, backtestHistoryStartDate, describeBacktestHistoryBackfill, isIbkrPacingOrOutageError } from "../src/backtest/backfillDailyHistory.js";
 import { lastFinishedBacktestSessionDate } from "../src/backtest/jobs/backtestJobRules.js";
@@ -77,4 +78,4 @@ main()
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   })
-  .finally(() => db.destroy());
+  .finally(() => closeDatabaseAfterPendingWrites());

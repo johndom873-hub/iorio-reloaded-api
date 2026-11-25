@@ -56,6 +56,7 @@ import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import { OptionType } from "@stoqey/ib";
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { fetchAccountLedgerPnl } from "../src/ibkr/fetchAccountLedgerPnl.js";
 import { fetchAccountSummary } from "../src/ibkr/fetchAccountSummary.js";
 import { fetchFlexStatements } from "../src/ibkr/fetchFlexCashTransactions.js";
@@ -508,5 +509,5 @@ async function main(): Promise<void> {
 // one-off process alive until Heroku cycles it after 24 hours (see shutdown()).
 runScript("run-daily-pnl-snapshot-job", main, async () => {
   await sharedReadConnection.shutdown();
-  await db.destroy();
+  await closeDatabaseAfterPendingWrites();
 });

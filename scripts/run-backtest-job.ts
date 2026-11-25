@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { sharedReadConnection } from "../src/ibkr/sharedReadConnection.js";
 import { executeBacktestJob } from "../src/backtest/jobs/executeBacktestJob.js";
 import { enableExactInputCaches } from "../src/lib/exactInputCaches.js";
@@ -24,7 +24,7 @@ main()
   .finally(async () => {
     // A new symbol's ticker row is created through the shared read connection, which would otherwise keep the process alive.
     await sharedReadConnection.shutdown();
-    await db.destroy();
+    await closeDatabaseAfterPendingWrites();
     // The outcome is written. A detached job process must end even when a library leaves a handle open (an IBKR SSH
     // tunnel that finishes opening after its timeout leaves a listening local server behind).
     process.exit();

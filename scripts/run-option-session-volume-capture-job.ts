@@ -10,7 +10,7 @@
 
 import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
-import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 import { describeSessionVolumeCaptureOutcome, optionSessionVolumeCaptureJobName, runOptionSessionVolumeCapture } from "../src/ibkr/runOptionSessionVolumeCapture.js";
@@ -36,4 +36,4 @@ async function main(): Promise<void> {
   );
 }
 
-runScript("run-option-session-volume-capture-job", main, () => db.destroy());
+runScript("run-option-session-volume-capture-job", main, () => closeDatabaseAfterPendingWrites());

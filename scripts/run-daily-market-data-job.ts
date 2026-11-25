@@ -19,6 +19,7 @@ import { runScript } from "../src/lib/runScript.js";
 import { EventName, WhatToShow } from "@stoqey/ib";
 import type { IbkrConnection } from "../src/ibkr/connectIbkr.js";
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "../src/ibkr/requestMarketData.js";
 import { captureMarketDataSnapshot } from "../src/ibkr/captureMarketDataSnapshot.js";
@@ -232,4 +233,4 @@ async function main(): Promise<void> {
   });
 }
 
-runScript("run-daily-market-data-job", main, () => db.destroy());
+runScript("run-daily-market-data-job", main, () => closeDatabaseAfterPendingWrites());

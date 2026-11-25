@@ -2,6 +2,7 @@ import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { XMLParser } from "fast-xml-parser";
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { loadBookDailySeries } from "../src/books/bookDashboard.js";
 import { accountCashItemsFromStatement } from "../src/lib/accountCashItems.js";
 import { buildPnlAnalysis, loadLedgerCashItems, type AccountCashItemRow, type AnalysisBook, type StoredMoveRow, type StoredRow } from "../src/lib/pnlAnalysis.js";
@@ -98,4 +99,4 @@ for (const book of ["all", "pluto", "manual"] as const) {
   console.log(`      total      ${money(totals.bookPnl)} ${money(totals.strategies)} ${money(totals.cash)} ${money(totals.flagged)} ${money(totals.valuation)} ${money(totals.unexplained)}`);
 }
 console.log(`\n${checks} night(s) above the threshold ($${unexplainedDollarsThreshold} and ${unexplainedFractionThreshold * 100}% of the book).${apply ? "" : " Dry run: nothing stored."}`);
-await db.destroy();
+await closeDatabaseAfterPendingWrites();

@@ -24,6 +24,7 @@ import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import { ScanCode, Stock } from "@stoqey/ib";
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { runScannerSubscription, type ScannerCandidate } from "../src/ibkr/fetchScannerCandidates.js";
 import { enrichCandidate, NO_SECURITY_DEFINITION_ERROR_CODE } from "../src/ibkr/enrichScannerCandidates.js";
@@ -336,4 +337,4 @@ async function main(): Promise<void> {
   });
 }
 
-runScript("run-daily-screener-scan-job", main, () => db.destroy());
+runScript("run-daily-screener-scan-job", main, () => closeDatabaseAfterPendingWrites());

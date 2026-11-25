@@ -22,6 +22,7 @@
 //   node dist/scripts/closeOrphanedRolledStockLegs.js --apply  (apply changes)
 
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 
 const ORPHANED_STOCK_LEG_IDS = ["3a0f05d6-ab27-4179-93a8-392c421b3d8b", "4ccf304d-21a5-4468-806b-4c60d12abaf0"];
 
@@ -93,4 +94,4 @@ main()
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   })
-  .finally(() => db.destroy());
+  .finally(() => closeDatabaseAfterPendingWrites());

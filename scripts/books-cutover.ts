@@ -6,6 +6,7 @@
 //   add --without-statement on staging: its paper account has no usable IBKR statement, so the books start from the live figures
 import "dotenv/config";
 import { db } from "../src/db/connection.js";
+import { closeDatabaseAfterPendingWrites } from "../src/lib/closeDatabaseAfterPendingWrites.js";
 import { sharedReadConnection } from "../src/ibkr/sharedReadConnection.js";
 import { applyBooksCutover, planBooksCutover } from "../src/books/cutover.js";
 import { formatWholeDollars } from "../src/lib/formatWholeDollars.js";
@@ -58,5 +59,5 @@ main()
   })
   .finally(async () => {
     await sharedReadConnection.shutdown();
-    await db.destroy();
+    await closeDatabaseAfterPendingWrites();
   });
