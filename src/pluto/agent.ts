@@ -21,7 +21,7 @@ import { closeAbandonedPlutoPasses, recordPlutoEvent, type PlutoTrigger } from "
 import { PlutoMarketWatch } from "./marketWatch.js";
 import { runPlutoPass, type PassRequest, type PassRunnerContext } from "./passRunner.js";
 import { advanceOpeningLook, decideOpeningLook, type OpeningLookDecision, type OpeningLookProgress } from "./openingLook.js";
-import { forcedRoundRetryDelayMs, recordRoundOutcome, roundFailureAlertText, roundFailureRecoveryText, shouldRetryForcedRound, type RoundFailureState } from "./roundFailures.js";
+import { forcedRoundRetryDelayMs, liveQuoteRetryDelayMs, switchedOnTickerQuoteWaitMs, liveQuoteRetrySymbols, recordRoundOutcome, roundFailureAlertText, roundFailureRecoveryText, shouldRetryForcedRound, type RoundFailureState } from "./roundFailures.js";
 import { resolvePlutoSession } from "./sessionSchedule.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { assemblePlutoReadinessResults, decidePlutoReadinessRun, describePlutoReadinessOutcome, reusableProbeResults, runPlutoReadinessTests } from "./readiness.js";
@@ -51,6 +51,11 @@ const readinessIntervalMs = 60_000;
 /** Pluto connects to IBKR as its window opens; a connection still missing this long after the window opened (or the process started) counts as lost, as on the screen. */
 const connectionGraceMs = 2 * 60_000;
 export const plutoProcessName = "pluto_agent";
+
+/** The round onNotification queues for a ticker switched on (fields ["enabled"], that ticker alone). */
+export function isTickerSwitchedOnRound(round: { trigger: string; detail: Record<string, unknown>; symbols: string[] | null }): boolean {
+  return round.trigger === "settings_changed" && round.symbols !== null && round.symbols.length > 0 && Array.isArray(round.detail.fields) && round.detail.fields.includes("enabled");
+}
 
 // Settings that shape how Pluto operates but never what it would decide: changing only these does
 // not warrant a forced round.
@@ -555,7 +560,17 @@ export class PlutoAgent {
     if (forced) {
       // Until today's opening look has run, the only data for opens is yesterday's: a forced round may manage held positions only.
       const beforeOpeningLook = forced.trigger !== "opening_analysis" && this.openingLook.doneFor !== easternIsoDate(new Date());
-      const result = await this.runRoundSafely({ trigger: forced.trigger, triggerDetail: forced.detail, symbols: forced.symbols ?? [], force: true, heldPositionsOnly: beforeOpeningLook });
+      if (isTickerSwitchedOnRound(forced) && this.phase === "window") await this.watchSwitchedOnTickers(forced.symbols ?? []);
+      const { result, quoteBlockedSymbols } = await this.runRoundSafely({ trigger: forced.trigger, triggerDetail: forced.detail, symbols: forced.symbols ?? [], force: true, heldPositionsOnly: beforeOpeningLook });
+      const retrySymbols = liveQuoteRetrySymbols(forced, result, quoteBlockedSymbols);
+      if (retrySymbols.length > 0) {
+        const timer = setTimeout(() => {
+          this.retryTimers.delete(timer);
+          this.queueForcedRound("live_quote_retry", { symbols: retrySymbols, afterSeconds: liveQuoteRetryDelayMs / 1000, retryOf: forced.trigger }, retrySymbols, true);
+        }, liveQuoteRetryDelayMs);
+        timer.unref?.();
+        this.retryTimers.add(timer);
+      }
       if (forced.trigger === "opening_analysis" && this.pendingOpeningLook) {
         const pending = this.pendingOpeningLook;
         this.pendingOpeningLook = null;
@@ -640,16 +655,33 @@ export class PlutoAgent {
    * Runs one round. "completed" covers skipped rounds, except one stopped at the system checks. Three failures in a row
    * alert once (roundFailures.ts).
    */
-  private async runRoundSafely(request: PassRequest): Promise<"completed" | "skipped_on_system_checks" | "failed"> {
-    if (this.stopped) return "completed";
+  /**
+   * A ticker switched on gets its stock line now and its round waits up to switchedOnTickerQuoteWaitMs for a live quote
+   * (Marcelo 2026-11-25): housekeeping subscribes lines only every minute, so the round used to find none and block a share order.
+   */
+  private async watchSwitchedOnTickers(symbols: readonly string[]): Promise<void> {
+    for (const symbol of symbols) {
+      try {
+        const quoted = await this.marketWatch.watchNowAndAwaitQuote(symbol, switchedOnTickerQuoteWaitMs);
+        if (!quoted) console.warn(`Pluto: ${symbol} was switched on but had no two-sided stock quote within ${switchedOnTickerQuoteWaitMs / 1000} s; its round runs anyway.`);
+      } catch (error) {
+        console.warn(`Pluto: subscribing ${symbol}'s stock line failed — ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+
+  private async runRoundSafely(request: PassRequest): Promise<{ result: "completed" | "skipped_on_system_checks" | "failed"; quoteBlockedSymbols: string[] }> {
+    if (this.stopped) return { result: "completed", quoteBlockedSymbols: [] };
     // Not while another agent holds the lease (this process stops when it learns that), nor while the renewal cannot reach the database.
-    if (this.lease && !(await this.lease.confirmHeld())) return "failed";
+    if (this.lease && !(await this.lease.confirmHeld())) return { result: "failed", quoteBlockedSymbols: [] };
     let result: "completed" | "skipped_on_system_checks" | "failed" = "completed";
+    let quoteBlockedSymbols: string[] = [];
     this.roundInFlight = true;
     this.roundsStarted += 1;
     try {
       const summary = await runPlutoPass(request, this.context);
       if (summary.skippedOnSystemChecks) result = "skipped_on_system_checks";
+      quoteBlockedSymbols = summary.quoteBlockedSymbols ?? [];
       // The round waited for the ledger to catch up on a fill (ledgerCheck.ts): another looks at every ticker shortly.
       if (summary.retryAfterSeconds !== undefined) {
         const timer = setTimeout(() => {
@@ -672,7 +704,7 @@ export class PlutoAgent {
     this.roundFailures = outcome.state;
     if (outcome.send === "alert") await notifyPlutoTelegram(roundFailureAlertText).catch(() => false);
     if (outcome.send === "recovery") await notifyPlutoTelegram(roundFailureRecoveryText).catch(() => false);
-    return result;
+    return { result, quoteBlockedSymbols };
   }
 
   async stop(): Promise<void> {

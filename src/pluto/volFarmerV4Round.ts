@@ -155,6 +155,19 @@ export interface VolFarmerV4RoundSummary {
   notes: string[];
   /** The round waited for the ledger to catch up on a fill (ledgerCheck.ts): another round is due this many seconds later. */
   retryAfterSeconds?: number;
+  /** Tickers with an order held back only for want of a live two-sided quote (blockedOnlyByLiveQuote). */
+  quoteBlockedSymbols?: string[];
+}
+
+/** An order whose only failed gate is live_quote: nothing else held it back, so it may pass once a quote is in. */
+export function blockedOnlyByLiveQuote(gateResults: readonly PlutoGateResult[]): boolean {
+  const failed = gateResults.filter((gate) => !gate.ok);
+  return failed.length === 1 && failed[0]!.gate === "live_quote";
+}
+
+function noteQuoteBlocked(summary: VolFarmerV4RoundSummary, symbol: string): void {
+  summary.quoteBlockedSymbols ??= [];
+  if (!summary.quoteBlockedSymbols.includes(symbol)) summary.quoteBlockedSymbols.push(symbol);
 }
 
 /** An option order the round sends, ready for the executor: what it is, its live price and its record. */
@@ -729,6 +742,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
       }
       if (!result.sent) note(result.detail);
       else summary.sent += 1;
+      if (result.blockedOnlyByLiveQuote) noteQuoteBlocked(summary, symbol);
       pending.push(pendingVolFarmerV4Order(state, order, result.actionId, round.optionCommissionDollars));
       continue;
     }
@@ -749,6 +763,7 @@ async function lookAtTicker(context: { input: VolFarmerV4RoundInput; ticker: Plu
       sent.push(item.leg ? { ...pendingOrder, contracts: item.contracts } : pendingOrder);
       if (!result.sent) note(result.detail);
       else summary.sent += 1;
+      if (result.blockedOnlyByLiveQuote) noteQuoteBlocked(summary, symbol);
     }
     if (sent.length === 0) {
       undo(order);
@@ -976,7 +991,7 @@ async function sendOrder(context: {
   tickerCounts: TickerCounts;
   farmer: ReturnType<typeof volFarmerV4RulesOf>["farmer"];
   v2: ReturnType<typeof volFarmerV4RulesOf>["v2"];
-}): Promise<{ actionId: string | null; sent: boolean; detail: string }> {
+}): Promise<{ actionId: string | null; sent: boolean; detail: string; blockedOnlyByLiveQuote?: boolean }> {
   const { input, ticker, item, stockPrice, clock, round, tickerCounts, farmer, v2 } = context;
   const { settings } = input;
   const opening = item.kind !== "sell_leaps";
@@ -1034,7 +1049,7 @@ async function sendOrder(context: {
   if (!ok) {
     const detail = gateResults.filter((gate) => !gate.ok).map((gate) => gate.detail).join("; ");
     await recordPlutoEvent("action_blocked", { passId: input.passId, actionId, symbol: ticker.symbol, stage: "vol_farmer_v4", reason: detail });
-    return { actionId, sent: false, detail: `${description} blocked: ${detail}` };
+    return { actionId, sent: false, detail: `${description} blocked: ${detail}`, blockedOnlyByLiveQuote: blockedOnlyByLiveQuote(gateResults) };
   }
   await recordPlutoEvent("action_validated", { passId: input.passId, actionId, symbol: ticker.symbol, quantity: item.contracts, limitPrice, reasons: [item.chosenBecause] });
   const dte = daysToExpiry(item.contract.expiry, clock.todayIso);
@@ -1086,7 +1101,7 @@ function bookCapitalGate(capital: ReturnType<typeof strategyBookCapitalVerdict>)
  * and Pluto's capital budget, a sale from the ticker's leftover-stock position, each at the mid of Pluto's own stock
  * quote (bid and ask, no older than the band's quote age), then the executor. Answers as sendOrder does.
  */
-async function sendShareOrder(context: { input: VolFarmerV4RoundInput; ticker: PlutoTickerSettings; order: VolFarmerV4PlannedOrder; clock: { todayIso: string }; round: RoundState; tickerCounts: TickerCounts }): Promise<{ actionId: string | null; sent: boolean; detail: string }> {
+async function sendShareOrder(context: { input: VolFarmerV4RoundInput; ticker: PlutoTickerSettings; order: VolFarmerV4PlannedOrder; clock: { todayIso: string }; round: RoundState; tickerCounts: TickerCounts }): Promise<{ actionId: string | null; sent: boolean; detail: string; blockedOnlyByLiveQuote?: boolean }> {
   const { input, ticker, order, round, tickerCounts } = context;
   const { settings } = input;
   const buying = order.kind === "buy_shares";
@@ -1137,7 +1152,7 @@ async function sendShareOrder(context: { input: VolFarmerV4RoundInput; ticker: P
   if (!ok) {
     const detail = gateResults.filter((gate) => !gate.ok).map((gate) => gate.detail).join("; ");
     await recordPlutoEvent("action_blocked", { passId: input.passId, actionId, symbol: ticker.symbol, stage: "vol_farmer_v4", reason: detail });
-    return { actionId, sent: false, detail: `${description} blocked: ${detail}` };
+    return { actionId, sent: false, detail: `${description} blocked: ${detail}`, blockedOnlyByLiveQuote: blockedOnlyByLiveQuote(gateResults) };
   }
   await recordPlutoEvent("action_validated", { passId: input.passId, actionId, symbol: ticker.symbol, quantity: shares, limitPrice, reasons: [chosenBecause] });
   const plan = { quantity: shares, limitPrice: limitPrice!, notional, fullSizeQuantity: shares };

@@ -24,6 +24,11 @@ const harness = vi.hoisted(() => ({
   expiringCalls: [] as { symbol: string; strike: number }[],
   stockPrice: null as number | null,
   settleCalls: [] as (string[] | null)[],
+  /** Each watchNowAndAwaitQuote call (symbol, timeout) and what it answers. */
+  watchNowCalls: [] as { symbol: string; timeoutMs: number }[],
+  quoteArrives: true,
+  /** One entry per runPlutoPass call: the tickers it held back for want of a live quote. */
+  quoteBlockedScript: [] as string[][],
 }));
 
 vi.mock("../db/connection.js", () => {
@@ -85,6 +90,10 @@ vi.mock("./marketWatch.js", () => ({
     async watch() {
       return { ok: harness.watchOk, detail: "" };
     }
+    async watchNowAndAwaitQuote(symbol: string, timeoutMs: number) {
+      harness.watchNowCalls.push({ symbol, timeoutMs });
+      return harness.quoteArrives;
+    }
     async stop() {}
   },
 }));
@@ -95,7 +104,8 @@ vi.mock("./passRunner.js", () => ({
     if (harness.holdRound) await harness.holdRound;
     const next = harness.passScript.length > 0 ? harness.passScript.shift()! : null;
     if (next instanceof Error) throw next;
-    return { passId: `pass-${harness.passRequests.length}`, modelCalled: next === null, skippedReason: next, outcome: next === null ? "no_trade" : null };
+    const quoteBlockedSymbols = harness.quoteBlockedScript.shift() ?? [];
+    return { passId: `pass-${harness.passRequests.length}`, modelCalled: next === null, skippedReason: next, outcome: next === null ? "no_trade" : null, ...(quoteBlockedSymbols.length > 0 ? { quoteBlockedSymbols } : {}) };
   }),
 }));
 vi.mock("./sessionSchedule.js", () => ({ resolvePlutoSession: async () => ({ isOpen: true, windowStartEt: "09:45", windowEndEt: "15:30", windowStartAtMs: Date.parse("2026-10-07T13:45:00Z"), windowEndAtMs: Date.parse("2026-10-07T19:30:00Z"), buyBacksStopAtMs: Date.parse("2026-10-07T19:59:00Z"), buyBacksStopEt: "15:59", closeAtMs: Date.parse("2026-10-07T20:00:00Z") }) }));
@@ -148,6 +158,9 @@ beforeEach(() => {
   harness.expiringCalls = [];
   harness.stockPrice = null;
   harness.settleCalls.length = 0;
+  harness.watchNowCalls.length = 0;
+  harness.quoteArrives = true;
+  harness.quoteBlockedScript.length = 0;
 });
 
 afterEach(() => {
@@ -287,6 +300,63 @@ describe("PlutoAgent rounds queued by notifications", () => {
     expect(agent.forcedRounds).toEqual([{ trigger: "settings_changed", detail: { fields: ["enabled"], symbol: "NVDA", by: "Marcelo" }, symbols: ["NVDA"], retried: false }]);
     await agent.loopIteration();
     expect(harness.passRequests[0]).toMatchObject({ trigger: "settings_changed", symbols: ["NVDA"], force: true, heldPositionsOnly: false });
+    // Its stock line is subscribed, and a quote awaited, before the round: not left to housekeeping's next tick (RKLB 2026-11-25).
+    expect(harness.watchNowCalls).toEqual([{ symbol: "NVDA", timeoutMs: 10_000 }]);
+  });
+
+  it("a switched-on ticker's round still runs when no quote arrives in time; other forced rounds and the buyback minutes await none", async () => {
+    harness.quoteArrives = false;
+    const agent = makeAgent();
+    agent.phase = "window";
+    agent.openingLook.doneFor = easternIsoDate(new Date());
+    agent.onNotification(plutoEvent("ticker_enabled", { symbol: "RKLB", by: "Marcelo" }));
+    await agent.loopIteration();
+    expect(harness.passRequests).toHaveLength(1);
+    agent.queueForcedRound("cooldown_ended", { symbol: "AMD" }, ["AMD"]);
+    await agent.loopIteration();
+    agent.phase = "buy_backs";
+    agent.onNotification(plutoEvent("ticker_enabled", { symbol: "NVDA", by: "Marcelo" }));
+    await agent.loopIteration();
+    expect(harness.passRequests.map((request) => request.trigger)).toEqual(["settings_changed", "cooldown_ended", "settings_changed"]);
+    expect(harness.watchNowCalls.map((call) => call.symbol)).toEqual(["RKLB"]);
+  });
+
+  it("a forced round that held an order back for want of a live quote looks again at those tickers once, 30 s later", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const agent = makeAgent();
+    agent.phase = "window";
+    agent.openingLook.doneFor = easternIsoDate(new Date());
+    harness.quoteBlockedScript.push(["RKLB"], ["RKLB"]);
+    agent.onNotification(plutoEvent("ticker_enabled", { symbol: "RKLB", by: "Marcelo" }));
+    await agent.loopIteration();
+    expect(agent.forcedRounds).toEqual([]);
+    expect(agent.retryTimers.size).toBe(1);
+    vi.advanceTimersByTime(29_999);
+    expect(agent.forcedRounds).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(agent.forcedRounds).toEqual([{ trigger: "live_quote_retry", detail: { symbols: ["RKLB"], afterSeconds: 30, retryOf: "settings_changed" }, symbols: ["RKLB"], retried: true }]);
+    await agent.loopIteration();
+    expect(harness.passRequests[1]).toMatchObject({ trigger: "live_quote_retry", symbols: ["RKLB"], force: true, heldPositionsOnly: false });
+    // Blocked again: no second retry.
+    expect(agent.retryTimers.size).toBe(0);
+  });
+
+  it("no live-quote retry after a round that held nothing back, one that failed, or a band round", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const agent = makeAgent();
+    agent.phase = "window";
+    agent.openingLook.doneFor = easternIsoDate(new Date());
+    agent.queueForcedRound("order_ended", { symbol: "AMD", outcome: "filled" }, null);
+    await agent.loopIteration();
+    expect(agent.retryTimers.size).toBe(0);
+    harness.passScript.push(new Error("db down"));
+    harness.quoteBlockedScript.push(["RKLB"]);
+    agent.queueForcedRound("position_closed", {}, null);
+    await agent.loopIteration();
+    // Only the failed round's own retry (forcedRoundRetryDelayMs) is set, as a position_closed round.
+    expect(agent.retryTimers.size).toBe(1);
+    vi.runOnlyPendingTimers();
+    expect(agent.forcedRounds.map((round: { trigger: string }) => round.trigger)).toEqual(["position_closed"]);
   });
 
   it("a ticker switched off, or an event with no symbol, queues nothing; a decision setting still queues an every-ticker round", () => {
@@ -430,10 +500,10 @@ describe("PlutoAgent agent lease", () => {
     const agent: AgentInternals = new PlutoAgent({ apiBaseUrl: "http://x", serviceUsername: "u", serviceUserPassword: "p", serviceLoginSecret: "s", telegramBotToken: "t" }, lease);
     agent.settings = { daySignalsPollSeconds: 1, tickerCooldownMinutes: 0, volFarmerV4CallsInTheMoneyAtLastLook: harness.callsInTheMoney };
     const request = { trigger: "band_quotes_update", triggerDetail: {}, symbols: ["AAA"], force: false };
-    expect(await agent.runRoundSafely(request)).toBe("failed");
+    expect((await agent.runRoundSafely(request)).result).toBe("failed");
     expect(harness.passRequests).toHaveLength(0);
     leaseHeld = true;
-    expect(await agent.runRoundSafely(request)).toBe("completed");
+    expect((await agent.runRoundSafely(request)).result).toBe("completed");
     expect(harness.passRequests).toHaveLength(1);
     expect(lease.confirmHeld).toHaveBeenCalledTimes(2);
   });
@@ -462,7 +532,7 @@ describe("PlutoAgent adopting working orders", () => {
     await agent.adoptWorkingOrders();
     expect(adoptedOrderIds()).toEqual([]);
     releaseRound();
-    expect(await round).toBe("completed");
+    expect((await round).result).toBe("completed");
     await agent.adoptWorkingOrders();
     expect(adoptedOrderIds()).toEqual(["order-1"]);
   });

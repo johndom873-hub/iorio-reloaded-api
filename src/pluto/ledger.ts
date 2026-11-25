@@ -9,10 +9,11 @@ import { ensurePlutoSettingsVersion } from "./settingsVersions.js";
 
 /**
  * What started an analysis round: a finished cycle of option quote band quotes (band_quotes_update), or, without one, the day's first
- * analysis, a settings change, an order ending, a ticker's cooldown ending, a position closing. Rounds stored before
+ * analysis, a settings change, an order ending, a ticker's cooldown ending, a position closing, or a forced round's second
+ * try on the tickers whose orders it held back for want of a live quote (live_quote_retry). Rounds stored before
  * Signals was retired (2026-10-27) may carry day_signals_update, grade_crossing or held_leg.
  */
-export type PlutoTrigger = "opening_analysis" | "band_quotes_update" | "settings_changed" | "order_ended" | "cooldown_ended" | "position_closed" | "ledger_catch_up" | "buy_back_check" | "manual";
+export type PlutoTrigger = "opening_analysis" | "band_quotes_update" | "settings_changed" | "order_ended" | "cooldown_ended" | "position_closed" | "ledger_catch_up" | "live_quote_retry" | "buy_back_check" | "manual";
 
 export interface PlutoSystemCheck {
   ok: boolean;

@@ -6,6 +6,7 @@ import { roundToCents } from "../lib/positionOrderRules.js";
 import { optionLimitCentsGivenUp, optionLimitPriceGivingUpOneCent } from "../lib/optionLimitPrice.js";
 import { followTheMidCheckIntervalSeconds, followTheMidIsOn, maxLimitPriceChangesPerOrder } from "../lib/orderLimitPriceChanges.js";
 import { ledgerCatchUpRetrySeconds, ledgerMismatchHoldSeconds } from "./ledgerCheck.js";
+import { liveQuoteRetryDelayMs, switchedOnTickerQuoteWaitMs } from "./roundFailures.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { tradingSessionsPerYear } from "../lib/tradingSessionsHeld.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
@@ -88,6 +89,10 @@ export interface PlutoHowItWorks {
     ledgerCatchUpRetrySeconds: number;
     /** …and a ticker whose memory and positions still disagree after this many seconds is held, a person told. */
     ledgerMismatchHoldSeconds: number;
+    /** A ticker switched on: its round waits up to this many seconds for its first live stock quote… */
+    switchedOnQuoteWaitSeconds: number;
+    /** …and an order held back only for want of a live quote is looked at once more this many seconds later (roundFailures.ts). */
+    liveQuoteRetrySeconds: number;
     /** % of the pot the first position's shares are bought with; the Puts sell on the rest. */
     firstPositionPct: number;
     putsStartCallYieldPct: number;
@@ -227,6 +232,8 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       maxLimitChangesPerOrder: maxLimitPriceChangesPerOrder,
       ledgerCatchUpRetrySeconds,
       ledgerMismatchHoldSeconds,
+      switchedOnQuoteWaitSeconds: switchedOnTickerQuoteWaitMs / 1000,
+      liveQuoteRetrySeconds: liveQuoteRetryDelayMs / 1000,
       firstPositionPct: settings.volFarmerV4FirstPositionPct,
       putsStartCallYieldPct: settings.volFarmerV4PutsStartCallYieldPct,
       putMaxAbsDelta: settings.volFarmerV4PutMaxAbsDelta,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { recordRoundOutcome, shouldRetryForcedRound, type RoundFailureState } from "./roundFailures.js";
+import { liveQuoteRetrySymbols, recordRoundOutcome, shouldRetryForcedRound, type RoundFailureState } from "./roundFailures.js";
 
 const fresh: RoundFailureState = { consecutiveFailures: 0, alerted: false };
 
@@ -29,5 +29,20 @@ describe("shouldRetryForcedRound", () => {
     expect(shouldRetryForcedRound({ trigger: "settings_changed" })).toBe(true);
     expect(shouldRetryForcedRound({ trigger: "settings_changed", retried: true })).toBe(false);
     expect(shouldRetryForcedRound({ trigger: "opening_analysis" })).toBe(false);
+  });
+});
+
+describe("liveQuoteRetrySymbols", () => {
+  it("retries a completed forced round's quote-blocked tickers once, the opening look's too, sorted and once each", () => {
+    expect(liveQuoteRetrySymbols({ trigger: "settings_changed" }, "completed", ["RKLB"])).toEqual(["RKLB"]);
+    expect(liveQuoteRetrySymbols({ trigger: "opening_analysis" }, "completed", ["SLV", "BE", "SLV"])).toEqual(["BE", "SLV"]);
+  });
+
+  it("never retries a retry, a round that held nothing back, or one that did not complete", () => {
+    expect(liveQuoteRetrySymbols({ trigger: "live_quote_retry", retried: true }, "completed", ["RKLB"])).toEqual([]);
+    expect(liveQuoteRetrySymbols({ trigger: "settings_changed", retried: true }, "completed", ["RKLB"])).toEqual([]);
+    expect(liveQuoteRetrySymbols({ trigger: "settings_changed" }, "completed", [])).toEqual([]);
+    expect(liveQuoteRetrySymbols({ trigger: "settings_changed" }, "failed", ["RKLB"])).toEqual([]);
+    expect(liveQuoteRetrySymbols({ trigger: "settings_changed" }, "skipped_on_system_checks", ["RKLB"])).toEqual([]);
   });
 });

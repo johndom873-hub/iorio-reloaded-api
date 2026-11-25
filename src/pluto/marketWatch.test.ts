@@ -5,12 +5,15 @@ const harness = vi.hoisted(() => ({
   linesEnabled: true,
   subscribed: [] as string[],
   unsubscribed: [] as string[],
+  /** The quote callback of each subscription, by key. */
+  listeners: new Map<string, (quote: { last: number | null; bid: number | null; ask: number | null; previousClose: number | null }) => void>(),
 }));
 
 vi.mock("../config/env.js", () => ({ ibkrMarketDataLinesEnabled: () => harness.linesEnabled }));
 vi.mock("../ibkr/marketDataPool.js", () => ({
-  subscribeToPooledQuote: async (contract: { key: string }) => {
+  subscribeToPooledQuote: async (contract: { key: string }, listener: (quote: { last: number | null; bid: number | null; ask: number | null; previousClose: number | null }) => void) => {
     harness.subscribed.push(contract.key);
+    harness.listeners.set(contract.key, listener);
     return () => harness.unsubscribed.push(contract.key);
   },
 }));
@@ -23,6 +26,7 @@ beforeEach(() => {
   harness.linesEnabled = true;
   harness.subscribed.length = 0;
   harness.unsubscribed.length = 0;
+  harness.listeners.clear();
 });
 
 describe("PlutoMarketWatch.watch", () => {
@@ -48,6 +52,73 @@ describe("PlutoMarketWatch.watch", () => {
     const result = await watch.watch(["COIN"]);
     expect(result.ok).toBe(false);
     expect(harness.unsubscribed).toEqual(["pluto-stock-COIN", "pluto-stock-SPY"]);
+  });
+});
+
+describe("PlutoMarketWatch.watchNowAndAwaitQuote", () => {
+  const quote = (bid: number | null, ask: number | null) => ({ last: 42.42, bid, ask, previousClose: 41 });
+
+  it("subscribes a switched-on ticker's line at once and answers as soon as a two-sided quote arrives", async () => {
+    vi.useFakeTimers();
+    try {
+      const watch = new PlutoMarketWatch(settings);
+      await watch.watch(["NVDA"]);
+      const waiting = watch.watchNowAndAwaitQuote("RKLB", 10_000);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(harness.subscribed).toEqual(["pluto-stock-NVDA", "pluto-stock-SPY", "pluto-stock-RKLB"]);
+      // A one-sided quote is not enough.
+      harness.listeners.get("pluto-stock-RKLB")!(quote(null, 42.45));
+      await vi.advanceTimersByTimeAsync(1_000);
+      harness.listeners.get("pluto-stock-RKLB")!(quote(42.4, 42.45));
+      await vi.advanceTimersByTimeAsync(250);
+      expect(await waiting).toBe(true);
+      // Housekeeping's next watch keeps it, subscribed once.
+      await watch.watch(["NVDA", "RKLB"]);
+      expect(harness.subscribed.filter((key) => key === "pluto-stock-RKLB")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("answers false after the timeout with no quote, the line kept; false at once when lines are disabled", async () => {
+    vi.useFakeTimers();
+    try {
+      const watch = new PlutoMarketWatch(settings);
+      const waiting = watch.watchNowAndAwaitQuote("RKLB", 10_000);
+      await vi.advanceTimersByTimeAsync(10_250);
+      expect(await waiting).toBe(false);
+      expect(watch.snapshot("RKLB")).not.toBeNull();
+      harness.linesEnabled = false;
+      expect(await watch.watchNowAndAwaitQuote("AMD", 10_000)).toBe(false);
+      expect(harness.subscribed).not.toContain("pluto-stock-AMD");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("answers at once for a ticker already quoted", async () => {
+    const watch = new PlutoMarketWatch(settings);
+    await watch.watch(["RKLB"]);
+    harness.listeners.get("pluto-stock-RKLB")!(quote(42.4, 42.45));
+    expect(await watch.watchNowAndAwaitQuote("RKLB", 10_000)).toBe(true);
+  });
+});
+
+describe("PlutoMarketWatch.hasFreshTwoSidedQuote", () => {
+  it("holds a quote to the order route's 15 seconds and to a bid above 0 at or under the ask", async () => {
+    const watch = new PlutoMarketWatch(settings);
+    await watch.watch(["RKLB"]);
+    const listener = harness.listeners.get("pluto-stock-RKLB")!;
+    expect(watch.hasFreshTwoSidedQuote("RKLB", Date.now())).toBe(false);
+    listener({ last: 42.42, bid: 42.4, ask: 42.45, previousClose: 41 });
+    const receivedAtMs = watch.snapshot("RKLB")!.updatedAtMs!;
+    expect(watch.hasFreshTwoSidedQuote("RKLB", receivedAtMs + 15_000)).toBe(true);
+    expect(watch.hasFreshTwoSidedQuote("RKLB", receivedAtMs + 15_001)).toBe(false);
+    listener({ last: 42.42, bid: 0, ask: 42.45, previousClose: 41 });
+    expect(watch.hasFreshTwoSidedQuote("RKLB", Date.now())).toBe(false);
+    listener({ last: 42.42, bid: 42.5, ask: 42.45, previousClose: 41 });
+    expect(watch.hasFreshTwoSidedQuote("RKLB", Date.now())).toBe(false);
+    expect(watch.hasFreshTwoSidedQuote("AMD", Date.now())).toBe(false);
   });
 });
 

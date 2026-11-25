@@ -165,7 +165,7 @@ vi.mock("./ledgerCheck.js", async (original) => ({
 }));
 vi.mock("./stateStore.js", () => ({ loadPlutoState: async () => harness.plutoState }));
 
-const { followTheMidOfAdoptedOrder, followTheMidOfShareOrder, isVolFarmerV4BuyBackRound, runVolFarmerV4Round, settleVolFarmerV4EndedOrders, volFarmerV4CallsLeftToBeAssignedNote, volFarmerV4CallsToBuyBack, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
+const { blockedOnlyByLiveQuote, followTheMidOfAdoptedOrder, followTheMidOfShareOrder, isVolFarmerV4BuyBackRound, runVolFarmerV4Round, settleVolFarmerV4EndedOrders, volFarmerV4CallsLeftToBeAssignedNote, volFarmerV4CallsToBuyBack, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");
 
 /** v4 at its defaults: Calls expiring at today's close, 80% of the pot in shares, rebalanced. */
 const v4Settings = { ...plutoSafetyLimitsSettingsFixture, ...plutoVolFarmerV4SettingsFixture, excessAllowancePct: 0, maxQuoteAgeMinutes: 10, burstLines: 10, telegramVerbosity: "actions" };
@@ -285,6 +285,30 @@ describe("runVolFarmerV4Round", () => {
     expect(summary.sent).toBe(1);
     // Pot $250,000; committed: the exposure, 30,000; free cash: the budget's $500,000 at most the account's $400,000; LEAPS cap 10% of the pot; the Puts' half, 125,000.
     expect(harness.lastRounds.get("t-VFT")).toEqual({ notes: [expect.stringContaining("VFT Sell $105 Call")], figures: { potDollars: 250_000, committedDollars: 30_000, freeCashDollars: 400_000, leapsCapDollars: 25_000, putsDollars: 125_000 } });
+  });
+
+  it("a Call held back only for want of a live quote at its burst names the ticker for one more look; one held back by a rule does not", async () => {
+    const burst = marketWatch.burst;
+    try {
+      marketWatch.burst = async () => [];
+      const summary = await round();
+      expect(harness.actions).toEqual([expect.objectContaining({ kind: "open_covered_call", outcome: "blocked", blockReason: "live_quote: no live two-sided quote" })]);
+      expect(summary.quoteBlockedSymbols).toEqual(["VFT"]);
+    } finally {
+      marketWatch.burst = burst;
+    }
+    // A quote is in at the burst but the bid is under v4's $0.05 minimum: a rule held it back, so no second look.
+    harness.actions.length = 0;
+    harness.memory.clear();
+    const lowBid = marketWatch.burst;
+    try {
+      marketWatch.burst = async (_symbol: string, contracts: { expiry: string; strike: number; right: "C" | "P" }[]) => contracts.map((contract) => ({ ...contract, bid: 0.01, ask: 0.03, bidSize: 1_000, askSize: 1_000 })) as never;
+      const summary = await round();
+      expect(harness.actions).toEqual([expect.objectContaining({ kind: "open_covered_call", outcome: "blocked", blockReason: expect.stringContaining("vol_farmer_v4_rules") })]);
+      expect(summary.quoteBlockedSymbols).toBeUndefined();
+    } finally {
+      marketWatch.burst = lowBid;
+    }
   });
 
   it("sells every uncovered lot whatever the bid size of its quote shows, or none shown (Marcelo 2026-11-05: Pluto's sales are limits at the live mid)", async () => {
@@ -551,6 +575,8 @@ describe("runVolFarmerV4Round: v4's share orders and settled cash", () => {
     expect(harness.actions).toEqual([expect.objectContaining({ kind: "buy_shares", outcome: "blocked", blockReason: expect.stringContaining("live_quote: no two-sided stock quote of the last 15 seconds") })]);
     expect(harness.executed).toEqual([]);
     expect(summary.sent).toBe(0);
+    // Held back only for want of a quote: the agent looks at the ticker once more (liveQuoteRetrySymbols).
+    expect(summary.quoteBlockedSymbols).toEqual(["VFT"]);
   });
 
   it("always holding the stock, on a day no option ends, buys a flat ticker's first position alone at the mid of Pluto's quote, waits while it works, then holds the shares at their fill", async () => {
@@ -1037,5 +1063,16 @@ describe("settleVolFarmerV4EndedOrders: the memory settled when no round runs (M
     harness.outcomes.set("a-buyback", { working: false, filledContracts: 0, optionLegIds: [], optionNetDollars: 0, sharesBought: 0, sharesCostDollars: 0, sharesSold: 0 });
     expect(await settleVolFarmerV4EndedOrders(["VFT"])).toEqual([{ symbol: "VFT", notes: ["the buyback of the 49.5 Call did not fill: the Call is left to be assigned"] }]);
     expect((harness.memory.get("t-VFT") as VolFarmerV4Memory).state.first!.calls).toEqual([{ legId: "c1", shares: 1_900 }]);
+  });
+});
+
+describe("blockedOnlyByLiveQuote", () => {
+  it("is true only when live_quote is the one failed gate", () => {
+    const passed = { gate: "vol_farmer_v4", ok: true, detail: "" };
+    const noQuote = { gate: "live_quote", ok: false, detail: "no two-sided stock quote of the last 15 seconds" };
+    expect(blockedOnlyByLiveQuote([passed, noQuote])).toBe(true);
+    expect(blockedOnlyByLiveQuote([passed, noQuote, { gate: "position", ok: false, detail: "the Call's position was not found" }])).toBe(false);
+    expect(blockedOnlyByLiveQuote([passed, { ...noQuote, ok: true }, { gate: "book_capital", ok: false, detail: "" }])).toBe(false);
+    expect(blockedOnlyByLiveQuote([passed, { ...noQuote, ok: true }])).toBe(false);
   });
 });

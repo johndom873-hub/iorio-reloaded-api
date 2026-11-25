@@ -38,6 +38,8 @@ export interface PassSummary {
   skippedOnSystemChecks?: boolean;
   /** The round waited for the ledger to catch up on a fill (ledgerCheck.ts): the agent runs another this many seconds later. */
   retryAfterSeconds?: number;
+  /** Tickers with an order held back only for want of a live two-sided quote (a forced round tries them once more). */
+  quoteBlockedSymbols?: string[];
 }
 
 async function loadEnabledSymbols(): Promise<string[]> {
@@ -117,7 +119,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   if (request.heldPositionsOnly) return skip("the strategies' orders wait for today's opening look", checks.checks);
   if (checks.context.netLiquidationValue === null) return skip("no net liquidation value for the strategies' pots", checks.checks);
   const roundInput = { passId, settings, api: context.api, marketWatch: context.marketWatch, trackWatch: context.trackWatch, now, todayIso: checks.context.todayEasternIso, totalCashValue: checks.context.totalCashValue, netLiquidationValue: checks.context.netLiquidationValue, closeAtMs: checks.context.session.closeAtMs, windowEndAtMs: checks.context.session.windowEndAtMs, buyBacksStopAtMs: checks.context.session.buyBacksStopAtMs, symbols: request.symbols };
-  const { sent, planned, looked, notes, retryAfterSeconds } = await runVolFarmerV4Round({ ...roundInput, settledCashValue: checks.context.settledCashValue, stressed: marketStress });
+  const { sent, planned, looked, notes, retryAfterSeconds, quoteBlockedSymbols } = await runVolFarmerV4Round({ ...roundInput, settledCashValue: checks.context.settledCashValue, stressed: marketStress });
   const skippedReason =
     sent > 0
       ? null
@@ -129,5 +131,5 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   await finishPass({ candidateCount: planned, systemChecks: checks.checks, skippedReason, notes });
   if (skippedReason) await recordPlutoEvent("pass_skipped", { passId, trigger: request.trigger, reason: skippedReason });
   await recordPlutoPass();
-  return { passId, skippedReason, outcome: sent > 0 ? "trade" : null, ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }) };
+  return { passId, skippedReason, outcome: sent > 0 ? "trade" : null, ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }), ...(quoteBlockedSymbols && quoteBlockedSymbols.length > 0 ? { quoteBlockedSymbols } : {}) };
 }

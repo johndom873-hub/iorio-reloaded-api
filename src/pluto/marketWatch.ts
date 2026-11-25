@@ -3,6 +3,7 @@ import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 import { subscribeToPooledQuote, type PooledQuote } from "../ibkr/marketDataPool.js";
 import type { LiveOptionQuote } from "../lib/optionContractKey.js";
+import { maximumLiveQuoteAgeMs } from "../lib/signalSnapshotLiveQuotes.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 // Pluto's own market data (design round 4, 2026-09-28): one stock line per enabled ticker plus SPY,
@@ -61,14 +62,42 @@ export class PlutoMarketWatch {
         this.stocks.delete(symbol);
       }
     }
-    for (const symbol of wanted) {
-      if (this.stocks.has(symbol)) continue;
-      const stock: WatchedStock = { symbol, last: null, bid: null, ask: null, previousClose: null, updatedAtMs: null };
-      this.stocks.set(symbol, stock);
-      const unsubscribe = await subscribeToPooledQuote({ key: `pluto-stock-${symbol}`, legType: "stock", symbol }, (quote) => this.onStockQuote(stock, quote));
-      this.unsubscribers.set(symbol, unsubscribe);
-    }
+    for (const symbol of wanted) await this.subscribeStock(symbol);
     return { ok: true, detail: `${wanted.size} stock lines; a quote burst adds up to ${this.settings.burstLines} more for ${this.settings.burstSettleSeconds} s` };
+  }
+
+  /**
+   * A ticker switched on mid-session (Marcelo 2026-11-25): its stock line is subscribed at once, not at housekeeping's next
+   * tick, and this waits up to timeoutMs for a two-sided quote no older than maximumLiveQuoteAgeMs, so the round that
+   * follows can price a share order. Answers whether one arrived; the line stays either way (housekeeping keeps or drops it).
+   * Example: RKLB switched on at 15:15:41 UTC on 2026-11-25 was looked at 21 s later, before its line existed, and its
+   * first purchase was blocked.
+   */
+  async watchNowAndAwaitQuote(symbol: string, timeoutMs: number, nowMs: () => number = Date.now, pollMs = 250): Promise<boolean> {
+    if (!ibkrMarketDataLinesEnabled()) return false;
+    await this.subscribeStock(symbol);
+    const deadline = nowMs() + timeoutMs;
+    while (!this.hasFreshTwoSidedQuote(symbol, nowMs())) {
+      if (nowMs() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    return true;
+  }
+
+  /** Whether the stock has a bid and an ask (bid above 0, ask at or above it) received within maximumLiveQuoteAgeMs, the order route's rule. */
+  hasFreshTwoSidedQuote(symbol: string, nowMs: number): boolean {
+    const stock = this.stocks.get(symbol);
+    if (!stock || stock.updatedAtMs === null || nowMs - stock.updatedAtMs > maximumLiveQuoteAgeMs) return false;
+    return stock.bid !== null && stock.ask !== null && stock.bid > 0 && stock.ask >= stock.bid;
+  }
+
+  /** One stock line, once: the entry is set before the subscription is awaited, so a concurrent call never subscribes it twice. */
+  private async subscribeStock(symbol: string): Promise<void> {
+    if (this.stocks.has(symbol)) return;
+    const stock: WatchedStock = { symbol, last: null, bid: null, ask: null, previousClose: null, updatedAtMs: null };
+    this.stocks.set(symbol, stock);
+    const unsubscribe = await subscribeToPooledQuote({ key: `pluto-stock-${symbol}`, legType: "stock", symbol }, (quote) => this.onStockQuote(stock, quote));
+    this.unsubscribers.set(symbol, unsubscribe);
   }
 
   private onStockQuote(stock: WatchedStock, quote: PooledQuote): void {
