@@ -403,7 +403,9 @@ describe("summarizeReadiness and buildReadinessMessage", () => {
     expect(message.split("\n")[0]).toBe("🚫 Pre-open check: NOT READY — production 2026-10-05");
     expect(message).toContain("❌ Worker: offline");
     expect(message).toContain("⚠️ Telegram: 1 undelivered");
-    expect(message).toContain("✅ Account: funded");
+    expect(message).toContain("1 other check passes.");
+    expect(message).not.toContain("Account: funded");
+    expect(message).not.toContain("Fine");
     expect(message).toContain("reply to this message and Genosuke can send the 2FA push");
     expect(buildReadinessMessage({ kind: "final", dateIso: "d", environment: "production", verdict, previous: null }).startsWith("🛑 FINAL pre-open check: NO-GO")).toBe(true);
     expect(buildReadinessMessage({ kind: "changed", dateIso: "d", environment: "production", verdict, previous: null }).startsWith("🚫 Pre-open check: still NOT READY")).toBe(true);

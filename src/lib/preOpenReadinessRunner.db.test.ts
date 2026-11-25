@@ -155,10 +155,10 @@ describe("runPreOpenReadinessIfDue", () => {
     expect(state.stages).toEqual(["open", "open", "open"]);
   });
 
-  it("sends the full report first, then only what changed since the last message", async () => {
+  it("sends problems and a count first, then only what changed since the last message", async () => {
     state.checks = [ok("Trading worker"), ok("Market data"), { name: "Release", status: "ok", detail: "v1" }];
     await runPreOpenReadinessIfDue(at("11:00"));
-    expect(sentMessages[0]).toContain("Fine\n✅ Trading worker: fine");
+    expect(sentMessages[0]).toBe("✅ Pre-open check: READY to trade — production 2031-03-03\n\n3 checks pass.");
 
     await runPreOpenReadinessIfDue(at("14:20"));
     expect(sentMessages[1]).toBe("✅ FINAL pre-open check: GO — production 2031-03-03\n\n3 checks pass, unchanged since 06:00 ET.");

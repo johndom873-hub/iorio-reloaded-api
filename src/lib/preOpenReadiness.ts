@@ -526,8 +526,8 @@ const headlines: Record<ReadinessMessageKind, { ready: string; notReady: string 
 };
 
 /**
- * The first message of the day (no `previous`) is the full report. Every later one lists problems and warnings in full, the
- * live-data lines at the market open, and only what changed since `previous`; the remaining passing checks become a count.
+ * Every message lists problems and warnings in full and turns the passing checks into a count. Messages after the first also list
+ * the live-data lines at the market open and only what changed since `previous`.
  */
 export function buildReadinessMessage(input: { kind: ReadinessMessageKind; dateIso: string; environment: string; verdict: ReadinessVerdict; previous: ReadinessSnapshot | null }): string {
   const { verdict, previous } = input;
@@ -537,7 +537,9 @@ export function buildReadinessMessage(input: { kind: ReadinessMessageKind; dateI
   if (verdict.failing.length > 0) lines.push("", "Problems", ...verdict.failing.map(describe));
   if (verdict.warnings.length > 0) lines.push("", "Look at", ...verdict.warnings.map(describe));
   if (previous === null) {
-    if (verdict.passing.length > 0) lines.push("", "Fine", ...verdict.passing.map(describe));
+    const passingCount = verdict.passing.length;
+    const listedAbove = verdict.failing.length + verdict.warnings.length > 0;
+    if (passingCount > 0) lines.push("", `${passingCount} ${listedAbove ? "other " : ""}${passingCount === 1 ? "check passes" : "checks pass"}.`);
   } else {
     const liveData = input.kind === "open" ? verdict.passing.filter((entry) => liveDataCheckNames.has(entry.name)) : [];
     if (liveData.length > 0) lines.push("", "Live data", ...liveData.map(describe));
