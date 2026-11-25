@@ -163,7 +163,6 @@ vi.mock("./ledgerCheck.js", async (original) => ({
     else if (verdict.sinceMs !== undefined) harness.ledgerMismatchSince.set(tickerId, new Date(verdict.sinceMs));
   },
 }));
-vi.mock("./oneOffShareTakeIns.js", () => ({ takeInOneOffShares: async () => null }));
 vi.mock("./stateStore.js", () => ({ loadPlutoState: async () => harness.plutoState }));
 
 const { followTheMidOfAdoptedOrder, followTheMidOfShareOrder, isVolFarmerV4BuyBackRound, runVolFarmerV4Round, settleVolFarmerV4EndedOrders, volFarmerV4CallsLeftToBeAssignedNote, volFarmerV4CallsToBuyBack, volFarmerV4NoCallQuotedReason } = await import("./volFarmerV4Round.js");

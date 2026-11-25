@@ -67,7 +67,6 @@ import {
   type VolFarmerV4PlannedOrder,
 } from "./volFarmerV4LiveBook.js";
 import { describeLedgerVerdict, judgeTickerLedger, ledgerCatchUpRetrySeconds, loadLedgerMismatchSince, memoryOptionLegIds, saveLedgerMismatch, type LedgerCheckVerdict } from "./ledgerCheck.js";
-import { takeInOneOffShares } from "./oneOffShareTakeIns.js";
 import { loadVolFarmerV4LeapsLook, loadVolFarmerV4LeftoverStockLeg, loadVolFarmerV4LegStatuses, loadVolFarmerV4Memory, loadVolFarmerV4OrderOutcomes, loadVolFarmerV4StepImpliedVolatility, saveVolFarmerV4LastRound, saveVolFarmerV4Memory, type VolFarmerV4LeapsLook, type VolFarmerV4RoundFigures } from "./volFarmerV4LookLoader.js";
 
 // One Pluto round under Vol Farmer v4 (Marcelo 2026-10-31; Vol Farmer v2's from 2026-10-27): every enabled ticker gets a
@@ -470,10 +469,6 @@ async function prepareTickerLook(context: { input: VolFarmerV4RoundInput; ticker
         putContracts: 0,
       });
     }
-  }
-  if (!adopted) {
-    const takenIn = await takeInOneOffShares({ tickerId, symbol, memory, passId: input.passId });
-    if (takenIn !== null) note(takenIn);
   }
   // Holdings adopted at this look are the ledger's own: nothing to compare.
   const verdict: LedgerCheckVerdict = adopted ? { kind: "matches" } : await judge(memory, openLegs, outcomes);
