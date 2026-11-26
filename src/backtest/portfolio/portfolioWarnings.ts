@@ -42,7 +42,7 @@ const listText = (symbols: readonly string[]) => (symbols.length <= 1 ? symbols.
 export function portfolioWarningsOf(input: { tickers: readonly WarningTickerInput[]; groups: readonly { symbols: string[]; share: number }[]; allocationTotalPct: number }): PortfolioWarning[] {
   const warnings: PortfolioWarning[] = [];
   const doesntSuit = input.tickers.filter((ticker) => ticker.verdict === "doesnt_suit").map((ticker) => ticker.symbol);
-  if (doesntSuit.length > 0) warnings.push({ code: "doesnt_suit", symbols: doesntSuit, text: `${listText(doesntSuit)}: Vol Farmer v4 doesn't suit ${doesntSuit.length === 1 ? "it" : "them"} (its analysis)` });
+  if (doesntSuit.length > 0) warnings.push({ code: "doesnt_suit", symbols: doesntSuit, text: `${listText(doesntSuit)}: Vol Farmer doesn't suit ${doesntSuit.length === 1 ? "it" : "them"} (its analysis)` });
   for (const ticker of input.tickers) {
     if (ticker.priceAsTraded === null || ticker.potDollars <= 0) continue;
     const lot = lotDollarsAt(ticker.priceAsTraded);
@@ -54,7 +54,7 @@ export function portfolioWarningsOf(input: { tickers: readonly WarningTickerInpu
   const shortHistory = input.tickers.filter((ticker) => ticker.ownHistoryYears < ownHistoryYearsMinimum).map((ticker) => ticker.symbol);
   if (shortHistory.length > 0) warnings.push({ code: "short_history", symbols: shortHistory, text: `${listText(shortHistory)}: under 5 years of ${shortHistory.length === 1 ? "its" : "their"} own history; earlier weeks modelled from SPY` });
   const noBearMarket = input.tickers.filter((ticker) => ticker.backtestWorstSpyFall !== null && ticker.backtestWorstSpyFall > spyFallSeenMinimum).map((ticker) => ticker.symbol);
-  if (noBearMarket.length > 0) warnings.push({ code: "no_bear_market_in_backtest", symbols: noBearMarket, text: `${listText(noBearMarket)}: ${noBearMarket.length === 1 ? "its" : "their"} backtest saw no SPY fall of 20%, so how much of a fall v4 keeps there is unmeasured` });
+  if (noBearMarket.length > 0) warnings.push({ code: "no_bear_market_in_backtest", symbols: noBearMarket, text: `${listText(noBearMarket)}: ${noBearMarket.length === 1 ? "its" : "their"} backtest saw no SPY fall of 20%, so how much of a fall Vol Farmer keeps there is unmeasured` });
   if (Math.abs(input.allocationTotalPct - 100) >= allocationTotalTolerancePct) warnings.push({ code: "allocations_not_100", symbols: [], text: `The allocations add up to ${input.allocationTotalPct.toFixed(2)}%, not 100%` });
   return warnings;
 }

@@ -230,7 +230,7 @@ describe("backtest routes", () => {
       ...Array(22).fill("vol_farmer · Original Vol Farmer (retired)"),
       ...Array(14).fill("vol_farmer_v2 · Vol Farmer v2"),
       ...Array(12).fill("vol_farmer_v3 · Vol Farmer v3"),
-      ...Array(26).fill("vol_farmer_v4 · Vol Farmer v4"),
+      ...Array(26).fill("vol_farmer_v4 · Vol Farmer"),
     ]);
     // Every row once, and every condition on a row that is there.
     const paths = template.rows.map((row) => row.path);
@@ -333,7 +333,7 @@ describe("backtest routes", () => {
     ]);
     expect(template.rows.find((row) => row.path === "decisionMaker")?.choices).toEqual([
       { value: "steady_stake", label: "Steady Stake (a steady share stake, Calls and Puts on expiry days)" },
-      { value: "vol_farmer_v4", label: "Vol Farmer v4 (80% of the pot in shares, Calls expiring at today's close)" },
+      { value: "vol_farmer_v4", label: "Vol Farmer (80% of the pot in shares, Calls expiring at today's close)" },
     ]);
     expect(template.notReplayed).toHaveLength(4);
     expect(template.notReplayed.join(" ")).not.toMatch(/macro|daily-loss breaker and market stress|one look a day/i);

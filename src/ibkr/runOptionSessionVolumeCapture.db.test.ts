@@ -108,7 +108,7 @@ describe("the after-close option volume capture", () => {
     expect(result.tickers.map((ticker) => [ticker.symbol, ticker.error])).toEqual([["NOCH", "no stored option chain"], ["VOL", null]]);
   });
 
-  it("captures a Vol Farmer v4 ticker selling the next expiry on that expiry only", async () => {
+  it("captures a Vol Farmer ticker selling the next expiry on that expiry only", async () => {
     await testDb("pluto_settings").where({ id: 1 }).update({ vol_farmer_v4_options_expiry: "next" });
     const farmerTickerId = randomUUID();
     await testDb("tickers").insert({ id: farmerTickerId, symbol: "FARM", company_name: "Farmer Co" });
@@ -131,7 +131,7 @@ describe("the after-close option volume capture", () => {
     }
   });
 
-  it("captures a Vol Farmer v4 ticker selling today's expiry on the one ending at the next session's close", async () => {
+  it("captures a Vol Farmer ticker selling today's expiry on the one ending at the next session's close", async () => {
     const sameDayTickerId = randomUUID();
     await testDb("tickers").insert({ id: sameDayTickerId, symbol: "SAME", company_name: "Same Day Co" });
     await testDb("shortlist_entries").insert({ ticker_id: sameDayTickerId, added_by_user_id: userId, bot_enabled: true });

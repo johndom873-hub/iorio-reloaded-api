@@ -1009,7 +1009,7 @@ async function buildPlutoSharePurchase(request: Request, response: Response): Pr
   }
   const action = plutoActionId.value === null ? undefined : await db("pluto_actions").where({ id: plutoActionId.value }).first("execution_strategy");
   if (action?.execution_strategy !== "vol_farmer_v4") {
-    response.status(400).json({ error: "Shares are bought on their own only by Pluto, under Vol Farmer v4." });
+    response.status(400).json({ error: "Shares are bought on their own only by Pluto, under Vol Farmer." });
     return;
   }
   if (option !== undefined) {
@@ -1099,7 +1099,7 @@ positionsRouter.post("/orders", async (request, response) => {
   if (isLeaps && leapsPlutoActionId) {
     const action = typeof leapsPlutoActionId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(leapsPlutoActionId) ? await db("pluto_actions").where({ id: leapsPlutoActionId }).first("execution_strategy") : undefined;
     if (action?.execution_strategy !== "vol_farmer_v4") {
-      response.status(400).json({ error: "Pluto buys LEAPS only under Vol Farmer v4." });
+      response.status(400).json({ error: "Pluto buys LEAPS only under Vol Farmer." });
       return;
     }
   }
@@ -1549,7 +1549,7 @@ async function readStrategyGateContext(orderRequest: { pluto_action_id?: string 
   try {
     return { strategy: await loadStrategyOrderGateContext(orderRequest), error: null };
   } catch (error) {
-    return { strategy: null, error: `Vol Farmer v4's order rules could not be read (${error instanceof Error ? error.message : String(error)}).` };
+    return { strategy: null, error: `Vol Farmer's order rules could not be read (${error instanceof Error ? error.message : String(error)}).` };
   }
 }
 

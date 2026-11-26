@@ -119,7 +119,7 @@ export function volFarmerV4NoCallQuotedReason(input: {
   const universe = optionQuoteBandExpiryContracts({ expirations: input.expirations, strikesByExpiry: input.strikesByExpiry, sessionIso: input.todayIso, expiryRule: volFarmerV4ExpiryRule({ volFarmerV4OptionsExpiry: input.optionsExpiry }) });
   if (!universe.some((contract) => contract.right === "C")) return `no ${expiry} Call strike is listed in the stored chain`;
   if (!input.bandCycleFinished) return `no ${expiry} option is quoted yet today`;
-  return `no ${expiry} Call is near v4's Call |delta| range at this price, so none is quoted`;
+  return `no ${expiry} Call is near Vol Farmer's Call |delta| range at this price, so none is quoted`;
 }
 
 export interface VolFarmerV4RoundInput {
@@ -858,7 +858,7 @@ async function buyBackCallsInTheMoney(context: { input: VolFarmerV4RoundInput; t
       legId: call.legId,
       contract: { ...contract, dte: 0 },
       plan: { quantity: call.contracts, limitPrice: limitPrice!, notional: costDollars, fullSizeQuantity: call.contracts },
-      reasons: [`Vol Farmer v4: ${chosenBecause}.`],
+      reasons: [`Vol Farmer: ${chosenBecause}.`],
     });
     if (result.outcome === "confirmed") round.bookCounts.ordersToday += 1;
     if (result.outcome !== "confirmed" || result.orderId === null) {
@@ -1015,7 +1015,7 @@ async function sendOrder(context: {
   const deltaContext: StrategyDeltaContext = { minAbsDelta: isPut ? 0 : farmer.callMinAbsDelta, maxAbsDelta: isPut ? v2.putMaxAbsDelta : farmer.callMaxAbsDelta, forwardAnchor: context.forwardAnchors.get(item.contract.expiry) ?? null, riskFreeRate: clock.riskFreeRate, todayIso: clock.todayIso, closeMinutesEt: clock.closeMinutesEt };
   const verdict = twoSided && !isLeaps ? strategyDeltaVerdict({ ...twoSided, stockPrice, strike: item.contract.strike, expiryIso: item.contract.expiry, isCall: !isPut, putHeldToRange: isPut, now, context: deltaContext }) : null;
   // A sale is held to the steps' bid minimum and spread limit; a LEAPS purchase or sale to a two-sided quote within the spread limit.
-  const ruleFailure = twoSided === null ? null : quoteRejection === "noUsableQuote" && item.side === "sell" && !isLeaps ? `the live bid ${twoSided.bid.toFixed(2)} is under the $0.05 minimum` : quoteRejection === "spreadTooWide" ? `the live spread is ${(((twoSided.ask - twoSided.bid) / ((twoSided.bid + twoSided.ask) / 2)) * 100).toFixed(1)}% of the mid, above v4's ${farmer.maxSpreadPctOfMid}%` : null;
+  const ruleFailure = twoSided === null ? null : quoteRejection === "noUsableQuote" && item.side === "sell" && !isLeaps ? `the live bid ${twoSided.bid.toFixed(2)} is under the $0.05 minimum` : quoteRejection === "spreadTooWide" ? `the live spread is ${(((twoSided.ask - twoSided.bid) / ((twoSided.bid + twoSided.ask) / 2)) * 100).toFixed(1)}% of the mid, above Vol Farmer's ${farmer.maxSpreadPctOfMid}%` : null;
   // A Call that opens a cycle, or rebuilds the first position, buys its shares with it.
   const buysShares = item.order.kind === "covered_call" && (item.order.sale.startsCycle || item.order.sale.buysShares === true);
   const notional = limitPrice === null ? 0 : item.contract.strategyKey === "cash_secured_put" ? Math.max(0, item.contract.strike - limitPrice) * 100 * item.contracts : item.contract.strategyKey === "leaps" ? (opening ? limitPrice * 100 * item.contracts : 0) : buysShares ? item.contracts * 100 * Math.max(0, stockPrice - limitPrice) : 0;
@@ -1023,7 +1023,7 @@ async function sendOrder(context: {
   const gateResults: PlutoGateResult[] = [
     { gate: "vol_farmer_v4", ok: true, detail: item.chosenBecause },
     { gate: "live_quote", ok: twoSided !== null, detail: twoSided ? `bid ${twoSided.bid.toFixed(2)}, ask ${twoSided.ask.toFixed(2)}` : "no live two-sided quote" },
-    ...(twoSided ? [{ gate: "vol_farmer_v4_rules", ok: ruleFailure === null, detail: ruleFailure ?? "the live quote passes v4's bid and spread rules" }] : []),
+    ...(twoSided ? [{ gate: "vol_farmer_v4_rules", ok: ruleFailure === null, detail: ruleFailure ?? "the live quote passes Vol Farmer's bid and spread rules" }] : []),
     ...(verdict ? [{ gate: "vol_farmer_v4_delta", ok: verdict.compliant, detail: verdict.reason ?? `own |delta| ${Math.abs(verdict.delta ?? 0).toFixed(3)} inside ${deltaContext.minAbsDelta}–${deltaContext.maxAbsDelta}` }] : []),
     ...(capital ? [bookCapitalGate(capital)] : []),
   ];
@@ -1054,7 +1054,7 @@ async function sendOrder(context: {
   await recordPlutoEvent("action_validated", { passId: input.passId, actionId, symbol: ticker.symbol, quantity: item.contracts, limitPrice, reasons: [item.chosenBecause] });
   const dte = daysToExpiry(item.contract.expiry, clock.todayIso);
   const plan = { quantity: item.contracts, limitPrice: limitPrice!, notional, fullSizeQuantity: item.contracts };
-  const reasons = [`Vol Farmer v4: ${item.chosenBecause}.`];
+  const reasons = [`Vol Farmer: ${item.chosenBecause}.`];
   const scoresSnapshot = { kind: "vol_farmer_v4", version: "vf4-1", contract: { ...contract, bid: twoSided!.bid, ask: twoSided!.ask, quoteSource: "live", quotedAt: live?.quotedAt ?? null, delta: verdict?.delta ?? null }, order: { contracts: item.contracts, chosenBecause: item.chosenBecause, scores: item.scores } };
   const executeInput: ExecuteInput =
     item.kind === "buy_leaps"
@@ -1156,7 +1156,7 @@ async function sendShareOrder(context: { input: VolFarmerV4RoundInput; ticker: P
   }
   await recordPlutoEvent("action_validated", { passId: input.passId, actionId, symbol: ticker.symbol, quantity: shares, limitPrice, reasons: [chosenBecause] });
   const plan = { quantity: shares, limitPrice: limitPrice!, notional, fullSizeQuantity: shares };
-  const reasons = [`Vol Farmer v4: ${chosenBecause}.`];
+  const reasons = [`Vol Farmer: ${chosenBecause}.`];
   const executeInput: ExecuteInput = buying
     ? { kind: "shares_buy", actionId, symbol: ticker.symbol, plan, reasons, scoresSnapshot: { kind: "vol_farmer_v4", version: "vf4-1", stock: { bid: twoSided!.bid, ask: twoSided!.ask, quoteSource: "live", quotedAt: new Date(quote!.updatedAtMs!).toISOString() }, order: { shares, chosenBecause, scores } } }
     : { kind: "shares_sell", actionId, symbol: ticker.symbol, positionId: leftover!.positionId, legId: leftover!.legId, plan, reasons };

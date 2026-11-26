@@ -43,7 +43,7 @@ const wholePeriod: DataFilePeriodContents = { missingWeekdays: 0, firstMissingWe
 
 const validRequest = { name: " Edge Yield 20% ", symbol: "aaoi", startDate: "2021-01-04", endDate: "2026-09-30", startingValue: 1_000_000, tablesMode: "walk_forward", overrides: {} };
 
-describe("Vol Farmer v4's allocations and excess allowance", () => {
+describe("Vol Farmer's allocations and excess allowance", () => {
   const { symbol: _oneSymbol, ...withoutSymbol } = validRequest;
   const request = (volFarmerV4: Record<string, unknown>) => validateCreateBacktestSessionRequest({ ...withoutSymbol, symbols: ["AAOI", "HOOD"], startDate: "2021-08-02", overrides: { volFarmerV4 } }, context);
 
@@ -172,7 +172,7 @@ describe("validateBacktestSettingsOverrides", () => {
     expect(validateBacktestSettingsOverrides({ trading: { spreadCostChargedPct: 120 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "spreadCostChargedPct must be between 0 and 100." });
   });
 
-  it("refuses every retired decision maker and takes the Steady Stake and Vol Farmer v4", () => {
+  it("refuses every retired decision maker and takes the Steady Stake and Vol Farmer", () => {
     const retired = { ok: false, error: "This decision maker was retired (the rules and llm backtests with Signals, the original Vol Farmer on 30 Oct 2026, the CC + Put Ladder and Vol Farmer v2 and v3 on 2 Nov 2026); its past sessions stay readable." };
     for (const decisionMaker of ["rules", "llm", "vol_farmer", "baseline", "vol_farmer_v2", "vol_farmer_v3"]) {
       expect(validateBacktestSettingsOverrides({ decisionMaker }, snapshot, editableBacktestSettingPaths)).toEqual(retired);
@@ -185,7 +185,7 @@ describe("validateBacktestSettingsOverrides", () => {
     expect(validateBacktestSettingsOverrides({ volFarmerV4: { callMaxAbsDelta: 1.2 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV4.callMaxAbsDelta must be a number from 0.01 to 0.99." });
     expect(validateBacktestSettingsOverrides({ volFarmerV4: { firstPositionPct: 95 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV4.firstPositionPct must be a number from 10 to 90." });
     expect(validateBacktestSettingsOverrides({ volFarmerV4: { rebalanceBandPct: 51 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV4.rebalanceBandPct must be a number from 0 to 50." });
-    expect(validateBacktestSettingsOverrides({ volFarmerV4: { stakePct: 80 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV4.stakePct is not a Vol Farmer v4 setting." });
+    expect(validateBacktestSettingsOverrides({ volFarmerV4: { stakePct: 80 } }, snapshot, editableBacktestSettingPaths)).toEqual({ ok: false, error: "volFarmerV4.stakePct is not a Vol Farmer setting." });
     // A lab still set to a retired decision maker (or a snapshot from before the choice, a rules one) starts nothing unless the request names another.
     for (const retiredSnapshot of [{ ...snapshot, decisionMaker: "baseline" as const }, { ...snapshot, decisionMaker: undefined }]) {
       expect(validateCreateBacktestSessionRequest(validRequest, { ...context, snapshot: retiredSnapshot })).toEqual(retired);

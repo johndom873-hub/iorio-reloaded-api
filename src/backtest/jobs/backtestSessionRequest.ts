@@ -166,7 +166,7 @@ export function validateBacktestSettingsOverrides(raw: unknown, snapshot: Backte
     if (!isPlainObject(raw.volFarmerV4)) return { ok: false, error: "overrides.volFarmerV4 must be an object." };
     const snapshotVolFarmerV4 = { ...defaultBacktestVolFarmerV4Settings, ...snapshot.volFarmerV4 };
     const unknownField = Object.keys(raw.volFarmerV4).find((field) => !(field in defaultBacktestVolFarmerV4Settings));
-    if (unknownField) return { ok: false, error: `volFarmerV4.${unknownField} is not a Vol Farmer v4 setting.` };
+    if (unknownField) return { ok: false, error: `volFarmerV4.${unknownField} is not a Vol Farmer setting.` };
     const problem = validateVolFarmerV4Settings({ ...snapshotVolFarmerV4, ...raw.volFarmerV4 });
     if (problem) return { ok: false, error: problem };
     const changed = changedEntries(snapshotVolFarmerV4, raw.volFarmerV4);

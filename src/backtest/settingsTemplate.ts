@@ -23,7 +23,7 @@ type RowDefinition = Omit<BacktestSettingRow, "now" | "group" | "section" | "app
 const rowDefinitionsBeforeVolFarmerV4: readonly RowDefinition[] = [
   { path: "fixed.earningsDateKnownCalendarDaysAhead", label: "Earnings dates known 30 days ahead", unit: "days", editable: false, note: "a report's date is seen from 30 calendar days before it: expiries spanning it are skipped only from then", fixedValue: earningsDateKnownCalendarDaysAhead },
 
-  { path: "trading.spreadCostChargedPct", label: "Spread cost share", unit: "percent", editable: true, note: "how much of the half-spread a Steady Stake fill gives up. Vol Farmer v4 does not use it: its Calls, Puts and buybacks fill one cent past the mid, as Pluto's orders are priced (bid 1.49, ask 1.52: a sale at 1.50, a buyback at 1.51), and its LEAPS have their own share" },
+  { path: "trading.spreadCostChargedPct", label: "Spread cost share", unit: "percent", editable: true, note: "how much of the half-spread a Steady Stake fill gives up. Vol Farmer does not use it: its Calls, Puts and buybacks fill one cent past the mid, as Pluto's orders are priced (bid 1.49, ask 1.52: a sale at 1.50, a buyback at 1.51), and its LEAPS have their own share" },
 
   { path: "pluto.windowStartEt", label: "Looks from", unit: "time", editable: false, note: "ET; a look every 30 minutes where the data files hold quotes (10:00 to 15:30)" },
   { path: "pluto.windowEndEt", label: "Looks until", unit: "time", editable: false, note: "ET; never later than 30 minutes before the close (12:30 on a 13:00 day)" },
@@ -33,10 +33,10 @@ const rowDefinitionsBeforeVolFarmerV4: readonly RowDefinition[] = [
     label: "Decision maker",
     unit: "choice",
     editable: true,
-    note: "who decides the session's trades: the Steady Stake or Vol Farmer v4, each on its own group's values only",
+    note: "who decides the session's trades: the Steady Stake or Vol Farmer, each on its own group's values only",
     choices: [
       { value: "steady_stake", label: "Steady Stake (a steady share stake, Calls and Puts on expiry days)" },
-      { value: "vol_farmer_v4", label: "Vol Farmer v4 (80% of the pot in shares, Calls expiring at today's close)" },
+      { value: "vol_farmer_v4", label: "Vol Farmer (80% of the pot in shares, Calls expiring at today's close)" },
     ],
   },
   { path: "volFarmer.callMinAbsDelta", label: "Calls' |delta| from", unit: "number", editable: true, note: "the Call sold is the one with the highest premium yield (annualized) inside the |delta| and days-to-expiry ranges whose strike passes the hedge rule; |delta| from each quote's own implied volatility" },
@@ -747,7 +747,7 @@ const volFarmerV4Notes: Readonly<Record<string, string>> = {
 
 const volFarmerV4RowDefinitions: readonly RowDefinition[] = volFarmerV4SourcePaths.map((sourcePath) => {
   const source = rowDefinitionsBeforeVolFarmerV4.find((row) => row.path === sourcePath);
-  if (source === undefined) throw new Error(`Vol Farmer v4 copies a row that does not exist: ${sourcePath}`);
+  if (source === undefined) throw new Error(`Vol Farmer copies a row that does not exist: ${sourcePath}`);
   const field = sourcePath.slice(sourcePath.indexOf(".") + 1);
   return { ...source, path: `volFarmerV4.${field}`, note: volFarmerV4Notes[field] ?? source.note };
 });
@@ -913,11 +913,11 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
     })),
   },
   {
-    group: "Vol Farmer v4",
+    group: "Vol Farmer",
     section: "vol_farmer_v4",
     rows: volFarmerV4RowDefinitions.map(({ path }) => ({
       path,
-      appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v4"] }], explanation: "Applies only with Vol Farmer v4 as decision maker." },
+      appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["vol_farmer_v4"] }], explanation: "Applies only with Vol Farmer as decision maker." },
     })),
   },
 ];

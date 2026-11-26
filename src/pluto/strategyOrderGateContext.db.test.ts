@@ -71,7 +71,7 @@ describe("loadStrategyOrderGateContext", () => {
     });
   });
 
-  it("holds Vol Farmer v4's Puts to |delta| at most its Put |delta| and its Calls to its Calls' range, and gives its LEAPS the book's cap alone", async () => {
+  it("holds Vol Farmer's Puts to |delta| at most its Put |delta| and its Calls to its Calls' range, and gives its LEAPS the book's cap alone", async () => {
     // The migration's defaults: Put |delta| 0.30, the Calls 0.05–0.50.
     const put = await action("vol_farmer_v4", { strategyKey: "cash_secured_put" });
     expect(await loadStrategyOrderGateContext({ pluto_action_id: put, payload: putPayload(45) }, testDb, now)).toMatchObject({ potFraction: 0.5, deltaChecked: true, isEntryPut: true, minAbsDelta: 0, maxAbsDelta: 0.3 });

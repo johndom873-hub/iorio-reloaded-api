@@ -633,7 +633,7 @@ describe("PATCH /shortlist/:id/bot-enabled", () => {
     expect((await readEntries(ticker.id))[0]).toMatchObject({ bot_enabled: true });
   });
 
-  it("switching Pluto off forgets what Vol Farmer v4 remembers of the ticker, and leaves other tickers' memory", async () => {
+  it("switching Pluto off forgets what Vol Farmer remembers of the ticker, and leaves other tickers' memory", async () => {
     const ticker = await insertTicker();
     const other = await insertTicker();
     const entryId = await insertEntry(ticker.id);
@@ -666,7 +666,7 @@ describe("DELETE /shortlist/:id", () => {
     expect(((await call("GET", "/")).json as any[]).map((row) => row.symbol)).not.toContain(ticker.symbol);
   });
 
-  it("forgets what Vol Farmer v4 remembers of the removed ticker", async () => {
+  it("forgets what Vol Farmer remembers of the removed ticker", async () => {
     const ticker = await insertTicker();
     const entryId = await insertEntry(ticker.id);
     await testDb("pluto_vol_farmer_v4_cycles").insert({ ticker_id: ticker.id, memory: JSON.stringify({ state: {}, pending: [] }) });

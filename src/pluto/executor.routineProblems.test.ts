@@ -68,7 +68,7 @@ describe("executePlutoOrder: a refusal at confirm", () => {
 });
 
 describe("executePlutoOrder: a Call on shares held (Marcelo 2026-11-23)", () => {
-  const callOpen = (buyEveryShare: boolean) => ({ kind: "strategy_open" as const, actionId: "a10", symbol: "IBIT", strategyKey: "covered_call" as const, contract: { expiry: "2026-11-23", strike: 36, right: "C" as const, dte: 0 }, plan: { quantity: 16, limitPrice: 0.15, notional: 0, fullSizeQuantity: 16 }, buyEveryShare, reasons: ["Vol Farmer v4."], scoresSnapshot: {} });
+  const callOpen = (buyEveryShare: boolean) => ({ kind: "strategy_open" as const, actionId: "a10", symbol: "IBIT", strategyKey: "covered_call" as const, contract: { expiry: "2026-11-23", strike: 36, right: "C" as const, dte: 0 }, plan: { quantity: 16, limitPrice: 0.15, notional: 0, fullSizeQuantity: 16 }, buyEveryShare, reasons: ["Vol Farmer."], scoresSnapshot: {} });
 
   it("asks the route never to buy shares with it; a Call that buys its shares asks for every share instead", async () => {
     const build = async (buyEveryShare: boolean) => {

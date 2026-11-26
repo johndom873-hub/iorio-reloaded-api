@@ -90,7 +90,7 @@ describe("lab settings routes", () => {
     expect((await fetch(`${baseUrl}/backtest/lab-ticker-overrides/AAPL`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ potDollars: 1 }) })).status).toBe(404);
   });
 
-  it("previews a save without writing it: each change, and no analysis out of date for a value Vol Farmer v4 doesn't read", async () => {
+  it("previews a save without writing it: each change, and no analysis out of date for a value Vol Farmer doesn't read", async () => {
     const before = await call<BacktestLabSettingsView>("GET", "/lab-settings");
     const stake = before.body.settings.steadyStake!.stakePct === 60 ? 65 : 60;
     const auditBefore = await call<BacktestLabAuditRow[]>("GET", "/lab-settings/audit?symbol=");

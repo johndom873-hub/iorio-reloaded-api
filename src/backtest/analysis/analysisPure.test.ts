@@ -8,10 +8,10 @@ import { barIndicatorsOf, sliceBarIndicators } from "./analysisPriceFigures.js";
 import { defaultBacktestVolFarmerV4Settings, type BacktestSettings } from "../backtestTypes.js";
 
 describe("analysisSessionName", () => {
-  it("names the session with the ticker, Vol Farmer v4 and the account, a trial's as one", () => {
-    expect(analysisSessionName("AMD", 100_000, false)).toBe("Analysis · AMD · Vol Farmer v4 · $100k");
-    expect(analysisSessionName("SMCI", 1_250_000, false)).toBe("Analysis · SMCI · Vol Farmer v4 · $1.25M");
-    expect(analysisSessionName("HOOD", 62_500, true)).toBe("Analysis trial · HOOD · Vol Farmer v4 · $62.5k");
+  it("names the session with the ticker, Vol Farmer and the account, a trial's as one", () => {
+    expect(analysisSessionName("AMD", 100_000, false)).toBe("Analysis · AMD · Vol Farmer · $100k");
+    expect(analysisSessionName("SMCI", 1_250_000, false)).toBe("Analysis · SMCI · Vol Farmer · $1.25M");
+    expect(analysisSessionName("HOOD", 62_500, true)).toBe("Analysis trial · HOOD · Vol Farmer · $62.5k");
   });
 });
 

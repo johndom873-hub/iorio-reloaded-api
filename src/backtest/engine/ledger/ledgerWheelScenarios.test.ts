@@ -230,7 +230,7 @@ describe("a finish two cents in the money", () => {
   });
 });
 
-describe("a covered call's call bought back alone (Vol Farmer v4's buyback at the day's last look)", () => {
+describe("a covered call's call bought back alone (Vol Farmer's buyback at the day's last look)", () => {
   //  2 Mar  sell 1 put $50 6 Mar @ 1.20      cash +120 − 0.68 = +119.32
   //  6 Mar  close 48.00: assigned            cash −5,000
   //  9 Mar  sell 1 call $51 20 Mar @ 0.80    cash +80 − 0.68 = +79.32

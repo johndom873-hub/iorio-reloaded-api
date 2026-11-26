@@ -66,7 +66,7 @@ describe("the Next action column", () => {
     expect(line(result, "sell_shares").detail).toBe("Sells 300 shares if DRAM is at $56.96 or above, once the $46 Call · Wed 4 Nov has expired (the first position keeps one lot; more shares at higher prices).");
     expect(line(result, "buy_shares").detail).toContain("Buys 300 shares if DRAM is at $34.17 or below");
     expect(line(result, "buy_leaps").detail).toContain("Needs a second position holding shares");
-    expect(line(result, "buy_back_call").detail).toBe("Not before the Calls expire: v4 buys a Call in the money back only at 15:28–15:59 ET before a weekend (next: Fri 6 Nov).");
+    expect(line(result, "buy_back_call").detail).toBe("Not before the Calls expire: Vol Farmer buys a Call in the money back only at 15:28–15:59 ET before a weekend (next: Fri 6 Nov).");
   });
 
   it("INTC, selling Friday expiries only: 4 of its 5 lots have no Call, and its $108 Call is bought back on Friday if in the money", () => {
@@ -78,7 +78,7 @@ describe("the Next action column", () => {
 
   it("SPCX: the pot is nearly committed, so Puts are blocked and the headline says so in its alert line", () => {
     const result = describeVolFarmerV4NextActions(dram({ ticker: { symbol: "SPCX", waiting: false, first: position(400, 139.31, [{ strike: 140, expiry: "2026-11-04", contracts: 4 }]), second: null, leaps: null, workingOrders: [], lastRoundNotes: [], lastRoundFigures: figuresOf(56_957.09, 53_754) }, state: stateOf(400, 139.31), stockPrice: 135.81 }));
-    expect(line(result, "sell_puts")).toMatchObject({ state: "blocked", detail: "SPCX commits $53,754 of its $56,957 pot: a v4 Put on the rest of the pot ($11,391) would be refused by the pot check." });
+    expect(line(result, "sell_puts")).toMatchObject({ state: "blocked", detail: "SPCX commits $53,754 of its $56,957 pot: a Vol Farmer Put on the rest of the pot ($11,391) would be refused by the pot check." });
     expect(result.nextAction).toMatchObject({ state: "waiting", text: "Sell Calls on 4 lots", alert: "Sell Puts blocked: $53,754 of the $56,957 pot is committed" });
   });
 

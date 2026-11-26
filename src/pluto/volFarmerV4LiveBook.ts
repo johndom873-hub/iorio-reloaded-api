@@ -346,8 +346,8 @@ export function replaceVolFarmerV4LegRef(state: VolFarmerV4SymbolState, from: st
 export function adoptVolFarmerV4Holdings(input: { positions: readonly PositionFigures[]; cycleBreakEvenPerShare: number | null; potDollars: number }): { state: VolFarmerV4SymbolState } | { waiting: string } {
   const openLegs = input.positions.filter((position) => position.status === "open").flatMap((position) => position.legs.filter((leg) => leg.exitAt === null));
   const shares = openLegs.filter((leg) => leg.legType === "stock" && leg.side === "long").reduce((sum, leg) => sum + leg.quantity, 0);
-  if (shares === 0) return { waiting: "holds no shares yet: its open Puts are left to expire or be assigned before v4 adopts it" };
-  if (input.cycleBreakEvenPerShare === null) return { waiting: "holds shares but its cycle's break-even cannot be worked out, so v4 cannot adopt it yet" };
+  if (shares === 0) return { waiting: "holds no shares yet: its open Puts are left to expire or be assigned before Vol Farmer adopts it" };
+  if (input.cycleBreakEvenPerShare === null) return { waiting: "holds shares but its cycle's break-even cannot be worked out, so Vol Farmer cannot adopt it yet" };
   const shortOptions = (optionType: "call" | "put") => openLegs.filter((leg) => leg.legType === "option" && leg.side === "short" && leg.optionType === optionType).map((leg) => ({ legId: leg.id, shares: leg.quantity * leg.multiplier }));
   const state = newVolFarmerV4SymbolState();
   state.potDollars = input.potDollars;

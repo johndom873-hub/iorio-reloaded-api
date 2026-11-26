@@ -962,7 +962,7 @@ describe("volFarmerV4NoCallQuotedReason", () => {
   it("tells quotes not in yet and the |delta| band apart", () => {
     expect(volFarmerV4NoCallQuotedReason({ ...base, bandCycleFinished: false })).toBe("no 30 Oct (2DTE) option is quoted yet today");
     // A finished cycle without a Call after today: none was near the range at this price (a Call quoted at an earlier cycle has left the band).
-    expect(volFarmerV4NoCallQuotedReason({ ...base, bandCycleFinished: true })).toBe("no 30 Oct (2DTE) Call is near v4's Call |delta| range at this price, so none is quoted");
+    expect(volFarmerV4NoCallQuotedReason({ ...base, bandCycleFinished: true })).toBe("no 30 Oct (2DTE) Call is near Vol Farmer's Call |delta| range at this price, so none is quoted");
   });
 
   it("tells a chain that lists no Call strike of the expiry", () => {

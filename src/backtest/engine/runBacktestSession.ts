@@ -1210,7 +1210,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     const dividendDollars = symbols.reduce((sum, entry) => sum + (entry.dividends ?? []).reduce((total, dividend) => total + dividend.creditedDollars, 0), 0);
     if (dividendDollars > 0) sessionNotes.push(`Cash dividends credited on the shares held: ${formatWholeDollars(dividendDollars)} (${symbols.filter((entry) => (entry.dividends ?? []).some((dividend) => dividend.creditedDollars > 0)).map((entry) => `${entry.symbol} ${formatWholeDollars((entry.dividends ?? []).reduce((total, dividend) => total + dividend.creditedDollars, 0))}`).join(", ")}).`);
     if (skippedUnavailableDays.length > 0) sessionNotes.push(`${formatCount(skippedUnavailableDays.length)} day(s) inside the period could not be downloaded for any symbol and were skipped: ${skippedUnavailableDays.join(", ")}.`);
-    const volFarmerV4Note = volFarmerSteps !== null ? describeVolFarmerV4Run(ledger, symbols.map((entry) => entry.symbol), volFarmerSteps.v2.firstPositionPct, "Vol Farmer v4", priceByLegId) : null;
+    const volFarmerV4Note = volFarmerSteps !== null ? describeVolFarmerV4Run(ledger, symbols.map((entry) => entry.symbol), volFarmerSteps.v2.firstPositionPct, "Vol Farmer", priceByLegId) : null;
     if (volFarmerV4Note !== null) sessionNotes.push(volFarmerV4Note);
     const bookRecords = buildBookRecords({ ledger, symbols, optionSales, actions, priceByLegId, lastSessionDateIso, calendar, noSaleRecords: { shortfalls } });
     // The book holds every share it sells (the ledger refuses anything else); the platform's cycle derivation reading it

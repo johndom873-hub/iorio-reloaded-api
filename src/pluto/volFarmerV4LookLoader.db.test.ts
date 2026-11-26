@@ -51,7 +51,7 @@ afterAll(async () => {
   await dropIsolatedTestDatabase(testDb);
 });
 
-describe("Vol Farmer v4's live reads", () => {
+describe("Vol Farmer's live reads", () => {
   it("saves and reads back a ticker's memory, without the backtest's cash check", async () => {
     expect(await loadVolFarmerV4Memory(tickerId)).toBeNull();
     const state = newVolFarmerV4SymbolState();

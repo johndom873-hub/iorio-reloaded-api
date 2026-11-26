@@ -74,7 +74,7 @@ function marketOf(stockPrice: number): VolFarmerV4Market {
   };
 }
 
-describe("Vol Farmer v4's live rules", () => {
+describe("Vol Farmer's live rules", () => {
   it("are Pluto's v4 settings, at every look, the LEAPS cap a share of the ticker's pot", () => {
     const { farmer, v2, v3 } = volFarmerV4RulesOf({ ...settings, excessAllowancePct: 20 });
     expect(farmer).toEqual({ callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50 });

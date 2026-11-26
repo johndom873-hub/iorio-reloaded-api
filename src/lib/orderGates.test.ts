@@ -49,7 +49,7 @@ describe("limitsInputFromOrderRequest for a Pluto strategy order", () => {
     expect(limitsInputFromOrderRequest({ id: "o8", request_type: "open_cash_secured_put", payload: putOpen })).not.toHaveProperty("strategy");
   });
 
-  it("limit-checks Vol Farmer v4's share purchase on what it pays, under its pot, and never its sale of shares", () => {
+  it("limit-checks Vol Farmer's share purchase on what it pays, under its pot, and never its sale of shares", () => {
     const purchase = { symbol: "AAA", strategyKey: "shares", legs: [{ role: "stock", action: "BUY", symbol: "AAA", quantity: 900, unitPrice: 100 }] } as OrderRequestPayload;
     expect(limitsInputFromOrderRequest({ id: "s1", request_type: "open_shares", payload: purchase }, { potFraction: 0.12, book: { symbols: ["AAA"], budgetFraction: 0.5 } })).toEqual({
       strategyKey: "shares",

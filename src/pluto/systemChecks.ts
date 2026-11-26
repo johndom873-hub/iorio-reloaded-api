@@ -13,6 +13,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 import { resolvePlutoSession, type PlutoSession } from "./sessionSchedule.js";
 import { describePlutoBlock, loadPlutoState, type PlutoState } from "./stateStore.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { dailyLossConfirmSeconds, emptyDailyLossTrack, trackDailyLoss, type DailyLossTrack } from "./dailyLossConfirmation.js";
 
 // Pre-model system gates (design round 3, item 19, approved 2026-09-28). Every check runs and is
 // recorded on the pass row, so the screen shows the whole board, not just the first failure;
@@ -42,6 +43,16 @@ export interface PlutoSystemChecksResult {
   checks: Record<string, PlutoSystemCheck>;
   failures: string[];
   context: PlutoSystemCheckContext;
+  /** The daily-loss reading past the breaker and confirmed by the readings before it (dailyLossConfirmation.ts): the breaker trips. */
+  dailyLossBreakerConfirmed: boolean;
+}
+
+/** The agent's run of daily-loss readings; one process runs the checks (passRunner), so this module holds it. */
+let dailyLossTrack: DailyLossTrack = emptyDailyLossTrack;
+
+/** Tests: forget the readings so far. */
+export function resetDailyLossTrack(): void {
+  dailyLossTrack = emptyDailyLossTrack;
 }
 
 function minutesOfDay(hhmm: string): number {
@@ -88,6 +99,7 @@ export function dailyLossPercent(netLiquidationValue: number | null, previousNet
 export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = new Date()): Promise<PlutoSystemChecksResult> {
   const todayEasternIso = easternIsoDate(now);
   const checks: Record<string, PlutoSystemCheck> = {};
+  let dailyLossBreakerConfirmed = false;
   const record = (name: string, ok: boolean, detail: string) => {
     checks[name] = { ok, detail };
   };
@@ -161,7 +173,18 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
       // dailyLossPercent(now, base) = (now − base) / base, with base = last night's value + the cash moved in since.
       const lossPct = dailyLossPercent(books.books.pluto.bookValue, previous ? Number(previous.book_value) + movedInDollars : null);
       if (lossPct === null) record("daily_loss", false, "cannot compute today's move: no previous snapshot of Pluto's book");
-      else record("daily_loss", lossPct > -settings.dailyLossBreakerPct, `${lossPct >= 0 ? "+" : ""}${lossPct.toFixed(2)}% of Pluto's book vs ${previous?.snapshot_date_iso} close (breaker at -${settings.dailyLossBreakerPct}%)`);
+      else {
+        const verdict = trackDailyLoss(dailyLossTrack, { pct: lossPct, atMs: now.getTime() }, settings.dailyLossBreakerPct);
+        dailyLossTrack = verdict.track;
+        dailyLossBreakerConfirmed = verdict.confirmed;
+        if (verdict.jumpedFromPct !== null) {
+          const pluto = books.books.pluto;
+          const legs = books.legValues.map((leg) => `${leg.symbol} ${leg.legType}${leg.optionType ? ` ${leg.optionType} ${leg.strikePrice} ${leg.expiryDate}` : ""} ×${leg.quantity} @ ${leg.price} (${leg.priceSource}) = ${Math.round(leg.marketValue)}`).join("; ");
+          console.warn(`Pluto daily loss jumped from ${verdict.jumpedFromPct.toFixed(2)}% to ${lossPct.toFixed(2)}%: Pluto's book ${Math.round(pluto.bookValue)} = cash ${Math.round(pluto.cash)} + positions ${Math.round(pluto.positionsValue)}; every open leg: ${legs}`);
+        }
+        const detail = `${lossPct >= 0 ? "+" : ""}${lossPct.toFixed(2)}% of Pluto's book vs ${previous?.snapshot_date_iso} close (breaker at -${settings.dailyLossBreakerPct}%)`;
+        record("daily_loss", !verdict.past, verdict.past && !verdict.confirmed ? `${detail}; the breaker trips if the readings stay past it for ${dailyLossConfirmSeconds} s` : detail);
+      }
     }
   } catch (error) {
     record("daily_loss", false, `could not read Pluto's book value: ${error instanceof Error ? error.message : String(error)}`);
@@ -178,5 +201,5 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   }
 
   const failures = Object.entries(checks).filter(([, check]) => !check.ok).map(([name, check]) => `${name}: ${check.detail}`);
-  return { ok: failures.length === 0, checks, failures, context: { state, marketState, netLiquidationValue, totalCashValue, settledCashValue, settledCashIsTotalCash, todayEasternIso, session } };
+  return { ok: failures.length === 0, checks, failures, context: { state, marketState, netLiquidationValue, totalCashValue, settledCashValue, settledCashIsTotalCash, todayEasternIso, session }, dailyLossBreakerConfirmed };
 }

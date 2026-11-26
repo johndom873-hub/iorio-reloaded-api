@@ -296,7 +296,7 @@ describe("a session through the wheel", () => {
   }, 60_000);
 });
 
-describe("a Vol Farmer v4 LEAPS", () => {
+describe("a Vol Farmer LEAPS", () => {
   it("is marked at what selling it would bring with v4's own LEAPS spread cost share, not v2's", async () => {
     // A cycle at 100 on 6 April, its Call expiring worthless; Puts on 13 April at 95, assigned at the 88 close on the 17th;
     // on Monday 20 April at 87, under B-E2 (about 89), the LEAPS (17 July, 60 or more days out) is bought, 10 contracts as

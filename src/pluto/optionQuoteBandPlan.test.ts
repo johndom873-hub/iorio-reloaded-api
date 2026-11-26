@@ -32,7 +32,7 @@ describe("optionQuoteBandExpiryContracts", () => {
     ]);
   });
 
-  it("Vol Farmer v4: only the next listed expiry after the session, whatever the range", () => {
+  it("Vol Farmer: only the next listed expiry after the session, whatever the range", () => {
     // On Tue 20 Oct: 20 Oct expires that session, so the next listed expiry is Fri 23 Oct (the chain lists it last).
     expect(optionQuoteBandExpiryContracts({ ...chain, sessionIso: clock.todayIso, expiryRule: { kind: "next_listed_expiry" } })).toEqual([
       { expiry: "2026-10-23", strike: 95, right: "C" },

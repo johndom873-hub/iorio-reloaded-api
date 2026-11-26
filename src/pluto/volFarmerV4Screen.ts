@@ -235,7 +235,7 @@ async function withNextActions(base: VolFarmerV4ScreenTickerBase[], tickers: Plu
       }),
     );
   } catch (error) {
-    console.warn(`Pluto's Vol Farmer v4 card could not read its next actions: ${error instanceof Error ? error.message : String(error)}`);
+    console.warn(`Pluto's Vol Farmer card could not read its next actions: ${error instanceof Error ? error.message : String(error)}`);
     return withoutActions();
   }
 }

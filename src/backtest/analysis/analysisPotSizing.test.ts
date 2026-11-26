@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { bandAt, largestPotOfDay, oneTickerPotShareOfAccount, potFittingDayShare, smallestPotFor, targetReachedAt, targetReachedOverDays } from "./analysisPotSizing.js";
 
 // The examples are the v4 formula sheet's (approved by Marcelo 2026-11-01).
-describe("Vol Farmer v4 pot sizing (F2–F4)", () => {
+describe("Vol Farmer pot sizing (F2–F4)", () => {
   it("the pot is 1.2× the account with one ticker at a 20% excess allowance", () => {
     expect(oneTickerPotShareOfAccount({ excessAllowancePct: 20 })).toBeCloseTo(1.2, 12);
     expect(oneTickerPotShareOfAccount({ excessAllowancePct: 0 })).toBeCloseTo(1, 12);

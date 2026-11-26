@@ -211,7 +211,7 @@ export function buyBackVolFarmerV4CallsInTheMoney(input: {
         candidateId: `${symbol}:close_leg:${leg.id}`,
         description: `${symbol} Buy back ${contractLabel} · ${contracts}× @ ${fillPrice.toFixed(2)} (${name} position: ${stockPrice.toFixed(2)} at ${lookTimeEt}, at or above the strike; the shares kept)`,
         automatic: false,
-        chosenBecause: "vol farmer v3: a Call expiring today in the money at the day's last look, bought back so its shares stay through the night",
+        chosenBecause: "Vol Farmer: a Call expiring today in the money at the day's last look, bought back so its shares stay through the night",
         outcome: "filled",
         blockReason: null,
         gateResults: [{ gate: input.gate, ok: true, detail: `${contracts} contract(s), quoted ${quote.bid} / ${quote.ask}` }],
@@ -460,7 +460,7 @@ function ledgerBook(input: { context: BacktestLookContext; lookSymbol: BacktestL
 
     sellShares(order) {
       const holder = positionsOfSymbol(ledger, symbol).find((position) => position.status === "open" && position.strategyKey === "unstructured");
-      if (!holder) throw new Error(`${symbol}: no uncovered shares to sell for Vol Farmer v3's rebalancing.`);
+      if (!holder) throw new Error(`${symbol}: no uncovered shares to sell for Vol Farmer's rebalancing.`);
       const actionId = context.nextActionId();
       sellShares(ledger, { positionId: holder.id, shares: order.shares, fillPrice: stockPrice * priceToCycleScale, at, actionId, tradedSharesPerLedgerShare: priceToCycleScale });
       actions.push(shareAction({ actionId, kind: "close_shares", order, positionIds: [holder.id] }));
@@ -507,7 +507,7 @@ const median = (values: readonly number[]) => {
  * pot left unspent once sized (whole lots, whole contracts), and every LEAPS trigger: the free cash then against one
  * contract's cost, and what was bought; Vol Farmer v3's adds its rebalancing (top-ups, trims, top-ups the cash cut).
  */
-export function describeVolFarmerV4Run(ledger: SimulatedLedger, symbols: readonly string[], firstPositionPct = defaultBacktestVolFarmerV2Settings.firstPositionPct, strategyLabel = "Vol Farmer v2", priceByLegId: ReadonlyMap<string, number> = new Map()): string | null {
+export function describeVolFarmerV4Run(ledger: SimulatedLedger, symbols: readonly string[], firstPositionPct = defaultBacktestVolFarmerV2Settings.firstPositionPct, strategyLabel = "Vol Farmer", priceByLegId: ReadonlyMap<string, number> = new Map()): string | null {
   const bySymbol = stateByLedger.get(ledger);
   if (!bySymbol) return null;
   const parts = symbols.flatMap((symbol) => {

@@ -540,7 +540,7 @@ describe("POST /positions/orders/:id/confirm", () => {
     }
   });
 
-  it("judges a Vol Farmer v4 order by its delta range and its pot; an Edge Margin order by the platform's rules", async () => {
+  it("judges a Vol Farmer order by its delta range and its pot; an Edge Margin order by the platform's rules", async () => {
     const ticker = await createTicker();
     const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, bot_enabled: true }).returning("id");
     const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates-ladder" }), model_called: false }).returning("id");

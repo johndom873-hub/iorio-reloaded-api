@@ -73,7 +73,7 @@ describe("createOptionQuoteBandPlanner", () => {
     expect(expiries).toEqual(["2026-10-23"]);
   });
 
-  it("a Vol Farmer v4 ticker selling today's expiry: only the one ending at today's close, none on a day without one, built afresh when the setting changes", async () => {
+  it("a Vol Farmer ticker selling today's expiry: only the one ending at today's close, none on a day without one, built afresh when the setting changes", async () => {
     // Tue 20 Oct lists 20 Oct (0 DTE) and 23 Oct; Wed 21 Oct lists no expiry ending that day.
     const chain = { expirations: ["20261020", "20261023"], strikesByExpiry: new Map([["20261020", [80, 100]], ["20261023", [80, 100]]]), fetchedAt: null };
     let optionsExpiry: PlutoSettings["volFarmerV4OptionsExpiry"] = "today";

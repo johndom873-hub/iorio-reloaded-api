@@ -24,12 +24,12 @@ const figures = { unfilledOrderCancelMinutes: 15, followsTheMid: true, tickers: 
 describe("buildPlutoHowItWorks", () => {
   it("quotes every number the tab shows, at today's defaults and constants", () => {
     const { volFarmerV4: _volFarmerV4, ...rest } = buildPlutoHowItWorks(settings, figures);
-    expect(rest).toEqual({ shared: { windowStartEt: "10:45", windowEndEt: "15:30", windowEndMinutesBeforeCloseAtLeast: 30, excessAllowancePct: 20, minCashReservePct: 2, dailyLossBreakerPct: 2, unfilledOrderCancelMinutes: 15, premiumYieldSessionsPerYear: 252, openingLookFallbackEt: "10:30" },
+    expect(rest).toEqual({ shared: { windowStartEt: "10:45", windowEndEt: "15:30", windowEndMinutesBeforeCloseAtLeast: 30, excessAllowancePct: 20, minCashReservePct: 2, dailyLossBreakerPct: 2, dailyLossConfirmSeconds: 15, unfilledOrderCancelMinutes: 15, premiumYieldSessionsPerYear: 252, openingLookFallbackEt: "10:30" },
       safetyLimits: { maxWorkingOrdersPerTicker: 10, maxOrdersPerTickerPerDay: 30, maxOpenPositionsPerTicker: 30, maxOpenPositions: 120, maxOrdersPerDay: 100, spyStressBreakerPct: 5, tickerCooldownMinutes: 0 },
     });
   });
 
-  it("quotes Vol Farmer v4's settings and works its example with the strategy's own functions", () => {
+  it("quotes Vol Farmer's settings and works its example with the strategy's own functions", () => {
     const { example, ...values } = buildPlutoHowItWorks(settings, figures).volFarmerV4;
     expect(values).toEqual({
       callMinAbsDelta: 0.05, callMaxAbsDelta: 0.5, maxSpreadPctOfMid: 50, minimumBid: 0.05, callMaxCommissionPctOfPremium: 20, firstPositionPct: 80,
@@ -61,7 +61,7 @@ describe("buildPlutoHowItWorks", () => {
     expect(buildPlutoHowItWorks({ ...settings, volFarmerV4StepRule: "fixed" }, figures).volFarmerV4.example).toMatchObject({ stepPct: 15, putStrikeCap: 81.6, leapsEntryBelowSecondBreakEvenPct: 7.5 });
   });
 
-  it("sizes Vol Farmer v4's first position with the First position share of the pot, and its rebalancing with the band", () => {
+  it("sizes Vol Farmer's first position with the First position share of the pot, and its rebalancing with the band", () => {
     // Pot 240,000 × 70% = 168,000: floor(168,000 ÷ 10,000.50) = 16 lots.
     expect(buildPlutoHowItWorks({ ...settings, volFarmerV4FirstPositionPct: 70 }, figures).volFarmerV4).toMatchObject({ firstPositionPct: 70, example: { pot: 240_000, lots: 16 } });
     // A 30% band (72,000): $70's 133,000 and $130's 247,000 stay inside 192,000 ± 72,000, so neither trades.

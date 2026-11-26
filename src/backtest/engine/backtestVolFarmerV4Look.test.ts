@@ -129,7 +129,7 @@ describe("the v2 formulas", () => {
     expect(chooseVolFarmerV4Leaps({ quotes: wide, expiry: "2027-03-19", stockPrice: 100, yearsToExpiry: years, riskFreeRate: 0.04, absDelta: 0.7, maxSpreadPctOfMid: 50, spreadShareCharged: 0 })!.strike).not.toBe(nearest);
   });
 
-  it("reads Vol Farmer v4's values from its own section", () => {
+  it("reads Vol Farmer's values from its own section", () => {
     const v4 = volFarmerStepSettingsOf({ volFarmerV4: defaultBacktestVolFarmerV4Settings });
     // The research's best run: Calls' |delta| up to 0.5, 80% in shares with a 20% allowance, both positions rebalanced, today's expiry, no strike floor;
     // the rebalancing band 20%.
@@ -139,7 +139,7 @@ describe("the v2 formulas", () => {
   });
 });
 
-describe("Vol Farmer v4 at the looks", () => {
+describe("Vol Farmer at the looks", () => {
   const symbol = "VFT";
   const riskFreeRate = 0.04;
   const round4 = (value: number) => Math.round(value * 10_000) / 10_000;
@@ -272,7 +272,7 @@ describe("Vol Farmer v4 at the looks", () => {
     const pot = ledgerNetLiquidationValue(ledger, marks);
     expect(pot).toBeCloseTo(ledger.cash + 400 * 80, 6);
     // With no option open, the positions' P&L is the account's: the shares' cost, the Call's premium, the shares at 80.
-    const firstPnl = Number(/P&L by position: first (−?)\$([\d,]+)/.exec(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer v4", marks)!)!.slice(1).join("").replace("−", "-").replace(/,/g, ""));
+    const firstPnl = Number(/P&L by position: first (−?)\$([\d,]+)/.exec(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer", marks)!)!.slice(1).join("").replace("−", "-").replace(/,/g, ""));
     expect(Math.abs(firstPnl - (pot - 100_000))).toBeLessThanOrEqual(1);
     const afterFall = await lookV3(ledger, marks, "2026-03-16", 80, "2026-03-20");
     // $32,000 of shares against half the pot (about $46,000): under it by more than 5% of the pot, so back to floor(target
@@ -338,8 +338,8 @@ describe("Vol Farmer v4 at the looks", () => {
     const topUp = afterFall.actions.find((action) => action.kind === "buy_shares")!;
     expect(topUp.quantity).toBe(100);
     expect(topUp.description).toContain(`pays for 1 of the ${wanted} lots`);
-    expect(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer v4")).toContain(`Vol Farmer v4 cash: 1 cycle(s)`);
-    expect(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer v4")).toContain(`rebalanced: 1 top-up(s) (1 lots), 0 trim(s) (0 lots), 1 top-up(s) the free cash held short (${wanted - 1} lots)`);
+    expect(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer")).toContain(`Vol Farmer cash: 1 cycle(s)`);
+    expect(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer")).toContain(`rebalanced: 1 top-up(s) (1 lots), 0 trim(s) (0 lots), 1 top-up(s) the free cash held short (${wanted - 1} lots)`);
   });
 
   it("Vol Farmer v3: tops up no more lots than the cap's room over the money in pays for, none once it is spent", async () => {
@@ -403,7 +403,7 @@ describe("Vol Farmer v4 at the looks", () => {
     expect(openShares()).toBe(400);
     expect(ledger.cash).toBeCloseTo(cashBefore - 2.01 * 400 - optionCommissionDollars(4), 6);
     // The run's P&L by position counts the buyback against the Call's premium.
-    const callsPnl = Number(/Calls (−?)\$([\d,]+)/.exec(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer v4", marks)!)!.slice(1).join("").replace("−", "-").replace(/,/g, ""));
+    const callsPnl = Number(/Calls (−?)\$([\d,]+)/.exec(describeVolFarmerV4Run(ledger, [symbol], 50, "Vol Farmer", marks)!)!.slice(1).join("").replace("−", "-").replace(/,/g, ""));
     expect(Math.abs(callsPnl - (sale.fillPrice! * 400 - optionCommissionDollars(4) - (2.01 * 400 + optionCommissionDollars(4))))).toBeLessThanOrEqual(1);
 
     // Monday 16 March, an expiry day: the Call is gone, not assigned, and the 400 shares held sell the day's Call; no new cycle.
@@ -415,7 +415,7 @@ describe("Vol Farmer v4 at the looks", () => {
     expect(openShares()).toBe(400);
   });
 
-  it("Vol Farmer v4: buys back one cent past the mid, never above the ask (2026-11-07), whatever the session's spread cost share", async () => {
+  it("Vol Farmer: buys back one cent past the mid, never above the ask (2026-11-07), whatever the session's spread cost share", async () => {
     const ledger = createSimulatedLedger(100_000, easternInstant("2026-03-09", 9, 30));
     const marks = new Map<string, number>();
     const opened = await lookV3(ledger, marks, "2026-03-13", 100, "2026-03-13", {}, { optionsExpiry: "today" });
@@ -434,7 +434,7 @@ describe("Vol Farmer v4 at the looks", () => {
     expect(volFarmerV4MoneyIn(state, { leg: (legId) => legs[legId] as never })).toBe(40_000 + 9_000 + 17_000);
   });
 
-  it("Vol Farmer v4: trades on its own section only, whatever the retired decision makers' sections hold", async () => {
+  it("Vol Farmer: trades on its own section only, whatever the retired decision makers' sections hold", async () => {
     // The original Vol Farmer's, v2's and v3's sections hold other values, which v4 must not read.
     const lookWithOtherSections = (ledger: SimulatedLedger, marks: Map<string, number>, todayIso: string, stockPrice: number, expiry: string) => {
       markShares(ledger, marks, stockPrice);

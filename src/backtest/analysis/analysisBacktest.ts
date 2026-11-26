@@ -30,7 +30,7 @@ import { oneTickerPotShareOfAccount } from "./analysisPotSizing.js";
 /** "Analysis · AMD · Vol Farmer v4 · $100k" (at most 120 characters, as any session name); a trial's says so. */
 export function analysisSessionName(symbol: string, accountDollars: number, trial: boolean): string {
   const account = accountDollars >= 1_000_000 ? `$${+(accountDollars / 1_000_000).toFixed(2)}M` : `$${+(accountDollars / 1000).toFixed(1)}k`;
-  return `Analysis${trial ? " trial" : ""} · ${symbol} · Vol Farmer v4 · ${account}`;
+  return `Analysis${trial ? " trial" : ""} · ${symbol} · Vol Farmer · ${account}`;
 }
 
 export interface AnalysisYearRow {

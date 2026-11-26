@@ -1022,7 +1022,7 @@ export interface BacktestSettingChoice {
 }
 
 /** One row of the New session settings table. `path` addresses the value inside BacktestSettings, e.g. "baseline.ladderRungs" or "trading.spreadCostChargedPct". */
-export type BacktestSettingGroup = "How the session runs" | "Looks and entries" | "Put ladder" | "Calls and Covered Calls" | "Contract choice" | "Entry filters" | "Exits" | "Hedge" | "Steady Stake" | "Original Vol Farmer (retired)" | "Vol Farmer v2" | "Vol Farmer v3" | "Vol Farmer v4";
+export type BacktestSettingGroup = "How the session runs" | "Looks and entries" | "Put ladder" | "Calls and Covered Calls" | "Contract choice" | "Entry filters" | "Exits" | "Hedge" | "Steady Stake" | "Original Vol Farmer (retired)" | "Vol Farmer v2" | "Vol Farmer v3" | "Vol Farmer";
 
 /** "every_session": rows every decision maker reads (the decision maker, the looks' window, the spread cost);
  *  "baseline_wheel": rows only a CC + Put Ladder session reads (retired); "steady_stake": rows only the Steady Stake reads;

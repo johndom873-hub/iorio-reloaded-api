@@ -7,6 +7,7 @@ import { optionLimitCentsGivenUp, optionLimitPriceGivingUpOneCent } from "../lib
 import { followTheMidCheckIntervalSeconds, followTheMidIsOn, maxLimitPriceChangesPerOrder } from "../lib/orderLimitPriceChanges.js";
 import { ledgerCatchUpRetrySeconds, ledgerMismatchHoldSeconds } from "./ledgerCheck.js";
 import { liveQuoteRetryDelayMs, switchedOnTickerQuoteWaitMs } from "./roundFailures.js";
+import { dailyLossConfirmSeconds } from "./dailyLossConfirmation.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { tradingSessionsPerYear } from "../lib/tradingSessionsHeld.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
@@ -53,6 +54,8 @@ export interface PlutoHowItWorks {
     /** Pluto's own min cash reserve, % of its book value (2026-11-09). */
     minCashReservePct: number;
     dailyLossBreakerPct: number;
+    /** The daily-loss breaker trips once the readings have stayed past it this long (dailyLossConfirmation.ts). */
+    dailyLossConfirmSeconds: number;
     unfilledOrderCancelMinutes: number;
     /** A premium yield a year is the sale's return × this ÷ the trading sessions it is held (tradingSessionsHeld.ts). */
     premiumYieldSessionsPerYear: number;
@@ -207,6 +210,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       excessAllowancePct: settings.excessAllowancePct,
       minCashReservePct: settings.minCashReservePct,
       dailyLossBreakerPct: settings.dailyLossBreakerPct,
+      dailyLossConfirmSeconds,
       unfilledOrderCancelMinutes: figures.unfilledOrderCancelMinutes,
       premiumYieldSessionsPerYear: tradingSessionsPerYear,
       openingLookFallbackEt: hhmmFromMinutes(openingLookFallbackEtMinutes),

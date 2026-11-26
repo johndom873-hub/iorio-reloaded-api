@@ -84,8 +84,9 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
 
   // 1. System gates.
   const checks = await runPlutoSystemChecks(settings, now);
-  // The daily-loss check is also a breaker (design item 51): tripping it needs a human reset.
-  if (checks.checks.daily_loss && !checks.checks.daily_loss.ok && !checks.checks.daily_loss.detail.startsWith("cannot compute") && !checks.checks.daily_loss.detail.startsWith("could not read")) {
+  // The daily-loss check is also a breaker (design item 51): tripping it needs a human reset. It trips only on readings
+  // that stay past it (dailyLossConfirmation.ts); a single reading past it holds this round back and nothing more.
+  if (checks.dailyLossBreakerConfirmed && checks.checks.daily_loss && !checks.checks.daily_loss.ok) {
     const before = await loadPlutoState();
     if (!before.breakers.daily_loss) {
       await tripPlutoBreaker("daily_loss", checks.checks.daily_loss.detail);

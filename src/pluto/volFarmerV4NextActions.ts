@@ -252,7 +252,7 @@ export function describeVolFarmerV4NextActions(input: VolFarmerV4NextActionsInpu
     add("sell_puts", "Sell Puts", "working", workingOrderText(workingPut, todayIso), "order working", `${workingOrderText(workingPut, todayIso)} · order working`);
   } else if (figures !== null && putsDollars !== null && figures.committedDollars > figures.potDollars - putsDollars) {
     const committed = `${formatWholeDollars(figures.committedDollars)} of the ${formatWholeDollars(figures.potDollars)} pot is committed`;
-    add("sell_puts", "Sell Puts", "blocked", "Sell Puts", committed, `${symbol} commits ${formatWholeDollars(figures.committedDollars)} of its ${formatWholeDollars(figures.potDollars)} pot: a v4 Put on the rest of the pot (${formatWholeDollars(putsDollars)}) would be refused by the pot check.`, `Sell Puts blocked: ${committed}`);
+    add("sell_puts", "Sell Puts", "blocked", "Sell Puts", committed, `${symbol} commits ${formatWholeDollars(figures.committedDollars)} of its ${formatWholeDollars(figures.potDollars)} pot: a Vol Farmer Put on the rest of the pot (${formatWholeDollars(putsDollars)}) would be refused by the pot check.`, `Sell Puts blocked: ${committed}`);
   } else if (openPuts.length > 0) {
     const open = openPuts.map((put) => `${shortContract(put, "P")} · ${put.contracts}×`).join(", ");
     add("sell_puts", "Sell Puts", "done", "Puts open", open, `Puts open: ${open}.`);
@@ -326,7 +326,7 @@ export function describeVolFarmerV4NextActions(input: VolFarmerV4NextActionsInpu
   } else if (openCalls.length === 0) {
     add("buy_back_call", "Buy back a Call", "not_due", "Buy back a Call", "No Call open.", "No Call open.");
   } else if (callsInTheMoney === "assigned") {
-    const detail = "v4 lets a Call in the money be assigned (its setting).";
+    const detail = "Vol Farmer lets a Call in the money be assigned (its setting).";
     add("buy_back_call", "Buy back a Call", "not_due", "Buy back a Call", detail, detail);
   } else {
     const days = input.openDays.filter((day) => day >= todayIso);
@@ -334,7 +334,7 @@ export function describeVolFarmerV4NextActions(input: VolFarmerV4NextActionsInpu
     const buyBackDay = callsInTheMoney === "bought_back" ? (days.find(usable) ?? null) : (days.find((day, index) => usable(day) && isLastSessionBeforeWeekend(day, days[index + 1] ?? null)) ?? null);
     const target = buyBackDay === null ? null : (openCalls.filter((call) => call.expiry >= buyBackDay).sort((a, b) => a.expiry.localeCompare(b.expiry))[0] ?? null);
     if (buyBackDay === null || target === null) {
-      const detail = `Not before the Calls expire: v4 buys a Call in the money back only at ${input.buyBackMinutes.label}${callsInTheMoney === "bought_back_before_weekends" ? " before a weekend" : ""}${buyBackDay === null ? "" : ` (next: ${formatWeekdayDayMonth(buyBackDay)})`}.`;
+      const detail = `Not before the Calls expire: Vol Farmer buys a Call in the money back only at ${input.buyBackMinutes.label}${callsInTheMoney === "bought_back_before_weekends" ? " before a weekend" : ""}${buyBackDay === null ? "" : ` (next: ${formatWeekdayDayMonth(buyBackDay)})`}.`;
       add("buy_back_call", "Buy back a Call", "not_due", "Buy back a Call", detail, detail);
     } else {
       const detail = `${formatWeekdayDayMonth(buyBackDay)}, ${input.buyBackMinutes.label}: the ${shortContract(target, "C")} · ${formatWeekdayDayMonth(target.expiry)} is bought back whenever it is in the money.`;

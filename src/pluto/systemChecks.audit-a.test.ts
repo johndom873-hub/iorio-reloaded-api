@@ -40,7 +40,11 @@ vi.mock("../lib/appEnvironment.js", () => ({ readAppEnvironment: () => "test" })
 vi.mock("../books/bookFigures.js", () => ({
   loadBooksLiveState: async () => {
     if (harness.plutoBookValue instanceof Error) throw harness.plutoBookValue;
-    return { ready: true, books: { pluto: { bookValue: harness.plutoBookValue } } };
+    return {
+      ready: true,
+      books: { pluto: { bookValue: harness.plutoBookValue, cash: 400_000, positionsValue: harness.plutoBookValue - 400_000 } },
+      legValues: [{ symbol: "WDC", legType: "stock", optionType: null, strikePrice: null, expiryDate: null, quantity: 100, price: 262, priceSource: "live", marketValue: 26_200 }],
+    };
   },
 }));
 vi.mock("../lib/marketSessionStatus.js", async () => {
@@ -53,7 +57,7 @@ vi.mock("./sessionSchedule.js", () => ({ resolvePlutoSession: async () => ({ win
 vi.mock("./stateStore.js", () => ({ loadPlutoState: async () => ({ mode: "on", paused: false, breakers: {} }), describePlutoBlock: () => null }));
 vi.mock("../lib/notifyTelegram.js", () => ({ notifyPlutoTelegram: vi.fn(), notifyTelegram: vi.fn() }));
 
-const { runPlutoSystemChecks } = await import("./systemChecks.js");
+const { resetDailyLossTrack, runPlutoSystemChecks } = await import("./systemChecks.js");
 
 const settings = { dailyLossBreakerPct: 3, windowEndEt: "15:30" } as never;
 const at = new Date("2026-10-07T15:00:00Z"); // 11:00 ET
@@ -64,6 +68,7 @@ beforeEach(() => {
   harness.plutoBookValue = 990_000;
   harness.movedIntoPluto = 0;
   harness.firstArgs.length = 0;
+  resetDailyLossTrack();
 });
 
 describe("runPlutoSystemChecks (audit A)", () => {
@@ -88,6 +93,29 @@ describe("runPlutoSystemChecks (audit A)", () => {
     // (999,000 − 1,030,000) / 1,030,000 = −3.01%
     harness.plutoBookValue = 999_000;
     expect((await runPlutoSystemChecks(settings, at)).checks.daily_loss!.ok).toBe(false);
+  });
+
+  it("trips the breaker only on readings past it for 15 s: the first holds the round back and says so (Marcelo 2026-11-25)", async () => {
+    harness.plutoBookValue = 960_000; // −4.00%, past −3%
+    const first = await runPlutoSystemChecks(settings, at);
+    expect(first.checks.daily_loss).toEqual({ ok: false, detail: "-4.00% of Pluto's book vs 2026-10-06 close (breaker at -3%); the breaker trips if the readings stay past it for 15 s" });
+    expect(first.dailyLossBreakerConfirmed).toBe(false);
+    const second = await runPlutoSystemChecks(settings, new Date(at.getTime() + 20_000));
+    expect(second.checks.daily_loss).toEqual({ ok: false, detail: "-4.00% of Pluto's book vs 2026-10-06 close (breaker at -3%)" });
+    expect(second.dailyLossBreakerConfirmed).toBe(true);
+  });
+
+  it("logs Pluto's book and every leg when a reading jumps 3 points or more from the one before", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await runPlutoSystemChecks(settings, at); // −1.00%
+      expect(warn).not.toHaveBeenCalled();
+      harness.plutoBookValue = 950_000; // −5.00%
+      await runPlutoSystemChecks(settings, new Date(at.getTime() + 20_000));
+      expect(warn).toHaveBeenCalledWith("Pluto daily loss jumped from -1.00% to -5.00%: Pluto's book 950000 = cash 400000 + positions 550000; every open leg: WDC stock ×100 @ 262 (live) = 26200");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("a book funded today from $0 is measured on its funding (Marcelo 2026-11-09): $796,000 now with $800,000 moved in is −0.50%", async () => {

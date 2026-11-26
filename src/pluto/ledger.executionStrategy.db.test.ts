@@ -25,7 +25,7 @@ const action = (passId: string) => recordPlutoAction({ passId, kind: "open_cash_
 const strategyOf = async (actionId: string) => (await testDb("pluto_actions").where({ id: actionId }).first("execution_strategy")).execution_strategy;
 
 describe("recordPlutoAction's execution strategy", () => {
-  it("is Vol Farmer v4, for a pass with or without recorded settings", async () => {
+  it("is Vol Farmer, for a pass with or without recorded settings", async () => {
     const oldSettingsPass = await startPlutoPass("manual", {}, { executionStrategy: "edge_margin", capitalBudgetPct: 50 });
     const bare = await startPlutoPass("manual");
     expect(await strategyOf(await action(oldSettingsPass))).toBe("vol_farmer_v4");

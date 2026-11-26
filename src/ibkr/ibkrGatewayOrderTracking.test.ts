@@ -1040,7 +1040,7 @@ describe("execution recorder", () => {
     });
   });
 
-  describe("shares Pluto bought on their own (Vol Farmer v4's open_shares) go to the ticker's leftover-stock position", () => {
+  describe("shares Pluto bought on their own (Vol Farmer's open_shares) go to the ticker's leftover-stock position", () => {
     const stockContractOf = (conId: string): Contract => ({ conId: Number(conId), secType: "STK" }) as Contract;
     async function tickerWithCoveredCall(stockConId: string): Promise<{ tickerId: string; coveredCallStockLegId: string }> {
       const [ticker] = await testDb("tickers").insert({ symbol: `SB${(counter += 1)}${Date.now() % 10_000}`, company_name: "Share Buy Test Co", sector: "Technology" }).returning(["id"]);

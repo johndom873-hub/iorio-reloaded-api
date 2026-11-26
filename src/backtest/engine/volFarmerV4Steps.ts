@@ -789,7 +789,7 @@ export function runVolFarmerV4Turn(input: VolFarmerV4LookInput): VolFarmerV4Turn
  */
 function holdWithoutOptions(input: VolFarmerV4LookInput, until: string): string | null {
   const { state, market, v2, v3, book } = input;
-  if (!book.buyShares) throw new Error("Vol Farmer v3 needs a book that trades shares.");
+  if (!book.buyShares) throw new Error("Vol Farmer needs a book that trades shares.");
   const alwaysHold = alwaysHoldsTheStock(v3, market.symbol);
   const rebuild = v3.firstPositionAfterCalledAway === "rebuild" && state.first === null && state.second !== null && state.second.shares > 0;
   if ((state.first === null && state.second === null && state.leaps === null && book.isFlat()) || rebuild) {
@@ -805,7 +805,7 @@ function holdWithoutOptions(input: VolFarmerV4LookInput, until: string): string 
     const spent = lots * sharesPerContract * stockPrice + market.stockCommissionDollars(lots * sharesPerContract);
     const shares = lots * sharesPerContractOnCycleScale;
     const description = `${market.symbol} Buy ${lots * sharesPerContract} shares @ ${stockPrice.toFixed(2)} (${rebuild ? "the first position rebuilt" : "a new cycle's first position"}: ${v2.firstPositionPct}% of the ${formatWholeDollars(pot)} pot${secondValue > 0 ? " less the second position's shares" : ""}, with no Call until ${until})`;
-    book.buyShares({ position: "first", shares, description, chosenBecause: "vol farmer v3: no option sold today, the first position's shares bought alone", candidateScores: { potValue: pot, targetValue: firstPositionDollars, stockPrice, lotsAfter: lots } });
+    book.buyShares({ position: "first", shares, description, chosenBecause: "Vol Farmer: no option sold today, the first position's shares bought alone", candidateScores: { potValue: pot, targetValue: firstPositionDollars, stockPrice, lotsAfter: lots } });
     if (!rebuild) {
       Object.assign(state, { ...newVolFarmerV4SymbolState(), cash: state.cash, potDollars: pot });
       state.cash.cycles += 1;
@@ -830,7 +830,7 @@ function holdWithoutOptions(input: VolFarmerV4LookInput, until: string): string 
  */
 function rebalanceHolding(input: VolFarmerV4LookInput, v3: BacktestVolFarmerV3Settings, noCallUntil?: string): string | null {
   const { state, market, v2, book } = input;
-  if (!book.buyShares || !book.sellShares) throw new Error("Vol Farmer v3 needs a book that trades shares.");
+  if (!book.buyShares || !book.sellShares) throw new Error("Vol Farmer needs a book that trades shares.");
   const first = state.first!;
   const second = v3.rebalances === "both_positions" && state.second !== null && state.second.shares > 0 ? state.second : null;
   const { symbol, stockPrice, priceToCycleScale } = market;
@@ -875,7 +875,7 @@ function rebalanceHolding(input: VolFarmerV4LookInput, v3: BacktestVolFarmerV3Se
     addVolFarmerV4Shares(first, shares, spent);
     const cashNote = `${capNote === "" ? "" : `; ${capNote}, for ${wanted} of the ${targetWanted} lots`}${lots < wanted ? `; the free cash (${formatWholeDollars(freeCash)}) pays for ${lots} of the ${wanted} lots` : ""}`;
     const description = `${symbol} Buy ${lots * sharesPerContract} shares @ ${stockPrice.toFixed(2)} (${against}; first position ${firstLotsBefore} → ${firstLotsBefore + lots} lots, break-even ${breakEvenBefore.toFixed(2)} → ${breakEvenAsTraded(first).toFixed(2)}${cashNote})`;
-    book.buyShares({ position: "first", shares, description, chosenBecause: `vol farmer v3: the ${holding}' value under the band around the target`, candidateScores: { ...candidateScores, lotsAfter: heldLots + lots, freeCash, ...(cap === null ? {} : { topUpCap: cap, moneyInBefore: moneyIn }) } });
+    book.buyShares({ position: "first", shares, description, chosenBecause: `Vol Farmer: the ${holding}' value under the band around the target`, candidateScores: { ...candidateScores, lotsAfter: heldLots + lots, freeCash, ...(cap === null ? {} : { topUpCap: cap, moneyInBefore: moneyIn }) } });
     book.notePositionPnl?.({ position: "first", kind: "shares", dollars: -spent });
     tally.topUps += 1;
     tally.lotsBought += lots;
@@ -886,7 +886,7 @@ function rebalanceHolding(input: VolFarmerV4LookInput, v3: BacktestVolFarmerV3Se
     const shares = lots * sharesPerContractOnCycleScale;
     const lotsBefore = lotsOf(position.shares);
     const description = `${symbol} Sell ${lots * sharesPerContract} shares @ ${stockPrice.toFixed(2)} (${against}; ${name} position ${lotsBefore} → ${lotsBefore - lots} lots, break-even ${breakEvenAsTraded(position).toFixed(2)} kept)`;
-    book.sellShares!({ position: name, shares, description, chosenBecause: `vol farmer v3: the ${holding}' value over the band around the target, ${v3.trimsSell === "second_position_first" ? "the second position" : "the higher break-even"} sold first`, candidateScores: { ...candidateScores, lotsAfter: heldLots - lots } });
+    book.sellShares!({ position: name, shares, description, chosenBecause: `Vol Farmer: the ${holding}' value over the band around the target, ${v3.trimsSell === "second_position_first" ? "the second position" : "the higher break-even"} sold first`, candidateScores: { ...candidateScores, lotsAfter: heldLots - lots } });
     book.notePositionPnl?.({ position: name, kind: "shares", dollars: lots * sharesPerContract * stockPrice - market.stockCommissionDollars(lots * sharesPerContract) });
     removeVolFarmerV4Shares(state, name, shares);
     tally.trims += 1;
@@ -1011,7 +1011,7 @@ function sellCalls(input: VolFarmerV4LookInput, orders: readonly CallOrder[], bu
       startsCycle,
       ...(buysShares ? { buysShares: true as const } : {}),
       description,
-      chosenBecause: `vol farmer v2: the highest premium yield ${input.v3.callStrikeFloor === "none" ? "above the price" : `at or above the ${group.map((order) => order.name).join(" and ")} position's break-even`}, ${contracts < group.reduce((sum, order) => sum + uncoveredLots(order.position, sharesPerContractOnCycleScale), 0) ? "the volume covering the most lots" : "its volume covering every lot"}`,
+      chosenBecause: `Vol Farmer: the highest premium yield ${input.v3.callStrikeFloor === "none" ? "above the price" : `at or above the ${group.map((order) => order.name).join(" and ")} position's break-even`}, ${contracts < group.reduce((sum, order) => sum + uncoveredLots(order.position, sharesPerContractOnCycleScale), 0) ? "the volume covering the most lots" : "its volume covering every lot"}`,
       candidateScores: { premiumYield: call.premiumYield, delta: call.delta, impliedVolatility: call.impliedVolatility, timeValue: call.timeValue, dte: call.dte, bid: call.bid, ask: call.ask, volumeCap: call.volumeCap, stockPrice, ...breakEvensBefore },
     });
     for (const order of group) order.position.calls.push({ legId: callLegId, shares: order.contracts * sharesPerContractOnCycleScale });
@@ -1034,7 +1034,7 @@ function sellPut(input: VolFarmerV4LookInput, second: VolFarmerV4Position, put: 
     candidate: put,
     contracts,
     description,
-    chosenBecause: `vol farmer v2: ${why}; the highest premium yield up to |delta| ${v2.putMaxAbsDelta}, on ${shareOfPotLabel(100 - v2.firstPositionPct)}`,
+    chosenBecause: `Vol Farmer: ${why}; the highest premium yield up to |delta| ${v2.putMaxAbsDelta}, on ${shareOfPotLabel(100 - v2.firstPositionPct)}`,
     candidateScores: { premiumYield: put.premiumYield, delta: put.delta, impliedVolatility: put.impliedVolatility, timeValue: put.timeValue, dte: put.dte, bid: put.bid, ask: put.ask, volumeCap: put.volumeCap, stockPrice: market.stockPrice, breakEvenFirst: firstBreakEvenAsTraded, ...stepScores },
   });
   second.puts.push({ legId: putLegId, shares: contracts * sharesPerContractOnCycleScale });
@@ -1105,7 +1105,7 @@ function buyLeaps(input: VolFarmerV4LookInput, secondBreakEvenAsTraded: number):
     fillPrice: leaps.fillPrice,
     contracts,
     description,
-    chosenBecause: `vol farmer v2: the price is half a Step below the second position's break-even; of the first expiry ${v2.leapsMinDte} or more days out, the Call whose |delta| is nearest ${v2.leapsAbsDelta}, with ${capped ? `the free cash up to the LEAPS cap (${v2.leapsMaxAccountPct}% of ${market.leapsCapBaseLabel})` : "all the free cash"}, up to the contracts offered at its ask`,
+    chosenBecause: `Vol Farmer: the price is half a Step below the second position's break-even; of the first expiry ${v2.leapsMinDte} or more days out, the Call whose |delta| is nearest ${v2.leapsAbsDelta}, with ${capped ? `the free cash up to the LEAPS cap (${v2.leapsMaxAccountPct}% of ${market.leapsCapBaseLabel})` : "all the free cash"}, up to the contracts offered at its ask`,
     candidateScores: { bid: leaps.bid, ask: leaps.ask, askSize: leaps.askSize, dte, stockPrice, impliedVolatility: leaps.impliedVolatility, delta: leaps.delta, freeCash, costDollars: leaps.fillPrice * sharesPerContract * contracts + market.optionCommissionDollars(contracts), ...(capped ? { accountValue: capBase, leapsBudget: budget } : {}) },
   });
   state.leaps = { legIds: [legId], expiry, strike: leaps.strike, intendedContracts: affordable };
@@ -1153,7 +1153,7 @@ function topUpLeaps(input: VolFarmerV4LookInput, secondBreakEvenAsTraded: number
     fillPrice,
     contracts,
     description,
-    chosenBecause: `vol farmer v2: the LEAPS was bought short of its ${leaps.intendedContracts} contracts, so the same contract is topped up`,
+    chosenBecause: `Vol Farmer: the LEAPS was bought short of its ${leaps.intendedContracts} contracts, so the same contract is topped up`,
     candidateScores: { bid: quote.bid, ask: quote.ask, askSize: quote.askSize, dte, stockPrice: market.stockPrice, freeCash, intendedContracts: leaps.intendedContracts, heldContracts: held, costDollars: fillPrice * sharesPerContract * contracts + market.optionCommissionDollars(contracts) },
   });
   leaps.legIds.push(legId);
@@ -1176,7 +1176,7 @@ function sellLeaps(input: VolFarmerV4LookInput, reason: string): string {
   const contracts = legs.reduce((sum, leg) => sum + leg.contracts, 0);
   const contractLabel = describeOptionContract({ strike: leaps.strike, right: "C", expiry: leaps.expiry, dte: daysToExpiry(leaps.expiry, market.todayIso) });
   const description = `${market.symbol} Sell ${contractLabel}${describeOrderSize(contracts, fill)} (LEAPS: ${reason})`;
-  book.sellLeaps({ legIds: legs.map((leg) => leg.legId), expiry: leaps.expiry, strike: leaps.strike, contracts, fillPrice: fill, description, chosenBecause: `vol farmer v2: ${reason}, so its LEAPS is sold`, candidateScores: { bid: quote.bid, ask: quote.ask, stockPrice: market.stockPrice } });
+  book.sellLeaps({ legIds: legs.map((leg) => leg.legId), expiry: leaps.expiry, strike: leaps.strike, contracts, fillPrice: fill, description, chosenBecause: `Vol Farmer: ${reason}, so its LEAPS is sold`, candidateScores: { bid: quote.bid, ask: quote.ask, stockPrice: market.stockPrice } });
   state.leaps = null;
   state.leapsToSell = false;
   return description;

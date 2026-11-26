@@ -63,7 +63,7 @@ describe("selectBaselineCandidates: how a sale fills", () => {
       tradingSessionsThrough: () => 6,
     }).candidates[0]!.fillPrice;
 
-  it("Vol Farmer v4: one cent past the mid, the mid rounded up to the cent less a cent (1.51 − 0.01 = 1.50)", () => {
+  it("Vol Farmer: one cent past the mid, the mid rounded up to the cent less a cent (1.51 − 0.01 = 1.50)", () => {
     expect(fillOf(volFarmerV4SaleFill)).toBe(1.5);
   });
 
