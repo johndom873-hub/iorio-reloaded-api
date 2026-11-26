@@ -6,7 +6,7 @@ function addDays(isoDate: string, days: number): string {
   return new Date(Date.parse(`${isoDate}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 }
 
-const point = (snapshotDate: string, returnFraction: number, profitDollars = returnFraction * 100_000): DailyPerformancePoint => ({ snapshotDate, returnFraction, profitDollars });
+const point = (snapshotDate: string, returnFraction: number, profitDollars = returnFraction * 100_000): DailyPerformancePoint => ({ snapshotDate, returnFraction, profitDollars, previousValue: 100_000 });
 
 describe("computeBookRiskFigures", () => {
   it("measures the drawdown on the growth index, with its dollars and dates, and holds back what lacks history", () => {

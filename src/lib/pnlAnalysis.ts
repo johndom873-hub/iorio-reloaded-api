@@ -54,6 +54,8 @@ export interface NightFigures {
   night: string;
   /** The book's P&L that night from its value; null when it has no value that night or the night before. */
   bookPnl: number | null;
+  /** The value the night's time-weighted return is measured against (bookPnl ÷ returnBase = the night's return); null when the night has no return. */
+  returnBase: number | null;
   /** Null when the night's attribution was not computed (pnl_attribution_nights). */
   buckets: Record<CycleBucket, BucketChange> | null;
   cash: Record<CashComponent, number>;
@@ -432,6 +434,7 @@ export function buildPnlAnalysis(inputs: PnlAnalysisInputs, firstDay: string | n
     pluto: computeDailyPerformancePoints(bookPerformanceRows(plutoSeries)),
     manual: computeDailyPerformancePoints(bookPerformanceRows(manualSeries)),
   };
+  const returnBaseByNight = Object.fromEntries(analysisBooks.map((book) => [book, new Map(bookPoints[book].map((point) => [point.snapshotDate, point.previousValue]))])) as Record<AnalysisBook, Map<string, number>>;
   const bookPnlByNight: Record<AnalysisBook, Map<string, number>> = {
     all: new Map(accountPoints.map((point) => [point.snapshotDate, point.profitDollars])),
     pluto: new Map(plutoSeries.filter((row) => row.dailyPnl !== null).map((row) => [row.snapshotDate, row.dailyPnl!])),
@@ -454,9 +457,10 @@ export function buildPnlAnalysis(inputs: PnlAnalysisInputs, firstDay: string | n
       const cash = emptyCash();
       for (const item of cashItems) if (item.book === book && item.night === night) cash[item.component] += item.amount;
       const bookPnl = bookPnlByNight[book].get(night) ?? null;
+      const returnBase = returnBaseByNight[book].get(night) ?? null;
       if (!attributionNights.has(night) || !attributionNights.has(previousNight)) {
         missingAttributionNights.push(night);
-        nightFigures.push({ night, bookPnl, buckets: null, cash, ibkrValuationDifference: null, unexplained: null });
+        nightFigures.push({ night, bookPnl, returnBase, buckets: null, cash, ibkrValuationDifference: null, unexplained: null });
         continue;
       }
       const changes = nightChanges(rowsByNight.get(night) ?? [], rowsByNight.get(previousNight) ?? [], calendarDaysBetween(previousNight, night), moveRowsByNight.get(night) ?? [], { startsAt: capturedAtByNight.get(previousNight)!, endsAt: capturedAtByNight.get(night)! }).filter((change) => book === "all" || change.book === book);
@@ -474,7 +478,7 @@ export function buildPnlAnalysis(inputs: PnlAnalysisInputs, firstDay: string | n
       const plutoPnl = bookPnlByNight.pluto.get(night);
       const manualPnl = bookPnlByNight.manual.get(night);
       const ibkrValuationDifference = book === "all" && bookPnl !== null && plutoPnl !== undefined && manualPnl !== undefined ? bookPnl - plutoPnl - manualPnl : null;
-      nightFigures.push({ night, bookPnl, buckets, cash, ibkrValuationDifference, unexplained: bookPnl === null ? null : bookPnl - explained - (ibkrValuationDifference ?? 0) });
+      nightFigures.push({ night, bookPnl, returnBase, buckets, cash, ibkrValuationDifference, unexplained: bookPnl === null ? null : bookPnl - explained - (ibkrValuationDifference ?? 0) });
     }
     const tickerCash = new Map<string, TickerCashRow>();
     for (const item of cashItems) {

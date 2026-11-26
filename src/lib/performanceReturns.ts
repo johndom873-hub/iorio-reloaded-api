@@ -15,6 +15,8 @@ export interface DailyPerformancePoint {
   snapshotDate: string;
   returnFraction: number;
   profitDollars: number;
+  /** The value the day's return is measured against: the previous usable night's value. */
+  previousValue: number;
 }
 
 export interface PeriodPerformance {
@@ -70,7 +72,7 @@ export function computeDailyPerformancePoints(snapshotRows: PerformanceSnapshotR
     const netCashFlow = carriedCashFlow + (row.netCashFlow ?? 0);
     const profitDollars = row.netLiquidationValue - previousNetLiquidationValue - netCashFlow;
     if (previousNetLiquidationValue > 0) {
-      points.push({ snapshotDate: row.snapshotDate, returnFraction: profitDollars / previousNetLiquidationValue, profitDollars });
+      points.push({ snapshotDate: row.snapshotDate, returnFraction: profitDollars / previousNetLiquidationValue, profitDollars, previousValue: previousNetLiquidationValue });
     }
     previousNetLiquidationValue = row.netLiquidationValue;
     carriedCashFlow = 0;
