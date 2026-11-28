@@ -330,6 +330,41 @@ describe("reconcileHeldPositions — every structure change is its own position"
     expect(Number(finalStockLeg.quantity)).toBe(300);
   });
 
+  it("Calls first filed uncovered, then covered: their shares stay on the Calls' position instead of closing and reopening every pass (prod SPCX 2026-11-27)", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const calls = heldShortOption(ticker.symbol, callConId, OptionType.Call, 130, isoDateDaysFromToday(20), 84.33, 3);
+    const openStockLegs = async () =>
+      testDb("position_legs as pl").join("positions as p", "p.id", "pl.position_id").where({ "p.ticker_id": ticker.id, "pl.leg_type": "stock" }).whereNull("pl.exit_at").select("pl.id", "pl.position_id", "pl.quantity");
+
+    // The first pass after the fill saw 100 of the 300 shares: the Calls are filed on an unstructured position.
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 129.32), calls]);
+    const [callsPosition] = await positionsFor(ticker.id);
+    expect(callsPosition).toMatchObject({ strategy_key: "unstructured", status: "open" });
+
+    await runPass([heldStock(ticker.symbol, stockConId, 300, 129.3188), calls]);
+    const [coveringLeg] = await openStockLegs();
+    expect(coveringLeg).toMatchObject({ position_id: callsPosition.id, quantity: 300 });
+    await runPass([heldStock(ticker.symbol, stockConId, 300, 129.3188), calls]);
+    await runPass([heldStock(ticker.symbol, stockConId, 300, 129.3188), calls]);
+    expect(await openStockLegs()).toEqual([coveringLeg]);
+    expect((await legsFor(callsPosition.id)).filter((leg) => leg.leg_type === "stock")).toHaveLength(1);
+
+    // 300 more shares bought by hand: they are leftover in a position of their own; the Calls keep theirs.
+    await runPass([heldStock(ticker.symbol, stockConId, 600, 129.987), calls]);
+    const withExtraShares = await openStockLegs();
+    expect(withExtraShares.map((leg) => [leg.position_id === callsPosition.id, leg.quantity]).sort()).toEqual([
+      [false, 300],
+      [true, 300],
+    ]);
+    expect(withExtraShares.find((leg) => leg.position_id === callsPosition.id)!.id).toBe(coveringLeg.id);
+
+    // Sold again: the leftover closes, the Calls' shares stay open.
+    await runPass([heldStock(ticker.symbol, stockConId, 300, 129.987), calls]);
+    expect((await openStockLegs()).map((leg) => leg.id)).toEqual([coveringLeg.id]);
+  });
+
   it("covered call expires with the shares retained: the covered call closes as expired and hands its shares to a leftover-stock position", async () => {
     const ticker = await createTicker();
     const stockConId = (nextConId += 1);

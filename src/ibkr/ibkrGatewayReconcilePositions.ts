@@ -998,15 +998,17 @@ async function syncHeldStructures(bySymbol: Map<string, IbkrHeldPosition[]>, hel
       // (every 60s) -- otherwise which conId's stock slice goes where could
       // reshuffle from one pass to the next with no real change underneath.
       const sortedCallLegs = [...shortCallLegs].sort((a, b) => (a.contract.conId ?? 0) - (b.contract.conId ?? 0));
+      const positionIdsHoldingCalls: string[] = [];
       for (const callLeg of sortedCallLegs) {
-        await upsertSplitCoveredCallPosition(symbol, stockLeg, callLeg, Math.abs(callLeg.quantity) * sharesPerHeldContract(callLeg), heldConIds, shortCallLegs);
+        const positionId = await upsertSplitCoveredCallPosition(symbol, stockLeg, callLeg, Math.abs(callLeg.quantity) * sharesPerHeldContract(callLeg), heldConIds, shortCallLegs);
+        if (positionId) positionIdsHoldingCalls.push(positionId);
       }
       // Should never happen -- every position this app opens is exactly 1
       // option + 100 shares/contract, so leftover stock beyond what the
       // sold calls need means something went wrong (a bug, or a manual
       // trade outside the app). Surfaced as its own flagged position
       // rather than silently absorbed into one of the covered calls above.
-      await upsertLeftoverStockPosition(symbol, stockLeg, stockLeg.quantity - totalShortCallShares);
+      await upsertLeftoverStockPosition(symbol, stockLeg, stockLeg.quantity - totalShortCallShares, positionIdsHoldingCalls);
     } else {
       const nonPutLegs = positionsForSymbol.filter((p) => !shortPutLegs.includes(p) && !longOptionLegs.includes(p));
       if (nonPutLegs.length > 0) {
@@ -1462,7 +1464,7 @@ async function upsertSplitCoveredCallPosition(
   sharesForThisLeg: number,
   heldConIds: Set<number>,
   symbolShortCallLegs: IbkrHeldPosition[],
-): Promise<void> {
+): Promise<string | undefined> {
   const callConId = String(callLeg.contract.conId);
   const existingCallLeg = await db("position_legs").where({ ibkr_contract_id: callConId }).whereNull("exit_at").first();
   console.log(
@@ -1506,7 +1508,7 @@ async function upsertSplitCoveredCallPosition(
     const ticker = await db("tickers").where({ symbol }).first();
     if (!ticker) {
       console.warn(`reconcileHeldPositions: no tickers row for ${symbol} — skipping sync until it's added via the Screener.`);
-      return;
+      return undefined;
     }
     const [newPosition] = await db("positions")
       .insert({ strategy_key: "covered_call", ticker_id: ticker.id, status: "open" })
@@ -1514,8 +1516,9 @@ async function upsertSplitCoveredCallPosition(
     positionId = newPosition.id;
     await publishNotification({ type: "position_opened", positionId: positionId!, symbol });
   } else {
-    // A call leg is only ever created on a covered_call position, so this can
-    // only be pre-2026-09-24 data. Labels are immutable now: report, don't relabel.
+    // A Call filed while IBKR showed it uncovered sits on an unstructured position (upsertUnstructuredPosition).
+    // Labels are immutable: report, don't relabel. Its shares go on that position, and the leftover-stock step
+    // leaves them there (upsertLeftoverStockPosition skips the positions holding this pass's Calls).
     const owner = await db("positions").where({ id: positionId }).first("strategy_key");
     if (owner?.strategy_key !== "covered_call") {
       console.warn(`upsertSplitCoveredCallPosition(${symbol}): call leg ${existingCallLeg!.id} sits on position ${positionId} labelled ${owner?.strategy_key} — left as-is.`);
@@ -1604,6 +1607,7 @@ async function upsertSplitCoveredCallPosition(
   }
 
   await upsertPositionLeg(positionId!, stockLeg, "long", sharesForThisLeg, true, handoffCost);
+  return positionId;
 }
 
 // One cash-secured-put position per distinct short put contract — the same
@@ -1712,8 +1716,9 @@ async function upsertLongOptionPosition(symbol: string, optionLeg: IbkrHeldPosit
 // Matched structurally (this ticker's unstructured stock-only leg), not by
 // ibkr_contract_id — the stock's conId is shared with every split
 // covered-call position for this symbol too, so a bare conId lookup can't
-// tell this one apart from those.
-async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPosition, leftoverShares: number): Promise<void> {
+// tell this one apart from those. The positions holding this pass's Calls are
+// skipped: an unstructured one among them owns its shares as covered ones.
+async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPosition, leftoverShares: number, positionIdsHoldingCalls: readonly string[]): Promise<void> {
   const ticker = await db("tickers").where({ symbol }).first();
   if (!ticker) {
     console.log(`upsertLeftoverStockPosition(${symbol}): no tickers row — skipping.`);
@@ -1723,6 +1728,7 @@ async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPos
   const existingLeftoverLeg = await db("position_legs as pl")
     .join("positions as p", "p.id", "pl.position_id")
     .where({ "p.ticker_id": ticker.id, "p.strategy_key": "unstructured", "pl.leg_type": "stock" })
+    .whereNotIn("p.id", positionIdsHoldingCalls)
     .whereNull("pl.exit_at")
     .select("pl.*")
     .first();

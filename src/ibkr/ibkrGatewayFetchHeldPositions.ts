@@ -9,6 +9,12 @@ export interface IbkrHeldPosition {
 
 const positionsTimeoutMs = 15_000;
 
+/** One holding per account and contract; a contract without a conId falls back to its describing fields. */
+function heldPositionKey(account: string, contract: Contract): string {
+  const contractKey = contract.conId ?? [contract.symbol, contract.secType, contract.right, contract.strike, contract.lastTradeDateOrContractMonth].join("|");
+  return `${account}:${contractKey}`;
+}
+
 /**
  * Pulls IBKR's actual current holdings via reqPositions(). Shared by
  * ibkrGatewayWorker.ts's continuous position sync and checkPositionReconciliation.ts's
@@ -28,11 +34,15 @@ const positionsTimeoutMs = 15_000;
  * of unrelated, harmless errors (order informational codes, market-data
  * subscription warnings) that would cause spurious aborts far more often
  * than they'd catch a real problem; the timeout is the sole safety net.
+ *
+ * IBKR also sends a `position` update whenever a fill changes a holding, so a fill landing inside the
+ * reqPositions window repeats its contract at in-between quantities (3 Calls filling: -1, -2, -3). One
+ * row per account and contract is kept, the latest; a contract whose latest quantity is 0 is no longer held.
  */
 export function fetchIbkrHeldPositions(ib: IBApi): Promise<IbkrHeldPosition[]> {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const rows: IbkrHeldPosition[] = [];
+    const latestByAccountAndContract = new Map<string, IbkrHeldPosition>();
 
     function cleanup() {
       clearTimeout(timer);
@@ -40,14 +50,16 @@ export function fetchIbkrHeldPositions(ib: IBApi): Promise<IbkrHeldPosition[]> {
       ib.off(EventName.positionEnd, onEnd);
     }
 
-    const onPosition = (_account: string, contract: Contract, pos: number, avgCost?: number) => {
-      if (pos !== 0) rows.push({ contract, quantity: pos, avgCost: avgCost ?? 0 });
+    const onPosition = (account: string, contract: Contract, pos: number, avgCost?: number) => {
+      const key = heldPositionKey(account, contract);
+      if (pos === 0) latestByAccountAndContract.delete(key);
+      else latestByAccountAndContract.set(key, { contract, quantity: pos, avgCost: avgCost ?? 0 });
     };
     const onEnd = () => {
       if (settled) return;
       settled = true;
       cleanup();
-      resolve(rows);
+      resolve([...latestByAccountAndContract.values()]);
     };
     const timer = setTimeout(() => {
       if (settled) return;
