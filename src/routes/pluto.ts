@@ -24,6 +24,9 @@ import { loadPlutoOrdersSentToday } from "../pluto/safetyLimits.js";
 import { computePlutoActionExposure, loadPlutoOrderRequestsByActionId, type PlutoActionOrderRequest } from "../pluto/actionExposure.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { respondWithStreamedResult } from "../lib/streamedResponse.js";
+import { runIbkrHealthCheckJob } from "../ibkr/checkIbkrHealthJob.js";
+import { judgeReconciliationAtReset, loadLatestSuccessfulHealthCheck } from "../pluto/systemChecks.js";
 
 // The Pluto screen's API. A trader can only stop Pluto (turn it off, pause it, drop today's stress override); starting it,
 // resuming it, resetting a breaker, allowing opens under stress and every setting are an admin's (Marcelo 2026-10-17).
@@ -212,6 +215,9 @@ plutoRouter.post("/resume", requireAdmin, async (request: Request, response: Res
   }
 });
 
+// The reconciliation breaker resets only on a health check run for the reset: Pluto's reconciliation check reads the last
+// health check, so resetting on the result that tripped it would trip it again at the next pass. Streamed: the check takes
+// 10–40 s (a mismatch is re-read 30 s later), past Heroku's 30 s router timeout. Never restarts the Gateway.
 plutoRouter.post("/breakers/:name/reset", requireAdmin, async (request: Request, response: Response) => {
   const name = String(request.params.name);
   const before = await loadPlutoState();
@@ -220,10 +226,24 @@ plutoRouter.post("/breakers/:name/reset", requireAdmin, async (request: Request,
     return;
   }
   const who = await currentUserDisplayName(request);
-  const state = await resetPlutoBreaker(name);
-  await recordPlutoEvent("breaker_reset", { name, by: who });
-  await notifyPlutoTelegram(`🔧 Pluto breaker "${name}" reset by ${who}. Pluto stays paused until resumed.`);
-  response.json(state);
+  await respondWithStreamedResult(response, async () => {
+    let freshCheck: string | undefined;
+    if (name === "reconciliation") {
+      const checkStartedAt = new Date();
+      try {
+        await runIbkrHealthCheckJob({ allowGatewayRestart: false, triggeredBy: "manual", triggeredByUserId: request.session.userId });
+      } catch {
+        // runIbkrHealthCheckJob (via runJob) logged the failure to job_runs; the run then does not count below.
+      }
+      const verdict = judgeReconciliationAtReset(await loadLatestSuccessfulHealthCheck(), checkStartedAt, new Date());
+      if (!verdict.ok) return { status: 409, body: { error: `The breaker stays tripped: ${verdict.detail.replace(/\.$/, "")}.` } };
+      freshCheck = verdict.detail;
+    }
+    const state = await resetPlutoBreaker(name);
+    await recordPlutoEvent("breaker_reset", { name, by: who, ...(freshCheck ? { freshCheck } : {}) });
+    await notifyPlutoTelegram(`🔧 Pluto breaker "${name}" reset by ${who}. Pluto stays paused until resumed.`);
+    return { status: 200, body: state };
+  });
 });
 
 // "Allow opens under stress today": clears itself with the Eastern date (Marcelo, 2026-09-28).

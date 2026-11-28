@@ -40,13 +40,14 @@ const mocks = vi.hoisted(() => {
 
   const rawMock = vi.fn((sql: string): unknown => ({ rows: state.rawRows, sql }));
   const db = Object.assign((table: string) => createBuilder(table), { raw: rawMock });
-  return { queries, state, db, rawMock, fetchPricesPoolFirst: vi.fn(), fetchPooledPricesOnly: vi.fn(), streamPooledPrices: vi.fn() };
+  return { queries, state, db, rawMock, fetchPricesPoolFirst: vi.fn(), fetchPooledPricesOnly: vi.fn(), streamPooledPrices: vi.fn(), loadFallbackStockPrices: vi.fn() };
 });
 
 vi.mock("../db/connection.js", () => ({ db: mocks.db }));
 vi.mock("../ibkr/pricePool.js", () => ({ fetchPricesPoolFirst: mocks.fetchPricesPoolFirst, fetchPooledPricesOnly: mocks.fetchPooledPricesOnly, streamPooledPrices: mocks.streamPooledPrices }));
+vi.mock("./priceService.js", () => ({ loadFallbackStockPrices: mocks.loadFallbackStockPrices }));
 
-const { computeCashLockedInCsps, computeExposureRows, computePositionExposures, computeTickerExposure, legsToPriceContracts, streamPositionExposures } = await import("./positionExposure.js");
+const { computeCashLockedInCsps, computeExposureRows, computeLegMarketValues, computePositionExposures, computeTickerExposure, legPriceOf, legsToPriceContracts, loadOpenLegMarketValues, streamPositionExposures } = await import("./positionExposure.js");
 
 type OpenPositionRow = Parameters<typeof computeExposureRows>[0][number];
 type OpenLegRow = Parameters<typeof computeExposureRows>[1][number];
@@ -82,6 +83,44 @@ beforeEach(() => {
   mocks.fetchPooledPricesOnly.mockReset();
   mocks.fetchPooledPricesOnly.mockReturnValue({});
   mocks.streamPooledPrices.mockReset();
+  mocks.loadFallbackStockPrices.mockReset().mockResolvedValue(new Map());
+});
+
+describe("legPriceOf", () => {
+  it("live first, then (shares) the stock's last recorded price, then the contract's last close, then the entry price", () => {
+    const shares = stockLeg({ entryPrice: "169.845", lastClosingPrice: "150.10", storedStockPrice: 147.9 });
+    expect(legPriceOf(shares, 148.2)).toEqual({ price: 148.2, priceSource: "live" });
+    expect(legPriceOf(shares, null)).toEqual({ price: 147.9, priceSource: "lastKnown" });
+    expect(legPriceOf({ ...shares, storedStockPrice: null }, undefined)).toEqual({ price: 150.1, priceSource: "lastClose" });
+    expect(legPriceOf({ ...shares, storedStockPrice: null, lastClosingPrice: null }, null)).toEqual({ price: 169.845, priceSource: "entry" });
+  });
+
+  it("never prices an option at a stored stock price", () => {
+    expect(legPriceOf(optionLeg({ lastClosingPrice: "1.1", storedStockPrice: 147.9 }), null)).toEqual({ price: 1.1, priceSource: "lastClose" });
+  });
+});
+
+describe("loadOpenLegMarketValues (the books, Pluto's daily loss)", () => {
+  it("price fetch throws: shares at the stock's last recorded price, the short Call at its contract's last close (900 x $147.90; -9 x 100 x $1.10)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    mocks.state.positions = [position({ symbol: "NVDA" })];
+    mocks.state.legs = [
+      stockLeg({ symbol: "NVDA", quantity: 900, entryPrice: "169.845" }),
+      optionLeg({ symbol: "NVDA", quantity: 9, entryPrice: "1.1054", strikePrice: "147", expiryDate: "20261127", lastClosingPrice: "1.10" }),
+    ];
+    mocks.fetchPricesPoolFirst.mockRejectedValue(new Error("pool unavailable"));
+    mocks.loadFallbackStockPrices.mockResolvedValue(new Map([["NVDA", { price: 147.9, asOf: new Date(), source: "known" }]]));
+    const values = await loadOpenLegMarketValues();
+    expect(values.map((leg) => [leg.priceSource, leg.price, Math.round(leg.marketValue)])).toEqual([
+      ["lastKnown", 147.9, 133110],
+      ["lastClose", 1.1, -990],
+    ]);
+    vi.mocked(console.warn).mockRestore();
+  });
+
+  it("computeLegMarketValues labels each leg's source the way legPriceOf does", () => {
+    expect(computeLegMarketValues([stockLeg({ storedStockPrice: 51 }), optionLeg()], { "0": null, "1": 1.5 }).map((leg) => leg.priceSource)).toEqual(["lastKnown", "live"]);
+  });
 });
 
 describe("computeCashLockedInCsps", () => {
@@ -324,13 +363,34 @@ describe("computePositionExposures", () => {
     ]);
   });
 
-  it("reads each leg's latest nightly closing price alongside the leg", async () => {
+  it("reads the contract's latest nightly closing price from any of its legs, alongside the leg", async () => {
     mocks.state.positions = [position()];
     mocks.state.legs = [stockLeg()];
     await computePositionExposures();
     const selectArgs = operationArgs(queriesOn("position_legs as pl")[0]!, "select").flat();
     const closingPriceColumn = selectArgs.find((arg) => typeof arg === "object" && arg !== null && String((arg as { sql?: string }).sql).includes("lastClosingPrice")) as { sql: string };
-    expect(closingPriceColumn.sql).toContain("FROM position_leg_price_snapshots lps WHERE lps.position_leg_id = pl.id ORDER BY lps.snapshot_date DESC LIMIT 1");
+    expect(closingPriceColumn.sql).toContain("same_contract.id = pl.id OR (pl.ibkr_contract_id IS NOT NULL AND same_contract.ibkr_contract_id = pl.ibkr_contract_id)");
+    expect(closingPriceColumn.sql).toContain("ORDER BY lps.snapshot_date DESC, lps.captured_at DESC LIMIT 1");
+  });
+
+  it("when the price fetch throws, values shares at the stock's last recorded price and logs why (prod 2026-11-27: NVDA 900 x $147.90, not the $169.845 entry)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mocks.state.positions = [position({ symbol: "NVDA" })];
+    mocks.state.legs = [stockLeg({ symbol: "NVDA", quantity: 900, entryPrice: "169.845" })];
+    mocks.fetchPricesPoolFirst.mockRejectedValue(new Error("IBKR market data is restricted"));
+    mocks.loadFallbackStockPrices.mockResolvedValue(new Map([["NVDA", { price: 147.9, asOf: new Date(), source: "known" }]]));
+    expect((await computePositionExposures())[0]!.exposure).toBeCloseTo(133110, 6);
+    expect(mocks.loadFallbackStockPrices).toHaveBeenCalledWith(["NVDA"]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("live prices unavailable for 1 leg(s), valued at stored prices — IBKR market data is restricted"));
+    warn.mockRestore();
+  });
+
+  it("reads no stored price when every stock leg has a live price", async () => {
+    mocks.state.positions = [position()];
+    mocks.state.legs = [stockLeg(), optionLeg()];
+    mocks.fetchPricesPoolFirst.mockResolvedValue({ "0": 52, "1": null });
+    await computePositionExposures();
+    expect(mocks.loadFallbackStockPrices).not.toHaveBeenCalled();
   });
 
   it("values a leg at its last nightly closing price when the price fetch throws (100 x $51 = $5,100)", async () => {

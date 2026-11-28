@@ -85,9 +85,24 @@ export function evaluateReconciliationCheck(latestSuccessfulRun: HealthCheckRunF
   const problems = latestSuccessfulRun.details?.reconciliationProblems;
   if (!Array.isArray(problems)) return { ok: false, detail: "the last successful health check recorded no reconciliation result" };
   const discrepancies = problems.map(String).filter((problem) => !problem.startsWith(reconciliationRunFailedPrefix));
-  if (discrepancies.length > 0) return { ok: false, detail: `discrepancy: ${discrepancies.join("; ")}` };
+  // Each problem is a sentence ending in "."; joined they read "…reports 400; COIN stock leg …", not "400.; COIN".
+  if (discrepancies.length > 0) return { ok: false, detail: `discrepancy: ${discrepancies.map((problem) => problem.replace(/\.$/, "")).join("; ")}` };
   if (problems.length > 0) return { ok: false, detail: `reconciliation did not run: ${problems.map(String).join("; ")}` };
   return { ok: true, detail: `IBKR and the book agree (checked ${Math.round(ageMinutes)} min ago)` };
+}
+
+/** The newest successful health-check run: what the reconciliation check reads. */
+export async function loadLatestSuccessfulHealthCheck(): Promise<HealthCheckRunForReconciliation | undefined> {
+  return db("job_runs").where({ job_name: "ibkr_health_check", status: "success" }).orderBy("started_at", "desc").first("started_at", "details");
+}
+
+/**
+ * Pure: the reconciliation check for a breaker reset, from a health check run for it. Only a run started at or after
+ * `checkStartedAt` counts: an older one is the result that tripped the breaker (or one that failed to replace it).
+ */
+export function judgeReconciliationAtReset(latestSuccessfulRun: HealthCheckRunForReconciliation | undefined, checkStartedAt: Date, now: Date): PlutoSystemCheck {
+  if (!latestSuccessfulRun || new Date(latestSuccessfulRun.started_at).getTime() < checkStartedAt.getTime()) return { ok: false, detail: "the health check did not complete" };
+  return evaluateReconciliationCheck(latestSuccessfulRun, now);
 }
 
 /** Pure: the daily-loss breaker input — today's move against last night's net liquidation value. */
@@ -193,8 +208,7 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   // Position reconciliation: the health-check job compares IBKR's holdings with the book and
   // stores what it found in job_runs.details.reconciliationProblems.
   try {
-    const latestSuccessfulRun = await db("job_runs").where({ job_name: "ibkr_health_check", status: "success" }).orderBy("started_at", "desc").first("started_at", "details");
-    const reconciliation = evaluateReconciliationCheck(latestSuccessfulRun, now);
+    const reconciliation = evaluateReconciliationCheck(await loadLatestSuccessfulHealthCheck(), now);
     record("reconciliation", reconciliation.ok, reconciliation.detail);
   } catch (error) {
     record("reconciliation", false, `could not read the health check: ${error instanceof Error ? error.message : String(error)}`);

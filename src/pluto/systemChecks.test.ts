@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dailyLossPercent, evaluateReconciliationCheck, isInsideTradingWindow } from "./systemChecks.js";
+import { dailyLossPercent, evaluateReconciliationCheck, isInsideTradingWindow, judgeReconciliationAtReset } from "./systemChecks.js";
 
 describe("isInsideTradingWindow", () => {
   const today = "2026-09-28"; // EDT, UTC-4
@@ -22,6 +22,28 @@ describe("dailyLossPercent", () => {
     expect(dailyLossPercent(null, 1_000_000)).toBeNull();
     expect(dailyLossPercent(980_000, null)).toBeNull();
     expect(dailyLossPercent(980_000, 0)).toBeNull();
+  });
+});
+
+describe("judgeReconciliationAtReset", () => {
+  const checkStartedAt = new Date("2026-11-27T15:34:00Z");
+  const now = new Date("2026-11-27T15:34:30Z");
+
+  it("passes on a clean run started for the reset", () => {
+    expect(judgeReconciliationAtReset({ started_at: "2026-11-27T15:34:11Z", details: { reconciliationProblems: [] } }, checkStartedAt, now).ok).toBe(true);
+  });
+
+  it("refuses with the fresh run's discrepancies, one '; ' between them and no doubled full stop", () => {
+    const problems = ["IBKR holds 300 of SPCX (conId 890493863) with no matching open position_legs row.", "COIN stock leg 10fbae95: local total quantity=100 but IBKR reports 400."];
+    expect(judgeReconciliationAtReset({ started_at: "2026-11-27T15:34:11Z", details: { reconciliationProblems: problems } }, checkStartedAt, now)).toEqual({
+      ok: false,
+      detail: "discrepancy: IBKR holds 300 of SPCX (conId 890493863) with no matching open position_legs row; COIN stock leg 10fbae95: local total quantity=100 but IBKR reports 400",
+    });
+  });
+
+  it("refuses on a clean run older than the reset's check (the check failed, so the newest success is not one run for it)", () => {
+    expect(judgeReconciliationAtReset({ started_at: "2026-11-27T15:20:26Z", details: { reconciliationProblems: [] } }, checkStartedAt, now)).toEqual({ ok: false, detail: "the health check did not complete" });
+    expect(judgeReconciliationAtReset(undefined, checkStartedAt, now)).toEqual({ ok: false, detail: "the health check did not complete" });
   });
 });
 

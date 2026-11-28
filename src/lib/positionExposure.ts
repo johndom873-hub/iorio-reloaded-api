@@ -3,6 +3,7 @@ import { db } from "../db/connection.js";
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import { fetchPooledPricesOnly, fetchPricesPoolFirst, streamPooledPrices } from "../ibkr/pricePool.js";
 import { dedupeInFlight } from "./dedupeInFlight.js";
+import { loadFallbackStockPrices } from "./priceService.js";
 import { sleepUnlessAborted } from "./sleepUnlessAborted.js";
 
 // Position "exposure"/"value" = full market value across every open leg
@@ -13,8 +14,8 @@ import { sleepUnlessAborted } from "./sleepUnlessAborted.js";
 // truth shared by riskLimits.ts (concentration/allocation limits) and
 // dashboard.ts (Portfolio section, Allocation card). A leg with no live
 // quote (e.g. an option that has not traded, outside market hours) is
-// valued at its latest nightly closing price (position_leg_price_snapshots),
-// else at its entry_price (opened since the last nightly run), rather than
+// valued by legPriceOf (shares at the stock's last recorded price, then the
+// contract's latest nightly close, then the entry price) rather than
 // dropping the position from every view.
 interface OpenLegRow {
   legId: string;
@@ -31,8 +32,36 @@ interface OpenLegRow {
   symbol: string;
   /** The position's ticker (the books' leg ownership, src/books). */
   tickerId?: string;
-  /** The leg's latest nightly closing price (position_leg_price_snapshots); null/absent when it has none yet. */
+  /** The contract's latest nightly closing price (position_leg_price_snapshots); null/absent when it has none yet. */
   lastClosingPrice?: string | null;
+  /** Stock legs: the last price recorded for the stock (priceService), loaded only for a leg without a live price. */
+  storedStockPrice?: number | null;
+}
+
+export type LegPriceSource = "live" | "lastKnown" | "lastClose" | "entry";
+
+/**
+ * Pure: the price a leg is valued at, and where it came from: a live price, else (shares) the last price recorded for the
+ * stock, else the contract's last nightly close, else the leg's entry price. Example: NVDA shares with no live price, last
+ * recorded at 147.90 a minute ago, entry 169.85 → 147.90 ("lastKnown"), not the entry price.
+ */
+export function legPriceOf(leg: OpenLegRow, livePrice: number | null | undefined): { price: number; priceSource: LegPriceSource } {
+  if (livePrice !== null && livePrice !== undefined) return { price: livePrice, priceSource: "live" };
+  if (leg.legType === "stock" && leg.storedStockPrice !== null && leg.storedStockPrice !== undefined) return { price: leg.storedStockPrice, priceSource: "lastKnown" };
+  if (leg.lastClosingPrice !== null && leg.lastClosingPrice !== undefined) return { price: Number(leg.lastClosingPrice), priceSource: "lastClose" };
+  return { price: Number(leg.entryPrice), priceSource: "entry" };
+}
+
+/** The stock legs without a live price get their stock's last recorded price (never throws: priceService logs a failed read). */
+async function withStoredStockPrices(legs: OpenLegRow[], pricesByKey: Record<string, number | null>): Promise<OpenLegRow[]> {
+  const unpriced = legs.filter((leg, index) => leg.legType === "stock" && (pricesByKey[String(index)] ?? null) === null);
+  if (unpriced.length === 0) return legs;
+  const stored = await loadFallbackStockPrices(unpriced.map((leg) => leg.symbol));
+  return legs.map((leg) => (leg.legType === "stock" && stored.has(leg.symbol) ? { ...leg, storedStockPrice: stored.get(leg.symbol)!.price } : leg));
+}
+
+function warnLivePricesUnavailable(caller: string, legCount: number, error: unknown): void {
+  console.warn(`${caller}: live prices unavailable for ${legCount} leg(s), valued at stored prices — ${error instanceof Error ? error.message : String(error)}`);
 }
 
 export interface PositionExposureRow {
@@ -108,8 +137,12 @@ async function resolveOpenPositionsAndLegs(symbol?: string): Promise<{ positions
       db.raw("to_char(pl.expiry_date, 'YYYYMMDD') as \"expiryDate\""),
       "t.symbol",
       "p.ticker_id as tickerId",
+      // The contract's latest nightly close, from any leg of it: reconciliation starts a new leg whenever shares move
+      // between positions, and a leg started today has no close of its own yet.
       db.raw(
-        `(SELECT lps.price FROM position_leg_price_snapshots lps WHERE lps.position_leg_id = pl.id ORDER BY lps.snapshot_date DESC LIMIT 1) AS "lastClosingPrice"`,
+        `(SELECT lps.price FROM position_leg_price_snapshots lps JOIN position_legs same_contract ON same_contract.id = lps.position_leg_id
+          WHERE same_contract.id = pl.id OR (pl.ibkr_contract_id IS NOT NULL AND same_contract.ibkr_contract_id = pl.ibkr_contract_id)
+          ORDER BY lps.snapshot_date DESC, lps.captured_at DESC LIMIT 1) AS "lastClosingPrice"`,
       ),
     );
 
@@ -128,8 +161,7 @@ export function legsToPriceContracts(legs: OpenLegRow[]): PriceContract[] {
 }
 
 // Pure function of whatever prices are currently known — a leg with no
-// price yet falls back to its last nightly closing price, else its
-// entry_price, so this always produces a full result. Used both by the one-shot computePositionExposures below and by
+// price yet falls back to a stored price (legPriceOf), so this always produces a full result. Used both by the one-shot computePositionExposures below and by
 // streamPositionExposures, called again on every price update; since a
 // missing price already defaults to a stored price rather than showing
 // nothing, there's no "regress to null" risk the way greeks/pnl have to
@@ -138,8 +170,7 @@ export function legsToPriceContracts(legs: OpenLegRow[]): PriceContract[] {
 export function computeExposureRows(positions: OpenPositionRow[], legs: OpenLegRow[], pricesByKey: Record<string, number | null>): PositionExposureRow[] {
   const exposureByPositionId = new Map<string, number>();
   legs.forEach((leg, index) => {
-    const fallbackPrice = leg.lastClosingPrice !== null && leg.lastClosingPrice !== undefined ? Number(leg.lastClosingPrice) : Number(leg.entryPrice);
-    const price = pricesByKey[String(index)] ?? fallbackPrice;
+    const { price } = legPriceOf(leg, pricesByKey[String(index)]);
     const sign = leg.side === "short" ? -1 : 1;
     let legValue = price * leg.quantity * leg.multiplier * sign;
 
@@ -175,20 +206,17 @@ export interface OpenLegMarketValue {
   /** YYYYMMDD, options only. */
   expiryDate: string | null;
   quantity: number;
-  /** The price the leg is valued at, and where it came from: a live price, else its last nightly close, else its entry. */
+  /** The price the leg is valued at, and where it came from (legPriceOf). */
   price: number;
-  priceSource: "live" | "lastClose" | "entry";
+  priceSource: LegPriceSource;
   /** The leg's market value at its mark, a short leg negative: what the books count as the position's worth (no Put collateral, which is cash). */
   marketValue: number;
 }
 
-/** Pure: each open leg's market value, priced as computeExposureRows prices it (live, else last close, else entry). */
+/** Pure: each open leg's market value, priced as computeExposureRows prices it (legPriceOf). */
 export function computeLegMarketValues(legs: OpenLegRow[], pricesByKey: Record<string, number | null>): OpenLegMarketValue[] {
   return legs.map((leg, index) => {
-    const livePrice = pricesByKey[String(index)] ?? null;
-    const hasLastClose = leg.lastClosingPrice !== null && leg.lastClosingPrice !== undefined;
-    const price = livePrice ?? (hasLastClose ? Number(leg.lastClosingPrice) : Number(leg.entryPrice));
-    const priceSource = livePrice !== null ? "live" : hasLastClose ? "lastClose" : "entry";
+    const { price, priceSource } = legPriceOf(leg, pricesByKey[String(index)]);
     return {
       legId: leg.legId,
       positionId: leg.positionId,
@@ -214,10 +242,10 @@ export async function loadOpenLegMarketValues(): Promise<OpenLegMarketValue[]> {
   let pricesByKey: Record<string, number | null> = {};
   try {
     pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs), { settleGraceMs: exposurePriceSettleGraceMs });
-  } catch {
-    // Every leg falls back to its closing or entry price.
+  } catch (error) {
+    warnLivePricesUnavailable("loadOpenLegMarketValues", legs.length, error);
   }
-  return computeLegMarketValues(legs, pricesByKey);
+  return computeLegMarketValues(await withStoredStockPrices(legs, pricesByKey), pricesByKey);
 }
 
 // The one-shot exposures (Dashboard, Risk & Limits) stop waiting this long after the last leg price arrived: a leg that
@@ -238,11 +266,11 @@ async function computePositionExposuresUncached(): Promise<PositionExposureRow[]
   let pricesByKey: Record<string, number | null> = {};
   try {
     pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs), { settleGraceMs: exposurePriceSettleGraceMs });
-  } catch {
-    // Leave pricesByKey empty — every leg falls back to its closing or entry price below.
+  } catch (error) {
+    warnLivePricesUnavailable("computePositionExposures", legs.length, error);
   }
 
-  return computeExposureRows(positions, legs, pricesByKey);
+  return computeExposureRows(positions, await withStoredStockPrices(legs, pricesByKey), pricesByKey);
 }
 
 // How long the order-limits check waits for a leg's price before valuing that leg at its closing or entry price. A leg that never
@@ -254,7 +282,7 @@ const tickerExposurePriceTimeoutMs = 1_500;
  * One ticker's total exposure, for the Signals order-limits check and Pluto's rounds: only that ticker's open legs are
  * priced, so another ticker's illiquid leg cannot stall it. Stock legs: pool first, then a snapshot capped at
  * tickerExposurePriceTimeoutMs. Option legs (Marcelo 2026-11-11): the pool only, never a snapshot; one nobody streams is
- * valued at its last closing price, else its entry price (computeExposureRows). A short option's value is small next to
+ * valued at the contract's last closing price, else its entry price (legPriceOf). A short option's value is small next to
  * the shares it covers, and its snapshots went unanswered by the thousand (a same-day Call never ticks).
  */
 export async function computeTickerExposure(symbol: string): Promise<number> {
@@ -265,10 +293,10 @@ export async function computeTickerExposure(symbol: string): Promise<number> {
   let pricesByKey: Record<string, number | null> = fetchPooledPricesOnly(contracts.filter((contract) => contract.legType === "option"));
   try {
     Object.assign(pricesByKey, await fetchPricesPoolFirst(contracts.filter((contract) => contract.legType !== "option"), { snapshotTimeoutMs: tickerExposurePriceTimeoutMs }));
-  } catch {
-    // The stock legs fall back to their closing or entry price in computeExposureRows.
+  } catch (error) {
+    warnLivePricesUnavailable(`computeTickerExposure(${symbol})`, legs.length, error);
   }
-  return computeExposureRows(positions, legs, pricesByKey).reduce((sum, row) => sum + row.exposure, 0);
+  return computeExposureRows(positions, await withStoredStockPrices(legs, pricesByKey), pricesByKey).reduce((sum, row) => sum + row.exposure, 0);
 }
 
 /** While no position is open, the stream stays up and re-reads this often (an empty reading each time, so the caller can refresh its account figures). */
