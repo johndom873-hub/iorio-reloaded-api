@@ -20,15 +20,16 @@ import {
 } from "./majorMacroEventSources.js";
 
 // Major US macro events (decided by Marcelo): the Fed rate decision, CPI, GDP, the jobs report (added 2026-10-10, model
-// review P6) and US federal elections, nothing else. They feed the Signals "macro_event_before_expiry" flag (a flag, never an exclusion), Pluto's per-ticker
-// macro_events, the Calendar page and the order-review warning. Sources: majorMacroEventSources.ts.
+// review P6) and US federal elections, nothing else. They feed the manual-order warning (order review and the
+// ticker trading screen) and the Calendar page. Sources: majorMacroEventSources.ts.
 
 /** How far ahead events are stored. */
 export const majorMacroEventLookaheadDays = 90;
-/** The longest expiry Signals and Pluto accept: a source whose schedule ends sooner than this raises an alert. */
+/** A source whose schedule ends sooner than this many days ahead raises an alert. */
 export const majorMacroEventMinimumHorizonDays = 45;
 const horizonAlertKey = "major_macro_events_horizon";
-const horizonAlertReminderIntervalMs = 24 * 60 * 60 * 1000;
+// Weekly: the usual cause is FRED loading next year's dates late, which clears by itself (Marcelo 2026-11-28).
+const horizonAlertReminderIntervalMs = 7 * 24 * 60 * 60 * 1000;
 
 export interface MacroEvent {
   dateIso: string; // YYYY-MM-DD (Eastern date of the release)
@@ -135,8 +136,9 @@ export async function captureMajorMacroEvents(now: Date = new Date()): Promise<M
 /** Text constant per set of sources (notifyDownThrottled re-sends on any text change). */
 export function buildMajorMacroEventHorizonMessage(horizonShortfalls: string[]): string {
   return (
-    `⚠️ Major macro events: the published schedule of ${horizonShortfalls.join(", ")} ends less than ${majorMacroEventMinimumHorizonDays} days ahead, ` +
-    `so the Signals macro flag and Pluto can miss a release on a longer expiry. It clears once next year's dates are published; check FRED or the Fed's FOMC calendar if it lasts.`
+    `⚠️ Major macro events: our copy of the schedule for ${horizonShortfalls.join(", ")} ends less than ${majorMacroEventMinimumHorizonDays} days ahead, ` +
+    `so the manual-order warning and the Calendar page can miss a release on a later expiry. Late in the year this is usually FRED loading next year's dates weeks after BLS/BEA publish them; it clears by itself. ` +
+    `If it lasts into January, check FRED's release dates or the Fed's FOMC calendar.`
   );
 }
 

@@ -160,9 +160,9 @@ describe("loadUpcomingMajorMacroEvents", () => {
 });
 
 describe("reportMajorMacroEventHorizon", () => {
-  it("alerts with a daily reminder while a schedule is short", async () => {
+  it("alerts with a weekly reminder while a schedule is short", async () => {
     await store.reportMajorMacroEventHorizon({ horizonShortfalls: ["CPI (FRED)"], failures: [] });
-    expect(alerts.notifyDownThrottled).toHaveBeenCalledWith("major_macro_events_horizon", store.buildMajorMacroEventHorizonMessage(["CPI (FRED)"]), 24 * 60 * 60 * 1000);
+    expect(alerts.notifyDownThrottled).toHaveBeenCalledWith("major_macro_events_horizon", store.buildMajorMacroEventHorizonMessage(["CPI (FRED)"]), 7 * 24 * 60 * 60 * 1000);
     expect(alerts.clearDownState).not.toHaveBeenCalled();
   });
 
